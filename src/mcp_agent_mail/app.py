@@ -14,6 +14,7 @@ from string import Template
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
+from git import Repo
 from sqlalchemy import asc, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
@@ -21,6 +22,7 @@ from sqlalchemy.orm import aliased
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .models import Agent, Claim, Message, MessageRecipient, Project
+from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .storage import (
     AsyncFileLock,
     ProjectArchive,
@@ -31,8 +33,6 @@ from .storage import (
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify
-from .storage import ensure_archive
-from git import Repo
 
 
 def _lifespan_factory(settings: Settings):
@@ -1330,15 +1330,8 @@ def build_mcp_server() -> FastMCP:
         code_repo_path: str,
     ) -> dict[str, Any]:
         project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
         repo_path = Path(code_repo_path).expanduser().resolve()
-        hooks_dir = repo_path / ".git" / "hooks"
-        if not hooks_dir.is_dir():
-            raise ValueError(f"No git hooks directory at {hooks_dir}")
-        hook_path = hooks_dir / "pre-commit"
-        script = await _build_precommit_hook_content(archive)
-        await asyncio.to_thread(hook_path.write_text, script, "utf-8")
-        await asyncio.to_thread(os.chmod, hook_path, 0o755)
+        hook_path = await install_guard_script(settings, project.slug, repo_path)
         await ctx.info(f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
         return {"hook": str(hook_path)}
 
@@ -1348,13 +1341,12 @@ def build_mcp_server() -> FastMCP:
         code_repo_path: str,
     ) -> dict[str, Any]:
         repo_path = Path(code_repo_path).expanduser().resolve()
-        hook_path = repo_path / ".git" / "hooks" / "pre-commit"
-        if hook_path.exists():
-            await asyncio.to_thread(hook_path.unlink)
-            await ctx.info(f"Removed pre-commit guard at {hook_path}.")
-            return {"removed": True}
-        await ctx.info(f"No pre-commit guard to remove at {hook_path}.")
-        return {"removed": False}
+        removed = await uninstall_guard_script(repo_path)
+        if removed:
+            await ctx.info(f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
+        else:
+            await ctx.info(f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
+        return {"removed": removed}
 
     @mcp.tool(name="claim_paths")
     async def claim_paths(
@@ -1856,6 +1848,82 @@ def build_mcp_server() -> FastMCP:
             "count": len(messages),
             "messages": messages,
         }
+
+    @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit}", mime_type="application/json")
+    async def urgent_unread_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        Convenience view listing urgent and high-importance messages that are unread for an agent.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        limit : int
+            Max number of messages.
+        """
+        if project is None:
+            raise ValueError("project parameter is required for urgent view")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=True, include_bodies=False, since_ts=None)
+        # Filter unread (no read_ts recorded)
+        unread: list[dict[str, Any]] = []
+        async with get_session() as session:
+            from .models import MessageRecipient  # local import to avoid cycle at top
+
+            for item in items:
+                result = await session.execute(
+                    select(MessageRecipient.read_ts).where(
+                        MessageRecipient.message_id == item["id"], MessageRecipient.agent_id == agent_obj.id
+                    )
+                )
+                read_ts = result.scalar_one_or_none()
+                if read_ts is None:
+                    unread.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
+
+    @mcp.resource("resource://views/ack-required/{agent}{?project,limit}", mime_type="application/json")
+    async def ack_required_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        Convenience view listing messages requiring acknowledgement for an agent where ack is pending.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        limit : int
+            Max number of messages.
+        """
+        if project is None:
+            raise ValueError("project parameter is required for ack view")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                select(Message, MessageRecipient.kind)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_obj.id,
+                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(desc(Message.created_ts))
+                .limit(limit)
+            )
+            for msg, kind in rows.all():
+                payload = _message_to_dict(msg, include_body=False)
+                payload["kind"] = kind
+                out.append(payload)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
     return mcp
 
