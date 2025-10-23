@@ -1481,6 +1481,15 @@ def build_mcp_server() -> FastMCP:
         """
         Inspect the server's current environment and HTTP settings.
 
+        When to use
+        -----------
+        - Debugging client connection issues (wrong host/port/path).
+        - Verifying which environment (dev/stage/prod) the server is running in.
+
+        Notes
+        -----
+        - This surfaces configuration only; it does not perform live health checks.
+
         Returns
         -------
         dict
@@ -1511,6 +1520,11 @@ def build_mcp_server() -> FastMCP:
         """
         List all projects known to the server in creation order.
 
+        When to use
+        -----------
+        - Discover available projects when a user provides only an agent name.
+        - Build UIs that let operators switch context between projects.
+
         Returns
         -------
         list[dict]
@@ -1532,6 +1546,11 @@ def build_mcp_server() -> FastMCP:
     async def project_detail(slug: str) -> dict[str, Any]:
         """
         Fetch a project and its agents by project slug or human key.
+
+        When to use
+        -----------
+        - Populate an "LDAP-like" directory for agents in tooling UIs.
+        - Determine available agent identities and their metadata before addressing mail.
 
         Parameters
         ----------
@@ -1564,6 +1583,11 @@ def build_mcp_server() -> FastMCP:
         """
         List claims for a project, optionally filtering to active-only.
 
+        Why this exists
+        ---------------
+        - Claims communicate edit intent and reduce collisions across agents.
+        - Surfacing them helps humans review ongoing work and resolve contention.
+
         Parameters
         ----------
         slug : str
@@ -1580,6 +1604,11 @@ def build_mcp_server() -> FastMCP:
         -------
         ```json
         {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://claims/backend-abc123?active_only=true"}}
+        ```
+
+        Also see all historical (including released) claims:
+        ```json
+        {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://claims/backend-abc123?active_only=false"}}
         ```
         """
         project = await _get_project_by_identifier(slug)
@@ -1612,12 +1641,21 @@ def build_mcp_server() -> FastMCP:
         """
         Read a single message by id within a project.
 
+        When to use
+        -----------
+        - Fetch the canonical body/metadata for rendering in a client after list/search.
+        - Retrieve attachments and full details for a given message id.
+
         Parameters
         ----------
         message_id : str
             Numeric id as a string.
         project : str
             Project slug or human key (required for disambiguation).
+
+        Common mistakes
+        ---------------
+        - Omitting `project` when a message id might exist in multiple projects.
 
         Returns
         -------
@@ -1648,6 +1686,11 @@ def build_mcp_server() -> FastMCP:
         """
         List messages for a thread within a project.
 
+        When to use
+        -----------
+        - Present a conversation view for a given ticket/thread key.
+        - Export a thread for summarization or reporting.
+
         Parameters
         ----------
         thread_id : str
@@ -1666,6 +1709,11 @@ def build_mcp_server() -> FastMCP:
         -------
         ```json
         {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&include_bodies=true"}}
+        ```
+
+        Numeric seed example (message id as thread seed):
+        ```json
+        {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend"}}
         ```
         """
         if project is None:
@@ -1737,6 +1785,10 @@ def build_mcp_server() -> FastMCP:
         -------
         ```json
         {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true"}}
+        ```
+        Incremental fetch example (using since_ts):
+        ```json
+        {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z"}}
         ```
         """
         if project is None:
