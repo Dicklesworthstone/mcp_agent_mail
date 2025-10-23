@@ -146,13 +146,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     mcp_http_app = server.http_app(path=settings.http.path)
     fastapi_app.mount(settings.http.path.rstrip("/"), mcp_http_app)
 
-    # Optional periodic claims cleanup background task
-    if settings.claims_cleanup_enabled:
+    # Optional periodic claims cleanup background task and ACK TTL warnings
+    if settings.claims_cleanup_enabled or settings.ack_ttl_enabled:
         import asyncio
 
         @fastapi_app.on_event("startup")
         async def _start_cleanup_task() -> None:  # pragma: no cover - service lifecycle
-            async def _worker() -> None:
+            async def _worker_cleanup() -> None:
                 while True:
                     try:
                         await ensure_schema()
@@ -166,13 +166,43 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         pass
                     await asyncio.sleep(settings.claims_cleanup_interval_seconds)
 
-            fastapi_app.state._claims_cleanup_task = asyncio.create_task(_worker())
+            async def _worker_ack_ttl() -> None:
+                import datetime as _dt
+                while True:
+                    try:
+                        await ensure_schema()
+                        async with get_session() as session:
+                            result = await session.execute(text(
+                                """
+                                SELECT m.id, m.created_ts, mr.agent_id
+                                FROM messages m
+                                JOIN message_recipients mr ON mr.message_id = m.id
+                                WHERE m.ack_required = 1 AND mr.ack_ts IS NULL
+                                """
+                            ))
+                            rows = result.fetchall()
+                        now = _dt.datetime.now(_dt.timezone.utc)
+                        for mid, created_ts, agent_id in rows:
+                            age = (now - created_ts).total_seconds()
+                            if age >= settings.ack_ttl_seconds:
+                                print(f"ack-warning message_id={mid} agent_id={agent_id} age_s={int(age)} ttl_s={settings.ack_ttl_seconds}")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(settings.ack_ttl_scan_interval_seconds)
+
+            tasks = []
+            if settings.claims_cleanup_enabled:
+                tasks.append(asyncio.create_task(_worker_cleanup()))
+            if settings.ack_ttl_enabled:
+                tasks.append(asyncio.create_task(_worker_ack_ttl()))
+            fastapi_app.state._background_tasks = tasks
 
         @fastapi_app.on_event("shutdown")
         async def _stop_cleanup_task() -> None:  # pragma: no cover - service lifecycle
-            task = getattr(fastapi_app.state, "_claims_cleanup_task", None)
-            if task:
+            tasks = getattr(fastapi_app.state, "_background_tasks", [])
+            for task in tasks:
                 task.cancel()
+            for task in tasks:
                 with contextlib.suppress(Exception):
                     await task
     return fastapi_app

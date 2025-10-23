@@ -72,6 +72,10 @@ class Settings:
     # Background maintenance toggles
     claims_cleanup_enabled: bool
     claims_cleanup_interval_seconds: int
+    # Ack TTL warnings
+    ack_ttl_enabled: bool
+    ack_ttl_seconds: int
+    ack_ttl_scan_interval_seconds: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -143,4 +147,7 @@ def get_settings() -> Settings:
         cors=cors_settings,
         claims_cleanup_enabled=_bool(_decouple_config("CLAIMS_CLEANUP_ENABLED", default="false"), default=False),
         claims_cleanup_interval_seconds=_int(_decouple_config("CLAIMS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
+        ack_ttl_enabled=_bool(_decouple_config("ACK_TTL_ENABLED", default="false"), default=False),
+        ack_ttl_seconds=_int(_decouple_config("ACK_TTL_SECONDS", default="1800"), default=1800),
+        ack_ttl_scan_interval_seconds=_int(_decouple_config("ACK_TTL_SCAN_INTERVAL_SECONDS", default="60"), default=60),
     )

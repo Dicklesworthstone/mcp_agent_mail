@@ -21,6 +21,15 @@ jobs:
         run: curl -Ls https://astral.sh/uv/install.sh | sh
       - name: Add uv to PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ci-ruff-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ci-ruff-${{ runner.os }}-
       - name: Sync dependencies
         run: uv sync --dev
       - name: Run Ruff
@@ -40,6 +49,15 @@ jobs:
         run: curl -Ls https://astral.sh/uv/install.sh | sh
       - name: Add uv to PATH
         run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ci-ty-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+          restore-keys: |
+            ci-ty-${{ runner.os }}-
       - name: Sync dependencies
         run: uv sync --dev
       - name: Run Ty

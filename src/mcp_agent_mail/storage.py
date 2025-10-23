@@ -280,12 +280,28 @@ async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, o
             "bytes": len(new_bytes),
             "data_base64": encoded,
         }, rel_path
-    return {
+    meta: dict[str, object] = {
         "type": "file",
         "media_type": "image/webp",
         "bytes": len(new_bytes),
         "path": rel_path,
-    }, rel_path
+    }
+    # Write/update dedup manifest with metadata
+    try:
+        manifest_dir = archive.root / "attachments" / "_manifests"
+        await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
+        manifest_path = manifest_dir / f"{digest}.json"
+        manifest_payload = {
+            "sha1": digest,
+            "original_ext": path.suffix.lower(),
+            "webp_path": rel_path,
+            "bytes_webp": len(new_bytes),
+            "kept_original": bool(archive.settings.storage.keep_original_images),
+        }
+        await _write_json(manifest_path, manifest_payload)
+    except Exception:
+        pass
+    return meta, rel_path
 
 
 async def _save_webp(img: Image.Image, path: Path) -> None:

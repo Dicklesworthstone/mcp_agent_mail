@@ -2116,6 +2116,43 @@ def build_mcp_server() -> FastMCP:
                 out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
+    @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}", mime_type="application/json")
+    async def ack_overdue_view(
+        agent: str,
+        project: Optional[str] = None,
+        ttl_minutes: int = 60,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List messages requiring acknowledgement older than ttl_minutes without ack."""
+        if project is None:
+            raise ValueError("project parameter is required for ack-overdue view")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, ttl_minutes))
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                select(Message, MessageRecipient.kind)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_obj.id,
+                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                    Message.created_ts < cutoff,
+                )
+                .order_by(asc(Message.created_ts))
+                .limit(limit)
+            )
+            for msg, kind in rows.all():
+                payload = _message_to_dict(msg, include_body=False)
+                payload["kind"] = kind
+                out.append(payload)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
     @mcp.resource("resource://mailbox/{agent}{?project,limit}", mime_type="application/json")
     async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """
@@ -2159,5 +2196,31 @@ def build_mcp_server() -> FastMCP:
             payload["commit"] = commit_meta
             out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts}", mime_type="application/json")
+    async def outbox_resource(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        include_bodies: bool = False,
+        since_ts: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """List messages sent by the agent, enriched with commit metadata for canonical files."""
+        if project is None:
+            raise ValueError("project parameter is required for outbox resource")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
+        enriched: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
 
     return mcp

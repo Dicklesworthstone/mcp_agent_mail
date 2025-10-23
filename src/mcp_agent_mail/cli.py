@@ -254,6 +254,65 @@ def claims_list(
     console.print(table)
 
 
+@claims_app.command("active")
+def claims_active(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    limit: int = typer.Option(100, help="Max claims to display"),
+) -> None:
+    """List active claims with expiry countdowns."""
+
+    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+        project_record = await _get_project_record(project)
+        if project_record.id is None:
+            raise ValueError("Project must have an id")
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(Claim, Agent.name)
+                .join(Agent, Claim.agent_id == Agent.id)
+                .where(Claim.project_id == project_record.id, cast(Any, Claim.released_ts).is_(None))
+                .order_by(asc(Claim.expires_ts))
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+        return project_record, rows
+
+    try:
+        project_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+
+    def _fmt_delta(dt: datetime) -> str:
+        delta = dt - now
+        total = int(delta.total_seconds())
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        h, r = divmod(total, 3600)
+        m, s = divmod(r, 60)
+        return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+
+    table = Table(title=f"Active Claims — {project_record.human_key}")
+    table.add_column("ID")
+    table.add_column("Agent")
+    table.add_column("Pattern")
+    table.add_column("Exclusive")
+    table.add_column("Expires")
+    table.add_column("In")
+
+    for claim, agent_name in rows:
+        table.add_row(
+            str(claim.id),
+            agent_name,
+            claim.path_pattern,
+            "yes" if claim.exclusive else "no",
+            _iso(claim.expires_ts),
+            _fmt_delta(claim.expires_ts),
+        )
+    console.print(table)
+
+
 @claims_app.command("soon")
 def claims_soon(
     project: str = typer.Argument(..., help="Project slug or human key"),
