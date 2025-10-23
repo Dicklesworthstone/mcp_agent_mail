@@ -43,6 +43,17 @@ class StorageSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class CorsSettings:
+    """CORS configuration for the HTTP app."""
+
+    enabled: bool
+    origins: list[str]
+    allow_credentials: bool
+    allow_methods: list[str]
+    allow_headers: list[str]
+
+
+@dataclass(slots=True, frozen=True)
 class Settings:
     """Top-level application settings."""
 
@@ -50,6 +61,7 @@ class Settings:
     http: HttpSettings
     database: DatabaseSettings
     storage: StorageSettings
+    cors: CorsSettings
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -93,4 +105,23 @@ def get_settings() -> Settings:
         convert_images=_bool(_decouple_config("CONVERT_IMAGES", default="true"), default=True),
     )
 
-    return Settings(environment=environment, http=http_settings, database=database_settings, storage=storage_settings)
+    def _csv(name: str, default: str) -> list[str]:
+        raw = _decouple_config(name, default=default)
+        items = [part.strip() for part in raw.split(",") if part.strip()]
+        return items
+
+    cors_settings = CorsSettings(
+        enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default="false"), default=False),
+        origins=_csv("HTTP_CORS_ORIGINS", default=""),
+        allow_credentials=_bool(_decouple_config("HTTP_CORS_ALLOW_CREDENTIALS", default="false"), default=False),
+        allow_methods=_csv("HTTP_CORS_ALLOW_METHODS", default="*"),
+        allow_headers=_csv("HTTP_CORS_ALLOW_HEADERS", default="*"),
+    )
+
+    return Settings(
+        environment=environment,
+        http=http_settings,
+        database=database_settings,
+        storage=storage_settings,
+        cors=cors_settings,
+    )
