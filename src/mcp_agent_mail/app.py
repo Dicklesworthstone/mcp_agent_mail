@@ -24,7 +24,7 @@ from .storage import (
     write_claim_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, slugify
+from .utils import generate_agent_name, sanitize_agent_name, slugify
 
 
 def _lifespan_factory(settings: Settings):
