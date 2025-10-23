@@ -16,7 +16,6 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from .app import _expire_stale_claims, build_mcp_server
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
-# models import not needed here
 from .storage import AsyncFileLock, ensure_archive, write_claim_record
 
 
@@ -72,15 +71,24 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 status_code = getattr(response, "status_code", 0)
                 client = request.client.host if request.client else "-"
                 try:
-                    import structlog  # type: ignore
-                    structlog.get_logger().info(
-                        "http_request",
-                        method=method,
-                        path=path,
-                        status=status_code,
-                        ms=dur_ms,
-                        client=client,
+                    from rich.console import Console  # type: ignore
+                    from rich.panel import Panel  # type: ignore
+                    from rich.text import Text  # type: ignore
+
+                    console = Console(width=100)
+                    title = Text.assemble(
+                        (method, "bold blue"),
+                        ("  "),
+                        (path, "bold white"),
+                        ("  "),
+                        (f"{status_code}", "bold green" if 200 <= status_code < 400 else "bold red"),
+                        ("  "),
+                        (f"{dur_ms}ms", "bold yellow"),
                     )
+                    body = Text.assemble(
+                        ("client: ", "cyan"), (client, "white"),
+                    )
+                    console.print(Panel(body, title=title, border_style="dim"))
                 except Exception:
                     print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
                 return response
@@ -169,9 +177,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     fastapi_app.mount(settings.http.path.rstrip("/"), mcp_http_app)
 
     # Optional periodic claims cleanup background task and ACK TTL warnings using lifespan
-    @fastapi_app.on_event("startup")
     async def _startup() -> None:  # pragma: no cover - service lifecycle
         if not (settings.claims_cleanup_enabled or settings.ack_ttl_enabled):
+            fastapi_app.state._background_tasks = []
             return
         async def _worker_cleanup() -> None:
             while True:
@@ -280,7 +288,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             tasks.append(asyncio.create_task(_worker_ack_ttl()))
         fastapi_app.state._background_tasks = tasks
 
-    @fastapi_app.on_event("shutdown")
     async def _shutdown() -> None:  # pragma: no cover - service lifecycle
         tasks = getattr(fastapi_app.state, "_background_tasks", [])
         for task in tasks:
@@ -288,6 +295,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         for task in tasks:
             with contextlib.suppress(Exception):
                 await task
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan_context(app: FastAPI):
+        await _startup()
+        try:
+            yield
+        finally:
+            await _shutdown()
+
+    fastapi_app.router.lifespan_context = lifespan_context
     return fastapi_app
 
 

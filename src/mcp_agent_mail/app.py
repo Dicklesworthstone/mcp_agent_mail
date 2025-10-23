@@ -988,6 +988,14 @@ def build_mcp_server() -> FastMCP:
         - Use the same `project_key` consistently across cooperating agents.
         """
         project = await _get_project_by_identifier(project_key)
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                c = Console()
+                c.print(Panel(f"project=[bold]{project.human_key}[/]\nname=[bold]{name or '(generated)'}[/]\nprogram={program}\nmodel={model}", title="tool: register_agent", border_style="green"))
+            except Exception:
+                pass
         # sanitize attachments policy
         ap = (attachments_policy or "auto").lower()
         if ap not in {"auto", "inline", "file"}:
@@ -1228,6 +1236,21 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                from rich.text import Text  # type: ignore
+                c = Console()
+                title = f"tool: send_message — to={len(to)} cc={len(cc or [])} bcc={len(bcc or [])}"
+                body = Text.assemble(
+                    ("project: ", "cyan"), (project.human_key, "white"), "\n",
+                    ("sender: ", "cyan"), (sender_name, "white"), "\n",
+                    ("subject: ", "cyan"), (subject[:120], "white"),
+                )
+                c.print(Panel(body, title=title, border_style="green"))
+            except Exception:
+                pass
         sender = await _get_agent(project, sender_name)
         payload = await _deliver_message(
             ctx,
@@ -1656,9 +1679,8 @@ def build_mcp_server() -> FastMCP:
                         value = parsed.get(key)
                         if value:
                             summary[key] = value
-            except Exception:
-                # If LLM fails, return heuristic summary
-                pass
+            except Exception as e:
+                await ctx.debug(f"summarize_thread.llm_skipped: {e}")
         examples = []
         if include_examples:
             for message, sender_name in rows[:3]:
@@ -1680,7 +1702,7 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         project_key: str,
         thread_ids: list[str],
-        llm_mode: bool = True,
+        llm_mode: bool = False,
         llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
     ) -> dict[str, Any]:
@@ -1805,8 +1827,8 @@ def build_mcp_server() -> FastMCP:
                             else:
                                 revised_threads.append(item)
                         thread_summaries = revised_threads
-            except Exception:
-                pass
+            except Exception as e:
+                await ctx.debug(f"summarize_threads.llm_skipped: {e}")
 
         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
         return {"threads": thread_summaries, "aggregate": aggregate}
@@ -1896,6 +1918,14 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                c = Console()
+                c.print(Panel("\n".join(paths), title=f"tool: claim_paths — agent={agent_name} ttl={ttl_seconds}s", border_style="green"))
+            except Exception:
+                pass
         agent = await _get_agent(project, agent_name)
         if project.id is None:
             raise ValueError("Project must have an id before claiming paths.")

@@ -133,6 +133,70 @@ async def test_claim_conflicts_and_release(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Alpha",
+            },
+        )
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Beta",
+            },
+        )
+
+        # Beta claims Alpha's inbox surface exclusively (overlap by pattern)
+        claim = await client.call_tool(
+            "claim_paths",
+            {
+                "project_key": "Backend",
+                "agent_name": "Beta",
+                "paths": ["agents/Alpha/inbox/*/*/*.md"],
+                "ttl_seconds": 1800,
+                "exclusive": True,
+            },
+        )
+        assert claim.data["granted"]
+
+        # Alpha tries to send a message to Alpha (self), which writes to agents/Alpha/inbox/YYYY/MM/...
+        # Expect CLAIM_CONFLICT error payload
+        resp = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Alpha",
+                "to": ["Alpha"],
+                "subject": "Blocked",
+                "body_md": "hello",
+            },
+        )
+        # Client surfaces tool errors via structured_content when error JSON is raised
+        sc = resp.structured_content
+        # Depending on client wrapper, this may be in error or result; be flexible
+        payload = sc.get("error") or sc.get("result") or {}
+        # If result was returned, it must include error shape; otherwise, use data if available
+        if not payload and hasattr(resp, "data"):
+            payload = getattr(resp, "data", {})
+        # Ensure error type and conflicts present
+        assert isinstance(payload, dict)
+        assert payload.get("type") == "CLAIM_CONFLICT" or payload.get("error", {}).get("type") == "CLAIM_CONFLICT"
+        conflicts = payload.get("conflicts") or payload.get("error", {}).get("conflicts")
+        assert conflicts and isinstance(conflicts, list)
+
+
+@pytest.mark.asyncio
 async def test_search_and_summarize(isolated_env):
     server = build_mcp_server()
 

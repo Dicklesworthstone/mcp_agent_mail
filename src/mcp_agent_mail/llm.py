@@ -8,15 +8,19 @@ python-decouple in `config.py`.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import litellm
+import structlog
+from decouple import Config as DecoupleConfig, RepositoryEnv
 
 from .config import get_settings
 
 _router: Optional[Any] = None
 _init_lock = asyncio.Lock()
+_logger = structlog.get_logger(__name__)
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,8 +46,7 @@ def _setup_callbacks() -> None:
             cost = float(kwargs.get("response_cost", 0.0) or 0.0)
             model = str(kwargs.get("model", ""))
             if cost > 0:
-                # Keep lightweight; higher-level logging uses rich if desired.
-                print(f"[litellm] model={model} cost=${cost:.6f}")
+                _logger.info("litellm.cost", model=model, cost_usd=cost)
         except Exception:
             pass
 
@@ -60,11 +63,22 @@ async def _ensure_initialized() -> None:
             return
         settings = get_settings()
 
+        # Bridge provider keys from .env to environment for LiteLLM
+        try:
+            _bridge_provider_env()
+        except Exception:
+            _logger.debug("litellm.env.bridge_failed")
+
         # Enable cache globally (memory or redis via env)
         if settings.llm.cache_enabled:
             from contextlib import suppress
 
             with suppress(Exception):
+                # If Redis requested, set environment hints LiteLLM recognizes
+                if settings.llm.cache_backend.lower() == "redis" and settings.llm.cache_redis_url:
+                    os.environ.setdefault("LITELLM_CACHE", "redis")
+                    os.environ.setdefault("REDIS_URL", settings.llm.cache_redis_url)
+                    os.environ.setdefault("LITELLM_REDIS_URL", settings.llm.cache_redis_url)
                 litellm.set_cache(True)  # type: ignore[attr-defined]
 
         _setup_callbacks()
@@ -110,5 +124,26 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
     provider = getattr(resp, "provider", None)
     model_used = getattr(resp, "model", use_model)
     return LlmOutput(content=content or "", model=str(model_used), provider=str(provider) if provider else None)
+
+
+def _bridge_provider_env() -> None:
+    """Populate os.environ with provider API keys from .env via decouple if missing."""
+    cfg = DecoupleConfig(RepositoryEnv(".env"))
+    names = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GROQ_API_KEY",
+        "XAI_API_KEY",
+        "GOOGLE_API_KEY",
+    ]
+    for name in names:
+        if os.environ.get(name):
+            continue
+        try:
+            value = cfg(name, default="")
+        except Exception:
+            value = ""
+        if value:
+            os.environ[name] = value
 
 

@@ -78,11 +78,23 @@ def serve_http(
     resolved_port = port or settings.http.port
     resolved_path = path or settings.http.path
 
-    console.rule("[bold blue]Starting MCP Agent Mail (HTTP)")
-    console.print(
-        f"Environment: [bold]{settings.environment}[/] | "
-        f"Endpoint: [green]http://{resolved_host}:{resolved_port}{resolved_path}[/]"
-    )
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+    t = Table(show_header=False, box=None)
+    t.add_row("Environment", Text(settings.environment, style="bold white"))
+    t.add_row("Endpoint", Text(f"http://{resolved_host}:{resolved_port}{resolved_path}", style="bold green"))
+    t.add_row("DB URL", Text(settings.database.url, style="cyan"))
+    t.add_row("Storage", Text(settings.storage.root, style="magenta"))
+    flags: list[str] = []
+    if settings.http.rate_limit_enabled: flags.append("rate-limit")
+    if settings.http.bearer_token: flags.append("bearer-auth")
+    if settings.cors.enabled: flags.append("CORS")
+    if settings.http.otel_enabled: flags.append("OTEL")
+    if settings.http.request_log_enabled: flags.append("req-log")
+    if settings.tools_log_enabled: flags.append("tools-log")
+    t.add_row("Features", Text(", ".join(flags) or "(none)", style="yellow"))
+    console.print(Panel(t, title="MCP Agent Mail — HTTP", border_style="blue"))
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
