@@ -382,6 +382,76 @@ def acks_pending(
     console.print(table)
 
 
+@acks_app.command("remind")
+def acks_remind(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    agent: str = typer.Argument(..., help="Agent name"),
+    min_age_minutes: int = typer.Option(30, help="Only show ACK-required older than N minutes"),
+    limit: int = typer.Option(50, help="Max messages to display"),
+) -> None:
+    """Highlight pending acknowledgements older than a threshold."""
+
+    async def _run() -> tuple[Project, Agent, list[tuple[Message, Any, Any, str]]]:
+        project_record = await _get_project_record(project)
+        agent_record = await _get_agent_record(project_record, agent)
+        if project_record.id is None or agent_record.id is None:
+            raise ValueError("Project and agent must have IDs")
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_record.id,
+                    MessageRecipient.agent_id == agent_record.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(asc(Message.created_ts))  # oldest first
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+        return project_record, agent_record, rows
+
+    try:
+        _project_record, agent_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=min_age_minutes)
+    stale = [(m, rts, ats, k) for (m, rts, ats, k) in rows if m.created_ts <= cutoff]
+
+    table = Table(title=f"ACK Reminders (>{min_age_minutes}m) for {agent_record.name}")
+    table.add_column("ID")
+    table.add_column("Subject")
+    table.add_column("Created")
+    table.add_column("Age")
+    table.add_column("Kind")
+    table.add_column("Read?")
+
+    def _age(dt: datetime) -> str:
+        delta = now - dt
+        total = int(delta.total_seconds())
+        h, r = divmod(max(total, 0), 3600)
+        m, s = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    for msg, read_ts, _ack_ts, kind in stale:
+        table.add_row(
+            str(msg.id),
+            msg.subject,
+            _iso(msg.created_ts),
+            _age(msg.created_ts),
+            kind,
+            "yes" if read_ts else "no",
+        )
+    if not stale:
+        console.print("[green]No pending acknowledgements exceed the threshold.[/]")
+    else:
+        console.print(table)
+
+
 
 
 

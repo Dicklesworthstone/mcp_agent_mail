@@ -82,20 +82,20 @@
 
 - [ ] **Messaging persistence & Git history**  
   Current status: we archive markdown and commit, but missing richer human review surfaces.  
-  - [ ] Expose resource/tool for per-agent inbox/outbox browsing, with context about commit history and diff summaries.  
-  - [ ] Store thread-level metadata (e.g., transcripts, digest files) so history of a conversation is easy to review from Git.  
+  - [x] Expose resource/tool for per-agent inbox/outbox browsing, with context about commit history and diff summaries.  
+  - [x] Store thread-level metadata (e.g., transcripts, digest files) so history of a conversation is easy to review from Git.  
   - [x] Add commit message trailers (e.g., `Agent:`, `Thread:`) to enable log filtering.  
     - [ ] In progress: Implemented trailers in storage commits; validating formatting across flows.
 
 - [ ] **Ack management & urgent views**  
   - [x] Build resources/tools listing “messages requiring ACK” and “urgent unread”, akin to flagged email views.  
-  - [ ] CLI/agent tooling to remind agents of outstanding acknowledgements, maybe integrate with claims guard.  
+  - [x] CLI/agent tooling to remind agents of outstanding acknowledgements, maybe integrate with claims guard.  
   - [ ] Implement ack TTL checks—warnings or auto-claims if deadlines missed.
 
 - [ ] **Claims & leases extensions**  
   - [x] Add CLI command for installing/removing the pre-commit guard (currently only a tool).  
   - [ ] Add server-side enforcement (e.g., refusal to send message updates if claims conflict).  
-  - [ ] Provide a heartbeat/renewal tool so agents can extend leases without reissuing claims.
+  - [x] Provide a heartbeat/renewal tool so agents can extend leases without reissuing claims.
 
 - [ ] **Search & summarization improvements**  
   - [ ] Upgrade summarizer: incorporate heuristics (e.g., parse markdown TODOs or code references) or optional LLM integration for richer briefs.  

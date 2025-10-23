@@ -1,0 +1,16 @@
+/var/log/mcp-agent-mail/*.log {
+    weekly
+    rotate 7
+    size 50M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 appuser appuser
+    sharedscripts
+    postrotate
+        systemctl kill -s USR1 mcp-agent-mail.service >/dev/null 2>&1 || true
+    endscript
+}
+
+
