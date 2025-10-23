@@ -125,9 +125,72 @@ async def write_message_bundle(
         await _write_text(inbox_path, content)
         rel_paths.append(inbox_path.relative_to(archive.root).as_posix())
 
+    # Update thread-level digest for human review if thread_id present
+    thread_id_obj = message.get("thread_id")
+    if isinstance(thread_id_obj, str) and thread_id_obj.strip():
+        canonical_rel = canonical_path.relative_to(archive.root).as_posix()
+        digest_rel = await _update_thread_digest(
+            archive,
+            thread_id_obj.strip(),
+            {
+                "from": sender,
+                "to": list(recipients),
+                "subject": message.get("subject", "") or "",
+                "created": timestamp_str,
+            },
+            body_md,
+            canonical_rel,
+        )
+        if digest_rel:
+            rel_paths.append(digest_rel)
+
     if extra_paths:
         rel_paths.extend(extra_paths)
-    await _commit(archive.repo, archive.settings, f"mail: {sender} -> {', '.join(recipients)} | {message['subject']}", rel_paths)
+    thread_key = message.get("thread_id") or message.get("id")
+    commit_subject = f"mail: {sender} -> {', '.join(recipients)} | {message['subject']}"
+    commit_message = commit_subject + "\n\n" + f"Agent: {sender}\n" + f"Thread: {thread_key}\n"
+    await _commit(archive.repo, archive.settings, commit_message, rel_paths)
+
+
+async def _update_thread_digest(
+    archive: ProjectArchive,
+    thread_id: str,
+    meta: dict[str, object],
+    body_md: str,
+    canonical_rel_path: str,
+) -> str | None:
+    """
+    Append a compact entry to a thread-level digest file for human review.
+
+    The digest lives at messages/threads/{thread_id}.md and contains an
+    append-only sequence of sections linking to canonical messages.
+    """
+    digest_dir = archive.root / "messages" / "threads"
+    await _to_thread(digest_dir.mkdir, parents=True, exist_ok=True)
+    digest_path = digest_dir / f"{thread_id}.md"
+
+    header = f"## {meta.get('created', '')} — {meta.get('from', '')} → {', '.join((meta.get('to') or []) or [])}\n\n"
+    link_line = f"[View canonical]({canonical_rel_path})\n\n"
+    subject = str(meta.get("subject", "")).strip()
+    subject_line = f"### {subject}\n\n" if subject else ""
+
+    # Truncate body to a preview to keep digest readable
+    preview = body_md.strip()
+    if len(preview) > 1200:
+        preview = preview[:1200].rstrip() + "\n..."
+
+    entry = subject_line + header + link_line + preview + "\n\n---\n\n"
+
+    # Append atomically
+    def _append() -> None:
+        mode = "a" if digest_path.exists() else "w"
+        with open(digest_path, mode, encoding="utf-8") as f:
+            if mode == "w":
+                f.write(f"# Thread {thread_id}\n\n")
+            f.write(entry)
+
+    await _to_thread(_append)
+    return digest_path.relative_to(archive.root).as_posix()
 
 
 async def process_attachments(
@@ -238,13 +301,15 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             #   mail: <Agent> -> ... | <Subject>
             #   claim: <Agent> ...
             try:
-                if message.startswith("mail: "):
-                    # mail: Agent -> recipients | Subject [thread maybe in subject]
+                # Avoid duplicating trailers if already embedded
+                lower_msg = message.lower()
+                have_agent_line = "\nagent:" in lower_msg
+                if message.startswith("mail: ") and not have_agent_line:
                     head = message[len("mail: ") :]
                     agent_part = head.split("->", 1)[0].strip()
                     if agent_part:
                         trailers.append(f"Agent: {agent_part}")
-                elif message.startswith("claim: "):
+                elif message.startswith("claim: ") and not have_agent_line:
                     head = message[len("claim: ") :]
                     agent_part = head.split(" ", 1)[0].strip()
                     if agent_part:

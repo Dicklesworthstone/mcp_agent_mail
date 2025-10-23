@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import fnmatch
-import os
-import textwrap
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from string import Template
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
@@ -21,11 +17,10 @@ from sqlalchemy.orm import aliased
 
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
-from .models import Agent, Claim, Message, MessageRecipient, Project
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
+from .models import Agent, Claim, Message, MessageRecipient, Project
 from .storage import (
     AsyncFileLock,
-    ProjectArchive,
     ensure_archive,
     process_attachments,
     write_agent_profile,

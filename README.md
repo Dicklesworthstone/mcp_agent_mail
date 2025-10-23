@@ -251,6 +251,8 @@ Expose common reads as resources that clients can fetch:
 - `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
 - `resource://message/{id}{?project}`
 - `resource://thread/{thread_id}{?project,include_bodies}`
+- `resource://views/urgent-unread/{agent}{?project,limit}`
+- `resource://views/ack-required/{agent}{?project,limit}`
 
 Example (conceptual) resource read:
 
@@ -283,6 +285,9 @@ sequenceDiagram
   DB-->>Server: rows
   Server-->>Client: { project, agent, messages: [...] }
 ```
+
+- `resource://views/urgent-unread/{agent}{?project,limit}`: high/urgent importance messages where `read_ts` is null
+- `resource://views/ack-required/{agent}{?project,limit}`: messages with `ack_required=true` where `ack_ts` is null
 
 ## Claims and the optional pre-commit guard
 
@@ -657,3 +662,25 @@ If you’re building with or contributing to this project, please read `project_
 - **Docker**: `docker compose up --build`
 
 See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the broader deployment roadmap (Docker, systemd, automation scripts, CI/CD).
+
+## CLI Commands
+
+The project exposes a developer CLI for common operations:
+
+- `serve-stdio` / `serve-http`: run the server transports
+- `migrate`: ensure schema and FTS structures exist
+- `lint` / `typecheck`: developer helpers
+- `list-projects [--include-agents]`: enumerate projects
+- `guard-install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
+- `guard-uninstall <code_repo_path>`: remove the guard from a repo
+- `list-acks --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
+
+Examples:
+
+```bash
+# Install guard into a repo
+uv run python -m mcp_agent_mail.cli guard-install /abs/path/backend /abs/path/backend
+
+# List pending acknowledgements for an agent
+uv run python -m mcp_agent_mail.cli list-acks --project /abs/path/backend --agent BlueLake --limit 10
+```

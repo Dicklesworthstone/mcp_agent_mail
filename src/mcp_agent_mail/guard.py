@@ -12,8 +12,8 @@ from .config import Settings
 from .storage import AsyncFileLock, ProjectArchive, ensure_archive
 
 __all__ = [
-    "render_precommit_script",
     "install_guard",
+    "render_precommit_script",
     "uninstall_guard",
 ]
 

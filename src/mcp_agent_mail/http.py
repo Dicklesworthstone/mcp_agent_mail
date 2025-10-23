@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse

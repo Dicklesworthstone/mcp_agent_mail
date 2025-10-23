@@ -84,7 +84,8 @@
   Current status: we archive markdown and commit, but missing richer human review surfaces.  
   - [ ] Expose resource/tool for per-agent inbox/outbox browsing, with context about commit history and diff summaries.  
   - [ ] Store thread-level metadata (e.g., transcripts, digest files) so history of a conversation is easy to review from Git.  
-  - [ ] Add commit message trailers (e.g., `Agent:`, `Thread:`) to enable log filtering.
+  - [x] Add commit message trailers (e.g., `Agent:`, `Thread:`) to enable log filtering.  
+    - [ ] In progress: Implemented trailers in storage commits; validating formatting across flows.
 
 - [ ] **Ack management & urgent views**  
   - [ ] Build resources/tools listing “messages requiring ACK” and “urgent unread”, akin to flagged email views.  
@@ -112,7 +113,8 @@
 - [ ] **CLI/guard tooling**  
   - [ ] Add CLI command to list active claims with expiry countdowns, and optionally raise warnings for soon-to-expire leases.  
   - [ ] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.  
-  - [ ] Offer CLI command to review ack status (`cli list-acks`).
+  - [x] Offer CLI command to review ack status (`cli list-acks`).  
+    - [ ] In progress: Implemented `list-acks`; extend output with ack age and thread columns.
 
 - [ ] **HTTP transport hardening**  
   - [ ] Add rate limiting (e.g., `slowapi`) and CORS toggles.  

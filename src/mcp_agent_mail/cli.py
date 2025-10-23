@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -23,6 +24,46 @@ from .utils import slugify
 
 console = Console()
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
+
+guard_app = typer.Typer(help="Install or remove the Git pre-commit guard")
+claims_app = typer.Typer(help="Inspect advisory claims")
+acks_app = typer.Typer(help="Review acknowledgement status")
+
+app.add_typer(guard_app, name="guard")
+app.add_typer(claims_app, name="claims")
+app.add_typer(acks_app, name="acks")
+
+
+async def _get_project_record(identifier: str) -> Project:
+    slug = slugify(identifier)
+    await ensure_schema()
+    async with get_session() as session:
+        stmt = select(Project).where((Project.slug == slug) | (Project.human_key == identifier))
+        result = await session.execute(stmt)
+        project = result.scalars().first()
+        if not project:
+            raise ValueError(f"Project '{identifier}' not found")
+        return project
+
+
+async def _get_agent_record(project: Project, agent_name: str) -> Agent:
+    if project.id is None:
+        raise ValueError("Project must have an id before querying agents")
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, Agent.name == agent_name)
+        )
+        agent = result.scalars().first()
+        if not agent:
+            raise ValueError(f"Agent '{agent_name}' not registered for project '{project.human_key}'")
+        return agent
+
+
+def _iso(dt: Optional[datetime]) -> str:
+    if dt is None:
+        return ""
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 @app.command("serve-stdio")
@@ -126,7 +167,137 @@ def list_projects(include_agents: bool = typer.Option(False, help="Include agent
         row = [str(project.id), project.slug, project.human_key, project.created_at.isoformat()]
         if include_agents:
             row.append(str(agent_count))
-        table.add_row(*row)
+    table.add_row(*row)
+    console.print(table)
+
+
+@guard_app.command("install")
+def guard_install(project: str, repo: Path = typer.Argument(..., help="Path to git repo")) -> None:
+    """Install the advisory pre-commit guard into the given repository."""
+
+    settings = get_settings()
+    repo_path = repo.expanduser().resolve()
+
+    async def _run() -> tuple[Project, Path]:
+        project_record = await _get_project_record(project)
+        hook_path = await install_guard_script(settings, project_record.slug, repo_path)
+        return project_record, hook_path
+
+    try:
+        project_record, hook_path = asyncio.run(_run())
+    except ValueError as exc:  # convert to CLI-friendly error
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"[green]Installed guard for [bold]{project_record.human_key}[/] at {hook_path}.")
+
+
+@guard_app.command("uninstall")
+def guard_uninstall(repo: Path = typer.Argument(..., help="Path to git repo")) -> None:
+    """Remove the advisory pre-commit guard from the repository."""
+
+    repo_path = repo.expanduser().resolve()
+    removed = asyncio.run(uninstall_guard_script(repo_path))
+    hook_path = repo_path / ".git" / "hooks" / "pre-commit"
+    if removed:
+        console.print(f"[green]Removed guard at {hook_path}.")
+    else:
+        console.print(f"[yellow]No guard found at {hook_path}.")
+
+
+@claims_app.command("list")
+def claims_list(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    active_only: bool = typer.Option(True, help="Show only active claims"),
+) -> None:
+    """Display advisory claims for a project."""
+
+    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+        project_record = await _get_project_record(project)
+        if project_record.id is None:
+            raise ValueError("Project must have an id")
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = select(Claim, Agent.name).join(Agent, Claim.agent_id == Agent.id).where(
+                Claim.project_id == project_record.id
+            )
+            if active_only:
+                stmt = stmt.where(cast(Any, Claim.released_ts).is_(None))
+            stmt = stmt.order_by(asc(Claim.expires_ts))
+            rows = (await session.execute(stmt)).all()
+        return project_record, rows
+
+    try:
+        project_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(title=f"Claims for {project_record.human_key}", show_lines=False)
+    table.add_column("ID")
+    table.add_column("Agent")
+    table.add_column("Pattern")
+    table.add_column("Exclusive")
+    table.add_column("Expires")
+    table.add_column("Released")
+    for claim, agent_name in rows:
+        table.add_row(
+            str(claim.id),
+            agent_name,
+            claim.path_pattern,
+            "yes" if claim.exclusive else "no",
+            _iso(claim.expires_ts),
+            _iso(claim.released_ts) if claim.released_ts else "",
+        )
+    console.print(table)
+
+
+@acks_app.command("pending")
+def acks_pending(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    agent: str = typer.Argument(..., help="Agent name"),
+    limit: int = typer.Option(20, help="Max messages to display"),
+) -> None:
+    """List messages that require acknowledgement and are still pending."""
+
+    async def _run() -> tuple[Project, Agent, list[tuple[Message, Any, Any, str]]]:
+        project_record = await _get_project_record(project)
+        agent_record = await _get_agent_record(project_record, agent)
+        if project_record.id is None or agent_record.id is None:
+            raise ValueError("Project and agent must have IDs")
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_record.id,
+                    MessageRecipient.agent_id == agent_record.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(desc(Message.created_ts))
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+        return project_record, agent_record, rows
+
+    try:
+        project_record, agent_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(title=f"Pending ACKs for {agent_record.name} ({project_record.human_key})", show_lines=False)
+    table.add_column("Msg ID")
+    table.add_column("Subject")
+    table.add_column("Kind")
+    table.add_column("Created")
+    table.add_column("Read")
+    for message, read_ts, _ack_ts, kind in rows:
+        table.add_row(
+            str(message.id),
+            message.subject,
+            kind,
+            _iso(message.created_ts),
+            _iso(read_ts) if read_ts else "",
+        )
     console.print(table)
 
 
@@ -142,8 +313,8 @@ def guard_install(
         slug = slugify(project_key)
         archive = await ensure_archive(settings, slug)
         script = await _build_precommit_hook_content(archive)
-        from pathlib import Path
         import os
+        from pathlib import Path
 
         repo_path = Path(code_repo_path).expanduser().resolve()
         hooks_dir = repo_path / ".git" / "hooks"
@@ -204,8 +375,8 @@ def list_acks(
                 .where(
                     Message.project_id == project.id,
                     MessageRecipient.agent_id == agent.id,
-                    Message.ack_required == True,
-                    MessageRecipient.ack_ts == None,
+                    Message.ack_required,
+                    MessageRecipient.ack_ts is None,
                 )
                 .order_by(desc(Message.created_ts))
                 .limit(limit)
