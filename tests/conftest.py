@@ -15,6 +15,11 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HTTP_PORT", "8765")
     monkeypatch.setenv("HTTP_PATH", "/mcp/")
     monkeypatch.setenv("APP_ENVIRONMENT", "test")
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "test-agent")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+    monkeypatch.setenv("INLINE_IMAGE_MAX_BYTES", "128")
     get_settings.cache_clear()
     reset_database_state()
     try:
@@ -24,3 +29,13 @@ def isolated_env(tmp_path, monkeypatch):
         reset_database_state()
         if db_path.exists():
             db_path.unlink()
+        storage_root = tmp_path / "storage"
+        if storage_root.exists():
+            for path in storage_root.rglob("*"):
+                if path.is_file():
+                    path.unlink()
+            for path in sorted(storage_root.rglob("*"), reverse=True):
+                if path.is_dir():
+                    path.rmdir()
+            if storage_root.exists():
+                storage_root.rmdir()

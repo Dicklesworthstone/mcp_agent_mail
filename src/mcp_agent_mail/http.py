@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from .app import build_mcp_server
 from .config import Settings
 from .db import ensure_schema, get_session
 
@@ -33,6 +34,8 @@ async def readiness_check() -> None:
 
 def build_http_app(settings: Settings, server=None) -> FastAPI:
     fastapi_app = FastAPI()
+    if server is None:
+        server = build_mcp_server()
 
     if settings.http.bearer_token:
         fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
