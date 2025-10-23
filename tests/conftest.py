@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import reset_database_state

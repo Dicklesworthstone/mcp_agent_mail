@@ -21,7 +21,7 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
-from .models import Agent, Claim, Message, MessageRecipient, Project
+from .models import Agent, AgentLink, Claim, Message, MessageRecipient, Project
 from .storage import (
     AsyncFileLock,
     ensure_archive,
@@ -85,12 +85,21 @@ def _parse_json_safely(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+def _parse_iso(raw_value: Optional[str]) -> Optional[datetime]:
     """Parse ISO-8601 timestamps, accepting a trailing 'Z' as UTC.
 
     Returns None when parsing fails.
     """
-    if not value:
+    if raw_value is None:
+        return None
+    s = raw_value.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
         return None
 
 
@@ -104,15 +113,6 @@ def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
         Console().print(JSON.from_data({"title": title, **payload}))
     except Exception:
         return
-    s = value.strip()
-    if not s:
-        return None
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    try:
-        return datetime.fromisoformat(s)
-    except ValueError:
-        return None
 
 def _project_to_dict(project: Project) -> dict[str, Any]:
     return {
@@ -757,7 +757,7 @@ def build_mcp_server() -> FastMCP:
         embed_policy: str = "auto"
         if getattr(sender, "attachments_policy", None) in {"inline", "file"}:
             convert_markdown = True
-            embed_policy = cast(str, sender.attachments_policy)
+            embed_policy = sender.attachments_policy
             # "auto" falls back to server defaults
         async with AsyncFileLock(archive.lock_path):
             # Server-side claims enforcement: block if conflicting active exclusive claim exists
@@ -1291,7 +1291,106 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
         sender = await _get_agent(project, sender_name)
-        payload = await _deliver_message(
+        # Enforce contact policies (per-recipient) with auto-allow heuristics
+        settings_local = get_settings()
+        if settings_local.contact_enforcement_enabled:
+            # allow replies always; if thread present and recipient already on thread, allow
+            auto_ok_names: set[str] = set()
+            if thread_id:
+                try:
+                    thread_rows: list[tuple[Message, str]]
+                    sender_alias = aliased(Agent)
+                    async with get_session() as s:
+                        stmt = (
+                            select(Message, sender_alias.name)
+                            .join(sender_alias, Message.sender_id == sender_alias.id)
+                            .where(Message.project_id == project.id, or_(Message.thread_id == thread_id, Message.id == cast(Any, thread_id)))
+                            .limit(500)
+                        )
+                        thread_rows = list((await s.execute(stmt)).all())
+                    # collect participants (sender names and recipients)
+                    participants: set[str] = {n for _m, n in thread_rows}
+                    auto_ok_names.update(participants)
+                except Exception:
+                    pass
+            # allow recent overlapping claims contact (shared surfaces) by default
+            # best-effort: if both agents hold any claim currently active, auto allow
+            now_utc = datetime.now(timezone.utc)
+            try:
+                async with get_session() as s2:
+                    claim_rows = await s2.execute(
+                        select(Claim, Agent.name)
+                        .join(Agent, Claim.agent_id == Agent.id)
+                        .where(Claim.project_id == project.id, cast(Any, Claim.released_ts).is_(None), Claim.expires_ts > now_utc)
+                    )
+                    name_to_claims: dict[str, list[str]] = {}
+                    for c, nm in claim_rows.all():
+                        name_to_claims.setdefault(nm, []).append(c.path_pattern)
+                for nm in to + (cc or []) + (bcc or []):
+                    if nm in name_to_claims and sender.name in name_to_claims:
+                        auto_ok_names.add(nm)
+            except Exception:
+                pass
+            # For each recipient, require link unless policy/open or in auto_ok
+            async with get_session() as s3:
+                for nm in to + (cc or []) + (bcc or []):
+                    if nm in auto_ok_names:
+                        continue
+                    # recipient lookup
+                    try:
+                        rec = await _get_agent(project, nm)
+                    except Exception:
+                        continue
+                    rec_policy = getattr(rec, "contact_policy", "auto").lower()
+                    if rec_policy == "open":
+                        continue
+                    if rec_policy == "block_all":
+                        raise RuntimeError("{\"error\":{\"type\":\"CONTACT_BLOCKED\",\"message\":\"Recipient is not accepting messages.\"}}")
+                    # contacts_only or auto -> must have approved link or prior contact within TTL
+                    ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
+                    recent_ok = False
+                    try:
+                        # check any message between these two within TTL
+                        since_dt = now_utc - ttl
+                        q = text(
+                            """
+                            SELECT 1 FROM messages m
+                            WHERE m.project_id = :pid
+                              AND m.created_ts > :since
+                              AND (
+                                   (m.sender_id = :sid AND EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :rname))
+                                   OR
+                                   (EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :sname) AND m.sender_id = (SELECT id FROM agents WHERE project_id=:pid AND name=:rname))
+                              )
+                            LIMIT 1
+                            """
+                        )
+                        row = await s3.execute(q, {"pid": project.id, "since": since_dt, "sid": sender.id, "sname": sender.name, "rname": rec.name})
+                        recent_ok = row.first() is not None
+                    except Exception:
+                        recent_ok = False
+                    if rec_policy == "auto" and recent_ok:
+                        continue
+                    # check approved AgentLink (local project)
+                    try:
+                        link = await s3.execute(
+                            select(AgentLink)
+                            .where(
+                                AgentLink.a_project_id == project.id,
+                                AgentLink.a_agent_id == sender.id,
+                                AgentLink.b_project_id == project.id,
+                                AgentLink.b_agent_id == rec.id,
+                                AgentLink.status == "approved",
+                            )
+                            .limit(1)
+                        )
+                        if link.first() is not None:
+                            continue
+                    except Exception:
+                        pass
+                    raise RuntimeError("{\"error\":{\"type\":\"CONTACT_REQUIRED\",\"message\":\"Recipient requires contact approval or recent context.\"}}")
+        # Deliver locally
+        local_payload = await _deliver_message(
             ctx,
             project,
             sender,
@@ -1306,7 +1405,7 @@ def build_mcp_server() -> FastMCP:
             ack_required,
             thread_id,
         )
-        return payload
+        return local_payload
 
     @mcp.tool(name="reply_message")
     async def reply_message(
@@ -1412,6 +1511,149 @@ def build_mcp_server() -> FastMCP:
         payload["reply_to"] = message_id
         return payload
 
+    @mcp.tool(name="request_contact")
+    async def request_contact(
+        ctx: Context,
+        project_key: str,
+        from_agent: str,
+        to_agent: str,
+        reason: str = "",
+        ttl_seconds: int = 7 * 24 * 3600,
+    ) -> dict[str, Any]:
+        """Request contact approval to message another agent.
+
+        Creates (or refreshes) a pending AgentLink and sends a small ack_required intro message.
+        """
+        project = await _get_project_by_identifier(project_key)
+        a = await _get_agent(project, from_agent)
+        b = await _get_agent(project, to_agent)
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(seconds=max(60, ttl_seconds))
+        async with get_session() as s:
+            # upsert link
+            existing = await s.execute(
+                select(AgentLink).where(
+                    AgentLink.a_project_id == project.id,
+                    AgentLink.a_agent_id == a.id,
+                    AgentLink.b_project_id == project.id,
+                    AgentLink.b_agent_id == b.id,
+                )
+            )
+            link = existing.scalars().first()
+            if link:
+                link.status = "pending"
+                link.reason = reason
+                link.updated_ts = now
+                link.expires_ts = exp
+                s.add(link)
+            else:
+                link = AgentLink(
+                    a_project_id=project.id or 0,
+                    a_agent_id=a.id or 0,
+                    b_project_id=project.id or 0,
+                    b_agent_id=b.id or 0,
+                    status="pending",
+                    reason=reason,
+                    created_ts=now,
+                    updated_ts=now,
+                    expires_ts=exp,
+                )
+                s.add(link)
+            await s.commit()
+        # Send an intro message with ack_required
+        subject = f"Contact request from {a.name}"
+        body = reason or f"{a.name} requests permission to contact {b.name}."
+        await _deliver_message(ctx, project, a, [b.name], [], [], subject, body, None, None, importance="normal", ack_required=True, thread_id=None)
+        return {"from": a.name, "to": b.name, "status": "pending", "expires_ts": _iso(exp)}
+
+    @mcp.tool(name="respond_contact")
+    async def respond_contact(
+        ctx: Context,
+        project_key: str,
+        to_agent: str,
+        from_agent: str,
+        accept: bool,
+        ttl_seconds: int = 30 * 24 * 3600,
+    ) -> dict[str, Any]:
+        """Approve or deny a contact request."""
+        project = await _get_project_by_identifier(project_key)
+        a = await _get_agent(project, from_agent)
+        b = await _get_agent(project, to_agent)
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
+        updated = 0
+        async with get_session() as s:
+            existing = await s.execute(
+                select(AgentLink).where(
+                    AgentLink.a_project_id == project.id,
+                    AgentLink.a_agent_id == a.id,
+                    AgentLink.b_project_id == project.id,
+                    AgentLink.b_agent_id == b.id,
+                )
+            )
+            link = existing.scalars().first()
+            if link:
+                link.status = "approved" if accept else "blocked"
+                link.updated_ts = now
+                link.expires_ts = exp
+                s.add(link)
+                updated = 1
+            else:
+                if accept:
+                    s.add(AgentLink(
+                        a_project_id=project.id or 0,
+                        a_agent_id=a.id or 0,
+                        b_project_id=project.id or 0,
+                        b_agent_id=b.id or 0,
+                        status="approved",
+                        reason="",
+                        created_ts=now,
+                        updated_ts=now,
+                        expires_ts=exp,
+                    ))
+                    updated = 1
+            await s.commit()
+        await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
+        return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
+
+    @mcp.tool(name="list_contacts")
+    async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
+        """List contact links for an agent in a project."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        out: list[dict[str, Any]] = []
+        async with get_session() as s:
+            rows = await s.execute(
+                select(AgentLink, Agent.name)
+                .join(Agent, Agent.id == AgentLink.b_agent_id)
+                .where(AgentLink.a_project_id == project.id, AgentLink.a_agent_id == agent.id)
+            )
+            for link, name in rows.all():
+                out.append({
+                    "to": name,
+                    "status": link.status,
+                    "reason": link.reason,
+                    "updated_ts": _iso(link.updated_ts),
+                    "expires_ts": _iso(link.expires_ts) if link.expires_ts else None,
+                })
+        return out
+
+    @mcp.tool(name="set_contact_policy")
+    async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
+        """Set contact policy for an agent: open | auto | contacts_only | block_all."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        pol = (policy or "auto").lower()
+        if pol not in {"open", "auto", "contacts_only", "block_all"}:
+            pol = "auto"
+        async with get_session() as s:
+            db_agent = await s.get(Agent, agent.id)
+            if db_agent:
+                db_agent.contact_policy = pol
+                s.add(db_agent)
+                await s.commit()
+        return {"agent": agent.name, "policy": pol}
+
     @mcp.tool(name="fetch_inbox")
     async def fetch_inbox(
         ctx: Context,
@@ -1451,11 +1693,22 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
-        project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
-        items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
-        await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'. urgent_only={urgent_only}")
-        return items
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nlimit={limit}\nurgent_only={urgent_only}", title="tool: fetch_inbox", border_style="green"))
+            except Exception:
+                pass
+        try:
+            project = await _get_project_by_identifier(project_key)
+            agent = await _get_agent(project, agent_name)
+            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
+            await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'. urgent_only={urgent_only}")
+            return items
+        except Exception as exc:
+            _rich_error_panel("fetch_inbox", {"error": str(exc)})
+            raise
 
     @mcp.tool(name="mark_message_read")
     async def mark_message_read(
@@ -2217,6 +2470,20 @@ def build_mcp_server() -> FastMCP:
         dict
             { renewed: int, claims: [{id, path_pattern, old_expires_ts, new_expires_ts}] }
         """
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                meta = [
+                    f"project={project_key}",
+                    f"agent={agent_name}",
+                    f"extend={extend_seconds}s",
+                    f"paths={len(paths or [])}",
+                    f"ids={len(claim_ids or [])}",
+                ]
+                Console().print(Panel.fit("\n".join(meta), title="tool: renew_claims", border_style="green"))
+            except Exception:
+                pass
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         if project.id is None or agent.id is None:

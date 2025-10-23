@@ -143,23 +143,42 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
 
 
 def _bridge_provider_env() -> None:
-    """Populate os.environ with provider API keys from .env via decouple if missing."""
+    """Populate os.environ with provider API keys from .env via decouple if missing.
+
+    Also map common synonyms to LiteLLM's canonical env names, e.g. GEMINI_API_KEY -> GOOGLE_API_KEY,
+    GROK_API_KEY -> XAI_API_KEY.
+    """
     cfg = DecoupleConfig(RepositoryEnv(".env"))
-    names = [
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GROQ_API_KEY",
-        "XAI_API_KEY",
-        "GOOGLE_API_KEY",
+
+    def _get_from_any(*keys: str) -> str:
+        for k in keys:
+            v = os.environ.get(k)
+            if v:
+                return v
+        for k in keys:
+            try:
+                v = cfg(k, default="")
+            except Exception:
+                v = ""
+            if v:
+                return v
+        return ""
+
+    # Canonical targets with possible synonyms
+    mappings: list[tuple[str, tuple[str, ...]]] = [
+        ("OPENAI_API_KEY", ("OPENAI_API_KEY",)),
+        ("ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY",)),
+        ("GROQ_API_KEY", ("GROQ_API_KEY",)),
+        ("XAI_API_KEY", ("XAI_API_KEY", "GROK_API_KEY")),
+        ("GOOGLE_API_KEY", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
+        ("OPENROUTER_API_KEY", ("OPENROUTER_API_KEY",)),
+        ("DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",)),
     ]
-    for name in names:
-        if os.environ.get(name):
-            continue
-        try:
-            value = cfg(name, default="")
-        except Exception:
-            value = ""
-        if value:
-            os.environ[name] = value
+
+    for canonical, aliases in mappings:
+        if not os.environ.get(canonical):
+            val = _get_from_any(*aliases)
+            if val:
+                os.environ[canonical] = val
 
 

@@ -235,6 +235,57 @@ sequenceDiagram
 | `list_agents(project_key, active_only=True)` | Directory-style listing of agents and activity |
 | `send_message(...)` | Create canonical + inbox/outbox markdown artifacts and commit |
 | `reply_message(...)` | Reply to an existing message and continue the thread |
+| `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` | Request permission to message another agent |
+| `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?)` | Approve or deny a contact request |
+| `list_contacts(project_key, agent_name)` | List contact links for an agent |
+| `set_contact_policy(project_key, agent_name, policy)` | Set policy: `open`, `auto` (default), `contacts_only`, `block_all` |
+## Contact model and “consent-lite” messaging
+
+Goal: make coordination “just work” without spam across unrelated agents. The server enforces per-project isolation by default and adds an optional consent layer within a project so agents only contact relevant peers.
+
+### Isolation by project
+
+- All tools require a `project_key`. Agents only see messages addressed to them within that project.
+- An agent working in Project A is invisible to agents in Project B unless explicit cross-project contact is established (see below). This avoids distraction between unrelated repositories.
+
+### Policies (per agent)
+
+- `open`: accept any targeted messages in the project.
+- `auto` (default): allow messages when there is obvious shared context (e.g., same thread participants; recent overlapping active claims; recent prior direct contact within a TTL); otherwise requires a contact request.
+- `contacts_only`: require an approved contact link first.
+- `block_all`: reject all new contacts (errors with CONTACT_BLOCKED).
+
+Use `set_contact_policy(project_key, agent_name, policy)` to update.
+
+### Request/approve contact
+
+- `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` creates or refreshes a pending link and sends a small ack_required “intro” message to the recipient.
+- `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?)` approves or denies; approval grants messaging until expiry.
+- `list_contacts(project_key, agent_name)` surfaces current links.
+
+### Auto-allow heuristics (no explicit request required)
+
+- Same thread: replies or messages to thread participants are allowed.
+- Recent overlapping claims: if sender and recipient hold active claims in the project, messaging is allowed.
+- Recent prior contact: a sliding TTL allows follow-ups between the same pair.
+
+These heuristics minimize friction while preventing cold spam.
+
+### Cross-project coordination (frontend vs backend repos)
+
+When two repos represent the same underlying project (e.g., `frontend` and `backend`), you have two options:
+
+1) Use the same `project_key` across both workspaces. Agents in both repos operate under one project namespace and benefit from full inbox/outbox coordination automatically.
+
+2) Keep separate `project_key`s and establish explicit contact:
+   - In `backend`, agent `GreenCastle` calls:
+     - `request_contact(project_key="/abs/path/backend", from_agent="GreenCastle", to_agent="BlueLake", reason="API contract changes")`
+   - In `frontend`, `BlueLake` calls:
+     - `respond_contact(project_key="/abs/path/backend", to_agent="BlueLake", from_agent="GreenCastle", accept=true)`
+   - After approval, messages can be exchanged; in default `auto` policy the server allows follow-up threads/claims-based coordination without re-requesting.
+
+Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is on by default (CONTACT_ENFORCEMENT_ENABLED=true) but is designed to be non-blocking in obvious collaboration contexts.
+
 | `check_my_messages(...)` | Pull recent messages for an agent |
 | `acknowledge_message(...)` | Mark a message as acknowledged by agent |
 | `claim_paths(...)` | Request advisory leases on files/globs |

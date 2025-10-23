@@ -76,11 +76,22 @@ async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object])
 
 
 async def write_claim_record(archive: ProjectArchive, claim: dict[str, object]) -> None:
-    path_pattern = str(claim.get("path_pattern", ""))
+    path_pattern = str(claim.get("path_pattern") or claim.get("path") or "").strip()
+    if not path_pattern:
+        raise ValueError("Claim record must include 'path_pattern'.")
+    normalized_claim = dict(claim)
+    normalized_claim["path_pattern"] = path_pattern
+    normalized_claim.pop("path", None)
     digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
     claim_path = archive.root / "claims" / f"{digest}.json"
-    await _write_json(claim_path, claim)
-    await _commit(archive.repo, archive.settings, f"claim: {claim['agent']} {claim['path_pattern']}", [claim_path.relative_to(archive.root).as_posix()])
+    await _write_json(claim_path, normalized_claim)
+    agent_name = str(normalized_claim.get("agent", "unknown"))
+    await _commit(
+        archive.repo,
+        archive.settings,
+        f"claim: {agent_name} {path_pattern}",
+        [claim_path.relative_to(archive.root).as_posix()],
+    )
 
 
 async def write_message_bundle(

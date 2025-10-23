@@ -99,6 +99,9 @@ class Settings:
     ack_escalation_claim_ttl_seconds: int
     ack_escalation_claim_exclusive: bool
     ack_escalation_claim_holder_name: str
+    # Contacts/links
+    contact_enforcement_enabled: bool
+    contact_auto_ttl_seconds: int
     # Logging
     log_rich_enabled: bool
     log_level: str
@@ -207,4 +210,6 @@ def get_settings() -> Settings:
         log_rich_enabled=_bool(_decouple_config("LOG_RICH_ENABLED", default="true"), default=True),
         log_level=_decouple_config("LOG_LEVEL", default="INFO"),
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),
+        contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="true"), default=True),
+        contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
     )

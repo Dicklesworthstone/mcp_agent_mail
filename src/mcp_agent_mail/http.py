@@ -67,13 +67,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # Simple request logging (configurable)
     if settings.http.request_log_enabled:
-        import time
+        import time as _time
 
         class RequestLoggingMiddleware(BaseHTTPMiddleware):
             async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
-                start = time.time()
+                start = _time.time()
                 response = await call_next(request)
-                dur_ms = int((time.time() - start) * 1000)
+                dur_ms = int((_time.time() - start) * 1000)
                 method = request.method
                 path = request.url.path
                 status_code = getattr(response, "status_code", 0)
@@ -329,15 +329,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                             })
                                             await s2.commit()
                                         # Also write JSON artifact to archive
-                                        archive = await ensure_archive(settings, (await _project_slug_from_id(project_id)) or "")
+                                        project_slug = (await _project_slug_from_id(project_id)) or ""
+                                        archive = await ensure_archive(settings, project_slug)
+                                        expires_at = now + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds)
                                         async with AsyncFileLock(archive.lock_path):
                                             await write_claim_record(archive, {
                                                 "agent": settings.ack_escalation_claim_holder_name or recipient_name,
-                                                "path": pattern,
+                                                "project": project_slug,
+                                                "path_pattern": pattern,
                                                 "exclusive": bool(settings.ack_escalation_claim_exclusive),
                                                 "reason": "ack-overdue",
-                                                "created": now.astimezone().isoformat(),
-                                                "expires": (now + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds)).astimezone().isoformat(),
+                                                "created_ts": now.isoformat(),
+                                                "expires_ts": expires_at.isoformat(),
                                             })
                                     except Exception:
                                         pass
