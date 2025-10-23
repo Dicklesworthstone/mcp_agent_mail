@@ -39,8 +39,8 @@
   - [x] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
   - [x] Enrich CLI output with Rich panels/logging
 - [ ] Testing
-  - [ ] Expand tests to cover filesystem archive & git commits
-  - [ ] Test claims conflict detection, release tool, resources
-  - [ ] Test search and summaries tools
-  - [ ] Test CLI serve-http with auth defaults and migrations command
-  - [ ] Add image conversion test (mocking Pillow)
+  - [x] Expand tests to cover filesystem archive & git commits
+  - [x] Test claims conflict detection, release tool, resources
+  - [x] Test search and summaries tools
+  - [x] Test CLI serve-http with auth defaults and migrations command
+  - [x] Add image conversion test (mocking Pillow)

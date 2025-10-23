@@ -2,6 +2,8 @@ import pytest
 from pathlib import Path
 
 from fastmcp import Client
+from git import Repo
+from PIL import Image
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import get_settings
@@ -65,6 +67,8 @@ async def test_messaging_flow(isolated_env):
         assert profile.exists()
         message_file = list((storage_root / "backend" / "messages").rglob("*.md"))[0]
         assert "Test" in message_file.read_text()
+        repo = Repo(str(storage_root / "backend"))
+        assert repo.head.commit.message.startswith("mail: BlueLake")
 
 
 @pytest.mark.asyncio
@@ -124,6 +128,9 @@ async def test_claim_conflicts_and_release(isolated_env):
         )
         assert release.data["released"] == 1
 
+        claims_resource = await client.read_resource("resource://claims/backend")
+        assert "src/app.py" in claims_resource[0].text
+
 
 @pytest.mark.asyncio
 async def test_search_and_summarize(isolated_env):
@@ -162,3 +169,42 @@ async def test_search_and_summarize(isolated_env):
         )
         summary_data = summary.data["summary"]
         assert "TODO" in " ".join(summary_data["key_points"])
+        assert summary.data["examples"]
+
+
+@pytest.mark.asyncio
+async def test_attachment_conversion(isolated_env):
+    storage = Path(get_settings().storage.root).resolve()
+    image_path = storage.parent / "temp.png"
+    image = Image.new("RGB", (2, 2), color=(255, 0, 0))
+    image.save(image_path)
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Artist",
+            },
+        )
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Artist",
+                "to": ["Artist"],
+                "subject": "Image",
+                "body_md": "Here is an image ![pic](%s)" % image_path,
+                "attachment_paths": [str(image_path)],
+            },
+        )
+        attachments = result.data["attachments"]
+        assert attachments
+        storage_root = storage / "backend"
+        attachment_files = list((storage_root / "attachments").rglob("*.webp"))
+        assert attachment_files
+    image_path.unlink(missing_ok=True)
