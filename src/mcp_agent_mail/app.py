@@ -10,8 +10,8 @@ from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
 from sqlalchemy import asc, desc, func, select, update
-from sqlalchemy.orm import aliased
 from sqlalchemy.exc import NoResultFound
+from sqlalchemy.orm import aliased
 
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
@@ -340,11 +340,25 @@ async def _get_message(project: Project, message_id: int) -> Message:
         return message
 
 
+async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
+    if project.id is None:
+        raise ValueError("Project must have an id before querying agents.")
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)
+        )
+        agent = result.scalars().first()
+        if not agent:
+            raise NoResultFound(f"Agent id '{agent_id}' not found for project '{project.human_key}'.")
+        return agent
+
+
 async def _update_recipient_timestamp(
     agent: Agent,
     message_id: int,
     field: str,
-) -> bool:
+) -> Optional[datetime]:
     if agent.id is None:
         raise ValueError("Agent must have an id before updating message state.")
     now = datetime.now(timezone.utc)
@@ -356,7 +370,7 @@ async def _update_recipient_timestamp(
         )
         result = await session.execute(stmt)
         await session.commit()
-    return bool(result.rowcount)
+    return now if result.rowcount else None
 
 
 def build_mcp_server() -> FastMCP:
@@ -370,6 +384,85 @@ def build_mcp_server() -> FastMCP:
     )
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
+
+    async def _deliver_message(
+        ctx: Context,
+        project: Project,
+        sender: Agent,
+        to_names: Sequence[str],
+        cc_names: Sequence[str],
+        bcc_names: Sequence[str],
+        subject: str,
+        body_md: str,
+        attachment_paths: Sequence[str] | None,
+        convert_images_override: Optional[bool],
+        importance: str,
+        ack_required: bool,
+        thread_id: Optional[str],
+    ) -> dict[str, Any]:
+        if not to_names and not cc_names and not bcc_names:
+            raise ValueError("At least one recipient must be specified.")
+        to_agents = [await _get_agent(project, name) for name in to_names]
+        cc_agents = [await _get_agent(project, name) for name in cc_names]
+        bcc_agents = [await _get_agent(project, name) for name in bcc_names]
+        recipient_records: list[tuple[Agent, str]] = [(agent, "to") for agent in to_agents]
+        recipient_records.extend((agent, "cc") for agent in cc_agents)
+        recipient_records.extend((agent, "bcc") for agent in bcc_agents)
+
+        archive = await ensure_archive(settings, project.slug)
+        convert_markdown = (
+            convert_images_override if convert_images_override is not None else settings.storage.convert_images
+        )
+        async with AsyncFileLock(archive.lock_path):
+            processed_body, attachments_meta, attachment_files = await process_attachments(
+                archive,
+                body_md,
+                attachment_paths or [],
+                convert_markdown,
+            )
+            message = await _create_message(
+                project,
+                sender,
+                subject,
+                processed_body,
+                recipient_records,
+                importance,
+                ack_required,
+                thread_id,
+                attachments_meta,
+            )
+            frontmatter = _message_frontmatter(
+                message,
+                project,
+                sender,
+                to_agents,
+                cc_agents,
+                bcc_agents,
+                attachments_meta,
+            )
+            recipients_for_archive = [agent.name for agent in to_agents + cc_agents + bcc_agents]
+            await write_message_bundle(
+                archive,
+                frontmatter,
+                processed_body,
+                sender.name,
+                recipients_for_archive,
+                attachment_files,
+            )
+        await ctx.info(
+            f"Message {message.id} created by {sender.name} (to {', '.join(recipients_for_archive)})"
+        )
+        payload = _message_to_dict(message)
+        payload.update(
+            {
+                "from": sender.name,
+                "to": [agent.name for agent in to_agents],
+                "cc": [agent.name for agent in cc_agents],
+                "bcc": [agent.name for agent in bcc_agents],
+                "attachments": attachments_meta,
+            }
+        )
+        return payload
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     async def health_check(ctx: Context) -> dict[str, Any]:
@@ -423,59 +516,64 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         project = await _get_project_by_identifier(project_key)
         sender = await _get_agent(project, sender_name)
-        to_agents = [await _get_agent(project, name) for name in to]
-        cc_names = cc or []
-        bcc_names = bcc or []
-        cc_agents = [await _get_agent(project, name) for name in cc_names]
-        bcc_agents = [await _get_agent(project, name) for name in bcc_names]
-        recipient_records: list[tuple[Agent, str]] = [(agent, "to") for agent in to_agents]
-        recipient_records.extend((agent, "cc") for agent in cc_agents)
-        recipient_records.extend((agent, "bcc") for agent in bcc_agents)
+        payload = await _deliver_message(
+            ctx,
+            project,
+            sender,
+            to,
+            cc or [],
+            bcc or [],
+            subject,
+            body_md,
+            attachment_paths,
+            convert_images,
+            importance,
+            ack_required,
+            thread_id,
+        )
+        return payload
 
-        archive = await ensure_archive(settings, project.slug)
-        convert_markdown = convert_images if convert_images is not None else settings.storage.convert_images
-        async with AsyncFileLock(archive.lock_path):
-            processed_body, attachments_meta, attachment_files = await process_attachments(
-                archive,
-                body_md,
-                attachment_paths or [],
-                convert_markdown,
-            )
-            message = await _create_message(
-                project,
-                sender,
-                subject,
-                processed_body,
-                recipient_records,
-                importance,
-                ack_required,
-                thread_id,
-                attachments_meta,
-            )
-            frontmatter = _message_frontmatter(
-                message,
-                project,
-                sender,
-                to_agents,
-                cc_agents,
-                bcc_agents,
-                attachments_meta,
-            )
-            await write_message_bundle(
-                archive,
-                frontmatter,
-                processed_body,
-                sender.name,
-                [agent.name for agent in to_agents + cc_agents + bcc_agents],
-                attachment_files,
-            )
-        await ctx.info(f"Message '{message.id}' created by '{sender.name}'.")
-        payload = _message_to_dict(message)
-        payload["from"] = sender.name
-        payload["to"] = [agent.name for agent in to_agents]
-        payload["cc"] = [agent.name for agent in cc_agents]
-        payload["bcc"] = [agent.name for agent in bcc_agents]
-        payload["attachments"] = attachments_meta
+    @mcp.tool(name="reply_message")
+    async def reply_message(
+        ctx: Context,
+        project_key: str,
+        message_id: int,
+        sender_name: str,
+        body_md: str,
+        to: Optional[list[str]] = None,
+        cc: Optional[list[str]] = None,
+        bcc: Optional[list[str]] = None,
+        subject_prefix: str = "Re:",
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        sender = await _get_agent(project, sender_name)
+        original = await _get_message(project, message_id)
+        original_sender = await _get_agent_by_id(project, original.sender_id)
+        thread_key = original.thread_id or str(original.id)
+        subject_prefix_clean = subject_prefix.strip()
+        base_subject = original.subject
+        if subject_prefix_clean and base_subject.lower().startswith(subject_prefix_clean.lower()):
+            reply_subject = base_subject
+        else:
+            reply_subject = f"{subject_prefix_clean} {base_subject}".strip()
+        to_names = to or [original_sender.name]
+        payload = await _deliver_message(
+            ctx,
+            project,
+            sender,
+            to_names,
+            cc or [],
+            bcc or [],
+            reply_subject,
+            body_md,
+            None,
+            None,
+            importance=original.importance,
+            ack_required=original.ack_required,
+            thread_id=thread_key,
+        )
+        payload["thread_id"] = thread_key
+        payload["reply_to"] = message_id
         return payload
 
     @mcp.tool(name="fetch_inbox")
@@ -484,12 +582,49 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         limit: int = 20,
+        urgent_only: bool = False,
+        include_bodies: bool = False,
+        since_ts: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
-        items = await _list_inbox(project, agent, limit)
-        await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'.")
+        items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
+        await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'. urgent_only={urgent_only}")
         return items
+
+    @mcp.tool(name="mark_message_read")
+    async def mark_message_read(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        message_id: int,
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        await _get_message(project, message_id)
+        read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
+        await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
+        return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
+
+    @mcp.tool(name="acknowledge_message")
+    async def acknowledge_message(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        message_id: int,
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        await _get_message(project, message_id)
+        read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
+        ack_ts = await _update_recipient_timestamp(agent, message_id, "ack_ts")
+        await ctx.info(f"Acknowledged message {message_id} for '{agent.name}'.")
+        return {
+            "message_id": message_id,
+            "acknowledged": bool(ack_ts),
+            "acknowledged_at": _iso(ack_ts) if ack_ts else None,
+            "read_at": _iso(read_ts) if read_ts else None,
+        }
 
     @mcp.tool(name="claim_paths")
     async def claim_paths(

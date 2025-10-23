@@ -132,6 +132,13 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 - `claims(id, project_id, agent_name, path, exclusive, reason, created_ts, expires_ts, released_ts)`
 - `fts_messages(subject, body_md)` + triggers for incremental updates
 
+### Concurrency and lifecycle
+
+- One request/task = one isolated operation; Git writes are serialized by a lock file in the project repo root
+- DB operations are short-lived and scoped to each tool call; FTS triggers keep the search index current
+- Artifacts are written first, then committed as a cohesive unit with a descriptive message
+- Attachments are content-addressed (sha1) to avoid duplication
+
 ## How it works (key flows)
 
 1) Create an identity
@@ -172,11 +179,52 @@ sequenceDiagram
 - `release_claims(project_key, agent_name, paths[])` releases active leases. JSON artifacts remain for audit history.
 - Optional: install a pre-commit hook in your code repo that blocks commits conflicting with other agents’ active exclusive claims.
 
+```mermaid
+sequenceDiagram
+  participant Agent as Agent
+  participant Server as FastMCP Server
+  participant DB as SQLite (claims)
+  participant Git as Git Repo (.mcp-mail/claims)
+
+  Agent->>Server: tools/call claim_paths(project_key, agent_name, paths[], ttl, exclusive, reason)
+  Server->>DB: expire old leases; check overlaps for each path
+  DB-->>Server: conflicts/grants
+  alt conflicts exist
+    Server-->>Agent: { conflicts: [...], granted: [], expires_ts }
+  else no conflicts
+    Server->>DB: insert claim rows (one per path)
+    Server->>Git: write claims/<sha1(path)>.json for each granted path
+    Server->>Git: commit "claim: <agent> exclusive/shared <n> path(s)"
+    Server-->>Agent: { granted: [..], conflicts: [], expires_ts }
+  end
+```
+
 5) Search & summarize
 
 - `search_messages(project_key, query, limit?)` uses FTS5 over subject and body.
 - `summarize_thread(project_key, thread_id, include_examples?)` extracts key points, actions, and participants from the thread.
 - `reply_message(project_key, from_agent, reply_to_message_id, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
+
+### Semantics & invariants
+
+- Identity
+  - Names are memorable adjective+noun and unique per project; `name_hint` is sanitized (alnum) and used if available
+  - `whois` returns the stored profile; `list_agents` can filter by recent activity
+  - `last_active_ts` is bumped on relevant interactions (messages, inbox checks, etc.)
+- Threads
+  - Replies inherit `thread_id` from the original; if missing, the reply sets `thread_id` to the original message id
+  - Subject lines are prefixed (e.g., `Re:`) for readability in mailboxes
+- Attachments
+  - Image references (file path or data URI) are converted to WebP; small images embed inline when policy allows
+  - Non-absolute paths resolve relative to the project repo root
+  - Stored under `attachments/<xx>/<sha1>.webp` and referenced by relative path in frontmatter
+- Claims
+  - TTL-based; exclusive means “please don’t modify overlapping surfaces” for others until expiry or release
+  - Conflict detection is per exact path pattern; shared claims can coexist, exclusive conflicts are surfaced
+  - JSON artifacts remain in Git for audit even after release (DB tracks release_ts)
+- Search
+  - External-content FTS virtual table and triggers index subject/body on insert/update/delete
+  - Queries are constrained to the project id and ordered by `created_ts DESC`
 
 ## Tools (MCP surface)
 
@@ -211,6 +259,29 @@ Example (conceptual) resource read:
   "method": "resources/read",
   "params": {"uri": "resource://inbox/BlueLake?project=/abs/path/backend&limit=20"}
 }
+```
+
+### Resource parameters
+
+- `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
+  - `project`: disambiguate if the same agent name exists in multiple projects; if omitted, the most recent agent activity determines the project
+  - `since_ts`: epoch seconds filter (defaults to 0)
+  - `urgent_only`: when true, only `importance in ('high','urgent')`
+  - `include_bodies`: include markdown bodies in results
+  - `limit`: max results (default 20)
+- `resource://message/{id}{?project}`: fetch one message; `project` optional if id is globally unique
+- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread’s messages; if `project` omitted, resolves to the most recent matching project
+
+```mermaid
+sequenceDiagram
+  participant Client as MCP Client
+  participant Server as FastMCP Server
+  participant DB as SQLite
+
+  Client->>Server: resources/read resource://inbox/BlueLake?project=/abs/backend&limit=20
+  Server->>DB: select messages joined with recipients for agent=BlueLake
+  DB-->>Server: rows
+  Server-->>Client: { project, agent, messages: [...] }
 ```
 
 ## Claims and the optional pre-commit guard
@@ -280,6 +351,46 @@ uv run python server.py
 ```
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port.
+
+## HTTP usage examples (JSON-RPC over Streamable HTTP)
+
+Assuming the server is running at `http://127.0.0.1:8765/mcp/`.
+
+Call a tool:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8765/mcp/ \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "tools/call",
+    "params": {
+      "name": "create_agent",
+      "arguments": {
+        "project_key": "/abs/path/backend",
+        "program": "codex-cli",
+        "model": "gpt5-codex",
+        "task_description": "Auth refactor"
+      }
+    }
+  }'
+```
+
+Read a resource:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8765/mcp/ \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "2",
+    "method": "resources/read",
+    "params": {
+      "uri": "resource://inbox/BlueLake?project=/abs/path/backend&limit=10"
+    }
+  }'
+```
 
 ## Design choices and rationale
 
@@ -354,6 +465,28 @@ Claim a surface for editing:
 - Use explicit loads in async code; avoid implicit lazy loads
 - Use async-friendly file operations when needed; Git operations are serialized with a file lock
 - Clean shutdown should dispose any async engines/resources (if introduced later)
+
+## Troubleshooting
+
+- "from_agent not registered"
+  - Create the agent first with `create_agent`, or check the `project_key` you’re using matches the sender’s project
+- Pre-commit hook blocks commits
+  - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive claims; inspect `.git/hooks/pre-commit`
+- Inline images didn’t embed
+  - Ensure `convert_images=true`, `image_embed_policy="auto"` or `inline`, and the resulting WebP size is below `inline_max_bytes`
+- Message not found
+  - Confirm the `project` disambiguation when using `resource://message/{id}`; ids are unique per project
+- Inbox empty but messages exist
+  - Check `since_ts`, `urgent_only`, and `limit`; verify recipient names match exactly (case-sensitive)
+
+## FAQ
+
+- Why Git and SQLite together?
+  - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn’t.
+- Are claims enforced?
+  - Claims are advisory at the server layer; the optional pre-commit hook adds local enforcement at commit time.
+- Why HTTP-only?
+  - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
 ## Roadmap (selected)
 
