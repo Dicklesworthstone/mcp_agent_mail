@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
-from sqlalchemy import asc, desc, func, or_, select, update
+from sqlalchemy import asc, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
@@ -326,6 +326,30 @@ async def _list_inbox(
     return messages
 
 
+def _summarize_messages(messages: Sequence[tuple[Message, str]]) -> dict[str, Any]:
+    participants: set[str] = set()
+    key_points: list[str] = []
+    action_items: list[str] = []
+    keywords = ("TODO", "ACTION", "FIXME", "NEXT", "BLOCKED")
+    for message, sender_name in messages:
+        participants.add(sender_name)
+        for line in message.body_md.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith(('-', '*', '+')) or stripped[:2] in {"1.", "2.", "3."}:
+                key_points.append(stripped.lstrip("-+* "))
+            upper = stripped.upper()
+            if any(token in upper for token in keywords):
+                action_items.append(stripped)
+    return {
+        "participants": sorted(participants),
+        "key_points": key_points[:10],
+        "action_items": action_items[:10],
+        "total_messages": len(messages),
+    }
+
+
 async def _get_message(project: Project, message_id: int) -> Message:
     if project.id is None:
         raise ValueError("Project must have an id before reading messages.")
@@ -402,6 +426,18 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         if not to_names and not cc_names and not bcc_names:
             raise ValueError("At least one recipient must be specified.")
+        def _unique(items: Sequence[str]) -> list[str]:
+            seen: set[str] = set()
+            ordered: list[str] = []
+            for item in items:
+                if item not in seen:
+                    seen.add(item)
+                    ordered.append(item)
+            return ordered
+
+        to_names = _unique(to_names)
+        cc_names = _unique(cc_names)
+        bcc_names = _unique(bcc_names)
         to_agents = [await _get_agent(project, name) for name in to_names]
         cc_agents = [await _get_agent(project, name) for name in cc_names]
         bcc_agents = [await _get_agent(project, name) for name in bcc_names]
@@ -623,6 +659,93 @@ def build_mcp_server() -> FastMCP:
             "acknowledged_at": _iso(ack_ts) if ack_ts else None,
             "read_at": _iso(read_ts) if read_ts else None,
         }
+
+    @mcp.tool(name="search_messages")
+    async def search_messages(
+        ctx: Context,
+        project_key: str,
+        query: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ValueError("Project must have an id before searching messages.")
+        await ensure_schema()
+        async with get_session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                           m.thread_id, a.name AS sender_name
+                    FROM fts_messages fm
+                    JOIN messages m ON fm.message_id = m.id
+                    JOIN agents a ON m.sender_id = a.id
+                    WHERE m.project_id = :project_id AND fm MATCH :query
+                    ORDER BY bm25(fm) ASC
+                    LIMIT :limit
+                    """
+                ),
+                {"project_id": project.id, "query": query, "limit": limit},
+            )
+            rows = result.mappings().all()
+        await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
+        return [
+            {
+                "id": row["id"],
+                "subject": row["subject"],
+                "importance": row["importance"],
+                "ack_required": row["ack_required"],
+                "created_ts": _iso(row["created_ts"]),
+                "thread_id": row["thread_id"],
+                "from": row["sender_name"],
+            }
+            for row in rows
+        ]
+
+    @mcp.tool(name="summarize_thread")
+    async def summarize_thread(
+        ctx: Context,
+        project_key: str,
+        thread_id: str,
+        include_examples: bool = False,
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ValueError("Project must have an id before summarizing threads.")
+        await ensure_schema()
+        sender_alias = aliased(Agent)
+        try:
+            message_id = int(thread_id)
+        except ValueError:
+            message_id = None
+        criteria = [Message.thread_id == thread_id]
+        if message_id is not None:
+            criteria.append(Message.id == message_id)
+        async with get_session() as session:
+            stmt = (
+                select(Message, sender_alias.name)
+                .join(sender_alias, Message.sender_id == sender_alias.id)
+                .where(Message.project_id == project.id, or_(*criteria))
+                .order_by(asc(Message.created_ts))
+            )
+            result = await session.execute(stmt)
+            rows = result.all()
+        summary = _summarize_messages(rows)
+        examples = []
+        if include_examples:
+            for message, sender_name in rows[:3]:
+                examples.append(
+                    {
+                        "id": message.id,
+                        "subject": message.subject,
+                        "from": sender_name,
+                        "created_ts": _iso(message.created_ts),
+                    }
+                )
+        await ctx.info(
+            f"Summarized thread '{thread_id}' for project '{project.human_key}' with {len(rows)} messages"
+        )
+        return {"thread_id": thread_id, "summary": summary, "examples": examples}
 
     @mcp.tool(name="claim_paths")
     async def claim_paths(
