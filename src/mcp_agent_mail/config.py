@@ -21,6 +21,8 @@ class HttpSettings:
     port: int
     path: str
     bearer_token: str | None
+    rate_limit_enabled: bool
+    rate_limit_per_minute: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -90,6 +92,8 @@ def get_settings() -> Settings:
         port=_int(_decouple_config("HTTP_PORT", default="8765"), default=8765),
         path=_decouple_config("HTTP_PATH", default="/mcp/"),
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
+        rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
+        rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
     )
 
     database_settings = DatabaseSettings(

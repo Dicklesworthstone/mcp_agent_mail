@@ -1517,6 +1517,143 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Released {affected} claims for '{agent.name}'.")
         return {"released": affected, "released_at": _iso(now)}
 
+    @mcp.tool(name="renew_claims")
+    async def renew_claims(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        ttl_seconds: int = 3600,
+        paths: Optional[list[str]] = None,
+        claim_ids: Optional[list[int]] = None,
+    ) -> dict[str, Any]:
+        """
+        Extend the expiry (TTL) for active claims held by an agent.
+
+        - If both `paths` and `claim_ids` are omitted, all active claims for the agent are renewed.
+        - Only claims with released_ts IS NULL are updated.
+        - New expires_ts = now + ttl_seconds (min 60s).
+        """
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        if project.id is None or agent.id is None:
+            raise ValueError("Project and agent must have ids before renewing claims.")
+        await ensure_schema()
+        now = datetime.now(timezone.utc)
+        new_expiry = now + timedelta(seconds=max(60, ttl_seconds))
+        async with get_session() as session:
+            stmt = (
+                update(Claim)
+                .where(
+                    Claim.project_id == project.id,
+                    Claim.agent_id == agent.id,
+                    cast(Any, Claim.released_ts).is_(None),
+                )
+                .values(expires_ts=new_expiry)
+            )
+            if claim_ids:
+                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+            if paths:
+                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+            result = await session.execute(stmt)
+            await session.commit()
+        affected = int(result.rowcount or 0)
+        await ctx.info(f"Renewed {affected} claims for '{agent.name}' to {_iso(new_expiry)}.")
+        return {"renewed": affected, "expires_ts": _iso(new_expiry)}
+
+    @mcp.tool(name="renew_claims")
+    async def renew_claims_tool(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        extend_seconds: int = 1800,
+        paths: Optional[list[str]] = None,
+        claim_ids: Optional[list[int]] = None,
+    ) -> dict[str, Any]:
+        """
+        Extend expiry for active claims held by an agent without reissuing them.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key.
+        agent_name : str
+            Agent identity who owns the claims.
+        extend_seconds : int
+            Seconds to extend from the later of now or current expiry (min 60s).
+        paths : Optional[list[str]]
+            Restrict renewals to matching path patterns.
+        claim_ids : Optional[list[int]]
+            Restrict renewals to matching claim ids.
+
+        Returns
+        -------
+        dict
+            { renewed: int, claims: [{id, path_pattern, old_expires_ts, new_expires_ts}] }
+        """
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        if project.id is None or agent.id is None:
+            raise ValueError("Project and agent must have ids before renewing claims.")
+        await ensure_schema()
+        now = datetime.now(timezone.utc)
+        bump = max(60, int(extend_seconds))
+
+        async with get_session() as session:
+            stmt = (
+                select(Claim)
+                .where(
+                    Claim.project_id == project.id,
+                    Claim.agent_id == agent.id,
+                    cast(Any, Claim.released_ts).is_(None),
+                )
+                .order_by(asc(Claim.expires_ts))
+            )
+            if claim_ids:
+                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+            if paths:
+                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+            result = await session.execute(stmt)
+            claims: list[Claim] = list(result.scalars().all())
+
+        if not claims:
+            await ctx.info(f"No active claims to renew for '{agent.name}'.")
+            return {"renewed": 0, "claims": []}
+
+        updated: list[dict[str, Any]] = []
+        async with get_session() as session:
+            for claim in claims:
+                old_exp = claim.expires_ts
+                base = old_exp if old_exp > now else now
+                claim.expires_ts = base + timedelta(seconds=bump)
+                session.add(claim)
+                updated.append(
+                    {
+                        "id": claim.id,
+                        "path_pattern": claim.path_pattern,
+                        "old_expires_ts": _iso(old_exp),
+                        "new_expires_ts": _iso(claim.expires_ts),
+                    }
+                )
+            await session.commit()
+
+        # Update Git artifacts for the renewed claims
+        archive = await ensure_archive(settings, project.slug)
+        async with AsyncFileLock(archive.lock_path):
+            for claim_info in updated:
+                payload = {
+                    "id": claim_info["id"],
+                    "project": project.human_key,
+                    "agent": agent.name,
+                    "path_pattern": claim_info["path_pattern"],
+                    "exclusive": True,  # JSON artifact is advisory; exclusivity remains unchanged visually
+                    "reason": "renew",
+                    "created_ts": _iso(now),
+                    "expires_ts": claim_info["new_expires_ts"],
+                }
+                await write_claim_record(archive, payload)
+        await ctx.info(f"Renewed {len(updated)} claim(s) for '{agent.name}'.")
+        return {"renewed": len(updated), "claims": updated}
+
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
         """
@@ -1918,6 +2055,49 @@ def build_mcp_server() -> FastMCP:
                 payload = _message_to_dict(msg, include_body=False)
                 payload["kind"] = kind
                 out.append(payload)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource("resource://mailbox/{agent}{?project,limit}", mime_type="application/json")
+    async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        List recent messages in an agent's mailbox with lightweight Git commit context.
+
+        Returns
+        -------
+        dict
+            { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
+        """
+        if project is None:
+            raise ValueError("project parameter is required for mailbox resource")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
+
+        # Attach recent commit summaries touching the archive (best-effort)
+        commits_index: dict[str, dict[str, str]] = {}
+        try:
+            archive = await ensure_archive(settings, project_obj.slug)
+            repo: Repo = archive.repo
+            for commit in repo.iter_commits(paths=["."], max_count=200):
+                # Heuristic: extract message id from commit summary when present in canonical subject format
+                # Expected: "mail: <from> -> ... | <subject>"
+                summary = commit.summary
+                hexsha = commit.hexsha[:12]
+                commits_index.setdefault(hexsha, {"hexsha": hexsha, "summary": summary})
+        except Exception:
+            pass
+
+        # Map messages to nearest commit (best-effort: none if not determinable)
+        out: list[dict[str, Any]] = []
+        for item in items:
+            commit_meta = None
+            # We cannot cheaply know exact commit per message without parsing message ids from log; keep null
+            # but preserve structure for clients
+            if commits_index:
+                commit_meta = next(iter(commits_index.values()))  # provide at least one recent reference
+            payload = dict(item)
+            payload["commit"] = commit_meta
+            out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
     return mcp

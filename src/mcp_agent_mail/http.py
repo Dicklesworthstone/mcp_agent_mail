@@ -24,6 +24,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
 
     async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":  # allow CORS preflight
+            return await call_next(request)
         if request.url.path.startswith("/health/"):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
@@ -43,10 +45,37 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     if server is None:
         server = build_mcp_server()
 
+    # Lightweight IP-based rate limiting (best-effort, per-process)
+    if settings.http.rate_limit_enabled and settings.http.rate_limit_per_minute > 0:
+        from collections import defaultdict, deque
+        from time import time
+
+        window_seconds = 60
+        limit = int(settings.http.rate_limit_per_minute)
+        hits: dict[str, deque[float]] = defaultdict(deque)
+
+        class RateLimitMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next):
+                if request.method == "OPTIONS":
+                    return await call_next(request)
+                if request.url.path.startswith("/health/"):
+                    return await call_next(request)
+                client_ip = request.client.host if request.client else "unknown"
+                now = time()
+                dq = hits[client_ip]
+                while dq and now - dq[0] >= window_seconds:
+                    dq.popleft()
+                if len(dq) >= limit:
+                    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+                dq.append(now)
+                return await call_next(request)
+
+        fastapi_app.add_middleware(RateLimitMiddleware)
+
     if settings.http.bearer_token:
         fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
 
-    # Optional CORS
+    # Optional CORS (add last so it can handle preflight and attach headers to errors)
     if settings.cors.enabled:
         fastapi_app.add_middleware(
             CORSMiddleware,
