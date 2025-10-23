@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
-import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -2022,11 +2022,22 @@ def build_mcp_server() -> FastMCP:
         project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
+        # Enrich with commit info for canonical markdown files (best-effort)
+        enriched: list[dict[str, Any]] = []
+        for item in messages:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
         return {
             "project": project_obj.human_key,
             "agent": agent_obj.name,
-            "count": len(messages),
-            "messages": messages,
+            "count": len(enriched),
+            "messages": enriched,
         }
 
     @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit}", mime_type="application/json")
@@ -2129,9 +2140,10 @@ def build_mcp_server() -> FastMCP:
             for commit in repo.iter_commits(paths=["."], max_count=200):
                 # Heuristic: extract message id from commit summary when present in canonical subject format
                 # Expected: "mail: <from> -> ... | <subject>"
-                summary = commit.summary
+                summary = str(commit.summary)
                 hexsha = commit.hexsha[:12]
-                commits_index.setdefault(hexsha, {"hexsha": hexsha, "summary": summary})
+                if hexsha not in commits_index:
+                    commits_index[hexsha] = {"hexsha": hexsha, "summary": summary}
         except Exception:
             pass
 
