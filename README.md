@@ -327,6 +327,17 @@ Common variables you may set:
 - `HOST` / `PORT`: Server bind host/port when running HTTP transport
 - Optional: any future limits (attachment max bytes, etc.)
 
+### Configuration reference
+
+| Name | Default | Description |
+| :-- | :-- | :-- |
+| `MCP_MAIL_STORE` | `~/.mcp-agent-mail` | Root for per-project repos and SQLite DB |
+| `HOST` | `127.0.0.1` | Bind host for HTTP transport |
+| `PORT` | `8765` | Bind port for HTTP transport |
+| `IMAGE_INLINE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
+| `LOG_LEVEL` | `info` | Future: server log level |
+| `ATTACHMENT_POLICY` | `auto` | Future: `auto`, `file`, or `inline` default for image conversion |
+
 ## Development quick start
 
 This repository targets Python 3.14 and uses `uv` with a virtual environment. We manage dependencies via `pyproject.toml` only.
@@ -351,6 +362,46 @@ uv run python server.py
 ```
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port.
+
+## End-to-end walkthrough
+
+1. Create two agent identities (backend and frontend projects):
+
+```json
+{"method":"tools/call","params":{"name":"create_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"}}}
+{"method":"tools/call","params":{"name":"create_agent","arguments":{"project_key":"/abs/path/frontend","program":"claude-code","model":"opus-4.1","task_description":"Navbar redesign"}}}
+```
+
+2. Backend agent claims `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
+
+```json
+{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths_list":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
+```
+
+3. Backend agent sends a design doc with an embedded diagram image:
+
+```json
+{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","from_agent":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true,"image_embed_policy":"auto","inline_max_bytes":32768}}}
+```
+
+4. Frontend agent checks inbox and replies in-thread with questions; reply inherits/sets `thread_id`:
+
+```json
+{"method":"tools/call","params":{"name":"check_my_messages","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","include_bodies":true}}}
+{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","from_agent":"BlueLake","reply_to_message_id":"msg_20251023_7b3d...","body_md":"Questions: ..."}}}
+```
+
+5. Summarize the thread for quick context:
+
+```json
+{"method":"tools/call","params":{"name":"summarize_thread","arguments":{"project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true}}}
+```
+
+6. Pre-commit guard is installed on the backend repo to protect exclusive claims:
+
+```json
+{"method":"tools/call","params":{"name":"install_precommit_guard","arguments":{"project_key":"/abs/path/backend","code_repo_path":"/abs/path/backend"}}}
+```
 
 ## HTTP usage examples (JSON-RPC over Streamable HTTP)
 
@@ -391,6 +442,14 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
     }
   }'
 ```
+
+## Search syntax tips (SQLite FTS5)
+
+- Basic terms: `plan users`
+- Phrase search: `"build plan"`
+- Prefix search: `mig*`
+- Boolean operators: `plan AND users NOT legacy`
+- Field boosting is not enabled by default; subject and body are indexed. Keep queries concise.
 
 ## Design choices and rationale
 
@@ -465,6 +524,60 @@ Claim a surface for editing:
 - Use explicit loads in async code; avoid implicit lazy loads
 - Use async-friendly file operations when needed; Git operations are serialized with a file lock
 - Clean shutdown should dispose any async engines/resources (if introduced later)
+
+## Security and ops
+
+- Transport
+  - HTTP-only (Streamable HTTP). Place behind a reverse proxy (e.g., NGINX) with TLS termination for production
+- Auth (future-ready)
+  - Add Bearer/JWT to the server or mount under a parent FastAPI app with auth middleware
+- Backups and retention
+  - The Git repos and SQLite DB live under `MCP_MAIL_STORE`; back them up together for consistency
+- Observability
+  - Add logging and metrics at the ASGI layer returned by `mcp.http_app()` (Prometheus, OpenTelemetry)
+- Concurrency
+  - Git operations are serialized by a file lock per project to avoid index contention
+
+## Python client example (HTTP JSON-RPC)
+
+```python
+import httpx, json
+
+URL = "http://127.0.0.1:8765/mcp/"
+
+def call_tool(name: str, arguments: dict) -> dict:
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+    r = httpx.post(URL, json=payload, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data["error"])  # surface MCP error
+    return data.get("result")
+
+def read_resource(uri: str) -> dict:
+    payload = {"jsonrpc":"2.0","id":"2","method":"resources/read","params":{"uri": uri}}
+    r = httpx.post(URL, json=payload, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data["error"])  # surface MCP error
+    return data.get("result")
+
+if __name__ == "__main__":
+    profile = call_tool("create_agent", {
+        "project_key": "/abs/path/backend",
+        "program": "codex-cli",
+        "model": "gpt5-codex",
+        "task_description": "Auth refactor",
+    })
+    inbox = read_resource("resource://inbox/{}?project=/abs/path/backend&limit=5".format(profile["name"]))
+    print(json.dumps(inbox, indent=2))
+```
 
 ## Troubleshooting
 

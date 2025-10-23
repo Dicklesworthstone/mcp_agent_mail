@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
-from sqlalchemy import asc, desc, func, select, update
+from sqlalchemy import asc, desc, func, or_, select, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
@@ -479,9 +479,7 @@ def build_mcp_server() -> FastMCP:
     async def ensure_project(ctx: Context, human_key: str) -> dict[str, Any]:
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
-        archive = await ensure_archive(settings, project.slug)
-        async with AsyncFileLock(archive.lock_path):
-            pass
+        await ensure_archive(settings, project.slug)
         return _project_to_dict(project)
 
     @mcp.tool(name="register_agent")
@@ -791,5 +789,76 @@ def build_mcp_server() -> FastMCP:
             }
             for claim, holder in rows
         ]
+
+    @mcp.resource("resource://message/{message_id}{?project}", mime_type="application/json")
+    async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
+        if project is None:
+            raise ValueError("project parameter is required for message resource")
+        project_obj = await _get_project_by_identifier(project)
+        message = await _get_message(project_obj, int(message_id))
+        sender = await _get_agent_by_id(project_obj, message.sender_id)
+        payload = _message_to_dict(message, include_body=True)
+        payload["from"] = sender.name
+        return payload
+
+    @mcp.resource("resource://thread/{thread_id}{?project,include_bodies}", mime_type="application/json")
+    async def thread_resource(
+        thread_id: str,
+        project: Optional[str] = None,
+        include_bodies: bool = False,
+    ) -> dict[str, Any]:
+        if project is None:
+            raise ValueError("project parameter is required for thread resource")
+        project_obj = await _get_project_by_identifier(project)
+        if project_obj.id is None:
+            raise ValueError("Project must have an id before listing threads.")
+        await ensure_schema()
+        try:
+            message_id = int(thread_id)
+        except ValueError:
+            message_id = None
+        sender_alias = aliased(Agent)
+        criteria = [Message.thread_id == thread_id]
+        if message_id is not None:
+            criteria.append(Message.id == message_id)
+        async with get_session() as session:
+            stmt = (
+                select(Message, sender_alias.name)
+                .join(sender_alias, Message.sender_id == sender_alias.id)
+                .where(Message.project_id == project_obj.id, or_(*criteria))
+                .order_by(asc(Message.created_ts))
+            )
+            result = await session.execute(stmt)
+            rows = result.all()
+        messages = []
+        for message, sender_name in rows:
+            payload = _message_to_dict(message, include_body=include_bodies)
+            payload["from"] = sender_name
+            messages.append(payload)
+        return {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
+
+    @mcp.resource(
+        "resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}",
+        mime_type="application/json",
+    )
+    async def inbox_resource(
+        agent: str,
+        project: Optional[str] = None,
+        since_ts: Optional[str] = None,
+        urgent_only: bool = False,
+        include_bodies: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        if project is None:
+            raise ValueError("project parameter is required for inbox resource")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
+        return {
+            "project": project_obj.human_key,
+            "agent": agent_obj.name,
+            "count": len(messages),
+            "messages": messages,
+        }
 
     return mcp

@@ -67,6 +67,7 @@ async def run_migrations(apply_fn: Callable[[AsyncEngine], Any] | None = None) -
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await conn.run_sync(_setup_fts)
     if apply_fn:
         result = apply_fn(engine)
         if inspect.isawaitable(result):
@@ -95,3 +96,39 @@ def reset_database_state() -> None:
     _session_factory = None
     _schema_ready = False
     _schema_lock = None
+
+
+def _setup_fts(connection) -> None:
+    connection.exec_driver_sql(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(message_id UNINDEXED, subject, body)"
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS fts_messages_ai
+        AFTER INSERT ON messages
+        BEGIN
+            INSERT INTO fts_messages(rowid, message_id, subject, body)
+            VALUES (new.id, new.id, new.subject, new.body_md);
+        END;
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS fts_messages_ad
+        AFTER DELETE ON messages
+        BEGIN
+            DELETE FROM fts_messages WHERE rowid = old.id;
+        END;
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER IF NOT EXISTS fts_messages_au
+        AFTER UPDATE ON messages
+        BEGIN
+            DELETE FROM fts_messages WHERE rowid = old.id;
+            INSERT INTO fts_messages(rowid, message_id, subject, body)
+            VALUES (new.id, new.id, new.subject, new.body_md);
+        END;
+        """
+    )
