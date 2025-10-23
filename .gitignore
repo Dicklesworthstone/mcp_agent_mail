@@ -149,6 +149,7 @@ ehthumbs.db
 Thumbs.db
 
 # Project specific
+storage/
 query_logs/
 *.log
 sec_filings.db
