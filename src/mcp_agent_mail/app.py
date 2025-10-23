@@ -132,6 +132,65 @@ async def _get_project_by_identifier(identifier: str) -> Project:
         return project
 
 
+async def _agent_name_exists(project: Project, name: str) -> bool:
+    if project.id is None:
+        raise ValueError("Project must have an id before querying agents.")
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
+        )
+        return result.first() is not None
+
+
+async def _generate_unique_agent_name(
+    project: Project,
+    settings: Settings,
+    name_hint: Optional[str] = None,
+) -> str:
+    archive = await ensure_archive(settings, project.slug)
+
+    async def available(candidate: str) -> bool:
+        return not await _agent_name_exists(project, candidate) and not (archive.root / "agents" / candidate).exists()
+
+    if name_hint:
+        sanitized = sanitize_agent_name(name_hint)
+        if not sanitized:
+            raise ValueError("Name hint must contain alphanumeric characters.")
+        if not await available(sanitized):
+            raise ValueError(f"Agent name '{sanitized}' is already in use.")
+        return sanitized
+
+    for _ in range(1024):
+        candidate = sanitize_agent_name(generate_agent_name())
+        if candidate and await available(candidate):
+            return candidate
+    raise RuntimeError("Unable to generate a unique agent name.")
+
+
+async def _create_agent_record(
+    project: Project,
+    name: str,
+    program: str,
+    model: str,
+    task_description: str,
+) -> Agent:
+    if project.id is None:
+        raise ValueError("Project must have an id before creating agents.")
+    await ensure_schema()
+    async with get_session() as session:
+        agent = Agent(
+            project_id=project.id,
+            name=name,
+            program=program,
+            model=model,
+            task_description=task_description,
+        )
+        session.add(agent)
+        await session.commit()
+        await session.refresh(agent)
+        return agent
+
+
 async def _get_or_create_agent(
     project: Project,
     name: Optional[str],
@@ -142,7 +201,13 @@ async def _get_or_create_agent(
 ) -> Agent:
     if project.id is None:
         raise ValueError("Project must have an id before creating agents.")
-    desired_name = (name or generate_agent_name()).strip()
+    if name is None:
+        desired_name = await _generate_unique_agent_name(project, settings, None)
+    else:
+        sanitized = sanitize_agent_name(name)
+        if not sanitized:
+            raise ValueError("Agent name must contain alphanumeric characters.")
+        desired_name = sanitized
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
@@ -502,6 +567,35 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     async def health_check(ctx: Context) -> dict[str, Any]:
+        """
+        Quick readiness probe for clients.
+
+        Use this to verify the server is up, responsive, and wired to its configured
+        environment. This does not perform deep dependency checks, but it surfaces
+        environment, host/port, and database URL for basic diagnostics.
+
+        Returns
+        -------
+        dict
+            {
+              "status": "ok" | "degraded" | "error",
+              "environment": str,
+              "http_host": str,
+              "http_port": int,
+              "database_url": str
+            }
+
+        JSON-RPC example
+        -----------------
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": "1",
+          "method": "tools/call",
+          "params": {"name": "health_check", "arguments": {}}
+        }
+        ```
+        """
         await ctx.info("Running health check.")
         return {
             "status": "ok",
@@ -513,6 +607,36 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="ensure_project")
     async def ensure_project(ctx: Context, human_key: str) -> dict[str, Any]:
+        """
+        Idempotently create or ensure a project exists for the given human key.
+
+        When to use
+        -----------
+        - First call in a workflow targeting a new repo/path identifier.
+        - As a guard before registering agents or sending messages.
+
+        Parameters
+        ----------
+        human_key : str
+            A stable identifier for a project (often an absolute path to a repo,
+            or a canonical slug that multiple agents can share).
+
+        Returns
+        -------
+        dict
+            Minimal project descriptor: { id, slug, human_key, created_at }.
+
+        JSON-RPC example
+        -----------------
+        ```json
+        {
+          "jsonrpc": "2.0",
+          "id": "2",
+          "method": "tools/call",
+          "params": {"name": "ensure_project", "arguments": {"human_key": "/abs/path/backend"}}
+        }
+        ```
+        """
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
         await ensure_archive(settings, project.slug)
@@ -527,9 +651,70 @@ def build_mcp_server() -> FastMCP:
         name: Optional[str] = None,
         task_description: str = "",
     ) -> dict[str, Any]:
+        """
+        Create or update an agent identity within a project and persist its profile to Git.
+
+        When to use
+        -----------
+        - At the start of a coding session by any automated agent.
+        - To update an existing agent's program/model/task metadata and bump last_active.
+
+        Parameters
+        ----------
+        project_key : str
+            The same human key you passed to `ensure_project` (or equivalent identifier).
+        program : str
+            The agent program (e.g., "codex-cli", "claude-code").
+        model : str
+            The underlying model (e.g., "gpt5-codex", "opus-4.1").
+        name : Optional[str]
+            Desired agent name. If omitted, a memorable adjective+noun name is generated.
+            Names are unique per project; passing the same name updates the profile.
+        task_description : str
+            Short description of current focus (shows up in directory listings).
+
+        Returns
+        -------
+        dict
+            { id, name, program, model, task_description, inception_ts, last_active_ts, project_id }
+
+        Examples
+        --------
+        Register with generated name:
+        ```json
+        {"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"register_agent","arguments":{
+          "project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"
+        }}} 
+        ```
+
+        Register with explicit name:
+        ```json
+        {"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"register_agent","arguments":{
+          "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
+        return _agent_to_dict(agent)
+
+    @mcp.tool(name="create_agent_identity")
+    async def create_agent_identity(
+        ctx: Context,
+        project_key: str,
+        program: str,
+        model: str,
+        name_hint: Optional[str] = None,
+        task_description: str = "",
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        unique_name = await _generate_unique_agent_name(project, settings, name_hint)
+        agent = await _create_agent_record(project, unique_name, program, model, task_description)
+        archive = await ensure_archive(settings, project.slug)
+        async with AsyncFileLock(archive.lock_path):
+            await write_agent_profile(archive, _agent_to_dict(agent))
+        await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
 
     @mcp.tool(name="send_message")
@@ -548,6 +733,62 @@ def build_mcp_server() -> FastMCP:
         ack_required: bool = False,
         thread_id: Optional[str] = None,
     ) -> dict[str, Any]:
+        """
+        Send a Markdown message to one or more recipients and persist canonical and mailbox copies to Git.
+
+        What this does
+        --------------
+        - Stores message (and recipients) in the database; updates sender's activity
+        - Writes a canonical `.md` under `messages/YYYY/MM/`
+        - Writes sender outbox and per-recipient inbox copies
+        - Optionally converts referenced images to WebP and embeds small images inline
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier (same used with `ensure_project`/`register_agent`).
+        sender_name : str
+            Must match an agent registered in the project.
+        to : list[str]
+            Primary recipients (agent names). At least one of to/cc/bcc must be non-empty.
+        subject : str
+            Short subject line that will be visible in inbox/outbox and search results.
+        body_md : str
+            GitHub-Flavored Markdown body. Image references can be file paths or data URIs.
+        cc, bcc : Optional[list[str]]
+            Additional recipients by name.
+        attachment_paths : Optional[list[str]]
+            Extra file paths to include as attachments; will be converted to WebP and stored.
+        convert_images : Optional[bool]
+            Overrides server default for image conversion/inlining. If None, server settings apply.
+        importance : str
+            One of {"low","normal","high","urgent"} (free form tolerated; used by filters).
+        ack_required : bool
+            If true, recipients should call `acknowledge_message` after reading.
+        thread_id : Optional[str]
+            If provided, message will be associated with an existing thread.
+
+        Returns
+        -------
+        dict
+            Message payload with id, timestamps, recipients, attachments, etc.
+
+        Edge cases
+        ----------
+        - If no recipients are given, the call fails.
+        - Unknown recipient names fail fast; register them first.
+        - Non-absolute attachment paths are resolved relative to the project archive root.
+
+        JSON-RPC example
+        -----------------
+        ```json
+        {"jsonrpc":"2.0","id":"5","method":"tools/call","params":{"name":"send_message","arguments":{
+          "project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],
+          "subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)",
+          "convert_images":true,"importance":"high","ack_required":true
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         sender = await _get_agent(project, sender_name)
         payload = await _deliver_message(
@@ -579,6 +820,45 @@ def build_mcp_server() -> FastMCP:
         bcc: Optional[list[str]] = None,
         subject_prefix: str = "Re:",
     ) -> dict[str, Any]:
+        """
+        Reply to an existing message, preserving or establishing a thread.
+
+        Behavior
+        --------
+        - Inherits original `importance` and `ack_required` flags
+        - `thread_id` is taken from the original message if present; otherwise, the original id is used
+        - Subject is prefixed with `subject_prefix` if not already present
+        - Defaults `to` to the original sender if not explicitly provided
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        message_id : int
+            The id of the message you are replying to.
+        sender_name : str
+            Your agent name (must be registered in the project).
+        body_md : str
+            Reply body in Markdown.
+        to, cc, bcc : Optional[list[str]]
+            Recipients by agent name. If omitted, `to` defaults to original sender.
+        subject_prefix : str
+            Prefix to apply (default "Re:"). Case-insensitive idempotent.
+
+        Returns
+        -------
+        dict
+            Message payload including `thread_id` and `reply_to`.
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"6","method":"tools/call","params":{"name":"reply_message","arguments":{
+          "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
+          "body_md":"Questions about the migration plan..."
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         sender = await _get_agent(project, sender_name)
         original = await _get_message(project, message_id)
@@ -620,6 +900,29 @@ def build_mcp_server() -> FastMCP:
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
     ) -> list[dict[str, Any]]:
+        """
+        Retrieve recent messages for an agent without mutating read/ack state.
+
+        Filters
+        -------
+        - `urgent_only`: only messages with importance in {high, urgent}
+        - `since_ts`: ISO-8601 timestamp string; messages strictly newer than this are returned
+        - `limit`: max number of messages (default 20)
+        - `include_bodies`: include full Markdown bodies in the payloads
+
+        Returns
+        -------
+        list[dict]
+            Each message includes: { id, subject, from, created_ts, importance, ack_required, kind, [body_md] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"7","method":"tools/call","params":{"name":"fetch_inbox","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"BlueLake","since_ts":"2025-10-23T00:00:00+00:00"
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
@@ -633,6 +936,27 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         message_id: int,
     ) -> dict[str, Any]:
+        """
+        Mark a specific message as read for the given agent.
+
+        Notes
+        -----
+        - Read receipts are per-recipient; this only affects the specified agent.
+        - This does not send an acknowledgement; use `acknowledge_message` for that.
+
+        Returns
+        -------
+        dict
+            { message_id, read: bool, read_at: iso8601 | null }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"8","method":"tools/call","params":{"name":"mark_message_read","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         await _get_message(project, message_id)
@@ -647,6 +971,27 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         message_id: int,
     ) -> dict[str, Any]:
+        """
+        Acknowledge a message addressed to an agent (and mark as read).
+
+        Behavior
+        --------
+        - Sets both read_ts and ack_ts for the (agent, message) pairing
+        - Safe to call multiple times; subsequent calls will return the prior timestamps
+
+        Returns
+        -------
+        dict
+            { message_id, acknowledged: bool, acknowledged_at: iso8601 | null, read_at: iso8601 | null }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"9","method":"tools/call","params":{"name":"acknowledge_message","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         await _get_message(project, message_id)
@@ -667,6 +1012,37 @@ def build_mcp_server() -> FastMCP:
         query: str,
         limit: int = 20,
     ) -> list[dict[str, Any]]:
+        """
+        Full-text search over subject and body for a project.
+
+        Tips
+        ----
+        - SQLite FTS5 syntax supported: phrases ("build plan"), prefix (mig*), boolean (plan AND users)
+        - Results are ordered by bm25 score (best matches first)
+        - Limit defaults to 20; raise for broad queries
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        query : str
+            FTS5 query string.
+        limit : int
+            Max results to return.
+
+        Returns
+        -------
+        list[dict]
+            Each entry: { id, subject, importance, ack_required, created_ts, thread_id, from }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"10","method":"tools/call","params":{"name":"search_messages","arguments":{
+          "project_key":"/abs/path/backend","query":"\"build plan\" AND users", "limit": 50
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         if project.id is None:
             raise ValueError("Project must have an id before searching messages.")
@@ -709,6 +1085,28 @@ def build_mcp_server() -> FastMCP:
         thread_id: str,
         include_examples: bool = False,
     ) -> dict[str, Any]:
+        """
+        Extract participants, key points, and action items for a thread.
+
+        Notes
+        -----
+        - If `thread_id` is not an id present on any message, it is treated as a string key
+        - If `thread_id` is a message id, messages where `id == thread_id` are also included
+        - `include_examples` returns up to 3 sample messages for quick preview
+
+        Returns
+        -------
+        dict
+            { thread_id, summary: {participants[], key_points[], action_items[], total_messages}, examples[] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"11","method":"tools/call","params":{"name":"summarize_thread","arguments":{
+          "project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         if project.id is None:
             raise ValueError("Project must have an id before summarizing threads.")
@@ -757,6 +1155,43 @@ def build_mcp_server() -> FastMCP:
         exclusive: bool = True,
         reason: str = "",
     ) -> dict[str, Any]:
+        """
+        Request advisory claims (leases) on project-relative paths/globs.
+
+        Semantics
+        ---------
+        - Conflicts are reported if an overlapping active exclusive claim exists held by another agent
+        - Glob matching is symmetric (`fnmatchcase(a,b)` or `fnmatchcase(b,a)`), including exact matches
+        - When granted, a JSON artifact is written under `claims/<sha1(path)>.json` and the DB is updated
+        - TTL must be >= 60 seconds (enforced by the server settings/policy)
+
+        Parameters
+        ----------
+        project_key : str
+        agent_name : str
+        paths : list[str]
+            File paths or glob patterns relative to the project workspace (e.g., "app/api/*.py").
+        ttl_seconds : int
+            Time to live for the claim; expired claims are auto-released.
+        exclusive : bool
+            If true, exclusive intent; otherwise shared/observe-only.
+        reason : str
+            Optional explanation (helps humans reviewing Git artifacts).
+
+        Returns
+        -------
+        dict
+            { granted: [{id, path_pattern, exclusive, reason, expires_ts}], conflicts: [{path, holders: [...]}] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"12","method":"tools/call","params":{"name":"claim_paths","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],
+          "ttl_seconds":7200,"exclusive":true,"reason":"migrations"
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         if project.id is None:
@@ -828,6 +1263,36 @@ def build_mcp_server() -> FastMCP:
         paths: Optional[list[str]] = None,
         claim_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
+        """
+        Release active claims held by an agent.
+
+        Behavior
+        --------
+        - If both `paths` and `claim_ids` are omitted, all active claims for the agent are released
+        - Otherwise, restricts release to matching ids and/or path patterns
+        - JSON artifacts stay in Git for audit; DB records get `released_ts`
+
+        Returns
+        -------
+        dict
+            { released: int, released_at: iso8601 }
+
+        Examples
+        --------
+        Release all active claims for agent:
+        ```json
+        {"jsonrpc":"2.0","id":"13","method":"tools/call","params":{"name":"release_claims","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"GreenCastle"
+        }}} 
+        ```
+
+        Release by ids:
+        ```json
+        {"jsonrpc":"2.0","id":"14","method":"tools/call","params":{"name":"release_claims","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"GreenCastle","claim_ids":[101,102]
+        }}} 
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         if project.id is None or agent.id is None:
