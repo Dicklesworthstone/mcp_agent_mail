@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
   "fastmcp>=2.10.5",
   "uvicorn[standard]>=0.32.0",
+  "fastapi>=0.110.0",
   "python-decouple>=3.8",
   "sqlmodel>=0.0.16",
   "sqlalchemy[asyncio]>=2.0.35",

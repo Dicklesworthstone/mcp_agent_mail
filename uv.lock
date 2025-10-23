@@ -343,6 +343,20 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi"
+version = "0.119.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/f4/152127681182e6413e7a89684c434e19e7414ed7ac0c632999c3c6980640/fastapi-0.119.1.tar.gz", hash = "sha256:a5e3426edce3fe221af4e1992c6d79011b247e3b03cc57999d697fe76cbf8ae0", size = 338616, upload-time = "2025-10-20T11:30:27.734Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/26/e6d959b4ac959fdb3e9c4154656fc160794db6af8e64673d52759456bf07/fastapi-0.119.1-py3-none-any.whl", hash = "sha256:0b8c2a2cce853216e150e9bd4faaed88227f8eb37de21cb200771f491586a27f", size = 108123, upload-time = "2025-10-20T11:30:26.185Z" },
+]
+
+[[package]]
 name = "fastmcp"
 version = "2.12.5"
 source = { registry = "https://pypi.org/simple" }
@@ -757,6 +771,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "attrs" },
     { name = "authlib" },
+    { name = "fastapi" },
     { name = "fastmcp" },
     { name = "filelock" },
     { name = "gitpython" },
@@ -793,6 +808,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "attrs", specifier = ">=24.2.0" },
     { name = "authlib", specifier = ">=1.5.2,<1.6" },
+    { name = "fastapi", specifier = ">=0.110.0" },
     { name = "fastmcp", specifier = ">=2.10.5" },
     { name = "filelock", specifier = ">=3.16.0" },
     { name = "gitpython", specifier = ">=3.1.43" },
