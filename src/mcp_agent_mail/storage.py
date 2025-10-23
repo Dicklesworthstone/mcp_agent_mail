@@ -231,6 +231,29 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
     def _perform_commit() -> None:
         repo.index.add(rel_paths)
         if repo.is_dirty(index=True, working_tree=True):
-            repo.index.commit(message, author=actor, committer=actor)
+            # Append commit trailers with Agent and optional Thread if present in message text
+            trailers: list[str] = []
+            # Extract simple Agent/Thread heuristics from the message subject line
+            # Expected message formats include:
+            #   mail: <Agent> -> ... | <Subject>
+            #   claim: <Agent> ...
+            try:
+                if message.startswith("mail: "):
+                    # mail: Agent -> recipients | Subject [thread maybe in subject]
+                    head = message[len("mail: ") :]
+                    agent_part = head.split("->", 1)[0].strip()
+                    if agent_part:
+                        trailers.append(f"Agent: {agent_part}")
+                elif message.startswith("claim: "):
+                    head = message[len("claim: ") :]
+                    agent_part = head.split(" ", 1)[0].strip()
+                    if agent_part:
+                        trailers.append(f"Agent: {agent_part}")
+            except Exception:
+                pass
+            final_message = message
+            if trailers:
+                final_message = message + "\n\n" + "\n".join(trailers) + "\n"
+            repo.index.commit(final_message, author=actor, committer=actor)
 
     await _to_thread(_perform_commit)

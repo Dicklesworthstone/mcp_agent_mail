@@ -132,3 +132,19 @@ def _setup_fts(connection) -> None:
         END;
         """
     )
+    # Additional performance indexes for common access patterns
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_created_ts ON messages(created_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_importance ON messages(importance)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_claims_expires_ts ON claims(expires_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent ON message_recipients(agent_id)"
+    )

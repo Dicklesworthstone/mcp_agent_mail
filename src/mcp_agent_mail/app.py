@@ -31,6 +31,8 @@ from .storage import (
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify
+from .storage import ensure_archive
+from git import Repo
 
 
 def _lifespan_factory(settings: Settings):
@@ -737,6 +739,57 @@ def build_mcp_server() -> FastMCP:
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
+
+    @mcp.tool(name="whois")
+    async def whois(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        include_recent_commits: bool = True,
+        commit_limit: int = 5,
+    ) -> dict[str, Any]:
+        """
+        Return enriched profile details for an agent, optionally including recent archive commits.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key.
+        agent_name : str
+            Agent name to look up.
+        include_recent_commits : bool
+            If true, include latest commits touching the project archive authored by the configured git author.
+        commit_limit : int
+            Maximum number of recent commits to include.
+
+        Returns
+        -------
+        dict
+            Agent profile augmented with { recent_commits: [{hexsha, summary, authored_ts}] } when requested.
+        """
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        profile = _agent_to_dict(agent)
+        recent: list[dict[str, Any]] = []
+        if include_recent_commits:
+            archive = await ensure_archive(settings, project.slug)
+            repo: Repo = archive.repo
+            try:
+                # Limit to archive path; extract last commits
+                count = max(1, min(50, commit_limit))
+                for commit in repo.iter_commits(paths=["."], max_count=count):
+                    recent.append(
+                        {
+                            "hexsha": commit.hexsha[:12],
+                            "summary": commit.summary,
+                            "authored_ts": _iso(datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)),
+                        }
+                    )
+            except Exception:
+                pass
+        profile["recent_commits"] = recent
+        await ctx.info(f"whois for '{agent_name}' in '{project.human_key}' returned {len(recent)} commits")
+        return profile
 
     @mcp.tool(name="create_agent_identity")
     async def create_agent_identity(

@@ -654,5 +654,6 @@ If you’re building with or contributing to this project, please read `project_
 - **Direct uvicorn**: `uvicorn mcp_agent_mail.http:build_http_app --factory --host 0.0.0.0 --port 8765`
 - **Python module**: `python -m mcp_agent_mail.http --host 0.0.0.0 --port 8765`
 - **Gunicorn**: `gunicorn -c deploy/gunicorn.conf.py mcp_agent_mail.http:build_http_app --factory`
+- **Docker**: `docker compose up --build`
 
 See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the broader deployment roadmap (Docker, systemd, automation scripts, CI/CD).

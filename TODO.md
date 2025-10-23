@@ -142,3 +142,21 @@
 
 # Recent Internal Note
 - [x] Pre-commit hook generator updated to use `string.Template` for safer substitutions (no curly-brace conflicts) and clean formatting (`src/mcp_agent_mail/app.py`).
+- [x] **Container image**  
+  Deliver a reproducible container workflow.  
+  - [x] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base.  
+  - [x] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
+  - [x] Create a sample `docker-compose.yml` with Postgres wiring and volumes.  
+  - [ ] Document the build/push flow and recommended multi-arch strategy.
+
+- [x] **Process supervisor packaging**  
+  Aid on-prem/bare metal operators.  
+  - [x] Provide a `systemd` unit template `deploy/systemd/mcp-agent-mail.service`.  
+  - [ ] Include optional log rotation config.  
+  - [ ] Document manual deployment steps.
+
+- [x] **Automation scripts**  
+  Simplify bootstrap and recurring ops.  
+  - [x] Add `scripts/bootstrap.sh` that installs deps and runs migrations.  
+  - [ ] Consider Makefile/task runner integration.  
+  - [ ] Template env files for staging/prod.
