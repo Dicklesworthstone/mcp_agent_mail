@@ -43,6 +43,32 @@ It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini C
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  A[Agents (CLIs: Claude Code, Codex, Gemini CLI, ...)]
+  S[mcp-agent-mail (FastMCP, HTTP-only)]
+  G[(Per-project Git repo: .mcp-mail/)]
+  Q[(SQLite + FTS5)]
+
+  A -- tools/resources (HTTP) --> S
+  S -- writes/reads --> G
+  S -- indexes/queries --> Q
+
+  subgraph GitTree[Git tree]
+    GI1[agents/<Agent>/profile.json]
+    GI2[agents/<Agent>/{inbox,outbox}/...]
+    GI3[messages/YYYY/MM/<msg-id>.md]
+    GI4[claims/<sha1(path)>.json]
+    GA[attachments/<xx>/<sha1>.webp]
+  end
+
+  G --- GI1
+  G --- GI2
+  G --- GI3
+  G --- GI4
+  G --- GA
+```
+
 ```
 Coding Agents (various CLIs)
         |  HTTP (Streamable) tools/resources
@@ -117,6 +143,23 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 - `send_message(project_key, from_agent, to[], subject, body_md, cc?, bcc?, importance?, ack_required?, thread_id?, convert_images?)`
 - Writes a canonical message under `messages/YYYY/MM/`, an outbox copy for the sender, and inbox copies for each recipient; commits all artifacts.
 - Optionally converts images (local paths or data URIs) to WebP and embeds small ones inline.
+
+```mermaid
+sequenceDiagram
+  participant Agent as Agent (e.g., GreenCastle)
+  participant Server as FastMCP Server
+  participant DB as SQLite (messages, recipients, FTS)
+  participant Git as Git Repo (.mcp-mail/)
+
+  Agent->>Server: tools/call send_message(project_key, from_agent, to[], subject, body_md, ...)
+  Server->>DB: validate sender, insert into messages, recipients
+  DB-->>Server: OK (message id, timestamps)
+  Server->>Git: write canonical markdown under messages/YYYY/MM/<id>.md
+  Server->>Git: write outbox copy under agents/<from>/outbox/
+  Server->>Git: write inbox copies under agents/<to>/inbox/
+  Server->>Git: commit all paths with message summary
+  Server-->>Agent: { id, created, subject, recipients, attachments }
+```
 
 3) Check inbox
 

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, desc, func, select, update
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import NoResultFound
 
 from .config import Settings, get_settings
@@ -71,6 +73,7 @@ def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, A
         "importance": message.importance,
         "ack_required": message.ack_required,
         "created_ts": _iso(message.created_ts),
+        "attachments": message.attachments,
     }
     if include_body:
         data["body_md"] = message.body_md
@@ -137,6 +140,8 @@ async def _get_or_create_agent(
     task_description: str,
     settings: Settings,
 ) -> Agent:
+    if project.id is None:
+        raise ValueError("Project must have an id before creating agents.")
     desired_name = (name or generate_agent_name()).strip()
     await ensure_schema()
     async with get_session() as session:
@@ -190,7 +195,12 @@ async def _create_message(
     importance: str,
     ack_required: bool,
     thread_id: Optional[str],
+    attachments: Sequence[dict[str, Any]],
 ) -> Message:
+    if project.id is None:
+        raise ValueError("Project must have an id before creating messages.")
+    if sender.id is None:
+        raise ValueError("Sender must have an id before sending messages.")
     await ensure_schema()
     async with get_session() as session:
         message = Message(
@@ -201,6 +211,7 @@ async def _create_message(
             importance=importance,
             ack_required=ack_required,
             thread_id=thread_id,
+            attachments=list(attachments),
         )
         session.add(message)
         await session.flush()
@@ -222,6 +233,8 @@ async def _create_claim(
     reason: str,
     ttl_seconds: int,
 ) -> Claim:
+    if project.id is None or agent.id is None:
+        raise ValueError("Project and agent must have ids before creating claims.")
     expires = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     await ensure_schema()
     async with get_session() as session:
@@ -239,12 +252,53 @@ async def _create_claim(
     return claim
 
 
-async def _list_inbox(project: Project, agent: Agent, limit: int) -> list[dict[str, Any]]:
+async def _expire_stale_claims(project_id: int) -> None:
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        await session.execute(
+            update(Claim)
+            .where(
+                Claim.project_id == project_id,
+                cast(Any, Claim.released_ts).is_(None),
+                Claim.expires_ts < now,
+            )
+            .values(released_ts=now)
+        )
+        await session.commit()
+
+
+def _claims_conflict(existing: Claim, candidate_path: str, candidate_exclusive: bool, candidate_agent: Agent) -> bool:
+    if existing.released_ts is not None:
+        return False
+    if existing.agent_id == candidate_agent.id:
+        return False
+    if not existing.exclusive and not candidate_exclusive:
+        return False
+    normalized_existing = existing.path_pattern
+    return (
+        fnmatch.fnmatchcase(candidate_path, normalized_existing)
+        or fnmatch.fnmatchcase(normalized_existing, candidate_path)
+        or normalized_existing == candidate_path
+    )
+
+
+async def _list_inbox(
+    project: Project,
+    agent: Agent,
+    limit: int,
+    urgent_only: bool,
+    include_bodies: bool,
+    since_ts: Optional[str],
+) -> list[dict[str, Any]]:
+    if project.id is None or agent.id is None:
+        raise ValueError("Project and agent must have ids before listing inbox.")
+    sender_alias = aliased(Agent)
     await ensure_schema()
     async with get_session() as session:
         stmt = (
-            select(Message)
+            select(Message, MessageRecipient.kind, sender_alias.name)
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+            .join(sender_alias, Message.sender_id == sender_alias.id)
             .where(
                 Message.project_id == project.id,
                 MessageRecipient.agent_id == agent.id,
@@ -252,9 +306,57 @@ async def _list_inbox(project: Project, agent: Agent, limit: int) -> list[dict[s
             .order_by(desc(Message.created_ts))
             .limit(limit)
         )
+        if urgent_only:
+            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
+        if since_ts:
+            try:
+                since_dt = datetime.fromisoformat(since_ts)
+            except ValueError:
+                since_dt = None
+            if since_dt:
+                stmt = stmt.where(Message.created_ts > since_dt)
         result = await session.execute(stmt)
-        messages = result.scalars().all()
-        return [_message_to_dict(message, include_body=False) for message in messages]
+        rows = result.all()
+    messages: list[dict[str, Any]] = []
+    for message, recipient_kind, sender_name in rows:
+        payload = _message_to_dict(message, include_body=include_bodies)
+        payload["from"] = sender_name
+        payload["kind"] = recipient_kind
+        messages.append(payload)
+    return messages
+
+
+async def _get_message(project: Project, message_id: int) -> Message:
+    if project.id is None:
+        raise ValueError("Project must have an id before reading messages.")
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Message).where(Message.project_id == project.id, Message.id == message_id)
+        )
+        message = result.scalars().first()
+        if not message:
+            raise NoResultFound(f"Message '{message_id}' not found for project '{project.human_key}'.")
+        return message
+
+
+async def _update_recipient_timestamp(
+    agent: Agent,
+    message_id: int,
+    field: str,
+) -> bool:
+    if agent.id is None:
+        raise ValueError("Agent must have an id before updating message state.")
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        stmt = (
+            update(MessageRecipient)
+            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)
+            .values({field: now})
+        )
+        result = await session.execute(stmt)
+        await session.commit()
+    return bool(result.rowcount)
 
 
 def build_mcp_server() -> FastMCP:
@@ -331,7 +433,7 @@ def build_mcp_server() -> FastMCP:
         recipient_records.extend((agent, "bcc") for agent in bcc_agents)
 
         archive = await ensure_archive(settings, project.slug)
-        convert_markdown = convert_images if convert_images is not None else True
+        convert_markdown = convert_images if convert_images is not None else settings.storage.convert_images
         async with AsyncFileLock(archive.lock_path):
             processed_body, attachments_meta, attachment_files = await process_attachments(
                 archive,
@@ -348,6 +450,7 @@ def build_mcp_server() -> FastMCP:
                 importance,
                 ack_required,
                 thread_id,
+                attachments_meta,
             )
             frontmatter = _message_frontmatter(
                 message,
@@ -397,13 +500,45 @@ def build_mcp_server() -> FastMCP:
         ttl_seconds: int = 3600,
         exclusive: bool = True,
         reason: str = "",
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any]:
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
-        claims = []
+        if project.id is None:
+            raise ValueError("Project must have an id before claiming paths.")
+        await _expire_stale_claims(project.id)
+        project_id = project.id
+        async with get_session() as session:
+            existing_rows = await session.execute(
+                select(Claim, Agent.name)
+                .join(Agent, Claim.agent_id == Agent.id)
+                .where(
+                    Claim.project_id == project_id,
+                    cast(Any, Claim.released_ts).is_(None),
+                    Claim.expires_ts > datetime.now(timezone.utc),
+                )
+            )
+            existing_claims = existing_rows.all()
+
+        granted: list[dict[str, Any]] = []
+        conflicts: list[dict[str, Any]] = []
         archive = await ensure_archive(settings, project.slug)
         async with AsyncFileLock(archive.lock_path):
             for path in paths:
+                conflicting_holders: list[dict[str, Any]] = []
+                for claim_record, holder_name in existing_claims:
+                    if _claims_conflict(claim_record, path, exclusive, agent):
+                        conflicting_holders.append(
+                            {
+                                "agent": holder_name,
+                                "path_pattern": claim_record.path_pattern,
+                                "exclusive": claim_record.exclusive,
+                                "expires_ts": _iso(claim_record.expires_ts),
+                            }
+                        )
+                if conflicting_holders:
+                    conflicts.append({"path": path, "holders": conflicting_holders})
+                    continue
+
                 claim = await _create_claim(project, agent, path, exclusive, reason, ttl_seconds)
                 claim_payload = {
                     "id": claim.id,
@@ -416,7 +551,7 @@ def build_mcp_server() -> FastMCP:
                     "expires_ts": _iso(claim.expires_ts),
                 }
                 await write_claim_record(archive, claim_payload)
-                claims.append(
+                granted.append(
                     {
                         "id": claim.id,
                         "path_pattern": claim.path_pattern,
@@ -425,8 +560,43 @@ def build_mcp_server() -> FastMCP:
                         "expires_ts": _iso(claim.expires_ts),
                     }
                 )
-        await ctx.info(f"Issued {len(claims)} claims for '{agent.name}'.")
-        return claims
+                existing_claims.append((claim, agent.name))
+        await ctx.info(f"Issued {len(granted)} claims for '{agent.name}'. Conflicts: {len(conflicts)}")
+        return {"granted": granted, "conflicts": conflicts}
+
+    @mcp.tool(name="release_claims")
+    async def release_claims_tool(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        paths: Optional[list[str]] = None,
+        claim_ids: Optional[list[int]] = None,
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        if project.id is None or agent.id is None:
+            raise ValueError("Project and agent must have ids before releasing claims.")
+        await ensure_schema()
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            stmt = (
+                update(Claim)
+                .where(
+                    Claim.project_id == project.id,
+                    Claim.agent_id == agent.id,
+                    cast(Any, Claim.released_ts).is_(None),
+                )
+                .values(released_ts=now)
+            )
+            if claim_ids:
+                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+            if paths:
+                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+            result = await session.execute(stmt)
+            await session.commit()
+        affected = int(result.rowcount or 0)
+        await ctx.info(f"Released {affected} claims for '{agent.name}'.")
+        return {"released": affected, "released_at": _iso(now)}
 
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
@@ -459,5 +629,32 @@ def build_mcp_server() -> FastMCP:
             **_project_to_dict(project),
             "agents": [_agent_to_dict(agent) for agent in agents],
         }
+
+    @mcp.resource("resource://claims/{slug}{?active_only}", mime_type="application/json")
+    async def claims_resource(slug: str, active_only: bool = True) -> list[dict[str, Any]]:
+        project = await _get_project_by_identifier(slug)
+        await ensure_schema()
+        if project.id is None:
+            raise ValueError("Project must have an id before listing claims.")
+        await _expire_stale_claims(project.id)
+        async with get_session() as session:
+            stmt = select(Claim, Agent.name).join(Agent, Claim.agent_id == Agent.id).where(Claim.project_id == project.id)
+            if active_only:
+                stmt = stmt.where(cast(Any, Claim.released_ts).is_(None))
+            result = await session.execute(stmt)
+            rows = result.all()
+        return [
+            {
+                "id": claim.id,
+                "agent": holder,
+                "path_pattern": claim.path_pattern,
+                "exclusive": claim.exclusive,
+                "reason": claim.reason,
+                "created_ts": _iso(claim.created_ts),
+                "expires_ts": _iso(claim.expires_ts),
+                "released_ts": _iso(claim.released_ts) if claim.released_ts else None,
+            }
+            for claim, holder in rows
+        ]
 
     return mcp

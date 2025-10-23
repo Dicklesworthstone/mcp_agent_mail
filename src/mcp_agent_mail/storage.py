@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence, cast
+from typing import Any, Iterable, Sequence
 
 from filelock import FileLock
 from git import Actor, Repo
@@ -92,10 +92,7 @@ async def write_message_bundle(
     extra_paths: Sequence[str] | None = None,
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
-    if isinstance(timestamp_obj, str):
-        timestamp_str = timestamp_obj
-    else:
-        timestamp_str = datetime.now(timezone.utc).isoformat()
+    timestamp_str = timestamp_obj if isinstance(timestamp_obj, str) else datetime.now(timezone.utc).isoformat()
     now = datetime.fromisoformat(timestamp_str)
     y_dir = now.strftime("%Y")
     m_dir = now.strftime("%m")
