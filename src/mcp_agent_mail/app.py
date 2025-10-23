@@ -92,6 +92,18 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
     """
     if not value:
         return None
+
+
+def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
+    """Render a compact JSON error panel if Rich is available and tools logging is enabled."""
+    try:
+        if not get_settings().tools_log_enabled:
+            return
+        from rich.console import Console  # type: ignore
+        from rich.json import JSON  # type: ignore
+        Console().print(JSON.from_data({"title": title, **payload}))
+    except Exception:
+        return
     s = value.strip()
     if not s:
         return None
@@ -530,6 +542,33 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
             if stats:
                 data["insertions"] = int(stats.get("insertions", 0))
                 data["deletions"] = int(stats.get("deletions", 0))
+        except Exception:
+            pass
+        # Attach concise diff summary (hunks count + first N +/- lines)
+        try:
+            parent = commit.parents[0] if commit.parents else None
+            hunks = 0
+            excerpt: list[str] = []
+            if parent is not None:
+                diffs = parent.diff(commit, paths=[relpath], create_patch=True)
+                for d in diffs:
+                    try:
+                        patch = d.diff.decode("utf-8", "ignore")
+                    except Exception:
+                        patch = ""
+                    for line in patch.splitlines():
+                        if line.startswith("@@"):
+                            hunks += 1
+                        if line.startswith("+") or line.startswith("-"):
+                            # skip file header lines like +++/---
+                            if line.startswith("+++") or line.startswith("---"):
+                                continue
+                            excerpt.append(line[:200])
+                            if len(excerpt) >= 12:
+                                break
+                    if len(excerpt) >= 12:
+                        break
+            data["diff_summary"] = {"hunks": hunks, "excerpt": excerpt}
         except Exception:
             pass
         return data
@@ -1452,12 +1491,29 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
-        project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
-        await _get_message(project, message_id)
-        read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
-        await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
-        return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: mark_message_read", border_style="green"))
+            except Exception:
+                pass
+        try:
+            project = await _get_project_by_identifier(project_key)
+            agent = await _get_agent(project, agent_name)
+            await _get_message(project, message_id)
+            read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
+            await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
+            return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
+        except Exception as exc:
+            if get_settings().tools_log_enabled:
+                try:
+                    from rich.console import Console  # type: ignore
+                    from rich.json import JSON  # type: ignore
+                    Console().print(JSON.from_data({"error": str(exc)}))
+                except Exception:
+                    pass
+            raise
 
     @mcp.tool(name="acknowledge_message")
     async def acknowledge_message(
@@ -1877,6 +1933,13 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         code_repo_path: str,
     ) -> dict[str, Any]:
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(f"project={project_key}\nrepo={code_repo_path}", title="tool: install_precommit_guard", border_style="green"))
+            except Exception:
+                pass
         project = await _get_project_by_identifier(project_key)
         repo_path = Path(code_repo_path).expanduser().resolve()
         hook_path = await install_guard_script(settings, project.slug, repo_path)
@@ -1888,6 +1951,13 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         code_repo_path: str,
     ) -> dict[str, Any]:
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(f"repo={code_repo_path}", title="tool: uninstall_precommit_guard", border_style="green"))
+            except Exception:
+                pass
         repo_path = Path(code_repo_path).expanduser().resolve()
         removed = await uninstall_guard_script(repo_path)
         if removed:
