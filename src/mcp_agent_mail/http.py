@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
@@ -10,12 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from sqlalchemy import text
 
-from .app import build_mcp_server
+from .app import _expire_stale_claims, build_mcp_server
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
-from .app import _expire_stale_claims
 
 __all__ = ["build_http_app", "main"]
 
@@ -110,6 +109,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     if settings.http.otel_enabled:
         try:
             from opentelemetry import trace  # type: ignore
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore
+                OTLPSpanExporter,
+            )
             from opentelemetry.instrumentation.fastapi import (  # type: ignore
                 FastAPIInstrumentor,
             )
@@ -117,9 +119,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             from opentelemetry.sdk.trace import TracerProvider  # type: ignore
             from opentelemetry.sdk.trace.export import (  # type: ignore
                 BatchSpanProcessor,
-            )
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore
-                OTLPSpanExporter,
             )
 
             resource = Resource.create({"service.name": settings.http.otel_service_name})
@@ -161,10 +160,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             rows = await session.execute(text("SELECT DISTINCT project_id FROM claims"))
                             pids = [r[0] for r in rows.fetchall() if r[0] is not None]
                         for pid in pids:
-                            try:
+                            with contextlib.suppress(Exception):
                                 await _expire_stale_claims(pid)
-                            except Exception:
-                                pass
                     except Exception:
                         pass
                     await asyncio.sleep(settings.claims_cleanup_interval_seconds)
@@ -176,10 +173,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             task = getattr(fastapi_app.state, "_claims_cleanup_task", None)
             if task:
                 task.cancel()
-                try:
+                with contextlib.suppress(Exception):
                     await task
-                except Exception:
-                    pass
     return fastapi_app
 
 

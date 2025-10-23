@@ -76,7 +76,7 @@
   Establish automated safeguards.  
   - [x] GitHub Actions workflow for `lint` (Ruff) + `type check` (Ty) triggered on pushes/PRs.  
   - [x] Separate workflow that builds and pushes Docker images to registry on tagged releases (with version tagging strategy).  
-  - [ ] Optional nightly workflow to run `cli migrate`, `cli list-projects`, etc., and capture artifacts/logs for manual review.
+  - [x] Optional nightly workflow to run `cli migrate`, `cli list-projects`, etc., and capture artifacts/logs for manual review.
 
 # Spec Alignment Backlog (from project_idea_and_guide.md)
 
@@ -102,7 +102,7 @@
   - [ ] Provide multi-thread digests, top mentions, action item extraction beyond simple keyword checks.
 
 - [ ] **Attachment handling**  
-  - [ ] Make conversion configurable per agent/project, allow storing original binary if required (alongside WebP).  
+  - [x] Make conversion configurable per agent/project, allow storing original binary if required (alongside WebP).  
   - [ ] Add deduplication manifest (tracking global SHA) and metadata (type, dimensions).  
   - [ ] Remember agent preference for inline vs file attachments.
 
@@ -117,13 +117,13 @@
     - [x] Implemented `list-acks`; includes ack age and thread columns.
 
 - [ ] **HTTP transport hardening**  
-  - [ ] Add rate limiting (e.g., `slowapi`) and CORS toggles.  
-  - [ ] Integrate OpenTelemetry instrumentation for tracing metrics.  
-  - [ ] Provide sample middleware for request logging.
+  - [x] Add rate limiting (e.g., `slowapi`) and CORS toggles.  
+  - [x] Integrate OpenTelemetry instrumentation for tracing metrics.  
+  - [x] Provide sample middleware for request logging.
 
 - [ ] **Database improvements**  
   - [x] Add indexes on created_ts, thread_id, importance for faster queries.  
-  - [ ] Implement scheduled cleanup for expired claims/old messages (maybe via background tasks).  
+  - [x] Implement scheduled cleanup for expired claims/old messages (maybe via background tasks).  
   - [ ] Prepare migrations once schema evolves (Alembic integration).
 
 - [ ] **Testing gaps**  

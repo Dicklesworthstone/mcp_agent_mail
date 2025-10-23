@@ -1,0 +1,28 @@
+name: Nightly Maintenance
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # 03:17 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install uv
+        run: curl -Ls https://astral.sh/uv/install.sh | sh
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Sync dependencies (dev)
+        run: uv sync --dev
+      - name: Run migrations
+        run: uv run python -m mcp_agent_mail.cli migrate
+      - name: List projects
+        run: uv run python -m mcp_agent_mail.cli list-projects --include-agents
+
