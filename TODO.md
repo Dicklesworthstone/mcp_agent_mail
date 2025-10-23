@@ -1,6 +1,6 @@
 # Project TODO (in progress)
 
-- [ ] Persistence archive
+- [x] Persistence archive
   - [x] Define storage root and per-project structure (agents/, messages/, claims/, attachments/)
   - [x] Implement Markdown writing with JSON front matter for canonical message + inbox/outbox copies
   - [x] Persist agent profiles to json under agents/
@@ -8,11 +8,11 @@
   - [x] Ensure all file operations async-friendly (use asyncio.to_thread as needed)
   - [x] Integrate GitPython: repo init per project, add commit helper with lock handling
   - [x] Add advisory file lock to serialize archive writes
-- [ ] Agent identity workflow
+- [x] Agent identity workflow
   - [x] Update name generator to check DB + filesystem for uniqueness
   - [x] Expose create identity tool returning full profile (program/model/task)
   - [x] Track last_active and ensure updates on interactions
-- [ ] Messaging enhancements
+- [x] Messaging enhancements
   - [x] Support message replies (thread_id, subject prefix)
   - [x] Include read/ack tools updating timestamps
   - [x] Implement urgent-only filter and ack-required flag handling

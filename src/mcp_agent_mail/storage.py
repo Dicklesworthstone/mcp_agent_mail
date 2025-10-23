@@ -169,7 +169,17 @@ async def _update_thread_digest(
     await _to_thread(digest_dir.mkdir, parents=True, exist_ok=True)
     digest_path = digest_dir / f"{thread_id}.md"
 
-    header = f"## {meta.get('created', '')} — {meta.get('from', '')} → {', '.join((meta.get('to') or []) or [])}\n\n"
+    # Ensure recipients list is typed as list[str] for join()
+    to_value = meta.get("to")
+    if isinstance(to_value, (list, tuple)):
+        recipients_list: list[str] = [str(v) for v in to_value]
+    elif isinstance(to_value, str):
+        recipients_list = [to_value]
+    else:
+        recipients_list = []
+    header = (
+        f"## {meta.get('created', '')} — {meta.get('from', '')} → {', '.join(recipients_list)}\n\n"
+    )
     link_line = f"[View canonical]({canonical_rel_path})\n\n"
     subject = str(meta.get("subject", "")).strip()
     subject_line = f"### {subject}\n\n" if subject else ""

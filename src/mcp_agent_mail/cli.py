@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Annotated, Any, Optional, cast
 
 import typer
 import uvicorn
@@ -172,7 +172,10 @@ def list_projects(include_agents: bool = typer.Option(False, help="Include agent
 
 
 @guard_app.command("install")
-def guard_install(project: str, repo: Path = typer.Argument(..., help="Path to git repo")) -> None:
+def guard_install(
+    project: str,
+    repo: Annotated[Path, typer.Argument(..., help="Path to git repo")],
+) -> None:
     """Install the advisory pre-commit guard into the given repository."""
 
     settings = get_settings()
@@ -191,7 +194,9 @@ def guard_install(project: str, repo: Path = typer.Argument(..., help="Path to g
 
 
 @guard_app.command("uninstall")
-def guard_uninstall(repo: Path = typer.Argument(..., help="Path to git repo")) -> None:
+def guard_uninstall(
+    repo: Annotated[Path, typer.Argument(..., help="Path to git repo")],
+) -> None:
     """Remove the advisory pre-commit guard from the repository."""
 
     repo_path = repo.expanduser().resolve()
@@ -279,7 +284,6 @@ def claims_soon(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    from datetime import datetime, timezone, timedelta
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(minutes=minutes)
     soon = [(c, a) for (c, a) in rows if c.expires_ts <= cutoff]
@@ -378,50 +382,7 @@ def acks_pending(
     console.print(table)
 
 
-@app.command("guard-install")
-def guard_install(
-    project_key: str = typer.Argument(..., help="Project human key or slug for the archive."),
-    code_repo_path: str = typer.Argument(..., help="Path to the code repository where to install the pre-commit hook."),
-) -> None:
-    """Install the pre-commit guard hook into a code repository."""
-    settings: Settings = get_settings()
 
-    async def _install() -> str:
-        slug = slugify(project_key)
-        archive = await ensure_archive(settings, slug)
-        script = await _build_precommit_hook_content(archive)
-        import os
-        from pathlib import Path
-
-        repo_path = Path(code_repo_path).expanduser().resolve()
-        hooks_dir = repo_path / ".git" / "hooks"
-        if not hooks_dir.is_dir():
-            raise typer.BadParameter(f"No git hooks directory at {hooks_dir}")
-        hook_path = hooks_dir / "pre-commit"
-        hook_path.write_text(script, encoding="utf-8")
-        os.chmod(hook_path, 0o755)
-        return str(hook_path)
-
-    console.rule("[bold blue]Installing Pre-commit Guard")
-    path = asyncio.run(_install())
-    console.print(f"[green]Installed guard at[/] {path}")
-
-
-@app.command("guard-uninstall")
-def guard_uninstall(
-    code_repo_path: str = typer.Argument(..., help="Path to the code repository to remove the pre-commit hook from."),
-) -> None:
-    """Remove the pre-commit guard hook if present."""
-    from pathlib import Path
-
-    repo_path = Path(code_repo_path).expanduser().resolve()
-    hook_path = repo_path / ".git" / "hooks" / "pre-commit"
-    console.rule("[bold blue]Uninstalling Pre-commit Guard")
-    if hook_path.exists():
-        hook_path.unlink()
-        console.print(f"[green]Removed guard at[/] {hook_path}")
-    else:
-        console.print(f"[yellow]No guard found at[/] {hook_path}")
 
 
 @app.command("list-acks")
