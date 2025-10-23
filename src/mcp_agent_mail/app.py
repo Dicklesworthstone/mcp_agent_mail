@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -392,6 +393,96 @@ async def _list_inbox(
         payload["kind"] = recipient_kind
         messages.append(payload)
     return messages
+
+
+async def _list_outbox(
+    project: Project,
+    agent: Agent,
+    limit: int,
+    include_bodies: bool,
+    since_ts: Optional[str],
+) -> list[dict[str, Any]]:
+    """List messages sent by the agent (their outbox)."""
+    if project.id is None or agent.id is None:
+        raise ValueError("Project and agent must have ids before listing outbox.")
+    await ensure_schema()
+    messages: list[dict[str, Any]] = []
+    async with get_session() as session:
+        stmt = (
+            select(Message)
+            .where(Message.project_id == project.id, Message.sender_id == agent.id)
+            .order_by(desc(Message.created_ts))
+            .limit(limit)
+        )
+        if since_ts:
+            try:
+                since_dt = datetime.fromisoformat(since_ts)
+            except ValueError:
+                since_dt = None
+            if since_dt:
+                stmt = stmt.where(Message.created_ts > since_dt)
+        result = await session.execute(stmt)
+        message_rows = result.scalars().all()
+
+        # For each message, collect recipients grouped by kind
+        for msg in message_rows:
+            recs = await session.execute(
+                select(MessageRecipient.kind, Agent.name)
+                .join(Agent, MessageRecipient.agent_id == Agent.id)
+                .where(MessageRecipient.message_id == msg.id)
+            )
+            to_list: list[str] = []
+            cc_list: list[str] = []
+            bcc_list: list[str] = []
+            for kind, name in recs.all():
+                if kind == "to":
+                    to_list.append(name)
+                elif kind == "cc":
+                    cc_list.append(name)
+                elif kind == "bcc":
+                    bcc_list.append(name)
+            payload = _message_to_dict(msg, include_body=include_bodies)
+            payload["from"] = agent.name
+            payload["to"] = to_list
+            payload["cc"] = cc_list
+            payload["bcc"] = bcc_list
+            messages.append(payload)
+    return messages
+
+
+def _canonical_relpath_for_message(message: Message) -> str:
+    """Return canonical archive-relative path for a message markdown file."""
+    ts = message.created_ts.astimezone(timezone.utc)
+    y = ts.strftime("%Y")
+    m = ts.strftime("%m")
+    return f"messages/{y}/{m}/{message.id}.md"
+
+
+async def _commit_info_for_message(settings: Settings, project: Project, message: Message) -> dict[str, Any] | None:
+    """Fetch commit metadata for the canonical message file (hexsha, summary, authored_ts, stats)."""
+    archive = await ensure_archive(settings, project.slug)
+    relpath = _canonical_relpath_for_message(message)
+
+    def _lookup():
+        try:
+            commit = next(archive.repo.iter_commits(paths=[relpath], max_count=1))
+        except StopIteration:
+            return None
+        data: dict[str, Any] = {
+            "hexsha": commit.hexsha[:12],
+            "summary": commit.summary,
+            "authored_ts": _iso(datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)),
+        }
+        try:
+            stats = commit.stats.files.get(relpath, None)
+            if stats:
+                data["insertions"] = int(stats.get("insertions", 0))
+                data["deletions"] = int(stats.get("deletions", 0))
+        except Exception:
+            pass
+        return data
+
+    return await asyncio.to_thread(_lookup)
 
 
 def _summarize_messages(messages: Sequence[tuple[Message, str]]) -> dict[str, Any]:
@@ -1519,49 +1610,6 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="renew_claims")
     async def renew_claims(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        ttl_seconds: int = 3600,
-        paths: Optional[list[str]] = None,
-        claim_ids: Optional[list[int]] = None,
-    ) -> dict[str, Any]:
-        """
-        Extend the expiry (TTL) for active claims held by an agent.
-
-        - If both `paths` and `claim_ids` are omitted, all active claims for the agent are renewed.
-        - Only claims with released_ts IS NULL are updated.
-        - New expires_ts = now + ttl_seconds (min 60s).
-        """
-        project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
-        if project.id is None or agent.id is None:
-            raise ValueError("Project and agent must have ids before renewing claims.")
-        await ensure_schema()
-        now = datetime.now(timezone.utc)
-        new_expiry = now + timedelta(seconds=max(60, ttl_seconds))
-        async with get_session() as session:
-            stmt = (
-                update(Claim)
-                .where(
-                    Claim.project_id == project.id,
-                    Claim.agent_id == agent.id,
-                    cast(Any, Claim.released_ts).is_(None),
-                )
-                .values(expires_ts=new_expiry)
-            )
-            if claim_ids:
-                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
-            if paths:
-                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
-            result = await session.execute(stmt)
-            await session.commit()
-        affected = int(result.rowcount or 0)
-        await ctx.info(f"Renewed {affected} claims for '{agent.name}' to {_iso(new_expiry)}.")
-        return {"renewed": affected, "expires_ts": _iso(new_expiry)}
-
-    @mcp.tool(name="renew_claims")
-    async def renew_claims_tool(
         ctx: Context,
         project_key: str,
         agent_name: str,
