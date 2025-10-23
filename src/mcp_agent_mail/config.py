@@ -23,6 +23,10 @@ class HttpSettings:
     bearer_token: str | None
     rate_limit_enabled: bool
     rate_limit_per_minute: int
+    request_log_enabled: bool
+    otel_enabled: bool
+    otel_service_name: str
+    otel_exporter_otlp_endpoint: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -42,6 +46,7 @@ class StorageSettings:
     git_author_email: str
     inline_image_max_bytes: int
     convert_images: bool
+    keep_original_images: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,6 +69,9 @@ class Settings:
     database: DatabaseSettings
     storage: StorageSettings
     cors: CorsSettings
+    # Background maintenance toggles
+    claims_cleanup_enabled: bool
+    claims_cleanup_interval_seconds: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -94,6 +102,10 @@ def get_settings() -> Settings:
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
+        request_log_enabled=_bool(_decouple_config("HTTP_REQUEST_LOG_ENABLED", default="false"), default=False),
+        otel_enabled=_bool(_decouple_config("HTTP_OTEL_ENABLED", default="false"), default=False),
+        otel_service_name=_decouple_config("OTEL_SERVICE_NAME", default="mcp-agent-mail"),
+        otel_exporter_otlp_endpoint=_decouple_config("OTEL_EXPORTER_OTLP_ENDPOINT", default=""),
     )
 
     database_settings = DatabaseSettings(
@@ -107,6 +119,7 @@ def get_settings() -> Settings:
         git_author_email=_decouple_config("GIT_AUTHOR_EMAIL", default="mcp-agent@example.com"),
         inline_image_max_bytes=_int(_decouple_config("INLINE_IMAGE_MAX_BYTES", default=str(64 * 1024)), default=64 * 1024),
         convert_images=_bool(_decouple_config("CONVERT_IMAGES", default="true"), default=True),
+        keep_original_images=_bool(_decouple_config("KEEP_ORIGINAL_IMAGES", default="false"), default=False),
     )
 
     def _csv(name: str, default: str) -> list[str]:
@@ -128,4 +141,6 @@ def get_settings() -> Settings:
         database=database_settings,
         storage=storage_settings,
         cors=cors_settings,
+        claims_cleanup_enabled=_bool(_decouple_config("CLAIMS_CLEANUP_ENABLED", default="false"), default=False),
+        claims_cleanup_interval_seconds=_int(_decouple_config("CLAIMS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
     )

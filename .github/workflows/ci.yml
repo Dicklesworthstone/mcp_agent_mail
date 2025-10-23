@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop", "release/**", "feature/**"]
+  pull_request:
+    branches: ["main", "develop"]
+
+jobs:
+  ruff:
+    name: Ruff Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install uv
+        run: curl -Ls https://astral.sh/uv/install.sh | sh
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Sync dependencies
+        run: uv sync --dev
+      - name: Run Ruff
+        run: uv run ruff check --output-format=github
+
+  ty:
+    name: Ty Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - name: Install uv
+        run: curl -Ls https://astral.sh/uv/install.sh | sh
+      - name: Add uv to PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - name: Sync dependencies
+        run: uv sync --dev
+      - name: Run Ty
+        run: uvx ty check
+
+

@@ -253,6 +253,7 @@ Expose common reads as resources that clients can fetch:
 - `resource://thread/{thread_id}{?project,include_bodies}`
 - `resource://views/urgent-unread/{agent}{?project,limit}`
 - `resource://views/ack-required/{agent}{?project,limit}`
+- `resource://mailbox/{agent}{?project,limit}`
 
 Example (conceptual) resource read:
 
@@ -328,10 +329,6 @@ HTTP_PORT = int(decouple_config("PORT", default=8765))
 
 Common variables you may set:
 
-- `MCP_MAIL_STORE`: Root for per-project archives and SQLite (default: `~/.mcp-agent-mail`)
-- `HOST` / `PORT`: Server bind host/port when running HTTP transport
-- Optional: any future limits (attachment max bytes, etc.)
-
 ### Configuration reference
 
 | Name | Default | Description |
@@ -342,6 +339,11 @@ Common variables you may set:
 | `IMAGE_INLINE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
 | `LOG_LEVEL` | `info` | Future: server log level |
 | `ATTACHMENT_POLICY` | `auto` | Future: `auto`, `file`, or `inline` default for image conversion |
+| `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
+| `HTTP_CORS_ORIGINS` |  | CSV of allowed origins (e.g., `https://app.example.com,https://ops.example.com`) |
+| `HTTP_CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials on CORS |
+| `HTTP_CORS_ALLOW_METHODS` | `*` | CSV of allowed methods or `*` |
+| `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
 
 ## Development quick start
 
@@ -624,6 +626,7 @@ if __name__ == "__main__":
 | `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
 | `claim_paths` | `claim_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
 | `release_claims` | `release_claims(project_key: str, agent_name: str, paths?: list[str], claim_ids?: list[int])` | `{released, released_at}` | Releases agent’s active claims |
+| `renew_claims` | `renew_claims(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], claim_ids?: list[int])` | `{renewed, claims[]}` | Extend TTL of existing claims |
 
 ### Resources
 
@@ -636,6 +639,7 @@ if __name__ == "__main__":
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
+| `resource://mailbox/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing (all messages for an agent) |
 
 ## Roadmap (selected)
 
@@ -660,6 +664,15 @@ If you’re building with or contributing to this project, please read `project_
 - **Python module**: `python -m mcp_agent_mail.http --host 0.0.0.0 --port 8765`
 - **Gunicorn**: `gunicorn -c deploy/gunicorn.conf.py mcp_agent_mail.http:build_http_app --factory`
 - **Docker**: `docker compose up --build`
+
+### CI/CD
+
+- Lint and Typecheck CI: GitHub Actions workflow runs Ruff and Ty on pushes/PRs to main/develop.
+- Release: Pushing a tag like `v0.1.0` builds and pushes a multi-arch Docker image to GHCR under `ghcr.io/<owner>/<repo>` with `latest` and version tags.
+
+### Log rotation (optional)
+
+If not using journald, a sample logrotate config is provided at `deploy/logrotate/mcp-agent-mail` to rotate `/var/log/mcp-agent-mail/*.log` weekly, keeping 7 rotations.
 
 ### Container build and multi-arch push
 
@@ -721,3 +734,12 @@ uv run python -m mcp_agent_mail.cli guard-install /abs/path/backend /abs/path/ba
 # List pending acknowledgements for an agent
 uv run python -m mcp_agent_mail.cli list-acks --project /abs/path/backend --agent BlueLake --limit 10
 ```
+
+## Continuous Integration
+
+This repo includes a GitHub Actions workflow that runs on pushes and PRs:
+
+- Ruff lint: `ruff check` (GitHub format)
+- Type check: `uvx ty check`
+
+See `.github/workflows/ci.yml`.

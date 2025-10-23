@@ -262,6 +262,12 @@ async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, o
     target_dir = buffer_path / digest[:2]
     await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     target_path = target_dir / f"{digest}.webp"
+    # Optionally store original alongside
+    if archive.settings.storage.keep_original_images:
+        orig_ext = path.suffix.lower().lstrip(".") or "bin"
+        orig_path = target_dir / f"{digest}.orig.{orig_ext}"
+        if not orig_path.exists():
+            await _to_thread(orig_path.write_bytes, data)
     if not target_path.exists():
         await _save_webp(img, target_path)
     new_bytes = await _to_thread(target_path.read_bytes)

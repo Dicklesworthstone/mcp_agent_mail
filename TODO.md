@@ -72,10 +72,10 @@
   - [ ] Optionally add a Makefile (or uv’s `task`/`run` alias) with targets: `make serve`, `make lint`, `make typecheck`, `make guard-install`, etc.  
   - [ ] Consider templating environment files (staging/prod) and verifying they load via `python-decouple`.
 
-- [ ] **CI/CD integration**  
+- [x] **CI/CD integration**  
   Establish automated safeguards.  
-  - [ ] GitHub Actions workflow for `lint` (Ruff) + `type check` (Ty) triggered on pushes/PRs.  
-  - [ ] Separate workflow that builds and pushes Docker images to registry on tagged releases (with version tagging strategy).  
+  - [x] GitHub Actions workflow for `lint` (Ruff) + `type check` (Ty) triggered on pushes/PRs.  
+  - [x] Separate workflow that builds and pushes Docker images to registry on tagged releases (with version tagging strategy).  
   - [ ] Optional nightly workflow to run `cli migrate`, `cli list-projects`, etc., and capture artifacts/logs for manual review.
 
 # Spec Alignment Backlog (from project_idea_and_guide.md)
