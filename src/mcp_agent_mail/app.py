@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from string import Template
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
@@ -1808,78 +1809,80 @@ def build_mcp_server() -> FastMCP:
 async def _build_precommit_hook_content(archive: ProjectArchive) -> str:
     claims_dir = archive.root / "claims"
     storage_root = archive.root
-    template = textwrap.dedent(
-        """#!/usr/bin/env python3
-        import json
-        import os
-        import sys
-        import subprocess
-        from pathlib import Path
-        from fnmatch import fnmatch
-        from datetime import datetime, timezone
+    template = Template(
+        textwrap.dedent(
+            """#!/usr/bin/env python3
+            import json
+            import os
+            import sys
+            import subprocess
+            from pathlib import Path
+            from fnmatch import fnmatch
+            from datetime import datetime, timezone
 
-        CLAIMS_DIR = Path({claims_dir!r})
-        STORAGE_ROOT = Path({storage_root!r})
-        AGENT_NAME = os.environ.get("AGENT_NAME")
-        if not AGENT_NAME:
-            sys.stderr.write("[pre-commit] AGENT_NAME environment variable is required.\\n")
-            sys.exit(1)
+            CLAIMS_DIR = Path("$claims_dir")
+            STORAGE_ROOT = Path("$storage_root")
+            AGENT_NAME = os.environ.get("AGENT_NAME")
+            if not AGENT_NAME:
+                sys.stderr.write("[pre-commit] AGENT_NAME environment variable is required.\n")
+                sys.exit(1)
 
-        if not CLAIMS_DIR.exists():
-            sys.exit(0)
+            if not CLAIMS_DIR.exists():
+                sys.exit(0)
 
-        now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
 
-        staged = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if staged.returncode != 0:
-            sys.stderr.write("[pre-commit] Failed to enumerate staged files.\\n")
-            sys.exit(1)
+            staged = subprocess.run(
+                ["git", "diff", "--cached", "--name-only"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if staged.returncode != 0:
+                sys.stderr.write("[pre-commit] Failed to enumerate staged files.\n")
+                sys.exit(1)
 
-        paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
+            paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
 
-        if not paths:
-            sys.exit(0)
+            if not paths:
+                sys.exit(0)
 
-        def load_claims():
-            for candidate in CLAIMS_DIR.glob("*.json"):
-                try:
-                    data = json.loads(candidate.read_text())
-                except Exception:
-                    continue
-                yield data
-
-        conflicts = []
-        for claim in load_claims():
-            if claim.get("agent") == AGENT_NAME:
-                continue
-            expires = claim.get("expires_ts")
-            if expires:
-                try:
-                    expires_dt = datetime.fromisoformat(expires)
-                    if expires_dt < now:
+            def load_claims():
+                for candidate in CLAIMS_DIR.glob("*.json"):
+                    try:
+                        data = json.loads(candidate.read_text())
+                    except Exception:
                         continue
-                except Exception:
-                    pass
-            pattern = claim.get("path_pattern")
-            if not pattern:
-                continue
-            for path_value in paths:
-                if fnmatch(path_value, pattern) or fnmatch(pattern, path_value):
-                    conflicts.append((path_value, claim.get("agent"), pattern))
+                    yield data
 
-        if conflicts:
-            sys.stderr.write("[pre-commit] Exclusive claim conflicts detected:\\n")
-            for path_value, agent_name, pattern in conflicts:
-                sys.stderr.write(f"  - {path_value} matches claim '{pattern}' held by {agent_name}\\n")
-            sys.stderr.write("Resolve conflicts or release claims before committing.\\n")
-            sys.exit(1)
+            conflicts = []
+            for claim in load_claims():
+                if claim.get("agent") == AGENT_NAME:
+                    continue
+                expires = claim.get("expires_ts")
+                if expires:
+                    try:
+                        expires_dt = datetime.fromisoformat(expires)
+                        if expires_dt < now:
+                            continue
+                    except Exception:
+                        pass
+                pattern = claim.get("path_pattern")
+                if not pattern:
+                    continue
+                for path_value in paths:
+                    if fnmatch(path_value, pattern) or fnmatch(pattern, path_value):
+                        conflicts.append((path_value, claim.get("agent"), pattern))
 
-        sys.exit(0)
-        """
+            if conflicts:
+                sys.stderr.write("[pre-commit] Exclusive claim conflicts detected:\n")
+                for path_value, agent_name, pattern in conflicts:
+                    sys.stderr.write("  - {} matches claim '{}' held by {}\n".format(path_value, pattern, agent_name))
+                sys.stderr.write("Resolve conflicts or release claims before committing.\n")
+                sys.exit(1)
+
+            sys.exit(0)
+            """
+        )
     )
-    return template.format(claims_dir=str(claims_dir), storage_root=str(storage_root))
+    return template.substitute(claims_dir=str(claims_dir), storage_root=str(storage_root))

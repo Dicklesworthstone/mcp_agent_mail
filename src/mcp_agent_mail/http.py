@@ -48,7 +48,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     async def readiness() -> JSONResponse:
         try:
             await readiness_check()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 

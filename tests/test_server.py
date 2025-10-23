@@ -1,6 +1,6 @@
-import pytest
 from pathlib import Path
 
+import pytest
 from fastmcp import Client
 from git import Repo
 from PIL import Image
@@ -65,7 +65,7 @@ async def test_messaging_flow(isolated_env):
         storage_root = Path(get_settings().storage.root).resolve()
         profile = storage_root / "backend" / "agents" / "BlueLake" / "profile.json"
         assert profile.exists()
-        message_file = list((storage_root / "backend" / "messages").rglob("*.md"))[0]
+        message_file = next(iter((storage_root / "backend" / "messages").rglob("*.md")))
         assert "Test" in message_file.read_text()
         repo = Repo(str(storage_root / "backend"))
         assert repo.head.commit.message.startswith("mail: BlueLake")
