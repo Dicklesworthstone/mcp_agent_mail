@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,61 @@ def _lifespan_factory(settings: Settings):
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
+
+def _parse_json_safely(text: str) -> dict[str, Any] | None:
+    """Best-effort JSON extraction supporting code fences and stray text.
+
+    Returns parsed dict on success, otherwise None.
+    """
+    import json as _json
+    import re as _re
+
+    try:
+        parsed = _json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    # Code fence block
+    m = _re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+    if m:
+        inner = m.group(1)
+        try:
+            parsed = _json.loads(inner)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    # Braces slice heuristic
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        snippet = text[start : end + 1]
+        try:
+            parsed = _json.loads(snippet)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    return None
+
+
+def _parse_iso(value: Optional[str]) -> Optional[datetime]:
+    """Parse ISO-8601 timestamps, accepting a trailing 'Z' as UTC.
+
+    Returns None when parsing fails.
+    """
+    if not value:
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
 
 def _project_to_dict(project: Project) -> dict[str, Any]:
     return {
@@ -380,10 +436,7 @@ async def _list_inbox(
         if urgent_only:
             stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
         if since_ts:
-            try:
-                since_dt = datetime.fromisoformat(since_ts)
-            except ValueError:
-                since_dt = None
+            since_dt = _parse_iso(since_ts)
             if since_dt:
                 stmt = stmt.where(Message.created_ts > since_dt)
         result = await session.execute(stmt)
@@ -417,10 +470,7 @@ async def _list_outbox(
             .limit(limit)
         )
         if since_ts:
-            try:
-                since_dt = datetime.fromisoformat(since_ts)
-            except ValueError:
-                since_dt = None
+            since_dt = _parse_iso(since_ts)
             if since_dt:
                 stmt = stmt.where(Message.created_ts > since_dt)
         result = await session.execute(stmt)
@@ -665,8 +715,10 @@ def build_mcp_server() -> FastMCP:
             convert_images_override if convert_images_override is not None else settings.storage.convert_images
         )
         # Respect agent-level attachments policy override if set
+        embed_policy: str = "auto"
         if getattr(sender, "attachments_policy", None) in {"inline", "file"}:
             convert_markdown = True
+            embed_policy = cast(str, sender.attachments_policy)
             # "auto" falls back to server defaults
         async with AsyncFileLock(archive.lock_path):
             # Server-side claims enforcement: block if conflicting active exclusive claim exists
@@ -704,9 +756,16 @@ def build_mcp_server() -> FastMCP:
                                 "expires_ts": _iso(claim_record.expires_ts),
                             })
                 if conflicts:
-                    raise ValueError(
-                        "Conflicting active claims prevent message write: "
-                        + "; ".join(f"{c['surface']} held by {c['holder']} ({c['path_pattern']})" for c in conflicts)
+                    raise RuntimeError(
+                        json.dumps(
+                            {
+                                "error": {
+                                    "type": "CLAIM_CONFLICT",
+                                    "message": "Conflicting active claims prevent message write.",
+                                    "conflicts": conflicts,
+                                }
+                            }
+                        )
                     )
 
             processed_body, attachments_meta, attachment_files = await process_attachments(
@@ -714,6 +773,7 @@ def build_mcp_server() -> FastMCP:
                 body_md,
                 attachment_paths or [],
                 convert_markdown,
+                embed_policy=embed_policy,
             )
             message = await _create_message(
                 project,
@@ -851,6 +911,11 @@ def build_mcp_server() -> FastMCP:
         ---------------
         - Passing an ephemeral or relative path as `human_key` (prefer absolute,
           stable identifiers to avoid accidental duplication).
+
+        Idempotency
+        -----------
+        - Safe to call multiple times. If the project already exists, the existing
+          record is returned and the archive is ensured on disk (no destructive changes).
         """
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
@@ -1122,6 +1187,20 @@ def build_mcp_server() -> FastMCP:
         - Unknown recipient names fail fast; register them first.
         - Non-absolute attachment paths are resolved relative to the project archive root.
 
+        Do / Don't
+        ----------
+        Do:
+        - Keep subjects concise and specific (aim for ≤ 80 characters).
+        - Use `thread_id` (or `reply_message`) to keep related discussion in a single thread.
+        - Address only relevant recipients; use CC/BCC sparingly and intentionally.
+        - Prefer Markdown links; attach images only when they materially aid understanding. The server
+          auto-converts images to WebP and may inline small images depending on policy.
+
+        Don't:
+        - Send large, repeated binaries—reuse prior attachments via `attachment_paths` when possible.
+        - Change topics mid-thread—start a new thread for a new subject.
+        - Broadcast to "all" agents unnecessarily—target just the agents who need to act.
+
         Examples
         --------
         1) Simple message:
@@ -1203,6 +1282,19 @@ def build_mcp_server() -> FastMCP:
             Recipients by agent name. If omitted, `to` defaults to original sender.
         subject_prefix : str
             Prefix to apply (default "Re:"). Case-insensitive idempotent.
+
+        Do / Don't
+        ----------
+        Do:
+        - Keep the subject focused; avoid topic drift within a thread.
+        - Reply to the original sender unless new stakeholders are strictly required.
+        - Preserve importance/ack flags from the original unless there is a clear reason to change.
+        - Use CC for FYI only; BCC sparingly and with intention.
+
+        Don't:
+        - Change `thread_id` when continuing the same discussion.
+        - Escalate to many recipients; prefer targeted replies and start a new thread for new topics.
+        - Attach large binaries in replies unless essential; reference prior attachments where possible.
 
         Returns
         -------
@@ -1319,6 +1411,11 @@ def build_mcp_server() -> FastMCP:
         - This does not send an acknowledgement; use `acknowledge_message` for that.
         - Safe to call multiple times; later calls return the original timestamp.
 
+        Idempotency
+        -----------
+        - If `mark_message_read` has already been called earlier for the same (agent, message),
+          the original timestamp is returned and no error is raised.
+
         Returns
         -------
         dict
@@ -1353,6 +1450,10 @@ def build_mcp_server() -> FastMCP:
         --------
         - Sets both read_ts and ack_ts for the (agent, message) pairing
         - Safe to call multiple times; subsequent calls will return the prior timestamps
+
+        Idempotency
+        -----------
+        - If acknowledgement already exists, the previous timestamps are preserved and returned.
 
         When to use
         -----------
@@ -1539,10 +1640,8 @@ def build_mcp_server() -> FastMCP:
                 user = "\n\n".join(excerpts)
                 llm_resp = await complete_system_user(system, user, model=llm_model)
                 # Best-effort parse: if JSON present, merge selective fields
-                import json as _json
-
-                try:
-                    parsed = _json.loads(llm_resp.content)
+                parsed = _parse_json_safely(llm_resp.content)
+                if parsed:
                     # Only merge known fields if present
                     for key in (
                         "participants",
@@ -1557,9 +1656,6 @@ def build_mcp_server() -> FastMCP:
                         value = parsed.get(key)
                         if value:
                             summary[key] = value
-                except Exception:
-                    # Ignore malformed outputs; keep heuristic summary
-                    pass
             except Exception:
                 # If LLM fails, return heuristic summary
                 pass
@@ -1578,6 +1674,142 @@ def build_mcp_server() -> FastMCP:
             f"Summarized thread '{thread_id}' for project '{project.human_key}' with {len(rows)} messages"
         )
         return {"thread_id": thread_id, "summary": summary, "examples": examples}
+
+    @mcp.tool(name="summarize_threads")
+    async def summarize_threads(
+        ctx: Context,
+        project_key: str,
+        thread_ids: list[str],
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+        per_thread_limit: int = 50,
+    ) -> dict[str, Any]:
+        """
+        Produce a digest across multiple threads including top mentions and action items.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        thread_ids : list[str]
+            Collection of thread keys or seed message ids.
+        llm_mode : bool
+            If true and LLM is enabled, refine the digest with the LLM for clarity.
+        llm_model : Optional[str]
+            Override model name for the LLM call.
+        per_thread_limit : int
+            Max messages to consider per thread.
+
+        Returns
+        -------
+        dict
+            {
+              threads: [{thread_id, summary}],
+              aggregate: { top_mentions[], action_items[], key_points[] }
+            }
+        """
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ValueError("Project must have an id before summarizing threads.")
+        await ensure_schema()
+
+        sender_alias = aliased(Agent)
+        all_mentions: dict[str, int] = {}
+        all_actions: list[str] = []
+        all_points: list[str] = []
+        thread_summaries: list[dict[str, Any]] = []
+
+        async with get_session() as session:
+            for tid in thread_ids:
+                try:
+                    seed_id = int(tid)
+                except ValueError:
+                    seed_id = None
+                criteria = [Message.thread_id == tid]
+                if seed_id is not None:
+                    criteria.append(Message.id == seed_id)
+                stmt = (
+                    select(Message, sender_alias.name)
+                    .join(sender_alias, Message.sender_id == sender_alias.id)
+                    .where(Message.project_id == project.id, or_(*criteria))
+                    .order_by(asc(Message.created_ts))
+                    .limit(per_thread_limit)
+                )
+                rows = (await session.execute(stmt)).all()
+                summary = _summarize_messages(rows)
+                # accumulate
+                for m in summary.get("mentions", []):
+                    name = str(m.get("name", "")).strip()
+                    if not name:
+                        continue
+                    all_mentions[name] = all_mentions.get(name, 0) + int(m.get("count", 0) or 0)
+                all_actions.extend(summary.get("action_items", []))
+                all_points.extend(summary.get("key_points", []))
+                thread_summaries.append({"thread_id": tid, "summary": summary})
+
+        # Lightweight heuristic digest
+        top_mentions = sorted(all_mentions.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        aggregate = {
+            "top_mentions": [{"name": n, "count": c} for n, c in top_mentions],
+            "action_items": all_actions[:25],
+            "key_points": all_points[:25],
+        }
+
+        # Optional LLM refinement
+        if llm_mode and get_settings().llm.enabled and thread_summaries:
+            try:
+                # Compose compact context combining per-thread key points & actions only
+                parts: list[str] = []
+                for item in thread_summaries[:8]:
+                    s = item["summary"]
+                    parts.append(
+                        "\n".join(
+                            [
+                                f"# Thread {item['thread_id']}",
+                                "## Key Points",
+                                *[f"- {p}" for p in s.get("key_points", [])[:6]],
+                                "## Actions",
+                                *[f"- {a}" for a in s.get("action_items", [])[:6]],
+                            ]
+                        )
+                    )
+                system = (
+                    "You are a senior engineer producing a crisp digest across threads. "
+                    "Return JSON: { threads: [{thread_id, key_points[], actions[]}], aggregate: {top_mentions[], key_points[], action_items[]} }."
+                )
+                user = "\n\n".join(parts)
+                llm_resp = await complete_system_user(system, user, model=llm_model)
+                parsed = _parse_json_safely(llm_resp.content)
+                if parsed:
+                    agg = parsed.get("aggregate") or {}
+                    if agg:
+                        for k in ("top_mentions", "key_points", "action_items"):
+                            v = agg.get(k)
+                            if v:
+                                aggregate[k] = v
+                    # Replace per-thread summaries' key aggregates if returned
+                    revised_threads = []
+                    threads_payload = parsed.get("threads") or []
+                    if threads_payload:
+                        mapping = {str(t.get("thread_id")): t for t in threads_payload}
+                        for item in thread_summaries:
+                            tid = str(item["thread_id"])
+                            if tid in mapping:
+                                s = item["summary"].copy()
+                                tdata = mapping[tid]
+                                if tdata.get("key_points"):
+                                    s["key_points"] = tdata["key_points"]
+                                if tdata.get("actions"):
+                                    s["action_items"] = tdata["actions"]
+                                revised_threads.append({"thread_id": item["thread_id"], "summary": s})
+                            else:
+                                revised_threads.append(item)
+                        thread_summaries = revised_threads
+            except Exception:
+                pass
+
+        await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
+        return {"threads": thread_summaries, "aggregate": aggregate}
 
     @mcp.tool(name="install_precommit_guard")
     async def install_precommit_guard(
@@ -1623,6 +1855,18 @@ def build_mcp_server() -> FastMCP:
         - Glob matching is symmetric (`fnmatchcase(a,b)` or `fnmatchcase(b,a)`), including exact matches
         - When granted, a JSON artifact is written under `claims/<sha1(path)>.json` and the DB is updated
         - TTL must be >= 60 seconds (enforced by the server settings/policy)
+
+        Do / Don't
+        ----------
+        Do:
+        - Claim before starting edits on a surface to signal intent to other agents.
+        - Use specific, minimal patterns (e.g., `app/api/*.py`) instead of broad globs.
+        - Set a realistic TTL and renew with `renew_claims` if you need more time.
+
+        Don't:
+        - Claim the entire repository or very broad patterns (e.g., `**/*`) unless absolutely necessary.
+        - Hold long-lived exclusive claims when you are not actively editing.
+        - Ignore conflicts; resolve them by coordinating with holders or waiting for expiry.
 
         Parameters
         ----------
@@ -1735,6 +1979,10 @@ def build_mcp_server() -> FastMCP:
         -------
         dict
             { released: int, released_at: iso8601 }
+
+        Idempotency
+        -----------
+        - Safe to call repeatedly. Releasing an already-released (or non-existent) claim is a no-op.
 
         Examples
         --------

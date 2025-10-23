@@ -15,7 +15,7 @@ from rich.table import Table
 from sqlalchemy import asc, desc, func, select
 
 from .app import build_mcp_server
-from .config import Settings, get_settings
+from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
@@ -64,16 +64,6 @@ def _iso(dt: Optional[datetime]) -> str:
     if dt is None:
         return ""
     return dt.astimezone(timezone.utc).isoformat()
-
-
-@app.command("serve-stdio")
-def serve_stdio() -> None:
-    """Run the MCP server over STDIO transport for local tooling."""
-    settings: Settings = get_settings()
-    console.rule("[bold blue]Starting MCP Agent Mail (STDIO)")
-    console.print(f"Environment: [bold]{settings.environment}[/]")
-    server = build_mcp_server()
-    server.run(transport="stdio")
 
 
 @app.command("serve-http")
@@ -167,7 +157,7 @@ def list_projects(include_agents: bool = typer.Option(False, help="Include agent
         row = [str(project.id), project.slug, project.human_key, project.created_at.isoformat()]
         if include_agents:
             row.append(str(agent_count))
-    table.add_row(*row)
+        table.add_row(*row)
     console.print(table)
 
 

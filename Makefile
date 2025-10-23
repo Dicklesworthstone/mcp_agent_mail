@@ -1,4 +1,4 @@
-.PHONY: serve-http serve-stdio migrate lint typecheck guard-install guard-uninstall claims
+.PHONY: serve-http migrate lint typecheck guard-install guard-uninstall claims
 
 PY=uv run
 CLI=$(PY) python -m mcp_agent_mail.cli
@@ -6,8 +6,7 @@ CLI=$(PY) python -m mcp_agent_mail.cli
 serve-http:
 	$(CLI) serve-http
 
-serve-stdio:
-	$(CLI) serve-stdio
+
 
 migrate:
 	$(CLI) migrate

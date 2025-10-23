@@ -98,7 +98,7 @@
   - [x] Provide a heartbeat/renewal tool so agents can extend leases without reissuing claims.
 
 - [ ] **Search & summarization improvements**  
-  - [ ] Upgrade summarizer: incorporate heuristics (e.g., parse markdown TODOs or code references) or optional LLM integration for richer briefs.  
+  - [x] Upgrade summarizer: incorporate heuristics (e.g., parse markdown TODOs or code references) or optional LLM integration for richer briefs.  
   - [ ] Provide multi-thread digests, top mentions, action item extraction beyond simple keyword checks.
 
 - [ ] **Attachment handling**  
@@ -120,6 +120,33 @@
   - [x] Add rate limiting (e.g., `slowapi`) and CORS toggles.  
   - [x] Integrate OpenTelemetry instrumentation for tracing metrics.  
   - [x] Provide sample middleware for request logging.
+
+- [ ] **Security & Auth**  
+  - [ ] Optional JWT-based auth with per-agent tokens and rotation.  
+  - [ ] Basic RBAC: read-only vs tools; audit logs for tools/calls.  
+  - [ ] TLS termination guidance and sample reverse-proxy config.
+
+- [ ] **Rate limiting (robust)**  
+  - [ ] Token-bucket with sliding window and per-endpoint limits.  
+  - [ ] Pluggable store (Redis) for multi-worker enforcement.
+
+- [ ] **Logging & Observability**  
+  - [ ] Replace prints with structured logging (json).  
+  - [ ] Error reporting with context (project/agent/message).  
+  - [ ] Metrics: background task status, conversion failures, claims TTL expirations.
+
+- [ ] **Cleanup & Retention**  
+  - [ ] Background compaction/dedup/retention for old messages/attachments.  
+  - [ ] Quotas for attachment storage and inbox sizes.
+
+- [ ] **Testing Expansion**  
+  - [ ] Extensive HTTP JSON-RPC tests for all tools/resources.  
+  - [ ] Claims conflict tests covering edge patterns and TTL transitions.  
+  - [ ] Attachment policy tests for agent/server overrides.
+
+- [ ] **Migrations**  
+  - [ ] Add Alembic migration for `attachments_policy` and any schema drift.  
+  - [ ] Wire CLI migrate to Alembic consistently.
 
 - [ ] **Database improvements**  
   - [x] Add indexes on created_ts, thread_id, importance for faster queries.  

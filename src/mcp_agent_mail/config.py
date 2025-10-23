@@ -93,6 +93,12 @@ class Settings:
     ack_ttl_enabled: bool
     ack_ttl_seconds: int
     ack_ttl_scan_interval_seconds: int
+    # Ack escalation
+    ack_escalation_enabled: bool
+    ack_escalation_mode: str  # "log" | "claim"
+    ack_escalation_claim_ttl_seconds: int
+    ack_escalation_claim_exclusive: bool
+    ack_escalation_claim_holder_name: str
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -164,7 +170,7 @@ def get_settings() -> Settings:
 
     llm_settings = LlmSettings(
         enabled=_bool(_decouple_config("LLM_ENABLED", default="false"), default=False),
-        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-4o-mini"),
+        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-5-mini"),
         temperature=_float(_decouple_config("LLM_TEMPERATURE", default="0.2"), default=0.2),
         max_tokens=_int(_decouple_config("LLM_MAX_TOKENS", default="512"), default=512),
         cache_enabled=_bool(_decouple_config("LLM_CACHE_ENABLED", default="true"), default=True),
@@ -186,4 +192,9 @@ def get_settings() -> Settings:
         ack_ttl_enabled=_bool(_decouple_config("ACK_TTL_ENABLED", default="false"), default=False),
         ack_ttl_seconds=_int(_decouple_config("ACK_TTL_SECONDS", default="1800"), default=1800),
         ack_ttl_scan_interval_seconds=_int(_decouple_config("ACK_TTL_SCAN_INTERVAL_SECONDS", default="60"), default=60),
+        ack_escalation_enabled=_bool(_decouple_config("ACK_ESCALATION_ENABLED", default="false"), default=False),
+        ack_escalation_mode=_decouple_config("ACK_ESCALATION_MODE", default="log"),
+        ack_escalation_claim_ttl_seconds=_int(_decouple_config("ACK_ESCALATION_CLAIM_TTL_SECONDS", default="3600"), default=3600),
+        ack_escalation_claim_exclusive=_bool(_decouple_config("ACK_ESCALATION_CLAIM_EXCLUSIVE", default="false"), default=False),
+        ack_escalation_claim_holder_name=_decouple_config("ACK_ESCALATION_CLAIM_HOLDER_NAME", default=""),
     )

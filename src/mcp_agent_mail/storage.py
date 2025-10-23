@@ -220,7 +220,10 @@ async def process_attachments(
         )
     if attachment_paths:
         for path in attachment_paths:
-            meta, rel_path = await _store_image(archive, Path(path), embed_policy=embed_policy)
+            p = Path(path)
+            if not p.is_absolute():
+                p = (archive.root / path).resolve()
+            meta, rel_path = await _store_image(archive, p, embed_policy=embed_policy)
             attachments_meta.append(meta)
             if rel_path:
                 commit_paths.append(rel_path)
@@ -244,6 +247,8 @@ async def _convert_markdown_images(
         if raw_path.startswith("data:"):
             continue
         file_path = Path(raw_path)
+        if not file_path.is_absolute():
+            file_path = (archive.root / raw_path).resolve()
         if not file_path.is_file():
             continue
         attachment_meta, rel_path = await _store_image(archive, file_path, embed_policy=embed_policy)

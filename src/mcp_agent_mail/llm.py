@@ -65,8 +65,6 @@ async def _ensure_initialized() -> None:
             from contextlib import suppress
 
             with suppress(Exception):
-                litellm.cache = True
-            with suppress(Exception):
                 litellm.set_cache(True)  # type: ignore[attr-defined]
 
         _setup_callbacks()

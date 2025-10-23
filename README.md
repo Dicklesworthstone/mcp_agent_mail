@@ -241,6 +241,7 @@ sequenceDiagram
 | `release_claims(...)` | Release existing leases |
 | `search_messages(...)` | FTS5 search over subject/body |
 | `summarize_thread(...)` | Extract summary/action items across a thread |
+| `summarize_threads(...)` | Digest across multiple threads (optional LLM refinement) |
 | `install_precommit_guard(project_key, code_repo_path)` | Install a Git pre-commit guard in a target repo |
 | `uninstall_precommit_guard(code_repo_path)` | Remove the guard |
 
@@ -363,6 +364,12 @@ bash scripts/test_endpoints.sh
 
 # Pre-commit guard smoke test (no pytest)
 bash scripts/test_guard.sh
+
+# Alembic quick start (optional)
+# Initialize once per repo, then create/apply migrations as schema evolves.
+uv run alembic init alembic
+uv run alembic revision -m "init schema"
+uv run alembic upgrade head
 ```
 
 Run the server (HTTP-only). Depending on your entrypoint, one of the following patterns will apply when the implementation is in place:
@@ -735,7 +742,7 @@ See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the 
 
 The project exposes a developer CLI for common operations:
 
-- `serve-stdio` / `serve-http`: run the server transports
+- `serve-http`: run the HTTP transport (Streamable HTTP only)
 - `migrate`: ensure schema and FTS structures exist
 - `lint` / `typecheck`: developer helpers
 - `list-projects [--include-agents]`: enumerate projects

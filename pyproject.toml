@@ -47,6 +47,7 @@ dependencies = [
   "attrs>=24.2.0",
   "authlib>=1.5.2,<1.6",
   "litellm>=1.40.0,<2",
+  "alembic>=1.13.2",
 ]
 
 [project.optional-dependencies]
