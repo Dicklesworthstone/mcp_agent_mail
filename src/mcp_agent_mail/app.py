@@ -19,6 +19,7 @@ from sqlalchemy.orm import aliased
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
+from .llm import complete_system_user
 from .models import Agent, Claim, Message, MessageRecipient, Project
 from .storage import (
     AsyncFileLock,
@@ -64,6 +65,7 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "inception_ts": _iso(agent.inception_ts),
         "last_active_ts": _iso(agent.last_active_ts),
         "project_id": agent.project_id,
+        "attachments_policy": getattr(agent, "attachments_policy", "auto"),
     }
 
 
@@ -489,24 +491,78 @@ def _summarize_messages(messages: Sequence[tuple[Message, str]]) -> dict[str, An
     participants: set[str] = set()
     key_points: list[str] = []
     action_items: list[str] = []
+    open_actions = 0
+    done_actions = 0
+    mentions: dict[str, int] = {}
+    code_references: set[str] = set()
     keywords = ("TODO", "ACTION", "FIXME", "NEXT", "BLOCKED")
+
+    def _record_mentions(text: str) -> None:
+        # very lightweight @mention parser
+        for token in text.split():
+            if token.startswith("@") and len(token) > 1:
+                name = token[1:].strip(".,:;()[]{}")
+                if name:
+                    mentions[name] = mentions.get(name, 0) + 1
+
+    def _maybe_code_ref(text: str) -> None:
+        # capture backtick-enclosed references that look like files/paths
+        start = 0
+        while True:
+            i = text.find("`", start)
+            if i == -1:
+                break
+            j = text.find("`", i + 1)
+            if j == -1:
+                break
+            snippet = text[i + 1 : j].strip()
+            if ("/" in snippet or ".py" in snippet or ".ts" in snippet or ".md" in snippet) and (1 <= len(snippet) <= 120):
+                code_references.add(snippet)
+            start = j + 1
+
     for message, sender_name in messages:
         participants.add(sender_name)
         for line in message.body_md.splitlines():
             stripped = line.strip()
             if not stripped:
                 continue
-            if stripped.startswith(('-', '*', '+')) or stripped[:2] in {"1.", "2.", "3."}:
-                key_points.append(stripped.lstrip("-+* "))
+            _record_mentions(stripped)
+            _maybe_code_ref(stripped)
+            # bullet points and ordered lists → key points
+            if stripped.startswith(('-', '*', '+')) or stripped[:2] in {"1.", "2.", "3.", "4.", "5."}:
+                # normalize checkbox bullets to plain text for key points
+                normalized = stripped
+                if normalized.startswith(('- [ ]', '- [x]', '- [X]')):
+                    normalized = normalized.split(']', 1)[-1].strip()
+                key_points.append(normalized.lstrip("-+* "))
+            # checkbox TODOs
+            if stripped.startswith(('- [ ]', '* [ ]', '+ [ ]')):
+                open_actions += 1
+                action_items.append(stripped)
+                continue
+            if stripped.startswith(('- [x]', '- [X]', '* [x]', '* [X]', '+ [x]', '+ [X]')):
+                done_actions += 1
+                action_items.append(stripped)
+                continue
+            # keyword-based action detection
             upper = stripped.upper()
             if any(token in upper for token in keywords):
                 action_items.append(stripped)
-    return {
+
+    # Sort mentions by frequency desc
+    sorted_mentions = sorted(mentions.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    summary: dict[str, Any] = {
         "participants": sorted(participants),
         "key_points": key_points[:10],
         "action_items": action_items[:10],
         "total_messages": len(messages),
+        "open_actions": open_actions,
+        "done_actions": done_actions,
+        "mentions": [{"name": name, "count": count} for name, count in sorted_mentions],
     }
+    if code_references:
+        summary["code_references"] = sorted(code_references)[:10]
+    return summary
 
 
 async def _get_message(project: Project, message_id: int) -> Message:
@@ -608,7 +664,51 @@ def build_mcp_server() -> FastMCP:
         convert_markdown = (
             convert_images_override if convert_images_override is not None else settings.storage.convert_images
         )
+        # Respect agent-level attachments policy override if set
+        if getattr(sender, "attachments_policy", None) in {"inline", "file"}:
+            convert_markdown = True
+            # "auto" falls back to server defaults
         async with AsyncFileLock(archive.lock_path):
+            # Server-side claims enforcement: block if conflicting active exclusive claim exists
+            if settings.claims_enforcement_enabled:
+                await _expire_stale_claims(project.id or 0)
+                now_ts = datetime.now(timezone.utc)
+                y_dir = now_ts.strftime("%Y")
+                m_dir = now_ts.strftime("%m")
+                candidate_surfaces: list[str] = []
+                candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
+                for r in to_agents + cc_agents + bcc_agents:
+                    candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
+
+                async with get_session() as session:
+                    rows = await session.execute(
+                        select(Claim, Agent.name)
+                        .join(Agent, Claim.agent_id == Agent.id)
+                        .where(
+                            Claim.project_id == project.id,
+                            cast(Any, Claim.released_ts).is_(None),
+                            Claim.expires_ts > now_ts,
+                        )
+                    )
+                    active_claims = rows.all()
+
+                conflicts: list[dict[str, Any]] = []
+                for surface in candidate_surfaces:
+                    for claim_record, holder_name in active_claims:
+                        if _claims_conflict(claim_record, surface, True, sender):
+                            conflicts.append({
+                                "surface": surface,
+                                "holder": holder_name,
+                                "path_pattern": claim_record.path_pattern,
+                                "exclusive": claim_record.exclusive,
+                                "expires_ts": _iso(claim_record.expires_ts),
+                            })
+                if conflicts:
+                    raise ValueError(
+                        "Conflicting active claims prevent message write: "
+                        + "; ".join(f"{c['surface']} held by {c['holder']} ({c['path_pattern']})" for c in conflicts)
+                    )
+
             processed_body, attachments_meta, attachment_files = await process_attachments(
                 archive,
                 body_md,
@@ -765,6 +865,7 @@ def build_mcp_server() -> FastMCP:
         model: str,
         name: Optional[str] = None,
         task_description: str = "",
+        attachments_policy: str = "auto",
     ) -> dict[str, Any]:
         """
         Create or update an agent identity within a project and persist its profile to Git.
@@ -822,7 +923,21 @@ def build_mcp_server() -> FastMCP:
         - Use the same `project_key` consistently across cooperating agents.
         """
         project = await _get_project_by_identifier(project_key)
+        # sanitize attachments policy
+        ap = (attachments_policy or "auto").lower()
+        if ap not in {"auto", "inline", "file"}:
+            ap = "auto"
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
+        # Persist attachment policy if changed
+        if getattr(agent, "attachments_policy", None) != ap:
+            async with get_session() as session:
+                db_agent = await session.get(Agent, agent.id)
+                if db_agent:
+                    db_agent.attachments_policy = ap
+                    session.add(db_agent)
+                    await session.commit()
+                    await session.refresh(db_agent)
+                    agent = db_agent
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
 
@@ -885,6 +1000,7 @@ def build_mcp_server() -> FastMCP:
         model: str,
         name_hint: Optional[str] = None,
         task_description: str = "",
+        attachments_policy: str = "auto",
     ) -> dict[str, Any]:
         """
         Create a new, unique agent identity and persist its profile to Git.
@@ -924,7 +1040,19 @@ def build_mcp_server() -> FastMCP:
         """
         project = await _get_project_by_identifier(project_key)
         unique_name = await _generate_unique_agent_name(project, settings, name_hint)
+        ap = (attachments_policy or "auto").lower()
+        if ap not in {"auto", "inline", "file"}:
+            ap = "auto"
         agent = await _create_agent_record(project, unique_name, program, model, task_description)
+        # Update attachments policy immediately
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.attachments_policy = ap
+                session.add(db_agent)
+                await session.commit()
+                await session.refresh(db_agent)
+                agent = db_agent
         archive = await ensure_archive(settings, project.slug)
         async with AsyncFileLock(archive.lock_path):
             await write_agent_profile(archive, _agent_to_dict(agent))
@@ -1343,6 +1471,8 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         thread_id: str,
         include_examples: bool = False,
+        llm_mode: bool = False,
+        llm_model: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Extract participants, key points, and action items for a thread.
@@ -1393,6 +1523,46 @@ def build_mcp_server() -> FastMCP:
             result = await session.execute(stmt)
             rows = result.all()
         summary = _summarize_messages(rows)
+
+        # Optional: refine with LLM if enabled
+        if llm_mode and get_settings().llm.enabled:
+            try:
+                # Prepare a compact prompt with message excerpts
+                excerpts: list[str] = []
+                for message, sender_name in rows[:15]:
+                    excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
+                system = (
+                    "You are a senior engineer. Produce a concise JSON summary with keys: "
+                    "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
+                    "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
+                )
+                user = "\n\n".join(excerpts)
+                llm_resp = await complete_system_user(system, user, model=llm_model)
+                # Best-effort parse: if JSON present, merge selective fields
+                import json as _json
+
+                try:
+                    parsed = _json.loads(llm_resp.content)
+                    # Only merge known fields if present
+                    for key in (
+                        "participants",
+                        "key_points",
+                        "action_items",
+                        "mentions",
+                        "code_references",
+                        "total_messages",
+                        "open_actions",
+                        "done_actions",
+                    ):
+                        value = parsed.get(key)
+                        if value:
+                            summary[key] = value
+                except Exception:
+                    # Ignore malformed outputs; keep heuristic summary
+                    pass
+            except Exception:
+                # If LLM fails, return heuristic summary
+                pass
         examples = []
         if include_examples:
             for message, sender_name in rows[:3]:
@@ -2115,6 +2285,68 @@ def build_mcp_server() -> FastMCP:
                 payload["kind"] = kind
                 out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource("resource://views/acks-stale/{agent}{?project,ttl_seconds,limit}", mime_type="application/json")
+    async def acks_stale_view(
+        agent: str,
+        project: Optional[str] = None,
+        ttl_seconds: Optional[int] = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        List ack-required messages older than a TTL where acknowledgement is still missing.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        ttl_seconds : Optional[int]
+            Minimum age in seconds to consider a message stale. Defaults to settings.ack_ttl_seconds.
+        limit : int
+            Max number of messages to return.
+        """
+        if project is None:
+            raise ValueError("project parameter is required for stale acks view")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        ttl = int(ttl_seconds) if ttl_seconds is not None else get_settings().ack_ttl_seconds
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                select(Message, MessageRecipient.kind, MessageRecipient.read_ts)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_obj.id,
+                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(asc(Message.created_ts))
+                .limit(limit * 5)
+            )
+            for msg, kind, read_ts in rows.all():
+                age_s = int((now - msg.created_ts).total_seconds())
+                if age_s >= ttl:
+                    payload = _message_to_dict(msg, include_body=False)
+                    payload["kind"] = kind
+                    payload["read_at"] = _iso(read_ts) if read_ts else None
+                    payload["age_seconds"] = age_s
+                    out.append(payload)
+                    if len(out) >= limit:
+                        break
+        return {
+            "project": project_obj.human_key,
+            "agent": agent_obj.name,
+            "ttl_seconds": ttl,
+            "count": len(out),
+            "messages": out,
+        }
 
     @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}", mime_type="application/json")
     async def ack_overdue_view(

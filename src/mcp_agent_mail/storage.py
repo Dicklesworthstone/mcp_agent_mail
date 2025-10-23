@@ -208,15 +208,19 @@ async def process_attachments(
     body_md: str,
     attachment_paths: Iterable[str] | None,
     convert_markdown: bool,
+    *,
+    embed_policy: str = "auto",
 ) -> tuple[str, list[dict[str, object]], list[str]]:
     attachments_meta: list[dict[str, object]] = []
     commit_paths: list[str] = []
     updated_body = body_md
     if convert_markdown and archive.settings.storage.convert_images:
-        updated_body = await _convert_markdown_images(archive, body_md, attachments_meta, commit_paths)
+        updated_body = await _convert_markdown_images(
+            archive, body_md, attachments_meta, commit_paths, embed_policy=embed_policy
+        )
     if attachment_paths:
         for path in attachment_paths:
-            meta, rel_path = await _store_image(archive, Path(path))
+            meta, rel_path = await _store_image(archive, Path(path), embed_policy=embed_policy)
             attachments_meta.append(meta)
             if rel_path:
                 commit_paths.append(rel_path)
@@ -228,6 +232,8 @@ async def _convert_markdown_images(
     body_md: str,
     meta: list[dict[str, object]],
     commit_paths: list[str],
+    *,
+    embed_policy: str = "auto",
 ) -> str:
     matches = list(_IMAGE_PATTERN.finditer(body_md))
     if not matches:
@@ -240,7 +246,7 @@ async def _convert_markdown_images(
         file_path = Path(raw_path)
         if not file_path.is_file():
             continue
-        attachment_meta, rel_path = await _store_image(archive, file_path)
+        attachment_meta, rel_path = await _store_image(archive, file_path, embed_policy=embed_policy)
         if attachment_meta["type"] == "inline":
             replacement = f"data:image/webp;base64,{attachment_meta['data_base64']}"
         else:
@@ -252,47 +258,66 @@ async def _convert_markdown_images(
     return result
 
 
-async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, object], str | None]:
+async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str = "auto") -> tuple[dict[str, object], str | None]:
     data = await _to_thread(path.read_bytes)
-    img = await _to_thread(Image.open, path)
-    img = img.convert("RGBA" if img.mode in ("LA", "RGBA") else "RGB")
+    pil = await _to_thread(Image.open, path)
+    img = pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")
+    width, height = img.size
     buffer_path = archive.attachments_dir
     await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
     digest = hashlib.sha1(data).hexdigest()
     target_dir = buffer_path / digest[:2]
     await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     target_path = target_dir / f"{digest}.webp"
-    # Update global deduplication manifest and optionally store original alongside
-    manifest_dir = archive.root / "attachments"
-    manifest_path = manifest_dir / "manifest.json"
-    def _update_manifest() -> None:
-        try:
-            if manifest_path.exists():
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            else:
-                manifest = {"entries": {}}
-            entries = manifest.setdefault("entries", {})
-            entries[digest] = {"bytes": len(data), "ext": path.suffix.lower().lstrip(".") or "bin"}
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        except Exception:
-            pass
-    await _to_thread(_update_manifest)
+    # Optionally store original alongside (in originals/)
+    original_rel: str | None = None
     if archive.settings.storage.keep_original_images:
+        originals_dir = archive.root / "attachments" / "originals" / digest[:2]
+        await _to_thread(originals_dir.mkdir, parents=True, exist_ok=True)
         orig_ext = path.suffix.lower().lstrip(".") or "bin"
-        orig_path = target_dir / f"{digest}.orig.{orig_ext}"
+        orig_path = originals_dir / f"{digest}.{orig_ext}"
         if not orig_path.exists():
             await _to_thread(orig_path.write_bytes, data)
+        original_rel = orig_path.relative_to(archive.root).as_posix()
     if not target_path.exists():
         await _save_webp(img, target_path)
     new_bytes = await _to_thread(target_path.read_bytes)
     rel_path = target_path.relative_to(archive.root).as_posix()
-    if len(new_bytes) <= archive.settings.storage.inline_image_max_bytes:
+    # Update per-attachment manifest with metadata
+    try:
+        manifest_dir = archive.root / "attachments" / "_manifests"
+        await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
+        manifest_path = manifest_dir / f"{digest}.json"
+        manifest_payload = {
+            "sha1": digest,
+            "webp_path": rel_path,
+            "bytes_webp": len(new_bytes),
+            "width": width,
+            "height": height,
+            "original_path": original_rel,
+            "bytes_original": len(data),
+            "original_ext": path.suffix.lower(),
+        }
+        await _write_json(manifest_path, manifest_payload)
+    except Exception:
+        pass
+
+    should_inline = False
+    if embed_policy == "inline":
+        should_inline = True
+    elif embed_policy == "file":
+        should_inline = False
+    else:
+        should_inline = len(new_bytes) <= archive.settings.storage.inline_image_max_bytes
+    if should_inline:
         encoded = base64.b64encode(new_bytes).decode("ascii")
         return {
             "type": "inline",
             "media_type": "image/webp",
             "bytes": len(new_bytes),
+            "width": width,
+            "height": height,
+            "sha1": digest,
             "data_base64": encoded,
         }, rel_path
     meta: dict[str, object] = {
@@ -300,22 +325,12 @@ async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, o
         "media_type": "image/webp",
         "bytes": len(new_bytes),
         "path": rel_path,
+        "width": width,
+        "height": height,
+        "sha1": digest,
     }
-    # Write/update dedup manifest with metadata
-    try:
-        manifest_dir = archive.root / "attachments" / "_manifests"
-        await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
-        manifest_path = manifest_dir / f"{digest}.json"
-        manifest_payload = {
-            "sha1": digest,
-            "original_ext": path.suffix.lower(),
-            "webp_path": rel_path,
-            "bytes_webp": len(new_bytes),
-            "kept_original": bool(archive.settings.storage.keep_original_images),
-        }
-        await _write_json(manifest_path, manifest_payload)
-    except Exception:
-        pass
+    if original_rel:
+        meta["original_path"] = original_rel
     return meta, rel_path
 
 

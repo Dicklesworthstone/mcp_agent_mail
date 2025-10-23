@@ -511,6 +511,73 @@ def acks_remind(
         console.print(table)
 
 
+@acks_app.command("overdue")
+def acks_overdue(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    agent: str = typer.Argument(..., help="Agent name"),
+    ttl_minutes: int = typer.Option(60, min=1, help="Only show ACK-required older than N minutes"),
+    limit: int = typer.Option(50, help="Max messages to display"),
+) -> None:
+    """List ack-required messages older than a threshold without acknowledgements."""
+
+    async def _run() -> tuple[Project, Agent, list[tuple[Message, str]]]:
+        project_record = await _get_project_record(project)
+        agent_record = await _get_agent_record(project_record, agent)
+        if project_record.id is None or agent_record.id is None:
+            raise ValueError("Project and agent must have IDs")
+        await ensure_schema()
+        async with get_session() as session:
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)
+            stmt = (
+                select(Message, MessageRecipient.kind)
+                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project_record.id,
+                    MessageRecipient.agent_id == agent_record.id,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                    Message.created_ts <= cutoff,
+                )
+                .order_by(asc(Message.created_ts))
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+        return project_record, agent_record, rows
+
+    try:
+        project_record, agent_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    table = Table(title=f"ACK Overdue (>{ttl_minutes}m) for {agent_record.name} ({project_record.human_key})")
+    table.add_column("ID")
+    table.add_column("Subject")
+    table.add_column("Created")
+    table.add_column("Age")
+    table.add_column("Kind")
+
+    now = datetime.now(timezone.utc)
+    def _age(dt: datetime) -> str:
+        delta = now - dt
+        total = int(delta.total_seconds())
+        h, r = divmod(max(total, 0), 3600)
+        m, s = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    for msg, kind in rows:
+        table.add_row(
+            str(msg.id),
+            msg.subject,
+            _iso(msg.created_ts),
+            _age(msg.created_ts),
+            kind,
+        )
+    if not rows:
+        console.print("[green]No overdue acknowledgements exceed the threshold.[/]")
+    else:
+        console.print(table)
+
+
 
 
 

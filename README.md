@@ -339,6 +339,7 @@ Common variables you may set:
 | `HOST` | `127.0.0.1` | Bind host for HTTP transport |
 | `PORT` | `8765` | Bind port for HTTP transport |
 | `IMAGE_INLINE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
+| `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
 | `LOG_LEVEL` | `info` | Future: server log level |
 | `ATTACHMENT_POLICY` | `auto` | Future: `auto`, `file`, or `inline` default for image conversion |
 | `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
@@ -356,6 +357,12 @@ This repository targets Python 3.14 and uses `uv` with a virtual environment. We
 uv venv --python 3.14
 source .venv/bin/activate  # or use direnv
 uv sync --dev
+
+# Quick endpoint smoke test (server must be running locally)
+bash scripts/test_endpoints.sh
+
+# Pre-commit guard smoke test (no pytest)
+bash scripts/test_guard.sh
 ```
 
 Run the server (HTTP-only). Depending on your entrypoint, one of the following patterns will apply when the implementation is in place:
@@ -468,6 +475,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
 - **SQLite + FTS5**: Efficient indexing/search with minimal ops footprint
 - **Advisory claims**: Make intent explicit and reviewable; optional guard enforces claims at commit time
 - **WebP attachments**: Compact images by default; inline embedding keeps small diagrams in context
+  - Optional: keep original binaries and dedup manifest under `attachments/` for audit and reuse
 
 ## Examples (conceptual tool calls)
 

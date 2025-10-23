@@ -61,6 +61,20 @@ class CorsSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class LlmSettings:
+    """LiteLLM-related settings and defaults."""
+
+    enabled: bool
+    default_model: str
+    temperature: float
+    max_tokens: int
+    cache_enabled: bool
+    cache_backend: str  # "memory" | "redis"
+    cache_redis_url: str
+    cost_logging_enabled: bool
+
+
+@dataclass(slots=True, frozen=True)
 class Settings:
     """Top-level application settings."""
 
@@ -69,9 +83,12 @@ class Settings:
     database: DatabaseSettings
     storage: StorageSettings
     cors: CorsSettings
+    llm: LlmSettings
     # Background maintenance toggles
     claims_cleanup_enabled: bool
     claims_cleanup_interval_seconds: int
+    # Server-side enforcement
+    claims_enforcement_enabled: bool
     # Ack TTL warnings
     ack_ttl_enabled: bool
     ack_ttl_seconds: int
@@ -139,14 +156,33 @@ def get_settings() -> Settings:
         allow_headers=_csv("HTTP_CORS_ALLOW_HEADERS", default="*"),
     )
 
+    def _float(value: str, *, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    llm_settings = LlmSettings(
+        enabled=_bool(_decouple_config("LLM_ENABLED", default="false"), default=False),
+        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-4o-mini"),
+        temperature=_float(_decouple_config("LLM_TEMPERATURE", default="0.2"), default=0.2),
+        max_tokens=_int(_decouple_config("LLM_MAX_TOKENS", default="512"), default=512),
+        cache_enabled=_bool(_decouple_config("LLM_CACHE_ENABLED", default="true"), default=True),
+        cache_backend=_decouple_config("LLM_CACHE_BACKEND", default="memory"),
+        cache_redis_url=_decouple_config("LLM_CACHE_REDIS_URL", default=""),
+        cost_logging_enabled=_bool(_decouple_config("LLM_COST_LOGGING_ENABLED", default="true"), default=True),
+    )
+
     return Settings(
         environment=environment,
         http=http_settings,
         database=database_settings,
         storage=storage_settings,
         cors=cors_settings,
+        llm=llm_settings,
         claims_cleanup_enabled=_bool(_decouple_config("CLAIMS_CLEANUP_ENABLED", default="false"), default=False),
         claims_cleanup_interval_seconds=_int(_decouple_config("CLAIMS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
+        claims_enforcement_enabled=_bool(_decouple_config("CLAIMS_ENFORCEMENT_ENABLED", default="true"), default=True),
         ack_ttl_enabled=_bool(_decouple_config("ACK_TTL_ENABLED", default="false"), default=False),
         ack_ttl_seconds=_int(_decouple_config("ACK_TTL_SECONDS", default="1800"), default=1800),
         ack_ttl_scan_interval_seconds=_int(_decouple_config("ACK_TTL_SCAN_INTERVAL_SECONDS", default="60"), default=60),

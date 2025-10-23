@@ -103,8 +103,8 @@
 
 - [ ] **Attachment handling**  
   - [x] Make conversion configurable per agent/project, allow storing original binary if required (alongside WebP).  
-  - [ ] Add deduplication manifest (tracking global SHA) and metadata (type, dimensions).  
-  - [ ] Remember agent preference for inline vs file attachments.
+  - [x] Add deduplication manifest (tracking global SHA) and metadata (type, dimensions).  
+  - [x] Remember agent preference for inline vs file attachments.
 
 - [ ] **Agent directory enhancements**  
   - [x] Add `whois(agent)` tool returning project assignments, recent activity, last git commit info.  
@@ -127,9 +127,9 @@
   - [ ] Prepare migrations once schema evolves (Alembic integration).
 
 - [ ] **Testing gaps**  
-  - [ ] Add manual/automated scripts to verify guard behavior (without invoking pytest).  
-  - [ ] Scripted integration tests for HTTP endpoints (liveness/readiness, token auth) using curl-like commands.  
-  - [ ] Document manual testing steps for CLI flows (`serve-http`, `migrate`, etc.).
+  - [x] Add manual/automated scripts to verify guard behavior (without invoking pytest).  
+  - [x] Scripted integration tests for HTTP endpoints (liveness/readiness, token auth) using curl-like commands.  
+  - [x] Document manual testing steps for CLI flows (`serve-http`, `migrate`, etc.).
 
 - [ ] **Documentation**  
   - [ ] Expand README with quickstart, configuration matrix, CLI usage, guard setup, and message flow explanation.  
