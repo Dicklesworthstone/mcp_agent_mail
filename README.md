@@ -648,3 +648,11 @@ See `TODO.md` for the in-progress task list, including:
 ---
 
 If you’re building with or contributing to this project, please read `project_idea_and_guide.md` for full design context and the motivation behind these decisions. Contributions that preserve the clean, HTTP-only FastMCP approach and the Git+SQLite dual persistence model are welcome.
+
+## Deployment quick notes
+
+- **Direct uvicorn**: `uvicorn mcp_agent_mail.http:build_http_app --factory --host 0.0.0.0 --port 8765`
+- **Python module**: `python -m mcp_agent_mail.http --host 0.0.0.0 --port 8765`
+- **Gunicorn**: `gunicorn -c deploy/gunicorn.conf.py mcp_agent_mail.http:build_http_app --factory`
+
+See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the broader deployment roadmap (Docker, systemd, automation scripts, CI/CD).

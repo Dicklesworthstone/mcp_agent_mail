@@ -1,0 +1,18 @@
+[Unit]
+Description=MCP Agent Mail HTTP Service
+After=network.target postgresql.service
+
+[Service]
+EnvironmentFile=/etc/mcp-agent-mail.env
+Type=simple
+WorkingDirectory=/opt/mcp-agent-mail
+ExecStart=/usr/bin/uvicorn mcp_agent_mail.http:build_http_app --factory --host 0.0.0.0 --port 8765
+Restart=always
+RestartSec=5
+User=appuser
+Group=appuser
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

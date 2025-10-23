@@ -1,0 +1,24 @@
+version: '3.8'
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agent_mail
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  server:
+    build: .
+    ports:
+      - "8765:8765"
+    environment:
+      DATABASE_URL: postgres+asyncpg://agent:agent@db:5432/agent_mail
+      STORAGE_ROOT: /data/archive
+    volumes:
+      - archive:/data/archive
+    depends_on:
+      - db
+volumes:
+  pgdata:
+  archive:
