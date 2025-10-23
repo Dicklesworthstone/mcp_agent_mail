@@ -65,20 +65,25 @@ def _run_command(command: list[str]) -> None:
 @app.command("lint")
 def lint() -> None:
     """Run Ruff linting with automatic fixes."""
+    console.rule("[bold]Running Ruff Lint[/bold]")
     _run_command(["ruff", "check", "--fix", "--unsafe-fixes"])
+    console.print("[green]Linting complete.[/]")
 
 
 @app.command("typecheck")
 def typecheck() -> None:
     """Run MyPy type checking."""
+    console.rule("[bold]Running Type Checker[/bold]")
     _run_command(["uvx", "ty", "check"])
+    console.print("[green]Type check complete.[/]")
 
 
 @app.command("migrate")
 def migrate() -> None:
     """Ensure database schema and FTS structures exist."""
     settings = get_settings()
-    asyncio.run(ensure_schema(settings))
+    with console.status("Applying migrations..."):
+        asyncio.run(ensure_schema(settings))
     console.print("[green]Database migrations complete.[/]")
 
 
@@ -105,7 +110,8 @@ def list_projects(include_agents: bool = typer.Option(False, help="Include agent
                 rows = [(project, 0) for project in projects]
             return rows
 
-    rows = asyncio.run(_collect())
+    with console.status("Collecting project data..."):
+        rows = asyncio.run(_collect())
     table = Table(title="Projects", show_lines=False)
     table.add_column("ID")
     table.add_column("Slug")

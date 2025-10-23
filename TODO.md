@@ -22,7 +22,7 @@
   - [x] Expand claim tool to detect glob overlaps
   - [x] Implement release_claims tool returning updated status
   - [x] Build resource for active claims per project
-  - [ ] Prepare pre-commit hook generator installing guard
+  - [x] Prepare pre-commit hook generator installing guard
 - [ ] Resources
   - [x] resource://message/{id}{?project} returning body + metadata
   - [x] resource://thread/{thread_id}{?project,include_bodies}
@@ -37,7 +37,7 @@
   - [x] Provide CLI command to run migrations and list projects/agents
   - [x] Add optional bearer auth scaffold for HTTP transport
   - [x] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
-  - [ ] Enrich CLI output with Rich panels/logging
+  - [x] Enrich CLI output with Rich panels/logging
 - [ ] Testing
   - [ ] Expand tests to cover filesystem archive & git commits
   - [ ] Test claims conflict detection, release tool, resources
