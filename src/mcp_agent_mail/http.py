@@ -6,6 +6,7 @@ import argparse
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -44,6 +45,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     if settings.http.bearer_token:
         fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
+
+    # Optional CORS
+    if settings.cors.enabled:
+        fastapi_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors.origins or ["*"],
+            allow_credentials=settings.cors.allow_credentials,
+            allow_methods=settings.cors.allow_methods or ["*"],
+            allow_headers=settings.cors.allow_headers or ["*"],
+        )
 
     @fastapi_app.get("/health/liveness")
     async def liveness() -> JSONResponse:
