@@ -1,0 +1,46 @@
+# Project TODO (in progress)
+
+- [ ] Persistence archive
+  - [ ] Define storage root and per-project structure (agents/, messages/, claims/, attachments/)
+  - [ ] Implement Markdown writing with JSON front matter for canonical message + inbox/outbox copies
+  - [ ] Persist agent profiles to json under agents/
+  - [ ] Persist claim JSON artifacts with hashed filenames
+  - [ ] Ensure all file operations async-friendly (use asyncio.to_thread as needed)
+  - [ ] Integrate GitPython: repo init per project, add commit helper with lock handling
+  - [ ] Add advisory file lock to serialize archive writes
+- [ ] Agent identity workflow
+  - [ ] Update name generator to check DB + filesystem for uniqueness
+  - [ ] Expose create identity tool returning full profile (program/model/task)
+  - [ ] Track last_active and ensure updates on interactions
+- [ ] Messaging enhancements
+  - [ ] Support message replies (thread_id, subject prefix)
+  - [ ] Include read/ack tools updating timestamps
+  - [ ] Implement urgent-only filter and ack-required flag handling
+  - [ ] Inline/attachment WebP conversion with Pillow; store under attachments/
+  - [ ] Provide acknowledgements tool
+- [ ] Claims/leases
+  - [ ] Expand claim tool to detect glob overlaps
+  - [ ] Implement release_claims tool returning updated status
+  - [ ] Build resource for active claims per project
+  - [ ] Prepare pre-commit hook generator installing guard
+- [ ] Resources
+  - [ ] resource://message/{id}{?project} returning body + metadata
+  - [ ] resource://thread/{thread_id}{?project,include_bodies}
+  - [ ] resource://inbox/{agent}{?project,...}
+  - [ ] resource://claims/{project}{?active_only}
+- [ ] Search & summaries
+  - [ ] Configure SQLite FTS tables/triggers for messages
+  - [ ] search_messages tool w/ query param
+  - [ ] summarize_thread tool returning keypoints/actions
+- [ ] Config/auth/CLI
+  - [ ] Extend settings for storage root, git author, attachment limits
+  - [ ] Provide CLI command to run migrations and list projects/agents
+  - [ ] Add optional bearer auth scaffold for HTTP transport
+  - [ ] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
+  - [ ] Enrich CLI output with Rich panels/logging
+- [ ] Testing
+  - [ ] Expand tests to cover filesystem archive & git commits
+  - [ ] Test claims conflict detection, release tool, resources
+  - [ ] Test search and summaries tools
+  - [ ] Test CLI serve-http with auth defaults and migrations command
+  - [ ] Add image conversion test (mocking Pillow)

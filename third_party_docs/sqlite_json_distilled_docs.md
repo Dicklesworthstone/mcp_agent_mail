@@ -1,0 +1,1083 @@
+# SQLite JSON Support: A Comprehensive Technical Reference (Part 1 of 3)
+
+## 1.0 Introduction: Philosophy and Availability
+
+This document provides a definitive and highly detailed technical reference for the JSON support integrated into SQLite. It is structured to be maximally coherent and intuitive for a Large Language Model, ensuring every concept, function, and behavior is explained with precision and exhaustive examples.
+
+The JSON1 extension aligns with SQLite's core philosophy: **Small. Fast. Reliable.** It provides a powerful, native, and efficient way to store, query, and manipulate JSON data directly within the database engine, avoiding the need for data serialization/deserialization at the application layer.
+
+### 1.1 Availability and Compilation
+
+The JSON functions and operators are a standard, built-in feature of SQLite, but their inclusion has evolved.
+
+*   **SQLite 3.38.0 (2022-02-22) and later:**
+    *   The JSON1 extension is **included by default**.
+    *   It is considered a core part of the engine.
+    *   To omit it, one must explicitly use the `-DSQLITE_OMIT_JSON` compile-time option.
+    *   This represents an "opt-out" model.
+
+*   **SQLite 3.37.2 and earlier:**
+    *   The JSON1 extension was **not included by default**.
+    *   To include it, one had to explicitly use the `-DSQLITE_ENABLE_JSON1` compile-time option during the build process.
+    *   This represented an "opt-in" model.
+
+Understanding this history is crucial when working with different SQLite versions or custom builds, as the presence of the JSON functions is not guaranteed in older distributions.
+
+## 2.0 The Dual Storage Model: TEXT vs. JSONB
+
+SQLite does not introduce a new fundamental storage type called "JSON". Due to strict backward compatibility constraints, it can only store `NULL`, `INTEGER`, `REAL`, `TEXT`, and `BLOB` values. The JSON functionality leverages the existing `TEXT` and `BLOB` types to represent JSON data. The choice between these two formats is the single most important architectural decision when working with JSON in SQLite, as it has profound implications for performance, storage, and interoperability.
+
+### 2.1 Standard JSON as TEXT
+
+This is the default, most straightforward, and most compatible method for storing JSON.
+
+*   **Storage Type:** `TEXT`
+*   **Format:** The data is stored as a simple string that conforms to the [RFC-8259 JSON standard](https://www.rfc-editor.org/rfc/rfc8259.html). It is human-readable and can be easily exported and consumed by any standard JSON parser.
+*   **Mechanism:** When a JSON function operates on a `TEXT` value, it must first **parse** the string into an internal, temporary representation, perform the requested operation, and then **render** the result back into a minified JSON text string. This parse/operate/render cycle occurs for *every* function call.
+*   **Pros:**
+    *   **Human-Readable:** Data can be easily inspected and understood directly in a SQL client.
+    *   **Maximum Interoperability:** The stored data is standard text JSON, compatible with virtually any programming language, tool, or system.
+    *   **Simplicity:** No special handling is required; it's just text.
+*   **Cons:**
+    *   **Performance Overhead:** The constant parsing and rendering of text is computationally expensive, especially for large or complex JSON documents or in high-frequency update operations.
+
+### 2.2 Binary JSON as JSONB
+
+Introduced in **SQLite 3.45.0 (2024-01-15)**, JSONB is a high-performance binary format designed for internal use.
+
+*   **Storage Type:** `BLOB` (Binary Large Object)
+*   **Format:** A proprietary, optimized binary representation of the JSON parse tree. It is **not human-readable**.
+*   **Mechanism:** JSONB stores SQLite's internal "parse tree" representation directly on disk. When a JSON function receives a JSONB blob, it can **bypass the parsing step entirely**, operating directly on the binary structure. This dramatically reduces CPU overhead.
+*   **Name Origin & Incompatibility Warning:** The "JSONB" name is inspired by PostgreSQL, but the on-disk format is **completely different and not binary compatible**. SQLite's JSONB cannot be read by PostgreSQL and vice-versa. It is intended solely for internal use within an SQLite database.
+*   **Performance Characteristics:**
+    *   The primary advantage of JSONB is its **speed**. It can be several times faster than text JSON for read and update operations because it eliminates parsing and rendering.
+    *   It is also typically **5-10% smaller** on disk than its text equivalent.
+    *   The current implementation of JSONB provides O(N) time complexity for element lookups, the same as for text JSON. The speed benefit comes from a much lower constant factor. The format is designed with space for future enhancements that *might* enable O(1) lookups, but this capability does not currently exist.
+*   **Handling of Malformed JSONB:**
+    *   JSONB generated by SQLite's `jsonb_*` functions will always be well-formed.
+    *   However, since JSONB is just a `BLOB`, it is possible to manually create a malformed blob. When a JSON function encounters malformed JSONB, the behavior is explicitly defined by the "garbage-in/garbage-out" principle:
+        1.  The SQL statement might abort with a "malformed JSON" error.
+        2.  The correct answer might be returned, if the malformed parts of the blob do not affect the specific operation.
+        3.  A nonsensical or incorrect answer might be returned.
+    *   **Crucial Guarantee:** Malformed JSONB will **never** cause a memory error, crash, or security vulnerability. It may produce incorrect results or errors, but it will not corrupt the process.
+    *   Use `json_valid(X, flags)` to verify the integrity of a JSONB blob if its origin is untrusted.
+
+### 2.3 Detailed Comparison: TEXT vs. JSONB
+
+| Feature | `TEXT` (Standard JSON) | `JSONB` (Binary JSON) |
+| :--- | :--- | :--- |
+| **Primary Use Case** | Data interchange, human readability, simple queries. | High-performance, frequent read/write operations within SQLite. |
+| **Storage Datatype** | `TEXT` | `BLOB` |
+| **On-Disk Format** | Human-readable RFC 8259 string. | Opaque, optimized binary format internal to SQLite. |
+| **Performance** | **Slower.** Requires parsing and rendering on every function call. | **Faster.** Bypasses parsing and rendering for most operations. |
+| **Size** | Standard text size. | Typically 5-10% smaller than the text equivalent. |
+| **Creation Functions**| `json()`, `json_array()`, `json_object()`, etc. | `jsonb()`, `jsonb_array()`, `jsonb_object()`, etc. |
+| **Interoperability**| **High.** Any system can read the text data. | **Low.** Only SQLite can interpret the JSONB blob. |
+| **Introduced in** | Original JSON1 extension. | SQLite 3.45.0. |
+| **Lookup Complexity**| O(N) | O(N) (with a significantly lower constant factor). |
+| **Debugging** | Easy. Can be read directly via `SELECT`. | Difficult. Requires `json_pretty()` or other functions to view content. |
+
+## 3.0 Core Syntax and Argument Interpretation
+
+Correctly using SQLite's JSON functions requires a precise understanding of how the function arguments (`json`, `path`, and `value`) are interpreted.
+
+### 3.1 The `json` Argument
+
+This is typically the first argument to any JSON function. It is the JSON document upon which the function will operate.
+
+*   The argument can be a `TEXT` value containing a well-formed JSON string.
+*   The argument can also be a `BLOB` value containing a well-formed JSONB binary structure.
+*   The functions will automatically detect whether the input is text or JSONB and process it accordingly. If the input is JSONB, the function will run faster.
+*   If the `json` argument is a `TEXT` value that is not well-formed JSON, most functions will throw an error. The exceptions are `json_valid()`, `json_quote()`, and `json_error_position()`, which are designed to handle invalid input.
+
+### 3.2 The `path` Argument
+
+The `path` argument is a `TEXT` value used to specify a location within a JSON document. A well-formed path is required, or the function will throw an error.
+
+*   **Structure:** A path must begin with a single dollar sign character (`$`), representing the root of the document. This is followed by zero or more object or array accessors.
+*   **Object Access:** Use a dot followed by the object label (e.g., `$.name`, `$.address.city`). The label does not need to be quoted.
+*   **Array Access:** Use square brackets with an integer index (e.g., `$[0]`, `$.users[1]`).
+    *   **Zero-Based Indexing:** `[0]` is the first element.
+    *   **Negative Indexing (from the right):** `[#-N]` selects the Nth element from the end. `[#-1]` is the last element of the array. The `#` character is conceptually the "number of elements in the array", so `[#-1]` evaluates to the correct index for the last element.
+    *   **Append-to-Array Syntax:** The special index `[#]` refers to the position *after* the last element. It is used with functions like `json_insert()` or `json_set()` to append a new value to the end of an array.
+
+**Example of Path Syntax:**
+
+```sql
+-- Given JSON: {"users": [{"name": "Alice", "id": 101}, {"name": "Bob", "id": 102}]}
+
+-- Path to the entire document
+-- '$.'
+
+-- Path to the 'users' array
+-- '$.users'
+
+-- Path to the first user object in the array
+-- '$.users[0]'
+
+-- Path to the name of the second user
+-- '$.users[1].name'
+
+-- Path to the last user in the array
+-- '$.users[#-1]'
+
+-- Path for appending a new user to the 'users' array
+-- '$.users[#]'
+```
+
+### 3.3 The `value` Argument (Critical Distinction)
+
+For functions that modify or create JSON (`json_insert`, `json_replace`, `json_set`, `json_array`, `json_object`), the interpretation of arguments supplied for a `value` parameter is nuanced and critical to understand.
+
+A `value` argument is treated in one of two ways, depending on its origin:
+
+1.  **Default: Interpreted as a Literal String:**
+    *   If a `value` argument is an ordinary SQL literal (e.g., `'[1,2]'`), a number, or the result of a non-JSON SQL function, it is **always treated as a literal**.
+    *   The entire value will be converted into a JSON string, including quoting and escaping. This is true even if the string itself *looks like* valid JSON.
+    *   The result of the `->>` operator is always SQL `TEXT`, so it is also treated as a literal string.
+
+2.  **Special Case: Interpreted as a JSON Structure:**
+    *   If a `value` argument is the **direct result of another JSON function** (e.g., `json()`, `json_array()`, `json_object()`, `jsonb()`, etc.) or the `->` operator, it is recognized as being "real" JSON.
+    *   The function will then embed the JSON structure (object or array) or primitive directly, without adding extra quotes.
+
+**Demonstration:**
+
+```sql
+-- CASE 1: Value is a literal string and is quoted in the output.
+-- The string '[52,3.14159]' is treated as a single text value.
+SELECT json_object('ex', '[52,3.14159]');
+-- Result: '{"ex":"[52,3.14159]"}'
+
+-- The ->> operator returns SQL TEXT, so it's also treated as a literal string.
+SELECT json_object('ex', ('[52,3.14159]' ->> '$'));
+-- Result: '{"ex":"[52,3.14159]"}'
+
+
+-- CASE 2: Value is the result of a JSON function and is embedded as a structure.
+-- The json() function marks its output as "JSON".
+SELECT json_object('ex', json('[52,3.14159]'));
+-- Result: '{"ex":[52,3.14159]}'
+
+-- The json_array() function also produces a "JSON" value.
+SELECT json_object('ex', json_array(52, 3.14159));
+-- Result: '{"ex":[52,3.14159]}'
+
+-- The -> operator returns JSON text, which is recognized as a JSON structure.
+SELECT json_object('ex', ('[52,3.14159]' -> '$'));
+-- Result: '{"ex":[52,3.14159]}'
+```
+
+> **LLM Takeaway:** To nest JSON structures, you **must** wrap the inner structure in a JSON-producing function like `json()`, `json_array()`, or `json_object()`, or extract it using the `->` operator.
+
+## 4.0 JSON5 and Extended Syntax Support
+
+Beginning with **SQLite 3.42.0 (2023-05-16)**, the JSON functions were enhanced to **read** input text that uses [JSON5 extensions](https://json5.org/). This greatly improves flexibility when ingesting data from various sources.
+
+**Core Principle:** SQLite can **read** JSON5, but it will always **write** strictly canonical RFC-8259 JSON.
+
+### 4.1 Supported JSON5 Extensions
+
+The following JSON5 features are understood by the SQLite parser:
+
+*   **Objects:**
+    *   Keys may be unquoted identifiers (e.g., `{key: "value"}`).
+    *   A single trailing comma is permitted (e.g., `{a:1,}`).
+*   **Arrays:**
+    *   A single trailing comma is permitted (e.g., `[1,2,]`).
+*   **Strings:**
+    *   May be single-quoted (e.g., `'hello'`).
+    *   May span multiple lines by escaping the newline character (`\`).
+    *   May include additional character escapes (e.g., `\v` for vertical tab).
+*   **Numbers:**
+    *   May be hexadecimal (e.g., `0x1A`).
+    *   May have a leading or trailing decimal point (e.g., `.5`, `5.`).
+    *   May be `Infinity`, `-Infinity`, and `NaN`.
+    *   May begin with an explicit plus sign (e.g., `+100`).
+*   **Comments:**
+    *   Single-line `// ...` comments are allowed.
+    *   Multi-line `/* ... */` comments are allowed.
+*   **Whitespace:**
+    *   Additional whitespace characters are permitted.
+
+### 4.2 SQLite-Specific Syntax Extensions
+
+SQLite's parser is slightly more permissive than the strict JSON5 specification in two ways, for performance and practical compatibility reasons:
+
+1.  **Relaxed Unquoted Keys:** Strict JSON5 requires unquoted keys to be valid ECMAScript 5.1 IdentifierNames. Verifying this requires large Unicode tables. SQLite simplifies this by allowing unquoted object keys to include **any Unicode character greater than U+007F that is not a whitespace character**. This simplifies the parser, making it smaller and faster.
+2.  **Extended Infinity/NaN:** JSON5 allows `Infinity`, `-Infinity`, and `NaN`. SQLite extends this to also accept:
+    *   The abbreviation `Inf` for `Infinity`.
+    *   Case-insensitivity for both `Infinity`/`Inf` and `NaN` (e.g., `infinity`, `NAN`).
+    *   `QNaN` and `SNaN` (quiet/signaling NaN), which are also case-insensitive.
+    *   **Note:** Within SQLite, all NaN variants (`NaN`, `QNaN`, `SNaN`) are parsed and treated as a JSON `null` value.
+
+### 4.3 Working with JSON5
+
+*   **Canonicalization:** To convert a JSON5 string into a standard, canonical JSON string, use the `json()` function.
+    ```sql
+    SELECT json('{key: "value", // a comment
+                  arr: [1,]}');
+    -- Result: '{"key":"value","arr":[1]}'
+    ```
+*   **Validation:** The standard `json_valid(X)` function remains strict for backward compatibility and only validates canonical JSON. To validate for JSON5, you must use the two-argument version with a flag:
+    *   `json_valid(X)` → Returns `1` only for canonical RFC-8259 JSON.
+    *   `json_valid(X, 2)` → Returns `1` for JSON5 or canonical JSON.
+
+## 5.0 Compatibility and Historical Behavior
+
+### 5.1 The JSON BLOB Input Bug (Official Legacy Behavior)
+
+A critical piece of historical context affects how `BLOB` inputs are handled.
+
+*   **The Original Bug:** The original documentation stated that passing a `BLOB` to a JSON function (that was not valid JSONB) should raise an error. However, the implementation had a bug: it would implicitly cast the `BLOB` to `TEXT` and attempt to parse it as a JSON string.
+*   **Application Dependency:** Some applications, particularly those using the CLI's `readfile()` function (which returns a `BLOB`), came to depend on this undocumented behavior to process JSON files.
+*   **The Accidental Fix:** The JSON routines were reimplemented in version 3.45.0, which "fixed" this bug, causing the documented behavior (raising an error) to occur. This broke applications that relied on the old behavior.
+*   **Official Backwards "Bug" Compatibility:** To restore functionality for these applications, version **3.45.1 (2024-01-30)** officially documented and reinstated the legacy behavior. A `BLOB` input that is not valid JSONB will be treated as text JSON.
+*   **The Ambiguity Problem:** This creates a potential ambiguity. A `BLOB` could be a valid JSONB structure while *also* being a valid text JSON string when cast to text.
+    *   Example: The `BLOB` `x'33343535'` is valid JSONB representing the integer `456`. When cast to text, it becomes the string `'3455'`, which is also a valid JSON number.
+*   **Recommendation:** If you have legacy databases that store text JSON in `BLOB` columns, it is strongly recommended to run an `UPDATE` statement to convert those columns to the `TEXT` datatype to avoid any ambiguity when using SQLite 3.45.0 or later.
+
+### 5.2 Parser Nesting Depth Limit
+
+To prevent stack overflow vulnerabilities from maliciously crafted input, the recursive descent parser used by SQLite imposes a nesting depth limit.
+
+*   **Limit:** Any JSON input that has **more than 1000 levels of nesting** (e.g., an array containing an array containing an array... 1001 times) is considered invalid, and functions will fail.
+*   **RFC Compliance:** This limitation is expressly permitted by the JSON standard, RFC-8259 section 9, which allows implementations to set their own nesting depth limits.
+
+---
+
+# SQLite JSON Support: A Comprehensive Technical Reference (Part 2 of 3)
+
+## 6.0 Scalar Function Reference
+
+This section provides a detailed breakdown of every scalar JSON function and operator. Scalar functions return a single value for each row of input. They are the primary tools for creating, manipulating, querying, and validating JSON data.
+
+Each function exists in two primary families:
+*   `json_*`: Functions that operate on and typically return standard `TEXT` JSON.
+*   `jsonb_*`: Functions that operate on and typically return binary `JSONB` (`BLOB`). These were introduced in version 3.45.0 and offer significant performance benefits.
+
+### 6.1 Creation and Conversion Functions
+
+These functions are used to construct new JSON values or convert between formats.
+
+---
+
+#### 6.1.1 `json(X)`
+*   **Syntax:** `json(X)`
+*   **Purpose:** The primary function for validating and canonicalizing JSON text.
+*   **Behavior:**
+    1.  It verifies that its argument `X` is a valid JSON string (either canonical or JSON5) or a JSONB blob.
+    2.  If `X` is not well-formed, the function throws a "malformed JSON" error.
+    3.  If `X` is valid, it returns a **minified, canonical RFC-8259 JSON `TEXT` string**. All unnecessary whitespace is removed, and any JSON5 extensions are converted to their standard equivalents.
+*   **Use Cases:**
+    *   **Validation:** Use `json(X)` within a `TRY...CATCH` block (or application-level equivalent) to ensure data is valid before insertion.
+    *   **Canonicalization:** Convert JSON5 or non-minified JSON into a standard, compact format for consistent storage.
+    *   **Forcing JSON Interpretation:** As detailed in Part 1 (Section 3.3), wrapping a value in `json()` marks it as "JSON", preventing it from being treated as a literal string when nested inside other JSON functions like `json_object()` or `json_array()`.
+*   **Duplicate Object Keys:** If the input JSON object `X` contains duplicate keys, the current implementation preserves the duplicates in the output. However, this behavior is officially **undefined**. Future versions of SQLite may be enhanced to silently remove duplicates, so applications should not rely on their preservation.
+*   **Examples:**
+    ```sql
+    -- Minification and canonicalization
+    SELECT json(' { "this" : "is", "a": [ "test" ] } ');
+    -- Result: '{"this":"is","a":["test"]}'
+
+    -- Conversion from JSON5 to canonical JSON
+    SELECT json('{key: "value", /* comment */ arr:[1,2,],}');
+    -- Result: '{"key":"value","arr":[1,2]}'
+
+    -- Forcing JSON interpretation within json_object
+    SELECT json_object('data', json('[1,2,3]'));
+    -- Result: '{"data":[1,2,3]}'
+    ```
+
+---
+
+#### 6.1.2 `jsonb(X)`
+*   **Syntax:** `jsonb(X)`
+*   **Purpose:** Converts a JSON value into the high-performance binary `JSONB` format.
+*   **Behavior:**
+    1.  It accepts an argument `X` which can be JSON `TEXT` (canonical or JSON5) or a `BLOB`.
+    2.  If `X` is `TEXT` that is not valid JSON, it throws an error.
+    3.  If `X` is valid `TEXT`, it returns the binary `JSONB` representation as a `BLOB`.
+    4.  If `X` is a `BLOB` that already appears to be JSONB, it returns a copy of `X`. The validation in this case is superficial; it only checks the outer element's header and does not perform a deep validation of the entire structure.
+*   **Use Cases:**
+    *   **Performance Optimization:** Use `jsonb(X)` to convert incoming text JSON into JSONB before storing it in a `BLOB` column for faster subsequent access.
+    *   **Efficient Nesting:** When nesting JSON functions, using `jsonb()` for inner arguments is more efficient than `json()`, as it provides a pre-parsed structure to the outer function (see Section 8.1 Performance Considerations).
+*   **Examples:**
+    ```sql
+    -- Storing JSON as a high-performance JSONB blob
+    -- CREATE TABLE documents (id INTEGER PRIMARY KEY, content BLOB);
+    INSERT INTO documents (content) VALUES (jsonb('{"user": "alpha", "active": true}'));
+    ```
+
+---
+
+#### 6.1.3 `json_array(value1, value2, ...)`
+*   **Syntax:** `json_array([value1, value2, ...])`
+*   **Purpose:** Constructs a new JSON array as a `TEXT` string.
+*   **Behavior:**
+    *   Accepts zero or more arguments and returns a well-formed JSON array string composed of those arguments.
+    *   The interpretation of each `value` argument follows the critical distinction rule from Part 1 (Section 3.3):
+        *   SQL literals (`TEXT`, `INTEGER`, `REAL`, `NULL`) are converted to their corresponding JSON primitive types. Text literals are quoted.
+        *   Values that are the direct result of a JSON function (like a nested `json_object()` or `json()`) are embedded as JSON structures.
+    *   Throws an error if any argument is a `BLOB`.
+*   **Examples:**
+    ```sql
+    -- Simple array of primitives
+    SELECT json_array(1, 2, '3', 4, null);
+    -- Result: '[1,2,"3",4,null]'
+
+    -- A literal string containing JSON characters is treated as a string
+    SELECT json_array('[1,2]');
+    -- Result: '["[1,2]"]'
+
+    -- Nesting by using another JSON function
+    SELECT json_array(1, json_array(2, 3), 4);
+    -- Result: '[1,[2,3],4]'
+
+    -- A more complex example showing the difference
+    SELECT json_array(1, '{"a":2}', json_object('a', 2));
+    -- Result: '[1,"{\"a\":2}",{"a":2}]'
+    ```
+
+---
+
+#### 6.1.4 `jsonb_array(value1, value2, ...)`
+*   **Syntax:** `jsonb_array([value1, value2, ...])`
+*   **Purpose:** Works identically to `json_array()` but returns the result in the binary `JSONB` format (`BLOB`) instead of `TEXT`.
+
+---
+
+#### 6.1.5 `json_object(label1, value1, ...)`
+*   **Syntax:** `json_object([label1, value1, label2, value2, ...])`
+*   **Purpose:** Constructs a new JSON object as a `TEXT` string.
+*   **Behavior:**
+    *   Accepts zero or more pairs of arguments and returns a well-formed JSON object string.
+    *   In each pair, the first argument is the object `label` (key) and the second is the `value`.
+    *   The `label` argument must be `TEXT`.
+    *   The `value` argument follows the same critical interpretation rule as `json_array()`.
+    *   Throws an error if any argument is a `BLOB`.
+    *   **Duplicate Labels:** The current implementation permits duplicate labels without error, though this might change in a future version. Relying on this behavior is discouraged.
+*   **Examples:**
+    ```sql
+    -- Simple object
+    SELECT json_object('a', 2, 'c', 4);
+    -- Result: '{"a":2,"c":4}'
+
+    -- A literal string value is quoted
+    SELECT json_object('a', 2, 'c', '{e:5}');
+    -- Result: '{"a":2,"c":"{e:5}"}'
+
+    -- Nesting by using another JSON function
+    SELECT json_object('a', 2, 'c', json_object('e', 5));
+    -- Result: '{"a":2,"c":{"e":5}}'
+    ```
+
+---
+
+#### 6.1.6 `jsonb_object(label1, value1, ...)`
+*   **Syntax:** `jsonb_object([label1, value1, ...])`
+*   **Purpose:** Works identically to `json_object()` but returns the result in the binary `JSONB` format (`BLOB`) instead of `TEXT`.
+
+---
+
+#### 6.1.7 `json_quote(value)`
+*   **Syntax:** `json_quote(X)`
+*   **Purpose:** Converts a single SQL value into its corresponding JSON primitive representation. This function is useful for understanding how SQLite will represent a value within a larger JSON structure.
+*   **Behavior:**
+    *   If `X` is an SQL number (`INTEGER` or `REAL`), it returns the number as a JSON number (text).
+    *   If `X` is an SQL `NULL`, it returns the JSON string `'null'`.
+    *   If `X` is an SQL `TEXT` string, it returns that string quoted and with necessary characters escaped, making it a valid JSON string.
+    *   If `X` is a value that is *already* marked as JSON (i.e., the result of another JSON function), `json_quote` is a no-op and returns the value unchanged.
+*   **Examples:**
+    ```sql
+    SELECT json_quote(3.14159);   -- Result: 3.14159
+    SELECT json_quote('verdant');   -- Result: '"verdant"'
+    SELECT json_quote(NULL);        -- Result: 'null'
+
+    -- An un-marked JSON-like string gets quoted
+    SELECT json_quote('[1]');       -- Result: '"[1]"'
+
+    -- A marked JSON array is returned as-is
+    SELECT json_quote(json('[1]')); -- Result: '[1]'
+    ```
+
+---
+
+### 6.2 Extraction and Querying Functions & Operators
+
+These functions and operators are used to retrieve data from within a JSON document.
+
+---
+
+#### 6.2.1 `json_extract(json, path1, path2, ...)`
+*   **Syntax:** `json_extract(X, P1, [P2, ...])`
+*   **Purpose:** The primary function for extracting one or more values from a JSON document `X` using path arguments.
+*   **Behavior (Single Path Argument):**
+    *   When called with a single path `P1`, the SQL datatype of the result depends on the JSON type of the extracted element:
+        *   JSON `null` → SQL `NULL`
+        *   JSON `number` → SQL `INTEGER` or `REAL`
+        *   JSON `true` → SQL `INTEGER` (1)
+        *   JSON `false` → SQL `INTEGER` (0)
+        *   JSON `string` → SQL `TEXT` (the dequoted string value)
+        *   JSON `object` or `array` → SQL `TEXT` (the text representation of the sub-structure)
+    *   If the path does not locate an element, the result is SQL `NULL`.
+*   **Behavior (Multiple Path Arguments):**
+    *   When called with two or more paths (`P1`, `P2`, ...), the function **always** returns a single SQL `TEXT` value.
+    *   This text value is a well-formed JSON array containing the results of extracting each path individually.
+*   **MySQL Incompatibility Note:** The behavior of single-path `json_extract` differs subtly from MySQL's version. MySQL's `json_extract` *always* returns a JSON-formatted string (e.g., `'null'` for a null, `'"xyz"'` for a string). SQLite's version returns the underlying SQL value, which is often more convenient.
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_doc = '{"a":2, "c":[4, 5, {"f":7}], "d": "xyz", "e": null}'
+
+    -- Extracting sub-objects and arrays returns JSON text
+    SELECT json_extract(json_doc, '$');      -- '{"a":2,"c":[4,5,{"f":7}],"d":"xyz","e":null}'
+    SELECT json_extract(json_doc, '$.c');    -- '[4,5,{"f":7}]'
+
+    -- Extracting a primitive returns the corresponding SQL type
+    SELECT json_extract(json_doc, '$.a');    -- SQL INTEGER: 2
+    SELECT json_extract(json_doc, '$.c[2].f'); -- SQL INTEGER: 7
+    SELECT json_extract(json_doc, '$.d');    -- SQL TEXT: 'xyz'
+    SELECT json_extract(json_doc, '$.e');    -- SQL NULL
+
+    -- Extracting a non-existent path returns NULL
+    SELECT json_extract(json_doc, '$.x');    -- SQL NULL
+
+    -- Multiple paths return a single JSON array text
+    SELECT json_extract(json_doc, '$.d', '$.a', '$.x'); -- '["xyz",2,null]'
+    ```
+
+---
+
+#### 6.2.2 `jsonb_extract(json, path1, path2, ...)`
+*   **Syntax:** `jsonb_extract(X, P1, [P2, ...])`
+*   **Purpose:** A variation of `json_extract` optimized for `JSONB` output.
+*   **Behavior:**
+    *   It works exactly the same as `json_extract` for cases where a primitive SQL value (text, numeric, null, boolean) is returned.
+    *   The key difference is when `json_extract` would normally return a `TEXT` representation of a JSON array or object. In this case, `jsonb_extract` returns the extracted sub-component in the binary `JSONB` format (`BLOB`).
+*   **Use Case:** Ideal when you need to extract a sub-object or sub-array and immediately pass it to another JSON function, as it avoids the text-rendering step.
+
+---
+
+#### 6.2.3 The `->` Operator
+*   **Syntax:** `json_column -> path_or_key`
+*   **Availability:** SQLite 3.38.0 and later.
+*   **Purpose:** A concise, PostgreSQL- and MySQL-compatible operator for extracting a sub-component.
+*   **Behavior:**
+    *   The left operand is a JSON `TEXT` string or a `JSONB` blob.
+    *   The right operand can be a full path string (e.g., `'$.a[0]'`) or, for convenience, a simple text label or integer index.
+        *   `-> 'label'` is equivalent to `-> '$.label'`.
+        *   `-> 0` is equivalent to `-> '$[0]'`.
+    *   This operator **always returns a `TEXT` representation of the selected JSON sub-component**. It never returns a raw SQL value.
+        *   Extracting a string `"xyz"` yields the JSON string `'"xyz"'`.
+        *   Extracting the number `7` yields the JSON string `'7'`.
+        *   Extracting `null` yields the JSON string `'null'`.
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_doc = '{"a":"xyz", "b": 7, "c": [10, 20]}'
+
+    SELECT json_doc -> 'a';       -- JSON TEXT: '"xyz"'
+    SELECT json_doc -> '$.b';     -- JSON TEXT: '7'
+    SELECT json_doc -> 'c';       -- JSON TEXT: '[10,20]'
+    SELECT json_doc -> 'c' -> 1;  -- JSON TEXT: '20' (Chaining)
+    SELECT json_doc -> '$.x';     -- SQL NULL (not found)
+    ```
+
+---
+
+#### 6.2.4 The `->>` Operator
+*   **Syntax:** `json_column ->> path_or_key`
+*   **Availability:** SQLite 3.38.0 and later.
+*   **Purpose:** A companion to `->` that extracts the underlying SQL value of a sub-component.
+*   **Behavior:**
+    *   It selects the same sub-component as `->`.
+    *   The key difference is the return type: `->>` **always returns an SQL `TEXT`, `INTEGER`, `REAL`, or `NULL` value**. It dequotes strings and returns the raw value.
+    *   For objects and arrays, it returns their text representation, similar to `json_extract` with a single path.
+*   **`->` vs. `->>` Comparison:** This is a critical distinction.
+    *   `->` gives you JSON text, suitable for passing to another JSON function.
+    *   `->>` gives you an SQL value, suitable for use in a `WHERE` clause or for display.
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_doc = '{"a":"xyz", "b": 7, "c": null, "d": [10, 20]}'
+
+    -- Extracting a string dequotes it
+    SELECT json_doc ->> 'a';      -- SQL TEXT: 'xyz'
+
+    -- Extracting a number returns the number (as text/numeric)
+    SELECT json_doc ->> 'b';      -- SQL INTEGER/TEXT: 7
+
+    -- Extracting a null returns SQL NULL
+    SELECT json_doc ->> 'c';      -- SQL NULL
+
+    -- Extracting an array returns its text representation
+    SELECT json_doc ->> 'd';      -- SQL TEXT: '[10,20]'
+
+    -- Chaining example
+    SELECT json_doc -> 'd' ->> 0; -- SQL TEXT: '10'
+    ```
+
+### 6.3 Modification and Transformation Functions
+
+These functions return a new, modified copy of the input JSON. They are immutable and do not alter the original value.
+
+---
+
+#### 6.3.1 `json_insert()`, `json_replace()`, `json_set()`
+*   **Syntax:** `function_name(json, path1, value1, [path2, value2, ...])`
+*   **Purpose:** These three functions all update a JSON document, differing only in how they handle existing and non-existing paths.
+    *   `json_insert()`: **Inserts** a value only if the target path does not already exist. It does nothing if the element at the path exists.
+    *   `json_replace()`: **Replaces** a value only if the target path already exists. It does nothing if the path does not exist.
+    *   `json_set()`: **Always** sets the value. It replaces if the path exists and creates it if it does not.
+*   **Behavior:**
+    *   The first argument is the original JSON. It is followed by one or more `path`/`value` pairs.
+    *   Edits are applied **sequentially from left to right**. A change made by an earlier pair can affect the path lookup for a later pair in the same call.
+    *   The `value` argument follows the critical interpretation rule (Section 3.3): wrap values in `json()` or `json_array()` etc., to insert them as JSON structures.
+    *   To append to an array, use the path `'...[#]'` with `json_insert()` or `json_set()`.
+*   **Comparison Table:**
+
+| Function | Overwrites if path exists? | Creates if path does not exist? |
+| :--- | :--- | :--- |
+| `json_insert()` | No | Yes |
+| `json_replace()` | Yes | No |
+| `json_set()` | Yes | Yes |
+
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_doc = '{"a": 1, "b": [10, 20]}'
+
+    -- json_insert: does not overwrite 'a', but adds 'c'
+    SELECT json_insert(json_doc, '$.a', 99, '$.c', 99); -- '{"a":1,"b":[10,20],"c":99}'
+
+    -- json_replace: overwrites 'a', but ignores non-existent 'c'
+    SELECT json_replace(json_doc, '$.a', 99, '$.c', 99); -- '{"a":99,"b":[10,20]}'
+
+    -- json_set: does both
+    SELECT json_set(json_doc, '$.a', 99, '$.c', 99); -- '{"a":99,"b":[10,20],"c":99}'
+
+    -- Appending to an array
+    SELECT json_set(json_doc, '$.b[#]', 30); -- '{"a":1,"b":[10,20,30]}'
+
+    -- Inserting a nested JSON object
+    SELECT json_set(json_doc, '$.d', json_object('x', 1)); -- '{"a":1,"b":[10,20],"d":{"x":1}}'
+    ```
+
+---
+
+#### 6.3.2 `jsonb_insert()`, `jsonb_replace()`, `jsonb_set()`
+*   **Purpose:** These work identically to their `json_*` counterparts but return the result in the binary `JSONB` format (`BLOB`).
+
+---
+
+#### 6.3.3 `json_remove(json, path1, path2, ...)`
+*   **Syntax:** `json_remove(X, [P1, P2, ...])`
+*   **Purpose:** Returns a copy of the input JSON `X` with the elements identified by the path arguments removed.
+*   **Behavior:**
+    *   Paths that do not exist in `X` are silently ignored.
+    *   Removals occur **sequentially from left to right**. Removing an array element at `[0]` will shift subsequent elements, affecting later path arguments in the same call (e.g., `'[0]'`, `'[1]'`).
+    *   If called with no path arguments, `json_remove(X)` simply returns a minified version of `X`.
+    *   Removing the root element (`'$'`) results in SQL `NULL`.
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_arr = '[0, 1, 2, 3, 4]'
+
+    -- Simple removal
+    SELECT json_remove(json_arr, '$[2]'); -- '[0,1,3,4]'
+
+    -- Sequential removal: remove index 2, then remove the NEW index 0
+    SELECT json_remove(json_arr, '$[2]', '$[0]'); -- '[1,3,4]' (The original '1' becomes the new index 0)
+
+    -- Sequential removal: remove index 0, then remove the NEW index 2
+    SELECT json_remove(json_arr, '$[0]', '$[2]'); -- '[1,2,4]' (The original '3' becomes the new index 2)
+
+    -- Remove from an object
+    SELECT json_remove('{"x":25, "y":42}', '$.y'); -- '{"x":25}'
+
+    -- Remove the root
+    SELECT json_remove('{"x":25, "y":42}', '$'); -- SQL NULL
+    ```
+
+---
+
+#### 6.3.4 `jsonb_remove(json, path1, path2, ...)`
+*   **Purpose:** Works identically to `json_remove()` but returns the result in the binary `JSONB` format (`BLOB`).
+
+---
+
+#### 6.3.5 `json_patch(T, P)`
+*   **Syntax:** `json_patch(target, patch)`
+*   **Purpose:** Applies a patch `P` to a target JSON document `T` according to the [RFC 7396 MergePatch algorithm](https://tools.ietf.org/html/rfc7396).
+*   **Behavior:**
+    *   It provides a generalized way to add, modify, and delete elements from **JSON Objects**.
+    *   **Crucial Limitation:** The MergePatch standard treats **JSON Arrays as atomic values**. It cannot modify individual elements of an array or append to it. If the patch contains an array for an existing key, the entire original array is **replaced** by the new one. For array manipulation, `json_set`, `json_insert`, and `json_remove` are required.
+    *   **Merge Rules for Objects:**
+        *   If a key from the patch exists in the target, the target's value is recursively merged/replaced.
+        *   If a key from the patch does not exist in the target, it is added.
+        *   If a key in the patch has a `null` value, the corresponding key is **deleted** from the target.
+*   **Examples:**
+    ```sql
+    -- Add/modify keys
+    SELECT json_patch('{"a":1,"b":2}', '{"c":3,"d":4,"a":9}'); -- '{"a":9,"b":2,"c":3,"d":4}'
+
+    -- Delete a key using null
+    SELECT json_patch('{"a":1,"b":2}', '{"b":null}'); -- '{"a":1}'
+
+    -- Array is replaced, not merged
+    SELECT json_patch('{"a":[1,2],"b":2}', '{"a":[9]}'); -- '{"a":[9],"b":2}'
+
+    -- Recursive merge on nested object
+    SELECT json_patch('{"a":{"x":1,"y":2},"b":3}', '{"a":{"y":9},"c":8}'); -- '{"a":{"x":1,"y":9},"b":3,"c":8}'
+    ```
+
+---
+
+#### 6.3.6 `jsonb_patch(T, P)`
+*   **Purpose:** Works identically to `json_patch()` but returns the result in the binary `JSONB` format (`BLOB`).
+
+---
+
+### 6.4 Inspection and Utility Functions
+
+These functions provide metadata about JSON structures or help with formatting.
+
+---
+
+#### 6.4.1 `json_type(json, [path])`
+*   **Syntax:** `json_type(X, [P])`
+*   **Purpose:** Returns the data type of a JSON element.
+*   **Behavior:**
+    *   Without a path, `json_type(X)` returns the type of the root element.
+    *   With a path `P`, `json_type(X, P)` returns the type of the element at that path.
+    *   If the path does not exist, it returns SQL `NULL`.
+    *   The returned type is one of the following `TEXT` values: `'null'`, `'true'`, `'false'`, `'integer'`, `'real'`, `'text'`, `'array'`, or `'object'`.
+*   **Examples:**
+    ```sql
+    -- Setup
+    -- LET json_doc = '{"a":[2, 3.5, true, false, null, "x"]}'
+
+    SELECT json_type(json_doc);           -- 'object'
+    SELECT json_type(json_doc, '$.a');    -- 'array'
+    SELECT json_type(json_doc, '$.a[0]'); -- 'integer'
+    SELECT json_type(json_doc, '$.a[1]'); -- 'real'
+    SELECT json_type(json_doc, '$.a[2]'); -- 'true'
+    SELECT json_type(json_doc, '$.a[5]'); -- 'text'
+    SELECT json_type(json_doc, '$.a[6]'); -- SQL NULL (out of bounds)
+    ```
+
+---
+
+#### 6.4.2 `json_array_length(json, [path])`
+*   **Syntax:** `json_array_length(X, [P])`
+*   **Purpose:** Returns the number of elements in a JSON array.
+*   **Behavior:**
+    *   `json_array_length(X)`: Returns the length if `X` itself is a JSON array; otherwise, returns `0`.
+    *   `json_array_length(X, P)`: Returns the length of the array at path `P`. If `P` points to something that isn't an array, it returns `0`. If path `P` does not exist, it returns `SQL NULL`.
+*   **Examples:**
+    ```sql
+    SELECT json_array_length('[1,2,3,4]');                  -- 4
+    SELECT json_array_length('{"one":[1,2,3]}', '$.one');  -- 3
+    SELECT json_array_length('{"one":[1,2,3]}');            -- 0 (the root is an object, not an array)
+    SELECT json_array_length('[1,2,3,4]', '$[2]');          -- 0 (the element at [2] is a number, not an array)
+    SELECT json_array_length('{"one":[1,2,3]}', '$.two');  -- SQL NULL (path does not exist)
+    ```
+
+---
+
+#### 6.4.3 `json_valid(X, [flags])`
+*   **Syntax:** `json_valid(X, [Y])`
+*   **Purpose:** Checks if the input `X` is well-formed JSON according to the rules specified by the optional `flags` integer `Y`. Returns `1` for true, `0` for false.
+*   **Behavior without Flags:** `json_valid(X)` is backward-compatible and defaults to `Y=1`. It returns `1` only if `X` is strictly canonical RFC-8259 JSON text. It returns `0` for JSON5 or JSONB.
+*   **Behavior with Flags (Bitmask):**
+    *   `0x01` (1): `X` is valid RFC-8259 JSON text.
+    *   `0x02` (2): `X` is valid JSON5 text.
+    *   `0x04` (4): `X` is a `BLOB` that superficially appears to be JSONB (fast check).
+    *   `0x08` (8): `X` is a `BLOB` that strictly conforms to the internal JSONB format (thorough, slower check).
+*   **Useful Flag Combinations:**
+    *   `1`: Is it canonical JSON text?
+    *   `2`: Is it JSON5 text?
+    *   `5` (1|4): Is it canonical JSON text OR likely JSONB?
+    *   `6` (2|4): Is it JSON5 text OR likely JSONB? **(This is often the most practical check for "is it a value I can feed to another JSON function?")**
+*   **Examples:**
+    ```sql
+    SELECT json_valid('{"x":35}');       -- 1 (canonical)
+    SELECT json_valid('{x:35}');        -- 0 (JSON5 is not valid with default flags)
+    SELECT json_valid('{x:35}', 2);     -- 1 (valid with JSON5 flag)
+    SELECT json_valid('{x:35}', 6);     -- 1 (valid with JSON5|JSONB flag)
+    SELECT json_valid('{"x":35');        -- 0 (malformed)
+    SELECT json_valid(jsonb('{}'), 4);  -- 1 (valid with JSONB flag)
+    SELECT json_valid(NULL);            -- NULL
+    ```
+
+---
+
+#### 6.4.4 `json_error_position(X)`
+*   **Syntax:** `json_error_position(X)`
+*   **Availability:** SQLite 3.42.0 and later.
+*   **Purpose:** A debugging tool that identifies the location of a syntax error in a JSON string.
+*   **Behavior:**
+    *   If `X` is well-formed JSON (text or JSONB), it returns `0`.
+    *   If `X` contains a syntax error, it returns the **1-based character position** of the first error.
+    *   For a `BLOB`, the returned position is an approximation of the byte offset of the error.
+*   **Examples:**
+    ```sql
+    SELECT json_error_position('{"a":1, "b"}'); -- Returns 12 (error at the '}')
+    SELECT json_error_position('{"a":1}');      -- Returns 0 (valid)
+    ```
+
+---
+
+#### 6.4.5 `json_pretty(json, [indent])`
+*   **Syntax:** `json_pretty(X, [indent_string])`
+*   **Availability:** SQLite 3.46.0 and later.
+*   **Purpose:** Formats a JSON `TEXT` or `JSONB` value with whitespace to make it human-readable.
+*   **Behavior:**
+    *   Works like `json()` but adds newlines and indentation.
+    *   The optional second argument is a `TEXT` string used for each level of indentation.
+    *   If the indent string is omitted or `NULL`, it defaults to four spaces (`'    '`).
+*   **Examples:**
+    ```sql
+    SELECT json_pretty('{"a":[1,2],"b":{"c":3}}');
+    -- Result:
+    -- {
+    --     "a": [
+    --         1,
+    --         2
+    --     ],
+    --     "b": {
+    --         "c": 3
+    --     }
+    -- }
+
+    SELECT json_pretty('{"a":1}', '->');
+    -- Result:
+    -- {
+    -- ->"a": 1
+    -- }
+    ```
+
+---
+
+## 7.0 Aggregate SQL Functions
+
+Aggregate functions operate on a set of rows and compute a single return value from them. They are used in conjunction with a `GROUP BY` clause.
+
+---
+
+#### 7.1 `json_group_array(value)`
+*   **Syntax:** `json_group_array(X)`
+*   **Purpose:** Aggregates all values `X` from a group of rows into a single JSON array `TEXT` string.
+*   **Behavior:**
+    *   The order of elements in the resulting array is arbitrary unless an `ORDER BY` clause is used within the aggregate function call (a feature of modern SQLite versions).
+    *   The `value` argument follows the same interpretation rule as `json_array` values. To aggregate JSON objects, they must be constructed or extracted correctly.
+*   **Performance Note:** Aggregate JSON functions are optimized to work with `TEXT` input. It is more efficient for their arguments to be the result of `json_*` functions than `jsonb_*` functions (see Section 8.1).
+*   **Example:**
+    ```sql
+    -- CREATE TABLE user (id INT, name TEXT, grp TEXT);
+    -- INSERT INTO user VALUES (1, 'Alice', 'A'), (2, 'Bob', 'B'), (3, 'Charlie', 'A');
+
+    -- Group user names by grp
+    SELECT grp, json_group_array(name) FROM user GROUP BY grp;
+    -- Results:
+    -- 'A' | '["Alice","Charlie"]'
+    -- 'B' | '["Bob"]'
+
+    -- Aggregate entire rows as objects
+    SELECT grp, json_group_array(json_object('id', id, 'name', name))
+    FROM user
+    GROUP BY grp;
+    -- Results:
+    -- 'A' | '[{"id":1,"name":"Alice"},{"id":3,"name":"Charlie"}]'
+    -- 'B' | '[{"id":2,"name":"Bob"}]'
+    ```
+
+---
+
+#### 7.2 `jsonb_group_array(value)`
+*   **Purpose:** Works identically to `json_group_array()` but returns the resulting array in the binary `JSONB` format (`BLOB`).
+
+---
+
+#### 7.3 `json_group_object(name, value)`
+*   **Syntax:** `json_group_object(N, V)`
+*   **Purpose:** Aggregates `name` (`N`) and `value` (`V`) pairs from a group of rows into a single JSON object `TEXT` string.
+*   **Behavior:**
+    *   `N` is the key, `V` is the value for each entry in the resulting object.
+    *   If there are duplicate `name` values within a group, it is undefined which `value` will be used. The last one processed is typically chosen, but this is not guaranteed.
+    *   The `value` argument follows the standard interpretation rules.
+*   **Example:**
+    ```sql
+    -- CREATE TABLE kv (k TEXT, v TEXT, grp TEXT);
+    -- INSERT INTO kv VALUES ('a', '1', 'g1'), ('b', '2', 'g1'), ('c', '3', 'g2');
+
+    SELECT grp, json_group_object(k, v) FROM kv GROUP BY grp;
+    -- Results:
+    -- 'g1' | '{"a":"1","b":"2"}'
+    -- 'g2' | '{"c":"3"}'
+
+    -- Using numeric values
+    SELECT grp, json_group_object(k, CAST(v AS INTEGER)) FROM kv GROUP BY grp;
+    -- Results:
+    -- 'g1' | '{"a":1,"b":2}'
+    -- 'g2' | '{"c":3}'
+    ```
+
+---
+
+#### 7.4 `jsonb_group_object(name, value)`
+*   **Purpose:** Works identically to `json_group_object()` but returns the resulting object in the binary `JSONB` format (`BLOB`).
+
+---
+
+# SQLite JSON Support: A Comprehensive Technical Reference (Part 3 of 3)
+
+## 8.0 Table-Valued Functions
+
+Table-valued functions are a powerful feature that "un-nests" or "shreds" a JSON document into a relational format. They behave like a virtual table in the `FROM` clause of a query, producing one row for each element they iterate over. This allows you to join JSON data with other tables and use the full power of SQL's `WHERE` clause to filter it.
+
+### 8.1 The Returned Table Schema
+
+Both `json_each()` and `json_tree()` return a table with the same schema. Understanding these columns is key to using the functions effectively.
+
+```sql
+CREATE TABLE json_tree(
+    key    ANY,       -- Key/index of the element relative to its parent.
+    value  ANY,       -- The value of the element. For objects/arrays, this is TEXT JSON.
+    type   TEXT,      -- The JSON type: 'object','array','string','integer','real','true','false','null'.
+    atom   ANY,       -- The SQL primitive value (NULL for objects/arrays).
+    id     INTEGER,   -- A unique integer ID for this element within the parse.
+    parent INTEGER,   -- The 'id' of the parent element (NULL for root).
+    fullkey TEXT,     -- The complete JSON path to this element from the absolute root.
+    path   TEXT,      -- The JSON path to the container of this element.
+    json   JSON HIDDEN, -- The original JSON input (hidden column).
+    root   TEXT HIDDEN  -- The starting path, if provided (hidden column).
+);
+```
+
+**Column Details:**
+
+*   `key`: For elements of an **object**, this is the `TEXT` label. For elements of an **array**, this is the `INTEGER` index. For the root primitive value, it is `NULL`.
+*   `value`: The value of the current element.
+    *   If the element is a primitive (string, number, boolean, null), `value` is the corresponding SQL value.
+    *   If the element is an `object` or `array`, `value` is the `TEXT` JSON representation of that structure.
+*   `type`: The specific JSON type of the element, as a `TEXT` string.
+*   `atom`: A "pure value" column. It holds the same value as `value` for primitives but is explicitly `NULL` for `object` and `array` types. This is extremely useful for filtering to only leaf nodes: `WHERE atom IS NOT NULL`.
+*   `id`: An integer that uniquely identifies an element within the JSON document for a single function call. Its main purpose is to be referenced by the `parent` column. The calculation of this ID is an implementation detail and may change between SQLite versions.
+*   `parent`: For `json_tree()`, this column contains the `id` of the container element. For `json_each()`, or for the root element in `json_tree()`, this is `NULL`. It enables reconstruction of the hierarchy.
+*   `fullkey`: The full, unambiguous JSON path for the current element, starting from the document root (`$`). This is true even if the iteration was started from a deeper path.
+*   `path`: The path to the **container** of the current element. For a primitive value at the root, it is the path to the element itself.
+
+---
+
+### 8.2 `json_each(json, [path])`
+
+*   **Syntax:** `json_each(X, [P])`
+*   **Purpose:** Iterates over the **immediate children** of a JSON object or array. It does not descend into nested structures.
+*   **Behavior:**
+    *   If the target element (at the root `X` or at path `P`) is a JSON `object`, `json_each` produces one row for each key/value pair.
+    *   If the target element is a JSON `array`, `json_each` produces one row for each element in the array.
+    *   If the target element is a primitive value (string, number, etc.), `json_each` produces a single row representing that value.
+    *   The `parent` column in the output is always `NULL`.
+*   **Use Case:** Ideal for flat or shallowly-nested data where you only need to inspect the top-level elements of an object or array.
+
+---
+
+### 8.3 `json_tree(json, [path])`
+
+*   **Syntax:** `json_tree(X, [P])`
+*   **Purpose:** **Recursively** walks an entire JSON structure, starting from the target element (at root `X` or path `P`).
+*   **Behavior:**
+    *   It produces one row for every single element in the JSON sub-tree, including all nested objects, arrays, and their contents.
+    *   The `id` and `parent` columns can be used to understand the hierarchical relationships between the rows.
+*   **Use Case:** Essential for deep-searching within a complex, nested JSON document for a specific key or value, regardless of its depth.
+
+---
+
+### 8.4 Examples using `json_each()` and `json_tree()`
+
+#### Example 1: Basic Search with `json_each`
+
+Assume a table `users` where `phone_numbers` is a JSON array of strings. Find all users with a 704 area code.
+
+```sql
+-- CREATE TABLE users (name TEXT, phone_numbers TEXT);
+-- INSERT INTO users VALUES ('Alice', '["704-555-1234", "980-555-5678"]');
+-- INSERT INTO users VALUES ('Bob', '["212-555-9999"]');
+
+SELECT DISTINCT u.name
+FROM users AS u, json_each(u.phone_numbers)
+WHERE json_each.value LIKE '704-%';
+-- Result: 'Alice'
+```
+Here, `json_each` generates a row for each phone number, which can then be checked with `LIKE`.
+
+---
+
+#### Example 2: Handling Mixed Data Types
+
+What if `phone_numbers` could be a single `TEXT` value OR a JSON array?
+
+```sql
+-- This query handles both cases:
+-- 1. A simple LIKE for plain text fields.
+-- 2. The UNION with json_each for JSON array fields.
+-- json_valid() is used as a guard to prevent json_each from failing on non-JSON text.
+
+SELECT name FROM users WHERE phone_numbers LIKE '704-%' AND NOT json_valid(phone_numbers)
+UNION
+SELECT u.name
+FROM users AS u, json_each(u.phone_numbers)
+WHERE json_valid(u.phone_numbers)
+  AND json_each.value LIKE '704-%';
+```
+
+---
+
+#### Example 3: Decomposing Data with `json_tree`
+
+Imagine a table `big_docs` with complex JSON. We want to extract all primitive (leaf) values.
+
+```sql
+-- CREATE TABLE big_docs (id INTEGER, doc TEXT);
+-- INSERT INTO big_docs VALUES (1, '{"a": 1, "b": [true, {"c": "hello"}]}');
+
+-- Using `atom` is the cleanest way to filter for leaf nodes.
+SELECT b.id, jt.fullkey, jt.atom
+FROM big_docs AS b, json_tree(b.doc) AS jt
+WHERE jt.atom IS NOT NULL;
+-- Results:
+-- id | fullkey      | atom
+-- ---|--------------|-------
+-- 1  | $.a          | 1
+-- 1  | $.b[0]       | 1        (true is represented as integer 1)
+-- 1  | $.b[1].c     | 'hello'
+
+-- An alternative is to filter by type.
+SELECT b.id, jt.fullkey, jt.value
+FROM big_docs AS b, json_tree(b.doc) AS jt
+WHERE jt.type NOT IN ('object', 'array');
+```
+
+---
+
+#### Example 4: Deep Search with `json_tree`
+
+A table contains documents, each with a unique `id` and a deeply nested `partlist`. Find the document `id` of any entry that contains a specific `uuid` anywhere inside its `partlist`.
+
+```sql
+-- CREATE TABLE inventory (doc TEXT);
+-- INSERT INTO inventory VALUES ('{"id": "doc-001", "partlist": {"gears": [{"uuid": "aaa"}, {"uuid": "bbb"}]}}');
+-- INSERT INTO inventory VALUES ('{"id": "doc-002", "partlist": {"motor": {"uuid": "ccc"}}}');
+-- INSERT INTO inventory VALUES ('{"id": "doc-003", "partlist": {"motor": {"uuid": "6fa5181e-..."}}}');
+
+SELECT DISTINCT json_extract(i.doc, '$.id') AS doc_id
+FROM inventory AS i, json_tree(i.doc, '$.partlist') AS jt
+WHERE jt.key = 'uuid'
+  AND jt.value = '6fa5181e-5721-11e5-a04e-57f3d7b32808';
+-- Result: 'doc-003'
+```
+This query efficiently finds the needle in the haystack. `json_tree` is started at the `$.partlist` path for efficiency, and the `WHERE` clause checks every `key` and `value` found within that sub-tree.
+
+## 9.0 Performance Considerations and Best Practices
+
+Choosing the right format and functions is critical for performance.
+
+### 9.1 Efficient Function Nesting (`json_*` vs. `jsonb_*`)
+
+Most JSON modification functions (`json_insert`, `json_set`, `json_extract`, etc.) perform their internal processing using a binary representation similar to JSONB.
+
+*   **Rule 1: Use `jsonb` for Inner Functions.** When an argument to one JSON function is supplied by another, use the `jsonb_*` variant for the inner function. This avoids a costly text-to-binary-to-text conversion cycle.
+
+    ```sql
+    -- Less efficient:
+    -- 1. json('{"c":3}') -> creates JSON text.
+    -- 2. json_insert() must parse this text back into a binary form to work with it.
+    ... json_insert(A, '$.b', json('{"c":3}')) ...
+
+    -- More efficient:
+    -- 1. jsonb('{"c":3}') -> creates a JSONB blob.
+    -- 2. json_insert() can use this binary representation directly, skipping the parse step.
+    ... json_insert(A, '$.b', jsonb('{"c":3}')) ...
+    ```
+
+*   **Rule 2 (Exception): Aggregate Functions.** The aggregate JSON functions (`json_group_array`, `json_group_object`) are an exception. They are currently optimized to build their result from `TEXT` fragments.
+
+    ```sql
+    -- More efficient for aggregates:
+    -- The aggregate function can more easily work with the text result of json().
+    SELECT json_group_array(json(A)) FROM ...
+
+    -- Less efficient for aggregates:
+    -- The aggregate function would have to convert the JSONB blob back to text internally.
+    SELECT json_group_array(jsonb(A)) FROM ...
+    ```
+
+### 9.2 Storage Strategy
+
+*   **For Read-Heavy or Static Data:** Storing as `TEXT` is fine. It is simple and universally compatible.
+*   **For Write-Heavy or Frequently Queried Data:** Storing as `JSONB` in a `BLOB` column is highly recommended. The one-time cost of converting to `JSONB` on `INSERT` is paid back many times over by faster reads and updates.
+
+## 10.0 The SQLite JSONB Format (Internal Reference)
+
+This section provides a detailed description of the JSONB binary format. **This information is for reference and forward-compatibility purposes only.** Applications should **never** attempt to construct or parse JSONB blobs manually. Always use the provided `jsonb_*` functions.
+
+### 10.1 Core Design
+
+JSONB is a direct binary translation of JSON text. It replaces punctuation (`{}[]:,"`) with a binary **header** prefixed to each element. This header contains the element's **type** and **size**, allowing for much faster skipping and parsing than scanning for delimiters in text.
+
+Each element is encoded as `header` + `payload`.
+
+### 10.2 Header Encoding
+
+The header is 1 to 9 bytes long. Its size and meaning are determined by the **first byte**.
+
+#### 10.2.1 Payload Size Encoding
+
+The upper 4 bits of the first header byte determine how the payload size is encoded.
+
+| Upper 4 Bits (Value) | Header Size | Payload Size Description |
+| :--- | :--- | :--- |
+| `0x0` - `0xB` (0-11) | 1 byte | The payload size *is* this value (0 to 11 bytes). |
+| `0xC` (12) | 2 bytes | Size is a 1-byte unsigned integer following the header byte. |
+| `0xD` (13) | 3 bytes | Size is a 2-byte unsigned big-endian integer. |
+| `0xE` (14) | 5 bytes | Size is a 4-byte unsigned big-endian integer. |
+| `0xF` (15) | 9 bytes | Size is an 8-byte unsigned big-endian integer (for future >2GiB support). |
+
+This variable-length encoding allows small, common elements to have a tiny 1-byte header, while accommodating gigantic payloads. The implementation can also over-allocate a header (e.g., reserve 5 bytes for an object header) and fill in the exact size later, leading to non-minimal but still valid encodings.
+
+#### 10.2.2 Element Type Encoding
+
+The lower 4 bits of the first header byte determine the element's type.
+
+| Lower 4 Bits | Element Type | Payload Description |
+| :--- | :--- | :--- |
+| `0x0` (`0`) | `NULL` | JSON `null`. Payload size must be 0. |
+| `0x1` (`1`) | `TRUE` | JSON `true`. Payload size must be 0. |
+| `0x2` (`2`) | `FALSE` | JSON `false`. Payload size must be 0. |
+| `0x3` (`3`) | `INT` | A canonical RFC 8259 integer. Payload is ASCII text of the number. |
+| `0x4` (`4`) | `INT5` | A JSON5 integer (e.g., hex). Payload is ASCII text representation. |
+| `0x5` (`5`) | `FLOAT` | A canonical RFC 8259 float. Payload is ASCII text of the number. |
+| `0x6` (`6`) | `FLOAT5`| A JSON5 float (e.g., `Infinity`). Payload is ASCII text representation. |
+| `0x7` (`7`) | `TEXT` | A simple string with no escapes. Payload is raw UTF-8 text. |
+| `0x8` (`8`) | `TEXTJ` | String with standard JSON escapes (`\n`, `\uXXXX`). Payload is escaped UTF-8. |
+| `0x9` (`9`) | `TEXT5` | String with JSON5 escapes. Payload is escaped UTF-8. |
+| `0xA` (`10`)| `TEXTRAW`| String with raw characters that *require* escaping for JSON output. |
+| `0xB` (`11`)| `ARRAY` | Payload is a concatenation of the JSONB elements of the array. |
+| `0xC` (`12`)| `OBJECT`| Payload is a concatenation of key/value pairs of JSONB elements. |
+| `0xD-0xF` (13-15)| `RESERVED` | Reserved for future use (e.g., indexes). Will cause an error if encountered. |
+
+### 10.3 Design Rationale (Lazy Conversion)
+
+The variety of `INT`/`FLOAT`/`TEXT` types reflects a core design principle: **lazy conversion**.
+
+*   **Numeric values are stored as text.** This avoids costly string-to-binary-to-string conversions when moving between text JSON and JSONB. Conversion to a native number format only happens when an arithmetic operation requires it.
+*   **Strings retain their original escaping.** A string from a JSON5 source (`TEXT5`) is stored differently from a string from canonical JSON (`TEXTJ`). The escapes are only processed if the value is extracted as an SQL `TEXT` via `->>`. This minimizes work.
+
+JSONB is not just a storage format; it serves as the **internal parse tree** for the JSON functions themselves, eliminating the overhead of creating a temporary in-memory representation.
+
+### 10.4 Valid JSONB BLOBs
+
+For a `BLOB` to be considered valid JSONB by the SQLite functions, two conditions must be met:
+1.  The header of the single, top-level element must be well-formed.
+2.  The size defined in that header must cause the element to **exactly fill the entire BLOB**. There can be no trailing bytes.

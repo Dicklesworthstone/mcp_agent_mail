@@ -1,0 +1,239 @@
+"""Filesystem and Git archive helpers for MCP Agent Mail."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Sequence, cast
+
+from filelock import FileLock
+from git import Actor, Repo
+from PIL import Image
+
+from .config import Settings
+
+_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
+
+
+@dataclass(slots=True)
+class ProjectArchive:
+    settings: Settings
+    slug: str
+    root: Path
+    repo: Repo
+    lock_path: Path
+
+    @property
+    def attachments_dir(self) -> Path:
+        return self.root / "attachments"
+
+
+class AsyncFileLock:
+    def __init__(self, path: Path) -> None:
+        self._lock = FileLock(str(path))
+
+    async def __aenter__(self) -> None:
+        await asyncio.to_thread(self._lock.acquire)
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        self._lock.release()
+
+
+async def _to_thread(func, /, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
+    root = Path(settings.storage.root).expanduser().resolve() / slug
+    await _to_thread(root.mkdir, parents=True, exist_ok=True)
+    repo = await _ensure_repo(root, settings)
+    return ProjectArchive(settings=settings, slug=slug, root=root, repo=repo, lock_path=root / ".archive.lock")
+
+
+async def _ensure_repo(root: Path, settings: Settings) -> Repo:
+    git_dir = root / ".git"
+    if git_dir.exists():
+        return Repo(str(root))
+
+    repo = await _to_thread(Repo.init, str(root))
+    attributes_path = root / ".gitattributes"
+    if not attributes_path.exists():
+        await _write_text(attributes_path, "*.json text\n*.md text\n")
+    await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
+    return repo
+
+
+async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object]) -> None:
+    profile_path = archive.root / "agents" / agent["name"].__str__() / "profile.json"
+    await _write_json(profile_path, agent)
+    await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [profile_path.relative_to(archive.root).as_posix()])
+
+
+async def write_claim_record(archive: ProjectArchive, claim: dict[str, object]) -> None:
+    path_pattern = str(claim.get("path_pattern", ""))
+    digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
+    claim_path = archive.root / "claims" / f"{digest}.json"
+    await _write_json(claim_path, claim)
+    await _commit(archive.repo, archive.settings, f"claim: {claim['agent']} {claim['path_pattern']}", [claim_path.relative_to(archive.root).as_posix()])
+
+
+async def write_message_bundle(
+    archive: ProjectArchive,
+    message: dict[str, object],
+    body_md: str,
+    sender: str,
+    recipients: Sequence[str],
+    extra_paths: Sequence[str] | None = None,
+) -> None:
+    timestamp_obj: Any = message.get("created") or message.get("created_ts")
+    if isinstance(timestamp_obj, str):
+        timestamp_str = timestamp_obj
+    else:
+        timestamp_str = datetime.now(timezone.utc).isoformat()
+    now = datetime.fromisoformat(timestamp_str)
+    y_dir = now.strftime("%Y")
+    m_dir = now.strftime("%m")
+
+    canonical_dir = archive.root / "messages" / y_dir / m_dir
+    outbox_dir = archive.root / "agents" / sender / "outbox" / y_dir / m_dir
+    inbox_dirs = [archive.root / "agents" / r / "inbox" / y_dir / m_dir for r in recipients]
+
+    rel_paths: list[str] = []
+
+    await _to_thread(canonical_dir.mkdir, parents=True, exist_ok=True)
+    await _to_thread(outbox_dir.mkdir, parents=True, exist_ok=True)
+    for path in inbox_dirs:
+        await _to_thread(path.mkdir, parents=True, exist_ok=True)
+
+    frontmatter = json.dumps(message, indent=2, sort_keys=True)
+    content = f"---json\n{frontmatter}\n---\n\n{body_md.strip()}\n"
+
+    filename = f"{message['id']}.md"
+    canonical_path = canonical_dir / filename
+    await _write_text(canonical_path, content)
+    rel_paths.append(canonical_path.relative_to(archive.root).as_posix())
+
+    outbox_path = outbox_dir / filename
+    await _write_text(outbox_path, content)
+    rel_paths.append(outbox_path.relative_to(archive.root).as_posix())
+
+    for inbox_dir in inbox_dirs:
+        inbox_path = inbox_dir / filename
+        await _write_text(inbox_path, content)
+        rel_paths.append(inbox_path.relative_to(archive.root).as_posix())
+
+    if extra_paths:
+        rel_paths.extend(extra_paths)
+    await _commit(archive.repo, archive.settings, f"mail: {sender} -> {', '.join(recipients)} | {message['subject']}", rel_paths)
+
+
+async def process_attachments(
+    archive: ProjectArchive,
+    body_md: str,
+    attachment_paths: Iterable[str] | None,
+    convert_markdown: bool,
+) -> tuple[str, list[dict[str, object]], list[str]]:
+    attachments_meta: list[dict[str, object]] = []
+    commit_paths: list[str] = []
+    updated_body = body_md
+    if convert_markdown and archive.settings.storage.convert_images:
+        updated_body = await _convert_markdown_images(archive, body_md, attachments_meta, commit_paths)
+    if attachment_paths:
+        for path in attachment_paths:
+            meta, rel_path = await _store_image(archive, Path(path))
+            attachments_meta.append(meta)
+            if rel_path:
+                commit_paths.append(rel_path)
+    return updated_body, attachments_meta, commit_paths
+
+
+async def _convert_markdown_images(
+    archive: ProjectArchive,
+    body_md: str,
+    meta: list[dict[str, object]],
+    commit_paths: list[str],
+) -> str:
+    matches = list(_IMAGE_PATTERN.finditer(body_md))
+    if not matches:
+        return body_md
+    result = body_md
+    for match in matches:
+        raw_path = match.group("path").strip()
+        if raw_path.startswith("data:"):
+            continue
+        file_path = Path(raw_path)
+        if not file_path.is_file():
+            continue
+        attachment_meta, rel_path = await _store_image(archive, file_path)
+        if attachment_meta["type"] == "inline":
+            replacement = f"data:image/webp;base64,{attachment_meta['data_base64']}"
+        else:
+            replacement = attachment_meta["path"]
+        result = result.replace(raw_path, str(replacement))
+        meta.append(attachment_meta)
+        if rel_path:
+            commit_paths.append(rel_path)
+    return result
+
+
+async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, object], str | None]:
+    data = await _to_thread(path.read_bytes)
+    img = await _to_thread(Image.open, path)
+    img = img.convert("RGBA" if img.mode in ("LA", "RGBA") else "RGB")
+    buffer_path = archive.attachments_dir
+    await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
+    digest = hashlib.sha1(data).hexdigest()
+    target_dir = buffer_path / digest[:2]
+    await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+    target_path = target_dir / f"{digest}.webp"
+    if not target_path.exists():
+        await _save_webp(img, target_path)
+    new_bytes = await _to_thread(target_path.read_bytes)
+    rel_path = target_path.relative_to(archive.root).as_posix()
+    if len(new_bytes) <= archive.settings.storage.inline_image_max_bytes:
+        encoded = base64.b64encode(new_bytes).decode("ascii")
+        return {
+            "type": "inline",
+            "media_type": "image/webp",
+            "bytes": len(new_bytes),
+            "data_base64": encoded,
+        }, rel_path
+    return {
+        "type": "file",
+        "media_type": "image/webp",
+        "bytes": len(new_bytes),
+        "path": rel_path,
+    }, rel_path
+
+
+async def _save_webp(img: Image.Image, path: Path) -> None:
+    await _to_thread(img.save, path, format="WEBP", method=6, quality=80)
+
+
+async def _write_text(path: Path, content: str) -> None:
+    await _to_thread(path.parent.mkdir, parents=True, exist_ok=True)
+    await _to_thread(path.write_text, content, encoding="utf-8")
+
+
+async def _write_json(path: Path, payload: dict[str, object]) -> None:
+    content = json.dumps(payload, indent=2, sort_keys=True)
+    await _write_text(path, content + "\n")
+
+
+async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
+    if not rel_paths:
+        return
+    actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
+
+    def _perform_commit() -> None:
+        repo.index.add(rel_paths)
+        if repo.is_dirty(index=True, working_tree=True):
+            repo.index.commit(message, author=actor, committer=actor)
+
+    await _to_thread(_perform_commit)
