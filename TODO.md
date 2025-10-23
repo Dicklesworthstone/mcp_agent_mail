@@ -18,27 +18,27 @@
   - [x] Implement urgent-only filter and ack-required flag handling
   - [x] Inline/attachment WebP conversion with Pillow; store under attachments/
   - [x] Provide acknowledgements tool
-- [ ] Claims/leases
+- [x] Claims/leases
   - [x] Expand claim tool to detect glob overlaps
   - [x] Implement release_claims tool returning updated status
   - [x] Build resource for active claims per project
   - [x] Prepare pre-commit hook generator installing guard
-- [ ] Resources
+- [x] Resources
   - [x] resource://message/{id}{?project} returning body + metadata
   - [x] resource://thread/{thread_id}{?project,include_bodies}
   - [x] resource://inbox/{agent}{?project,...}
   - [x] resource://claims/{project}{?active_only}
-- [ ] Search & summaries
+- [x] Search & summaries
   - [x] Configure SQLite FTS tables/triggers for messages
   - [x] search_messages tool w/ query param
   - [x] summarize_thread tool returning keypoints/actions
-- [ ] Config/auth/CLI
+- [x] Config/auth/CLI
   - [x] Extend settings for storage root, git author, attachment limits
   - [x] Provide CLI command to run migrations and list projects/agents
   - [x] Add optional bearer auth scaffold for HTTP transport
   - [x] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
   - [x] Enrich CLI output with Rich panels/logging
-- [ ] Testing
+- [x] Testing
   - [x] Expand tests to cover filesystem archive & git commits
   - [x] Test claims conflict detection, release tool, resources
   - [x] Test search and summaries tools
@@ -47,7 +47,7 @@
 
 # Deployment Enhancements (Detailed Backlog)
 
-- [ ] **Production ASGI entrypoint**  
+- [x] **Production ASGI entrypoint**  
   Provide a first-class entryway for running the HTTP transport in production environments.  
   - [x] Create `src/mcp_agent_mail/__main__.py` (or `run.py`) exposing a callable that bootstraps settings and starts the FastAPI/uvicorn server so that `python -m mcp_agent_mail.http` “just works”.  
   - [x] Supply a documented `uvicorn` CLI snippet (e.g., `uvicorn mcp_agent_mail.http:build_http_app --factory`) plus example environment variable usage.  
@@ -55,14 +55,14 @@
 
 - [ ] **Container image**  
   Deliver a reproducible container workflow.  
-  - [ ] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base (e.g., `python:3.14-slim`).  
-  - [ ] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
-  - [ ] Create a sample `docker-compose.yml` that wires the MCP server with Postgres (async connection) showing env config, volume mounts (for archive), and health checks.  
+  - [x] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base (e.g., `python:3.14-slim`).  
+  - [x] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
+  - [x] Create a sample `docker-compose.yml` that wires the MCP server with Postgres (async connection) showing env config, volume mounts (for archive), and health checks.  
   - [ ] Document the build/push flow and recommended multi-arch strategy.
 
 - [ ] **Process supervisor packaging**  
   Aid on-prem/bare metal operators.  
-  - [ ] Provide a `systemd` unit template (`mcp-agent-mail.service`) that sources `/etc/mcp-agent-mail.env`, runs uvicorn, automatically restarts on failure, and logs to journal.  
+  - [x] Provide a `systemd` unit template (`mcp-agent-mail.service`) that sources `/etc/mcp-agent-mail.env`, runs uvicorn, automatically restarts on failure, and logs to journal.  
   - [ ] Include optional log rotation config (logrotate snippet) for when journald isn’t available.  
   - [ ] Document manual deployment steps: copy binaries, set permissions, enable service.
 
@@ -88,12 +88,12 @@
     - [ ] In progress: Implemented trailers in storage commits; validating formatting across flows.
 
 - [ ] **Ack management & urgent views**  
-  - [ ] Build resources/tools listing “messages requiring ACK” and “urgent unread”, akin to flagged email views.  
+  - [x] Build resources/tools listing “messages requiring ACK” and “urgent unread”, akin to flagged email views.  
   - [ ] CLI/agent tooling to remind agents of outstanding acknowledgements, maybe integrate with claims guard.  
   - [ ] Implement ack TTL checks—warnings or auto-claims if deadlines missed.
 
 - [ ] **Claims & leases extensions**  
-  - [ ] Add CLI command for installing/removing the pre-commit guard (currently only a tool).  
+  - [x] Add CLI command for installing/removing the pre-commit guard (currently only a tool).  
   - [ ] Add server-side enforcement (e.g., refusal to send message updates if claims conflict).  
   - [ ] Provide a heartbeat/renewal tool so agents can extend leases without reissuing claims.
 
@@ -107,14 +107,14 @@
   - [ ] Remember agent preference for inline vs file attachments.
 
 - [ ] **Agent directory enhancements**  
-  - [ ] Add `whois(agent)` tool returning project assignments, recent activity, last git commit info.  
-  - [ ] Integrate with Git to show the agent’s most recent archive commit summaries.
+  - [x] Add `whois(agent)` tool returning project assignments, recent activity, last git commit info.  
+  - [x] Integrate with Git to show the agent’s most recent archive commit summaries.
 
 - [ ] **CLI/guard tooling**  
   - [ ] Add CLI command to list active claims with expiry countdowns, and optionally raise warnings for soon-to-expire leases.  
   - [ ] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.  
-  - [x] Offer CLI command to review ack status (`cli list-acks`).  
-    - [ ] In progress: Implemented `list-acks`; extend output with ack age and thread columns.
+   - [x] Offer CLI command to review ack status (`cli list-acks`).  
+    - [x] Implemented `list-acks`; includes ack age and thread columns.
 
 - [ ] **HTTP transport hardening**  
   - [ ] Add rate limiting (e.g., `slowapi`) and CORS toggles.  
@@ -122,7 +122,7 @@
   - [ ] Provide sample middleware for request logging.
 
 - [ ] **Database improvements**  
-  - [ ] Add indexes on created_ts, thread_id, importance for faster queries.  
+  - [x] Add indexes on created_ts, thread_id, importance for faster queries.  
   - [ ] Implement scheduled cleanup for expired claims/old messages (maybe via background tasks).  
   - [ ] Prepare migrations once schema evolves (Alembic integration).
 
