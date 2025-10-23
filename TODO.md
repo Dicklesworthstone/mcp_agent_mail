@@ -13,25 +13,25 @@
   - [ ] Expose create identity tool returning full profile (program/model/task)
   - [x] Track last_active and ensure updates on interactions
 - [ ] Messaging enhancements
-  - [ ] Support message replies (thread_id, subject prefix)
-  - [ ] Include read/ack tools updating timestamps
-  - [ ] Implement urgent-only filter and ack-required flag handling
-  - [ ] Inline/attachment WebP conversion with Pillow; store under attachments/
-  - [ ] Provide acknowledgements tool
+  - [x] Support message replies (thread_id, subject prefix)
+  - [x] Include read/ack tools updating timestamps
+  - [x] Implement urgent-only filter and ack-required flag handling
+  - [x] Inline/attachment WebP conversion with Pillow; store under attachments/
+  - [x] Provide acknowledgements tool
 - [ ] Claims/leases
-  - [ ] Expand claim tool to detect glob overlaps
-  - [ ] Implement release_claims tool returning updated status
-  - [ ] Build resource for active claims per project
+  - [x] Expand claim tool to detect glob overlaps
+  - [x] Implement release_claims tool returning updated status
+  - [x] Build resource for active claims per project
   - [ ] Prepare pre-commit hook generator installing guard
 - [ ] Resources
-  - [ ] resource://message/{id}{?project} returning body + metadata
-  - [ ] resource://thread/{thread_id}{?project,include_bodies}
-  - [ ] resource://inbox/{agent}{?project,...}
-  - [ ] resource://claims/{project}{?active_only}
+  - [x] resource://message/{id}{?project} returning body + metadata
+  - [x] resource://thread/{thread_id}{?project,include_bodies}
+  - [x] resource://inbox/{agent}{?project,...}
+  - [x] resource://claims/{project}{?active_only}
 - [ ] Search & summaries
-  - [ ] Configure SQLite FTS tables/triggers for messages
-  - [ ] search_messages tool w/ query param
-  - [ ] summarize_thread tool returning keypoints/actions
+  - [x] Configure SQLite FTS tables/triggers for messages
+  - [x] search_messages tool w/ query param
+  - [x] summarize_thread tool returning keypoints/actions
 - [ ] Config/auth/CLI
   - [ ] Extend settings for storage root, git author, attachment limits
   - [ ] Provide CLI command to run migrations and list projects/agents
