@@ -253,7 +253,9 @@ Expose common reads as resources that clients can fetch:
 - `resource://thread/{thread_id}{?project,include_bodies}`
 - `resource://views/urgent-unread/{agent}{?project,limit}`
 - `resource://views/ack-required/{agent}{?project,limit}`
-- `resource://mailbox/{agent}{?project,limit}`
+- `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}`: ack-required messages older than TTL without acknowledgements
+- `resource://mailbox/{agent}{?project,limit}`: recent inbox items with basic commit metadata
+- `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}`: messages sent by agent with commit metadata
 
 Example (conceptual) resource read:
 
@@ -344,6 +346,7 @@ Common variables you may set:
 | `HTTP_CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials on CORS |
 | `HTTP_CORS_ALLOW_METHODS` | `*` | CSV of allowed methods or `*` |
 | `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
+| `KEEP_ORIGINAL_IMAGES` | `false` | Store original attachment bytes alongside WebP |
 
 ## Development quick start
 

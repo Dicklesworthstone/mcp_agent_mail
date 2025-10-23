@@ -262,7 +262,22 @@ async def _store_image(archive: ProjectArchive, path: Path) -> tuple[dict[str, o
     target_dir = buffer_path / digest[:2]
     await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
     target_path = target_dir / f"{digest}.webp"
-    # Optionally store original alongside
+    # Update global deduplication manifest and optionally store original alongside
+    manifest_dir = archive.root / "attachments"
+    manifest_path = manifest_dir / "manifest.json"
+    def _update_manifest() -> None:
+        try:
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            else:
+                manifest = {"entries": {}}
+            entries = manifest.setdefault("entries", {})
+            entries[digest] = {"bytes": len(data), "ext": path.suffix.lower().lstrip(".") or "bin"}
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    await _to_thread(_update_manifest)
     if archive.settings.storage.keep_original_images:
         orig_ext = path.suffix.lower().lstrip(".") or "bin"
         orig_path = target_dir / f"{digest}.orig.{orig_ext}"
