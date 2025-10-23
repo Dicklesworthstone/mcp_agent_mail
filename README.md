@@ -349,6 +349,15 @@ Common variables you may set:
 | `HTTP_CORS_ALLOW_METHODS` | `*` | CSV of allowed methods or `*` |
 | `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Store original attachment bytes alongside WebP |
+| `CLAIMS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting claims |
+| `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning |
+| `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
+| `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
+| `ACK_ESCALATION_ENABLED` | `false` | Enable escalation for overdue ACKs |
+| `ACK_ESCALATION_MODE` | `log` | `log` or `claim` escalation mode |
+| `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation claims |
+| `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation claim exclusive |
+| `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation claims |
 
 ## Development quick start
 

@@ -272,3 +272,41 @@ async def test_attachment_conversion(isolated_env):
         attachment_files = list((storage_root / "attachments").rglob("*.webp"))
         assert attachment_files
     image_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_rich_logger_does_not_throw(isolated_env, monkeypatch):
+    # Enable rich logging flags
+    from mcp_agent_mail import config as _config
+    monkeypatch.setenv("LOG_RICH_ENABLED", "true")
+    monkeypatch.setenv("LOG_INCLUDE_TRACE", "true")
+    # Rebuild settings cache
+    try:
+        _config.get_settings.cache_clear()
+    except Exception:
+        pass
+    server = build_mcp_server()
+    # Start a client and hit a couple of endpoints to produce logs
+    async with Client(server) as client:
+        res = await client.call_tool("health_check", {})
+        assert res.data["status"] == "ok"
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Logger",
+            },
+        )
+        await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Logger",
+                "to": ["Logger"],
+                "subject": "Rich",
+                "body_md": "hello",
+            },
+        )

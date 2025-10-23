@@ -1496,18 +1496,35 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
-        project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
-        await _get_message(project, message_id)
-        read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
-        ack_ts = await _update_recipient_timestamp(agent, message_id, "ack_ts")
-        await ctx.info(f"Acknowledged message {message_id} for '{agent.name}'.")
-        return {
-            "message_id": message_id,
-            "acknowledged": bool(ack_ts),
-            "acknowledged_at": _iso(ack_ts) if ack_ts else None,
-            "read_at": _iso(read_ts) if read_ts else None,
-        }
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: acknowledge_message", border_style="green"))
+            except Exception:
+                pass
+        try:
+            project = await _get_project_by_identifier(project_key)
+            agent = await _get_agent(project, agent_name)
+            await _get_message(project, message_id)
+            read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
+            ack_ts = await _update_recipient_timestamp(agent, message_id, "ack_ts")
+            await ctx.info(f"Acknowledged message {message_id} for '{agent.name}'.")
+            return {
+                "message_id": message_id,
+                "acknowledged": bool(ack_ts),
+                "acknowledged_at": _iso(ack_ts) if ack_ts else None,
+                "read_at": _iso(read_ts) if read_ts else None,
+            }
+        except Exception as exc:
+            if get_settings().tools_log_enabled:
+                try:
+                    from rich.console import Console  # type: ignore
+                    from rich.json import JSON  # type: ignore
+                    Console().print(JSON.from_data({"error": str(exc)}))
+                except Exception:
+                    pass
+            raise
 
     @mcp.tool(name="search_messages")
     async def search_messages(
@@ -1555,6 +1572,20 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                from rich.text import Text  # type: ignore
+                cons = Console()
+                body = Text.assemble(
+                    ("project: ", "cyan"), (project.human_key, "white"), "\n",
+                    ("query: ", "cyan"), (query[:200], "white"), "\n",
+                    ("limit: ", "cyan"), (str(limit), "white"),
+                )
+                cons.print(Panel(body, title="tool: search_messages", border_style="green"))
+            except Exception:
+                pass
         if project.id is None:
             raise ValueError("Project must have an id before searching messages.")
         await ensure_schema()
@@ -1576,6 +1607,13 @@ def build_mcp_server() -> FastMCP:
             )
             rows = result.mappings().all()
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel(f"results={len(rows)}", title="tool: search_messages — done", border_style="green"))
+            except Exception:
+                pass
         return [
             {
                 "id": row["id"],
@@ -1595,7 +1633,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         thread_id: str,
         include_examples: bool = False,
-        llm_mode: bool = False,
+        llm_mode: bool = True,
         llm_model: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -1702,7 +1740,7 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         project_key: str,
         thread_ids: list[str],
-        llm_mode: bool = False,
+        llm_mode: bool = True,
         llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
     ) -> dict[str, Any]:
@@ -2030,31 +2068,54 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
-        project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
-        if project.id is None or agent.id is None:
-            raise ValueError("Project and agent must have ids before releasing claims.")
-        await ensure_schema()
-        now = datetime.now(timezone.utc)
-        async with get_session() as session:
-            stmt = (
-                update(Claim)
-                .where(
-                    Claim.project_id == project.id,
-                    Claim.agent_id == agent.id,
-                    cast(Any, Claim.released_ts).is_(None),
+        if get_settings().tools_log_enabled:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                details = [
+                    f"project={project_key}",
+                    f"agent={agent_name}",
+                    f"paths={len(paths or [])}",
+                    f"ids={len(claim_ids or [])}",
+                ]
+                Console().print(Panel.fit("\n".join(details), title="tool: release_claims", border_style="green"))
+            except Exception:
+                pass
+        try:
+            project = await _get_project_by_identifier(project_key)
+            agent = await _get_agent(project, agent_name)
+            if project.id is None or agent.id is None:
+                raise ValueError("Project and agent must have ids before releasing claims.")
+            await ensure_schema()
+            now = datetime.now(timezone.utc)
+            async with get_session() as session:
+                stmt = (
+                    update(Claim)
+                    .where(
+                        Claim.project_id == project.id,
+                        Claim.agent_id == agent.id,
+                        cast(Any, Claim.released_ts).is_(None),
+                    )
+                    .values(released_ts=now)
                 )
-                .values(released_ts=now)
-            )
-            if claim_ids:
-                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
-            if paths:
-                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
-            result = await session.execute(stmt)
-            await session.commit()
-        affected = int(result.rowcount or 0)
-        await ctx.info(f"Released {affected} claims for '{agent.name}'.")
-        return {"released": affected, "released_at": _iso(now)}
+                if claim_ids:
+                    stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+                if paths:
+                    stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+                result = await session.execute(stmt)
+                await session.commit()
+            affected = int(result.rowcount or 0)
+            await ctx.info(f"Released {affected} claims for '{agent.name}'.")
+            return {"released": affected, "released_at": _iso(now)}
+        except Exception as exc:
+            if get_settings().tools_log_enabled:
+                try:
+                    from rich.console import Console  # type: ignore
+                    from rich.json import JSON  # type: ignore
+                    Console().print(JSON.from_data({"error": str(exc)}))
+                except Exception:
+                    pass
+            raise
 
     @mcp.tool(name="renew_claims")
     async def renew_claims(

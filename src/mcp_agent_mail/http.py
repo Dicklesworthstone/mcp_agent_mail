@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from .app import _expire_stale_claims, build_mcp_server
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
-from .storage import AsyncFileLock, ensure_archive, write_claim_record
+from .storage import AsyncFileLock, ensure_archive, write_agent_profile, write_claim_record
 
 
 async def _project_slug_from_id(pid: int | None) -> str | None:
@@ -56,6 +56,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     fastapi_app = FastAPI()
     if server is None:
         server = build_mcp_server()
+    # Rich traceback (optional)
+    if getattr(settings, "log_rich_enabled", False) and getattr(settings, "log_include_trace", False):
+        try:
+            from rich.traceback import install as rich_traceback_install  # type: ignore
+
+            rich_traceback_install(show_locals=False)
+        except Exception:
+            pass
 
     # Simple request logging (configurable)
     if settings.http.request_log_enabled:
@@ -116,6 +124,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 while dq and now - dq[0] >= window_seconds:
                     dq.popleft()
                 if len(dq) >= limit:
+                    try:
+                        from rich.console import Console  # type: ignore
+                        from rich.panel import Panel  # type: ignore
+                        cons = Console(width=100)
+                        cons.print(Panel.fit(f"ip={client_ip} window={window_seconds}s limit={limit}", title="429 Rate Limit", border_style="red"))
+                    except Exception:
+                        pass
                     raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
                 dq.append(now)
                 return await call_next(request)
@@ -170,6 +185,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         try:
             await readiness_check()
         except Exception as exc:
+            try:
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+                Console().print(Panel.fit(str(exc), title="Readiness Error", border_style="red"))
+            except Exception:
+                pass
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
@@ -191,6 +212,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     for pid in pids:
                         with contextlib.suppress(Exception):
                             await _expire_stale_claims(pid)
+                    # Log a compact Rich panel with scan summary
+                    try:
+                        from rich.console import Console  # type: ignore
+                        from rich.panel import Panel  # type: ignore
+                        Console().print(Panel.fit(f"projects_scanned={len(pids)}", title="Claims Cleanup", border_style="cyan"))
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 await asyncio.sleep(settings.claims_cleanup_interval_seconds)
@@ -215,15 +243,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         age = (now - created_ts).total_seconds()
                         if age >= settings.ack_ttl_seconds:
                             try:
-                                import structlog  # type: ignore
-                                structlog.get_logger().warning(
-                                    "ack_overdue",
-                                    message_id=mid,
-                                    agent_id=agent_id,
-                                    project_id=project_id,
-                                    age_seconds=int(age),
-                                    ttl_seconds=settings.ack_ttl_seconds,
+                                from rich.console import Console  # type: ignore
+                                from rich.panel import Panel  # type: ignore
+                                from rich.text import Text  # type: ignore
+                                con = Console()
+                                body = Text.assemble(
+                                    ("message_id: ", "cyan"), (str(mid), "white"), "\n",
+                                    ("agent_id: ", "cyan"), (str(agent_id), "white"), "\n",
+                                    ("project_id: ", "cyan"), (str(project_id), "white"), "\n",
+                                    ("age_s: ", "cyan"), (str(int(age)), "white"), "\n",
+                                    ("ttl_s: ", "cyan"), (str(settings.ack_ttl_seconds), "white"),
                                 )
+                                con.print(Panel(body, title="ACK Overdue", border_style="red"))
                             except Exception:
                                 print(f"ack-warning message_id={mid} project_id={project_id} agent_id={agent_id} age_s={int(age)} ttl_s={settings.ack_ttl_seconds}")
                             if settings.ack_escalation_enabled:
@@ -248,6 +279,39 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                                 hid = hid_row.scalar_one_or_none()
                                                 if isinstance(hid, int):
                                                     holder_agent_id = hid
+                                                else:
+                                                    # Auto-create ops holder in DB and write profile.json
+                                                    await s_holder.execute(text(
+                                                        "INSERT INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts) VALUES (:pid, :name, :program, :model, :task, :ts, :ts)"
+                                                    ), {
+                                                        "pid": project_id,
+                                                        "name": settings.ack_escalation_claim_holder_name,
+                                                        "program": "ops",
+                                                        "model": "system",
+                                                        "task": "ops-escalation",
+                                                        "ts": now,
+                                                    })
+                                                    await s_holder.commit()
+                                                    hid_row2 = await s_holder.execute(
+                                                        text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                                                        {"pid": project_id, "name": settings.ack_escalation_claim_holder_name},
+                                                    )
+                                                    hid2 = hid_row2.scalar_one_or_none()
+                                                    if isinstance(hid2, int):
+                                                        holder_agent_id = hid2
+                                                        # Write profile.json to archive
+                                                        archive = await ensure_archive(settings, (await _project_slug_from_id(project_id)) or "")
+                                                        async with AsyncFileLock(archive.lock_path):
+                                                            await write_agent_profile(archive, {
+                                                                "id": holder_agent_id,
+                                                                "name": settings.ack_escalation_claim_holder_name,
+                                                                "program": "ops",
+                                                                "model": "system",
+                                                                "project_slug": (await _project_slug_from_id(project_id)) or "",
+                                                                "inception_ts": now.astimezone().isoformat(),
+                                                                "inception_iso": now.astimezone().isoformat(),
+                                                                "task": "ops-escalation",
+                                                            })
                                         async with get_session() as s2:
                                             await s2.execute(text(
                                                 """

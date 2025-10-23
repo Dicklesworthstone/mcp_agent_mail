@@ -87,12 +87,18 @@ def serve_http(
     t.add_row("DB URL", Text(settings.database.url, style="cyan"))
     t.add_row("Storage", Text(settings.storage.root, style="magenta"))
     flags: list[str] = []
-    if settings.http.rate_limit_enabled: flags.append("rate-limit")
-    if settings.http.bearer_token: flags.append("bearer-auth")
-    if settings.cors.enabled: flags.append("CORS")
-    if settings.http.otel_enabled: flags.append("OTEL")
-    if settings.http.request_log_enabled: flags.append("req-log")
-    if settings.tools_log_enabled: flags.append("tools-log")
+    if settings.http.rate_limit_enabled:
+        flags.append("rate-limit")
+    if settings.http.bearer_token:
+        flags.append("bearer-auth")
+    if settings.cors.enabled:
+        flags.append("CORS")
+    if settings.http.otel_enabled:
+        flags.append("OTEL")
+    if settings.http.request_log_enabled:
+        flags.append("req-log")
+    if settings.tools_log_enabled:
+        flags.append("tools-log")
     t.add_row("Features", Text(", ".join(flags) or "(none)", style="yellow"))
     console.print(Panel(t, title="MCP Agent Mail — HTTP", border_style="blue"))
 

@@ -46,8 +46,24 @@ def _setup_callbacks() -> None:
             cost = float(kwargs.get("response_cost", 0.0) or 0.0)
             model = str(kwargs.get("model", ""))
             if cost > 0:
-                _logger.info("litellm.cost", model=model, cost_usd=cost)
+                # Prefer rich terminal output when enabled; fallback to structlog
+                if settings.log_rich_enabled:
+                    try:
+                        from rich.console import Console  # type: ignore
+                        from rich.panel import Panel  # type: ignore
+                        from rich.text import Text  # type: ignore
+
+                        body = Text.assemble(
+                            ("model: ", "cyan"), (model, "white"), "\n",
+                            ("cost: ", "cyan"), (f"${cost:.6f}", "bold green"),
+                        )
+                        Console().print(Panel(body, title="llm: cost", border_style="magenta"))
+                    except Exception:
+                        _logger.info("litellm.cost", model=model, cost_usd=cost)
+                else:
+                    _logger.info("litellm.cost", model=model, cost_usd=cost)
         except Exception:
+            # Never let logging issues impact normal flow
             pass
 
     if _on_success not in _existing_callbacks():
