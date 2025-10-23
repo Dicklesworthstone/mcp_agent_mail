@@ -58,13 +58,13 @@
   - [x] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base (e.g., `python:3.14-slim`).  
   - [x] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
   - [x] Create a sample `docker-compose.yml` that wires the MCP server with Postgres (async connection) showing env config, volume mounts (for archive), and health checks.  
-  - [ ] Document the build/push flow and recommended multi-arch strategy.
+  - [x] Document the build/push flow and recommended multi-arch strategy.
 
 - [ ] **Process supervisor packaging**  
   Aid on-prem/bare metal operators.  
   - [x] Provide a `systemd` unit template (`mcp-agent-mail.service`) that sources `/etc/mcp-agent-mail.env`, runs uvicorn, automatically restarts on failure, and logs to journal.  
-  - [ ] Include optional log rotation config (logrotate snippet) for when journald isn’t available.  
-  - [ ] Document manual deployment steps: copy binaries, set permissions, enable service.
+  - [x] Include optional log rotation config (logrotate snippet) for when journald isn’t available.  
+  - [x] Document manual deployment steps: copy binaries, set permissions, enable service.
 
 - [ ] **Automation scripts**  
   Simplify bootstrap and recurring ops.  
@@ -160,5 +160,5 @@
 - [x] **Automation scripts**  
   Simplify bootstrap and recurring ops.  
   - [x] Add `scripts/bootstrap.sh` that installs deps and runs migrations.  
-  - [ ] Consider Makefile/task runner integration.  
-  - [ ] Template env files for staging/prod.
+  - [x] Consider Makefile/task runner integration.  
+  - [x] Template env files for staging/prod.

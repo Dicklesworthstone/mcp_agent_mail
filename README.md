@@ -661,6 +661,43 @@ If you’re building with or contributing to this project, please read `project_
 - **Gunicorn**: `gunicorn -c deploy/gunicorn.conf.py mcp_agent_mail.http:build_http_app --factory`
 - **Docker**: `docker compose up --build`
 
+### Container build and multi-arch push
+
+Use Docker Buildx for multi-arch images. Example flow:
+
+```bash
+# Create and select a builder (once)
+docker buildx create --use --name mcp-builder || docker buildx use mcp-builder
+
+# Build and test locally (linux/amd64)
+docker buildx build --load -t your-registry/mcp-agent-mail:dev .
+
+# Multi-arch build and push (amd64, arm64)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t your-registry/mcp-agent-mail:latest \
+  -t your-registry/mcp-agent-mail:v0.1.0 \
+  --push .
+```
+
+Recommended tags: a moving `latest` and immutable version tags per release. Ensure your registry login is configured (`docker login`).
+
+### Systemd manual deployment steps
+
+1. Copy project files to `/opt/mcp-agent-mail` and ensure permissions (owner `appuser`).
+2. Place environment file at `/etc/mcp-agent-mail.env` based on `deploy/env/production.env`.
+3. Install service file `deploy/systemd/mcp-agent-mail.service` to `/etc/systemd/system/`.
+4. Reload systemd and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable mcp-agent-mail
+sudo systemctl start mcp-agent-mail
+sudo systemctl status mcp-agent-mail
+```
+
+Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.
+
 See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the broader deployment roadmap (Docker, systemd, automation scripts, CI/CD).
 
 ## CLI Commands
