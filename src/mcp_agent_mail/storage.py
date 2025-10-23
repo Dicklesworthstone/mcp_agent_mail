@@ -184,7 +184,7 @@ async def _update_thread_digest(
     # Append atomically
     def _append() -> None:
         mode = "a" if digest_path.exists() else "w"
-        with open(digest_path, mode, encoding="utf-8") as f:
+        with digest_path.open(mode, encoding="utf-8") as f:
             if mode == "w":
                 f.write(f"# Thread {thread_id}\n\n")
             f.write(entry)

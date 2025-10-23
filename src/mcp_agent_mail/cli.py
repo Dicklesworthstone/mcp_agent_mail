@@ -249,6 +249,69 @@ def claims_list(
     console.print(table)
 
 
+@claims_app.command("soon")
+def claims_soon(
+    project: str = typer.Argument(..., help="Project slug or human key"),
+    minutes: int = typer.Option(30, min=1, help="Show claims expiring within N minutes"),
+) -> None:
+    """Show claims expiring soon to prompt renewals or coordination."""
+
+    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+        project_record = await _get_project_record(project)
+        if project_record.id is None:
+            raise ValueError("Project must have an id")
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(Claim, Agent.name)
+                .join(Agent, Claim.agent_id == Agent.id)
+                .where(
+                    Claim.project_id == project_record.id,
+                    cast(Any, Claim.released_ts).is_(None),
+                )
+                .order_by(asc(Claim.expires_ts))
+            )
+            rows = (await session.execute(stmt)).all()
+        return project_record, rows
+
+    try:
+        project_record, rows = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(minutes=minutes)
+    soon = [(c, a) for (c, a) in rows if c.expires_ts <= cutoff]
+
+    table = Table(title=f"Claims expiring within {minutes}m — {project_record.human_key}", show_lines=False)
+    table.add_column("ID")
+    table.add_column("Agent")
+    table.add_column("Pattern")
+    table.add_column("Exclusive")
+    table.add_column("Expires")
+    table.add_column("In")
+
+    def _fmt_delta(dt: datetime) -> str:
+        delta = dt - now
+        total = int(delta.total_seconds())
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        h, r = divmod(total, 3600)
+        m, s = divmod(r, 60)
+        return f"{sign}{h:02d}:{m:02d}:{s:02d}"
+
+    for claim, agent_name in soon:
+        table.add_row(
+            str(claim.id),
+            agent_name,
+            claim.path_pattern,
+            "yes" if claim.exclusive else "no",
+            _iso(claim.expires_ts),
+            _fmt_delta(claim.expires_ts),
+        )
+    console.print(table)
+
 @acks_app.command("pending")
 def acks_pending(
     project: str = typer.Argument(..., help="Project slug or human key"),
@@ -286,17 +349,31 @@ def acks_pending(
 
     table = Table(title=f"Pending ACKs for {agent_record.name} ({project_record.human_key})", show_lines=False)
     table.add_column("Msg ID")
+    table.add_column("Thread")
     table.add_column("Subject")
     table.add_column("Kind")
     table.add_column("Created")
     table.add_column("Read")
+    table.add_column("Ack Age")
+
+    now = datetime.now(timezone.utc)
+    def _age(dt: datetime) -> str:
+        delta = now - dt
+        total = int(delta.total_seconds())
+        h, r = divmod(max(total, 0), 3600)
+        m, s = divmod(r, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
     for message, read_ts, _ack_ts, kind in rows:
+        age = _age(message.created_ts)
         table.add_row(
             str(message.id),
+            message.thread_id or "",
             message.subject,
             kind,
             _iso(message.created_ts),
             _iso(read_ts) if read_ts else "",
+            age,
         )
     console.print(table)
 
