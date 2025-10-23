@@ -573,11 +573,19 @@ def build_mcp_server() -> FastMCP:
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     async def health_check(ctx: Context) -> dict[str, Any]:
         """
-        Quick readiness probe for clients.
+        Quick readiness probe for agents and orchestrators.
 
-        Use this to verify the server is up, responsive, and wired to its configured
-        environment. This does not perform deep dependency checks, but it surfaces
-        environment, host/port, and database URL for basic diagnostics.
+        When to use
+        -----------
+        - Before starting a workflow, to ensure the coordination server is reachable
+          and configured (right environment, host/port, DB wiring).
+        - During incident triage to print basic diagnostics to logs via `ctx.info`.
+
+        What it checks vs what it does not
+        ----------------------------------
+        - Reports current environment and HTTP binding details.
+        - Returns the configured database URL (not a live connection test).
+        - Does not perform deep dependency health checks or connection attempts.
 
         Returns
         -------
@@ -590,16 +598,16 @@ def build_mcp_server() -> FastMCP:
               "database_url": str
             }
 
-        JSON-RPC example
-        -----------------
+        Examples
+        --------
+        JSON-RPC (generic MCP client):
         ```json
-        {
-          "jsonrpc": "2.0",
-          "id": "1",
-          "method": "tools/call",
-          "params": {"name": "health_check", "arguments": {}}
-        }
+        {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"health_check","arguments":{}}}
         ```
+
+        Typical agent usage (pseudocode):
+        - Call `health_check`.
+        - If status != ok, sleep/retry with backoff and log `environment`/`http_host`/`http_port`.
         """
         await ctx.info("Running health check.")
         return {
@@ -620,6 +628,13 @@ def build_mcp_server() -> FastMCP:
         - First call in a workflow targeting a new repo/path identifier.
         - As a guard before registering agents or sending messages.
 
+        How it works
+        ------------
+        - Computes a stable slug from `human_key` (lowercased, safe characters) so
+          multiple agents can refer to the same project consistently.
+        - Ensures DB row exists and that the on-disk archive is initialized
+          (e.g., `messages/`, `agents/`, `claims/` directories).
+
         Parameters
         ----------
         human_key : str
@@ -631,8 +646,9 @@ def build_mcp_server() -> FastMCP:
         dict
             Minimal project descriptor: { id, slug, human_key, created_at }.
 
-        JSON-RPC example
-        -----------------
+        Examples
+        --------
+        JSON-RPC:
         ```json
         {
           "jsonrpc": "2.0",
@@ -641,6 +657,11 @@ def build_mcp_server() -> FastMCP:
           "params": {"name": "ensure_project", "arguments": {"human_key": "/abs/path/backend"}}
         }
         ```
+
+        Common mistakes
+        ---------------
+        - Passing an ephemeral or relative path as `human_key` (prefer absolute,
+          stable identifiers to avoid accidental duplication).
         """
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
@@ -663,6 +684,13 @@ def build_mcp_server() -> FastMCP:
         -----------
         - At the start of a coding session by any automated agent.
         - To update an existing agent's program/model/task metadata and bump last_active.
+
+        Semantics
+        ---------
+        - If `name` is omitted, a memorable adjective+noun name is generated.
+        - Reusing the same `name` updates the profile (program/model/task) and
+          refreshes `last_active_ts`.
+        - A `profile.json` file is written under `agents/<Name>/` in the project archive.
 
         Parameters
         ----------
@@ -698,6 +726,11 @@ def build_mcp_server() -> FastMCP:
           "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
         }}}
         ```
+
+        Pitfalls
+        --------
+        - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
+        - Use the same `project_key` consistently across cooperating agents.
         """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
@@ -713,6 +746,42 @@ def build_mcp_server() -> FastMCP:
         name_hint: Optional[str] = None,
         task_description: str = "",
     ) -> dict[str, Any]:
+        """
+        Create a new, unique agent identity and persist its profile to Git.
+
+        How this differs from `register_agent`
+        --------------------------------------
+        - Always creates a new identity with a fresh unique name (never updates an existing one).
+        - `name_hint`, if provided, is sanitized (alphanumeric only) and must be available,
+          otherwise an error is raised. Without a hint, a readable adjective+noun name is generated.
+
+        When to use
+        -----------
+        - Spawning a brand new worker agent that should not overwrite an existing profile.
+        - Temporary task-specific identities (e.g., short-lived refactor assistants).
+
+        Returns
+        -------
+        dict
+            { id, name, program, model, task_description, inception_ts, last_active_ts, project_id }
+
+        Examples
+        --------
+        With name hint:
+        ```json
+        {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
+          "task_description":"DB migration spike"
+        }}}
+        ```
+
+        Let the server generate the name:
+        ```json
+        {"jsonrpc":"2.0","id":"c2","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1"
+        }}}
+        ```
+        """
         project = await _get_project_by_identifier(project_key)
         unique_name = await _generate_unique_agent_name(project, settings, name_hint)
         agent = await _create_agent_record(project, unique_name, program, model, task_description)
@@ -747,6 +816,7 @@ def build_mcp_server() -> FastMCP:
         - Writes a canonical `.md` under `messages/YYYY/MM/`
         - Writes sender outbox and per-recipient inbox copies
         - Optionally converts referenced images to WebP and embeds small images inline
+        - Supports explicit attachments via `attachment_paths` in addition to inline references
 
         Parameters
         ----------
@@ -784,13 +854,29 @@ def build_mcp_server() -> FastMCP:
         - Unknown recipient names fail fast; register them first.
         - Non-absolute attachment paths are resolved relative to the project archive root.
 
-        JSON-RPC example
-        -----------------
+        Examples
+        --------
+        1) Simple message:
         ```json
         {"jsonrpc":"2.0","id":"5","method":"tools/call","params":{"name":"send_message","arguments":{
           "project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],
-          "subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)",
-          "convert_images":true,"importance":"high","ack_required":true
+          "subject":"Plan for /api/users","body_md":"See below."
+        }}}
+        ```
+
+        2) Inline image (auto-convert to WebP and inline if small):
+        ```json
+        {"jsonrpc":"2.0","id":"6a","method":"tools/call","params":{"name":"send_message","arguments":{
+          "project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],
+          "subject":"Diagram","body_md":"![diagram](docs/flow.png)","convert_images":true
+        }}}
+        ```
+
+        3) Explicit attachments:
+        ```json
+        {"jsonrpc":"2.0","id":"6b","method":"tools/call","params":{"name":"send_message","arguments":{
+          "project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],
+          "subject":"Screenshots","body_md":"Please review.","attachment_paths":["shots/a.png","shots/b.png"]
         }}}
         ```
         """
@@ -855,12 +941,21 @@ def build_mcp_server() -> FastMCP:
         dict
             Message payload including `thread_id` and `reply_to`.
 
-        Example
-        -------
+        Examples
+        --------
+        Minimal reply to original sender:
         ```json
         {"jsonrpc":"2.0","id":"6","method":"tools/call","params":{"name":"reply_message","arguments":{
           "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
           "body_md":"Questions about the migration plan..."
+        }}}
+        ```
+
+        Reply with explicit recipients and CC:
+        ```json
+        {"jsonrpc":"2.0","id":"6c","method":"tools/call","params":{"name":"reply_message","arguments":{
+          "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
+          "body_md":"Looping ops.","to":["GreenCastle"],"cc":["RedCat"],"subject_prefix":"RE:"
         }}}
         ```
         """
@@ -915,6 +1010,12 @@ def build_mcp_server() -> FastMCP:
         - `limit`: max number of messages (default 20)
         - `include_bodies`: include full Markdown bodies in the payloads
 
+        Usage patterns
+        --------------
+        - Poll after each editing step in an agent loop to pick up coordination messages.
+        - Use `since_ts` with the timestamp from your last poll for efficient incremental fetches.
+        - Combine with `acknowledge_message` if `ack_required` is true.
+
         Returns
         -------
         list[dict]
@@ -948,6 +1049,7 @@ def build_mcp_server() -> FastMCP:
         -----
         - Read receipts are per-recipient; this only affects the specified agent.
         - This does not send an acknowledgement; use `acknowledge_message` for that.
+        - Safe to call multiple times; later calls return the original timestamp.
 
         Returns
         -------
@@ -983,6 +1085,11 @@ def build_mcp_server() -> FastMCP:
         --------
         - Sets both read_ts and ack_ts for the (agent, message) pairing
         - Safe to call multiple times; subsequent calls will return the prior timestamps
+
+        When to use
+        -----------
+        - Respond to messages with `ack_required=true` to signal explicit receipt.
+        - Agents can treat an acknowledgement as a lightweight, non-textual reply.
 
         Returns
         -------
@@ -1025,6 +1132,13 @@ def build_mcp_server() -> FastMCP:
         - SQLite FTS5 syntax supported: phrases ("build plan"), prefix (mig*), boolean (plan AND users)
         - Results are ordered by bm25 score (best matches first)
         - Limit defaults to 20; raise for broad queries
+
+        Query examples
+        ---------------
+        - Phrase search: `"build plan"`
+        - Prefix: `migrat*`
+        - Boolean: `plan AND users`
+        - Require urgent: `urgent AND deployment`
 
         Parameters
         ----------
@@ -1098,6 +1212,11 @@ def build_mcp_server() -> FastMCP:
         - If `thread_id` is not an id present on any message, it is treated as a string key
         - If `thread_id` is a message id, messages where `id == thread_id` are also included
         - `include_examples` returns up to 3 sample messages for quick preview
+
+        Suggested use
+        -------------
+        - Call after a long discussion to inform a summarizing or planning agent.
+        - Use `key_points` to seed a TODO list and `action_items` to assign work.
 
         Returns
         -------

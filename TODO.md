@@ -33,10 +33,10 @@
   - [x] search_messages tool w/ query param
   - [x] summarize_thread tool returning keypoints/actions
 - [ ] Config/auth/CLI
-  - [ ] Extend settings for storage root, git author, attachment limits
-  - [ ] Provide CLI command to run migrations and list projects/agents
-  - [ ] Add optional bearer auth scaffold for HTTP transport
-  - [ ] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
+  - [x] Extend settings for storage root, git author, attachment limits
+  - [x] Provide CLI command to run migrations and list projects/agents
+  - [x] Add optional bearer auth scaffold for HTTP transport
+  - [x] Implement health/readiness endpoints on HTTP app via FastAPI wrapper
   - [ ] Enrich CLI output with Rich panels/logging
 - [ ] Testing
   - [ ] Expand tests to cover filesystem archive & git commits
