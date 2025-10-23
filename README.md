@@ -601,6 +601,37 @@ if __name__ == "__main__":
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
+## API Quick Reference
+
+### Tools
+
+| Name | Signature | Returns | Notes |
+| :-- | :-- | :-- | :-- |
+| `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
+| `ensure_project` | `ensure_project(human_key: str)` | `{id, slug, human_key, created_at}` | Idempotently creates/ensures project |
+| `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
+| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str)` | Message dict | Writes canonical + inbox/outbox, converts images |
+| `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | Message dict | Preserves/creates thread, inherits flags |
+| `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
+| `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
+| `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
+| `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
+| `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
+| `claim_paths` | `claim_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
+| `release_claims` | `release_claims(project_key: str, agent_name: str, paths?: list[str], claim_ids?: list[int])` | `{released, released_at}` | Releases agent’s active claims |
+
+### Resources
+
+| URI | Params | Returns | Notes |
+| :-- | :-- | :-- | :-- |
+| `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
+| `resource://projects` | — | `list[project]` | All projects |
+| `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
+| `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | Claims for a project |
+| `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
+| `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
+| `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
+
 ## Roadmap (selected)
 
 See `TODO.md` for the in-progress task list, including:

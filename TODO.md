@@ -9,8 +9,8 @@
   - [x] Integrate GitPython: repo init per project, add commit helper with lock handling
   - [x] Add advisory file lock to serialize archive writes
 - [ ] Agent identity workflow
-  - [ ] Update name generator to check DB + filesystem for uniqueness
-  - [ ] Expose create identity tool returning full profile (program/model/task)
+  - [x] Update name generator to check DB + filesystem for uniqueness
+  - [x] Expose create identity tool returning full profile (program/model/task)
   - [x] Track last_active and ensure updates on interactions
 - [ ] Messaging enhancements
   - [x] Support message replies (thread_id, subject prefix)

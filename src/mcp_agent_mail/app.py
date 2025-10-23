@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
+import json
+import os
+import textwrap
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
@@ -684,14 +689,14 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"register_agent","arguments":{
           "project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"
-        }}} 
+        }}}
         ```
 
         Register with explicit name:
         ```json
         {"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"register_agent","arguments":{
           "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -786,7 +791,7 @@ def build_mcp_server() -> FastMCP:
           "project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],
           "subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)",
           "convert_images":true,"importance":"high","ack_required":true
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -856,7 +861,7 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"6","method":"tools/call","params":{"name":"reply_message","arguments":{
           "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
           "body_md":"Questions about the migration plan..."
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -920,7 +925,7 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"7","method":"tools/call","params":{"name":"fetch_inbox","arguments":{
           "project_key":"/abs/path/backend","agent_name":"BlueLake","since_ts":"2025-10-23T00:00:00+00:00"
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -954,7 +959,7 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"8","method":"tools/call","params":{"name":"mark_message_read","arguments":{
           "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -989,7 +994,7 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"9","method":"tools/call","params":{"name":"acknowledge_message","arguments":{
           "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -1040,7 +1045,7 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"10","method":"tools/call","params":{"name":"search_messages","arguments":{
           "project_key":"/abs/path/backend","query":"\"build plan\" AND users", "limit": 50
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -1104,7 +1109,7 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"11","method":"tools/call","params":{"name":"summarize_thread","arguments":{
           "project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -1144,6 +1149,39 @@ def build_mcp_server() -> FastMCP:
             f"Summarized thread '{thread_id}' for project '{project.human_key}' with {len(rows)} messages"
         )
         return {"thread_id": thread_id, "summary": summary, "examples": examples}
+
+    @mcp.tool(name="install_precommit_guard")
+    async def install_precommit_guard(
+        ctx: Context,
+        project_key: str,
+        code_repo_path: str,
+    ) -> dict[str, Any]:
+        project = await _get_project_by_identifier(project_key)
+        archive = await ensure_archive(settings, project.slug)
+        repo_path = Path(code_repo_path).expanduser().resolve()
+        hooks_dir = repo_path / ".git" / "hooks"
+        if not hooks_dir.is_dir():
+            raise ValueError(f"No git hooks directory at {hooks_dir}")
+        hook_path = hooks_dir / "pre-commit"
+        script = await _build_precommit_hook_content(archive)
+        await asyncio.to_thread(hook_path.write_text, script, "utf-8")
+        await asyncio.to_thread(os.chmod, hook_path, 0o755)
+        await ctx.info(f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
+        return {"hook": str(hook_path)}
+
+    @mcp.tool(name="uninstall_precommit_guard")
+    async def uninstall_precommit_guard(
+        ctx: Context,
+        code_repo_path: str,
+    ) -> dict[str, Any]:
+        repo_path = Path(code_repo_path).expanduser().resolve()
+        hook_path = repo_path / ".git" / "hooks" / "pre-commit"
+        if hook_path.exists():
+            await asyncio.to_thread(hook_path.unlink)
+            await ctx.info(f"Removed pre-commit guard at {hook_path}.")
+            return {"removed": True}
+        await ctx.info(f"No pre-commit guard to remove at {hook_path}.")
+        return {"removed": False}
 
     @mcp.tool(name="claim_paths")
     async def claim_paths(
@@ -1189,7 +1227,7 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"12","method":"tools/call","params":{"name":"claim_paths","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],
           "ttl_seconds":7200,"exclusive":true,"reason":"migrations"
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -1283,14 +1321,14 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"13","method":"tools/call","params":{"name":"release_claims","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle"
-        }}} 
+        }}}
         ```
 
         Release by ids:
         ```json
         {"jsonrpc":"2.0","id":"14","method":"tools/call","params":{"name":"release_claims","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle","claim_ids":[101,102]
-        }}} 
+        }}}
         ```
         """
         project = await _get_project_by_identifier(project_key)
@@ -1321,6 +1359,24 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
+        """
+        Inspect the server's current environment and HTTP settings.
+
+        Returns
+        -------
+        dict
+            {
+              "environment": str,
+              "database_url": str,
+              "http": { "host": str, "port": int, "path": str }
+            }
+
+        Example (JSON-RPC)
+        ------------------
+        ```json
+        {"jsonrpc":"2.0","id":"r1","method":"resources/read","params":{"uri":"resource://config/environment"}}
+        ```
+        """
         return {
             "environment": settings.environment,
             "database_url": settings.database.url,
@@ -1333,6 +1389,20 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://projects", mime_type="application/json")
     async def projects_resource() -> list[dict[str, Any]]:
+        """
+        List all projects known to the server in creation order.
+
+        Returns
+        -------
+        list[dict]
+            Each: { id, slug, human_key, created_at }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://projects"}}
+        ```
+        """
         await ensure_schema()
         async with get_session() as session:
             result = await session.execute(select(Project).order_by(asc(Project.created_at)))
@@ -1341,6 +1411,25 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://project/{slug}", mime_type="application/json")
     async def project_detail(slug: str) -> dict[str, Any]:
+        """
+        Fetch a project and its agents by project slug or human key.
+
+        Parameters
+        ----------
+        slug : str
+            Project slug (or human key; both resolve to the same target).
+
+        Returns
+        -------
+        dict
+            Project descriptor including { agents: [...] } with agent profiles.
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r3","method":"resources/read","params":{"uri":"resource://project/backend-abc123"}}
+        ```
+        """
         project = await _get_project_by_identifier(slug)
         await ensure_schema()
         async with get_session() as session:
@@ -1353,6 +1442,27 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://claims/{slug}{?active_only}", mime_type="application/json")
     async def claims_resource(slug: str, active_only: bool = True) -> list[dict[str, Any]]:
+        """
+        List claims for a project, optionally filtering to active-only.
+
+        Parameters
+        ----------
+        slug : str
+            Project slug or human key.
+        active_only : bool
+            If true (default), only returns claims with no `released_ts`.
+
+        Returns
+        -------
+        list[dict]
+            Each claim with { id, agent, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://claims/backend-abc123?active_only=true"}}
+        ```
+        """
         project = await _get_project_by_identifier(slug)
         await ensure_schema()
         if project.id is None:
@@ -1380,6 +1490,27 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://message/{message_id}{?project}", mime_type="application/json")
     async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
+        """
+        Read a single message by id within a project.
+
+        Parameters
+        ----------
+        message_id : str
+            Numeric id as a string.
+        project : str
+            Project slug or human key (required for disambiguation).
+
+        Returns
+        -------
+        dict
+            Full message payload including body and sender name.
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend"}}
+        ```
+        """
         if project is None:
             raise ValueError("project parameter is required for message resource")
         project_obj = await _get_project_by_identifier(project)
@@ -1395,6 +1526,29 @@ def build_mcp_server() -> FastMCP:
         project: Optional[str] = None,
         include_bodies: bool = False,
     ) -> dict[str, Any]:
+        """
+        List messages for a thread within a project.
+
+        Parameters
+        ----------
+        thread_id : str
+            Either a string thread key or a numeric message id to seed the thread.
+        project : str
+            Project slug or human key (required).
+        include_bodies : bool
+            Include message bodies if true (default false).
+
+        Returns
+        -------
+        dict
+            { project, thread_id, messages: [{...}] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&include_bodies=true"}}
+        ```
+        """
         if project is None:
             raise ValueError("project parameter is required for thread resource")
         project_obj = await _get_project_by_identifier(project)
@@ -1437,6 +1591,35 @@ def build_mcp_server() -> FastMCP:
         include_bodies: bool = False,
         limit: int = 20,
     ) -> dict[str, Any]:
+        """
+        Read an agent's inbox for a project.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        since_ts : Optional[str]
+            ISO-8601 timestamp string; only messages newer than this are returned.
+        urgent_only : bool
+            If true, limits to importance in {high, urgent}.
+        include_bodies : bool
+            Include message bodies in results (default false).
+        limit : int
+            Maximum number of messages to return (default 20).
+
+        Returns
+        -------
+        dict
+            { project, agent, count, messages: [...] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true"}}
+        ```
+        """
         if project is None:
             raise ValueError("project parameter is required for inbox resource")
         project_obj = await _get_project_by_identifier(project)
@@ -1450,3 +1633,81 @@ def build_mcp_server() -> FastMCP:
         }
 
     return mcp
+
+async def _build_precommit_hook_content(archive: ProjectArchive) -> str:
+    claims_dir = archive.root / "claims"
+    storage_root = archive.root
+    claims_dir_str = json.dumps(str(claims_dir))
+    storage_root_str = json.dumps(str(storage_root))
+    return f"""#!/usr/bin/env python3
+import json
+import os
+import sys
+import subprocess
+from pathlib import Path
+from fnmatch import fnmatch
+from datetime import datetime, timezone
+
+CLAIMS_DIR = Path({claims_dir_str})
+STORAGE_ROOT = Path({storage_root_str})
+AGENT_NAME = os.environ.get("AGENT_NAME")
+if not AGENT_NAME:
+    sys.stderr.write("[pre-commit] AGENT_NAME environment variable is required.\n")
+    sys.exit(1)
+
+if not CLAIMS_DIR.exists():
+    sys.exit(0)
+
+now = datetime.now(timezone.utc)
+
+staged = subprocess.run(
+    ["git", "diff", "--cached", "--name-only"],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+if staged.returncode != 0:
+    sys.stderr.write("[pre-commit] Failed to enumerate staged files.\n")
+    sys.exit(1)
+
+paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
+
+if not paths:
+    sys.exit(0)
+
+def load_claims():
+    for path in CLAIMS_DIR.glob("*.json"):
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            continue
+        yield data
+
+conflicts = []
+for claim in load_claims():
+    if claim.get("agent") == AGENT_NAME:
+        continue
+    expires = claim.get("expires_ts")
+    if expires:
+        try:
+            expires_dt = datetime.fromisoformat(expires)
+            if expires_dt < now:
+                continue
+        except Exception:
+            pass
+    pattern = claim.get("path_pattern")
+    if not pattern:
+        continue
+    for path in paths:
+        if fnmatch(path, pattern) or fnmatch(pattern, path):
+            conflicts.append((path, claim.get("agent"), pattern))
+
+if conflicts:
+    sys.stderr.write("[pre-commit] Exclusive claim conflicts detected:\n")
+    for path, agent, pattern in conflicts:
+        sys.stderr.write(f"  - {path} matches claim '{pattern}' held by {agent}\n")
+    sys.stderr.write("Resolve conflicts or release claims before committing.\n")
+    sys.exit(1)
+
+sys.exit(0)
+"""
