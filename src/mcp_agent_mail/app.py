@@ -10,6 +10,8 @@ from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import json
+import functools
 from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, cast
@@ -195,6 +197,43 @@ def _tool_metrics_snapshot() -> list[dict[str, Any]]:
             }
         )
     return snapshot
+
+
+@functools.lru_cache(maxsize=1)
+def _load_capabilities_mapping() -> list[dict[str, Any]]:
+    mapping_path = Path(__file__).resolve().parent.parent.parent / "deploy" / "capabilities" / "agent_capabilities.json"
+    if not mapping_path.exists():
+        return []
+    try:
+        data = json.loads(mapping_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("capability_mapping.load_failed", extra={"error": str(exc)})
+        return []
+    agents = data.get("agents", [])
+    if not isinstance(agents, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for entry in agents:
+        if not isinstance(entry, dict):
+            continue
+        normalized.append(entry)
+    return normalized
+
+
+def _capabilities_for(agent: Optional[str], project: Optional[str]) -> list[str]:
+    mapping = _load_capabilities_mapping()
+    caps: set[str] = set()
+    for entry in mapping:
+        entry_agent = entry.get("name")
+        entry_project = entry.get("project")
+        if agent and entry_agent != agent:
+            continue
+        if project and entry_project != project:
+            continue
+        for item in entry.get("capabilities", []):
+            if isinstance(item, str):
+                caps.add(item)
+    return sorted(caps)
 
 
 def _lifespan_factory(settings: Settings):
@@ -3648,6 +3687,16 @@ def build_mcp_server() -> FastMCP:
         return {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "tools": _tool_metrics_snapshot(),
+        }
+
+    @mcp.resource("resource://tooling/capabilities/{agent}{?project}", mime_type="application/json")
+    def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
+        caps = _capabilities_for(agent, project)
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "agent": agent,
+            "project": project,
+            "capabilities": caps,
         }
 
     @mcp.resource("resource://tooling/recent{?agent,project,window_seconds}", mime_type="application/json")

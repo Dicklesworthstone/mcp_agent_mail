@@ -1,0 +1,19 @@
+{
+  "agents": [
+    {
+      "name": "BlueLake",
+      "project": "/abs/path/backend",
+      "capabilities": ["messaging", "read", "ack", "summarization"]
+    },
+    {
+      "name": "GreenCastle",
+      "project": "/abs/path/backend",
+      "capabilities": ["messaging", "write", "claims", "repository", "workflow"]
+    },
+    {
+      "name": "OpsBot",
+      "project": "/abs/path/backend",
+      "capabilities": ["workflow", "contact", "messaging", "summarization", "infrastructure"]
+    }
+  ]
+}

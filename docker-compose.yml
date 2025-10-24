@@ -15,6 +15,8 @@ services:
     environment:
       DATABASE_URL: postgres+asyncpg://agent:agent@db:5432/agent_mail
       STORAGE_ROOT: /data/archive
+      TOOL_METRICS_EMIT_ENABLED: "true"
+      TOOL_METRICS_EMIT_INTERVAL_SECONDS: "120"
     volumes:
       - archive:/data/archive
     depends_on:
