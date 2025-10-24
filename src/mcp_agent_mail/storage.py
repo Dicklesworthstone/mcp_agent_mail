@@ -40,10 +40,15 @@ class AsyncFileLock:
         self._timeout = float(timeout_seconds)
 
     async def __aenter__(self) -> None:
-        self._lock.acquire(timeout=self._timeout)
+        # In test, shorten timeout drastically to avoid hangs; allow zero to skip fast
+        import os as _os
+        t = self._timeout
+        if (_os.environ.get("APP_ENVIRONMENT") or "").lower() == "test":
+            t = min(t, 1.0)
+        await _to_thread(self._lock.acquire, timeout=t)
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        self._lock.release()
+        await _to_thread(self._lock.release)
 
 
 async def _to_thread(func, /, *args, **kwargs):

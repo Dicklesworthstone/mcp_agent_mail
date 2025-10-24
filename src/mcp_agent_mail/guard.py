@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-import textwrap
 from pathlib import Path
-from string import Template
 
 from .config import Settings
 from .storage import AsyncFileLock, ProjectArchive, ensure_archive

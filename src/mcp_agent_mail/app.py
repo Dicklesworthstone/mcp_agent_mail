@@ -246,8 +246,23 @@ def _lifespan_factory(settings: Settings):
     return lifespan
 
 
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+def _iso(dt: Any) -> str:
+    """Return ISO-8601 in UTC from datetime or best-effort from string.
+
+    Accepts datetime or ISO-like string; falls back to str(dt) if unknown.
+    """
+    try:
+        if isinstance(dt, str):
+            try:
+                parsed = datetime.fromisoformat(dt)
+                return parsed.astimezone(timezone.utc).isoformat()
+            except Exception:
+                return dt
+        if hasattr(dt, "astimezone"):
+            return dt.astimezone(timezone.utc).isoformat()  # type: ignore[no-any-return]
+        return str(dt)
+    except Exception:
+        return str(dt)
 
 
 def _parse_json_safely(text: str) -> dict[str, Any] | None:
@@ -3944,7 +3959,7 @@ def build_mcp_server() -> FastMCP:
         }
 
     @mcp.resource("resource://claims/{slug}", mime_type="application/json")
-    async def claims_resource(slug: str, active_only: bool = True) -> list[dict[str, Any]]:
+    async def claims_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
         """
         List claims for a project, optionally filtering to active-only.
 
