@@ -81,3 +81,34 @@ async def test_mailbox_and_mailbox_with_commits(isolated_env):
         assert blocks2 and "CommitMeta" in (blocks2[0].text or "")
 
 
+@pytest.mark.asyncio
+async def test_outbox_and_message_resource(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Sender"},
+        )
+        m = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Sender",
+                "to": ["Sender"],
+                "subject": "OutboxMsg",
+                "body_md": "B",
+            },
+        )
+        payload = (m.data.get("deliveries") or [{}])[0].get("payload", {})
+        mid = payload.get("id")
+
+        # Outbox should list it
+        blocks = await client.read_resource("resource://outbox/Sender?project=Backend&limit=5")
+        assert blocks and "OutboxMsg" in (blocks[0].text or "")
+
+        # Message resource returns full payload with body
+        blocks2 = await client.read_resource(f"resource://message/{mid}?project=Backend")
+        assert blocks2 and "OutboxMsg" in (blocks2[0].text or "")
+
+

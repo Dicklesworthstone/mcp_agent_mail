@@ -85,3 +85,35 @@ async def test_macro_claim_cycle(isolated_env):
         assert "released" in data
 
 
+@pytest.mark.asyncio
+async def test_renew_claims_extends_expiry(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Claimer"},
+        )
+        g = await client.call_tool(
+            "claim_paths",
+            {
+                "project_key": "Backend",
+                "agent_name": "Claimer",
+                "paths": ["src/app.py"],
+                "ttl_seconds": 60,
+                "exclusive": True,
+            },
+        )
+        assert g.data["granted"]
+        r = await client.call_tool(
+            "renew_claims",
+            {
+                "project_key": "Backend",
+                "agent_name": "Claimer",
+                "paths": ["src/app.py"],
+                "extend_seconds": 600,
+            },
+        )
+        assert r.data.get("renewed", 0) >= 1
+
+

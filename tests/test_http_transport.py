@@ -116,3 +116,14 @@ async def test_http_path_mount_trailing_and_no_slash(isolated_env):
         assert r2.status_code in (200, 401, 403)
 
 
+@pytest.mark.asyncio
+async def test_http_readiness_endpoint(isolated_env):
+    server = build_mcp_server()
+    settings = _config.get_settings()
+    app = build_http_app(settings, server)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.get("/health/readiness")
+        assert r.status_code in (200, 503)
+
+

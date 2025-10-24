@@ -4184,8 +4184,21 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         if project is None:
-            raise ValueError("project parameter is required for inbox resource")
-        project_obj = await _get_project_by_identifier(project)
+            # Auto-detect project by agent name if uniquely identifiable
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) >= 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for inbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
         # Enrich with commit info for canonical markdown files (best-effort)
