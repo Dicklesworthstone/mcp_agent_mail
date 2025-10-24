@@ -35,14 +35,15 @@ class ProjectArchive:
 
 
 class AsyncFileLock:
-    def __init__(self, path: Path) -> None:
-        self._lock = FileLock(str(path))
+    def __init__(self, path: Path, *, timeout_seconds: float = 60.0) -> None:
+        self._lock = SoftFileLock(str(path))
+        self._timeout = float(timeout_seconds)
 
     async def __aenter__(self) -> None:
-        await asyncio.to_thread(self._lock.acquire)
+        await asyncio.to_thread(self._lock.acquire, self._timeout)
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        self._lock.release()
+        await asyncio.to_thread(self._lock.release)
 
 
 async def _to_thread(func, /, *args, **kwargs):
@@ -237,6 +238,22 @@ async def process_attachments(
         updated_body = await _convert_markdown_images(
             archive, body_md, attachments_meta, commit_paths, embed_policy=embed_policy
         )
+    else:
+        # Even when not converting, surface inline data-uri images in attachments meta for visibility
+        if "data:image" in body_md:
+            for m in _IMAGE_PATTERN.finditer(body_md):
+                raw_path = m.group("path")
+                if raw_path.startswith("data:"):
+                    try:
+                        header = raw_path.split(",", 1)[0]
+                        media_type = "image/webp"
+                        if ";" in header:
+                            mt = header[5:].split(";", 1)[0]
+                            if mt:
+                                media_type = mt
+                        attachments_meta.append({"type": "inline", "media_type": media_type})
+                    except Exception:
+                        attachments_meta.append({"type": "inline"})
     if attachment_paths:
         for path in attachment_paths:
             p = Path(path)
@@ -268,6 +285,20 @@ async def _convert_markdown_images(
         raw_path = match.group("path")
         normalized_path = raw_path.strip()
         if raw_path.startswith("data:"):
+            # Preserve inline data URI and record minimal metadata so callers can assert inline behavior
+            try:
+                header = normalized_path.split(",", 1)[0]
+                media_type = "image/webp"
+                if ";" in header:
+                    mt = header[5:].split(";", 1)[0]
+                    if mt:
+                        media_type = mt
+                meta.append({
+                    "type": "inline",
+                    "media_type": media_type,
+                })
+            except Exception:
+                meta.append({"type": "inline"})
             result_parts.append(raw_path)
             last_idx = path_end
             continue

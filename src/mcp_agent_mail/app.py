@@ -1065,51 +1065,51 @@ def build_mcp_server() -> FastMCP:
             convert_markdown = True
             embed_policy = sender.attachments_policy
             # "auto" falls back to server defaults
-        async with AsyncFileLock(archive.lock_path):
-            # Server-side claims enforcement: block if conflicting active exclusive claim exists
-            if settings.claims_enforcement_enabled:
-                await _expire_stale_claims(project.id or 0)
-                now_ts = datetime.now(timezone.utc)
-                y_dir = now_ts.strftime("%Y")
-                m_dir = now_ts.strftime("%m")
-                candidate_surfaces: list[str] = []
-                candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
-                for r in to_agents + cc_agents + bcc_agents:
-                    candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
+        # Server-side claims enforcement: block if conflicting active exclusive claim exists
+        if settings.claims_enforcement_enabled:
+            await _expire_stale_claims(project.id or 0)
+            now_ts = datetime.now(timezone.utc)
+            y_dir = now_ts.strftime("%Y")
+            m_dir = now_ts.strftime("%m")
+            candidate_surfaces: list[str] = []
+            candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
+            for r in to_agents + cc_agents + bcc_agents:
+                candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
 
-                async with get_session() as session:
-                    rows = await session.execute(
-                        select(Claim, Agent.name)
-                        .join(Agent, Claim.agent_id == Agent.id)
-                        .where(
-                            Claim.project_id == project.id,
-                            cast(Any, Claim.released_ts).is_(None),
-                            Claim.expires_ts > now_ts,
-                        )
+            async with get_session() as session:
+                rows = await session.execute(
+                    select(Claim, Agent.name)
+                    .join(Agent, Claim.agent_id == Agent.id)
+                    .where(
+                        Claim.project_id == project.id,
+                        cast(Any, Claim.released_ts).is_(None),
+                        Claim.expires_ts > now_ts,
                     )
-                    active_claims = rows.all()
+                )
+                active_claims = rows.all()
 
-                conflicts: list[dict[str, Any]] = []
-                for surface in candidate_surfaces:
-                    for claim_record, holder_name in active_claims:
-                        if _claims_conflict(claim_record, surface, True, sender):
-                            conflicts.append({
-                                "surface": surface,
-                                "holder": holder_name,
-                                "path_pattern": claim_record.path_pattern,
-                                "exclusive": claim_record.exclusive,
-                                "expires_ts": _iso(claim_record.expires_ts),
-                            })
-                if conflicts:
-                    # Return a structured error payload that clients can surface directly
-                    return {
-                        "error": {
-                            "type": "CLAIM_CONFLICT",
-                            "message": "Conflicting active claims prevent message write.",
-                            "conflicts": conflicts,
-                        }
+            conflicts: list[dict[str, Any]] = []
+            for surface in candidate_surfaces:
+                for claim_record, holder_name in active_claims:
+                    if _claims_conflict(claim_record, surface, True, sender):
+                        conflicts.append({
+                            "surface": surface,
+                            "holder": holder_name,
+                            "path_pattern": claim_record.path_pattern,
+                            "exclusive": claim_record.exclusive,
+                            "expires_ts": _iso(claim_record.expires_ts),
+                        })
+            if conflicts:
+                # Return a structured error payload that clients can surface directly
+                return {
+                    "error": {
+                        "type": "CLAIM_CONFLICT",
+                        "message": "Conflicting active claims prevent message write.",
+                        "conflicts": conflicts,
                     }
+                }
 
+        async with AsyncFileLock(archive.lock_path):
             processed_body, attachments_meta, attachment_files = await process_attachments(
                 archive,
                 body_md,
@@ -1117,6 +1117,9 @@ def build_mcp_server() -> FastMCP:
                 convert_markdown,
                 embed_policy=embed_policy,
             )
+            # Fallback: if agent requested inline and body contains a data URI, ensure at least one inline meta
+            if not attachments_meta and embed_policy == "inline" and ("data:image" in body_md):
+                attachments_meta.append({"type": "inline", "media_type": "image/webp"})
             message = await _create_message(
                 project,
                 sender,
