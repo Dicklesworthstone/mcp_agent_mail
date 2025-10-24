@@ -4301,6 +4301,21 @@ def build_mcp_server() -> FastMCP:
         limit : int
             Max number of messages.
         """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
@@ -4348,6 +4363,21 @@ def build_mcp_server() -> FastMCP:
         limit : int
             Max number of messages.
         """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
@@ -4408,6 +4438,24 @@ def build_mcp_server() -> FastMCP:
         limit : int
             Max number of messages to return.
         """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("ttl_seconds"):
+                    with suppress(Exception):
+                        ttl_seconds = int(parsed["ttl_seconds"][0])
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
@@ -4469,6 +4517,24 @@ def build_mcp_server() -> FastMCP:
         limit: int = 50,
     ) -> dict[str, Any]:
         """List messages requiring acknowledgement older than ttl_minutes without ack."""
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("ttl_minutes"):
+                    with suppress(Exception):
+                        ttl_minutes = int(parsed["ttl_minutes"][0])
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(

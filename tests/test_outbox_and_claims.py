@@ -23,7 +23,8 @@ async def test_outbox_resource_lists_sent_messages(isolated_env):
             "send_message",
             {"project_key": "Backend", "sender_name": "Sender", "to": ["Sender"], "subject": "OutboxTest", "body_md": "b"},
         )
-        blocks = await client.read_resource("resource://outbox/Sender?project=Backend&limit=10")
+        # Let the server auto-resolve project for this single-agent name
+        blocks = await client.read_resource("resource://outbox/Sender?limit=10")
         assert blocks and "OutboxTest" in (blocks[0].text or "")
 
 
