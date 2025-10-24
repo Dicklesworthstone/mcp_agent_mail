@@ -54,9 +54,11 @@ async def test_renew_claims_extends_expiry_and_updates_artifact(isolated_env):
             "renew_claims",
             {"project_key": "Backend", "agent_name": "Holder", "extend_seconds": 60, "paths": ["docs/*.md"]},
         )
-        renewed = (ren.data.get("renewed") or [])[0]
-        after = renewed.get("expires_ts")
-        assert after and after > before
+        assert ren.data.get("renewed", 0) >= 1
+        renewals = ren.data.get("claims") or []
+        renewed = renewals[0]
+        after = renewed.get("new_expires_ts")
+        assert isinstance(after, str) and after > before
 
         # Also confirm JSON artifact on disk reflects updated expires_ts
         # The artifact is stored by sha1(path_pattern).json under claims/

@@ -18,6 +18,11 @@ async def test_reply_preserves_thread_and_subject_prefix(isolated_env):
                 "register_agent",
                 {"project_key": "Backend", "program": "x", "model": "y", "name": n},
             )
+        # Allow direct messaging without contact gating for this test
+        await client.call_tool(
+            "set_contact_policy",
+            {"project_key": "Backend", "agent_name": "B", "policy": "open"},
+        )
 
         orig = await client.call_tool(
             "send_message",

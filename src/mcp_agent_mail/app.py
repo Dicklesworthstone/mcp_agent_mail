@@ -2851,7 +2851,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
-    ) -> Any:
+    ) -> list[dict[str, Any]]:
         """
         Full-text search over subject and body for a project.
 
@@ -2952,11 +2952,7 @@ def build_mcp_server() -> FastMCP:
             }
             for row in rows
         ]
-        try:
-            from fastmcp.tools.tool import ToolResult  # type: ignore
-            return ToolResult(structured_content=items)  # Enables clients to populate .data
-        except Exception:
-            return items
+        return items
 
     @mcp.tool(name="summarize_thread")
     @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
@@ -3951,7 +3947,7 @@ def build_mcp_server() -> FastMCP:
                 continue
             if agent and ag != agent:
                 continue
-         
+
             record = {
                 "timestamp": _iso(ts),
                 "tool": tool_name,
@@ -4120,6 +4116,17 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend"}}
         ```
         """
+        # Support toolkits that pass query in the template segment
+        if "?" in message_id:
+            id_part, _, qs = message_id.partition("?")
+            message_id = id_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+            except Exception:
+                pass
         if project is None:
             # Try to infer project by message id when unique
             async with get_session() as s_auto:
