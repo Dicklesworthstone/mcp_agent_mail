@@ -764,6 +764,8 @@ if __name__ == "__main__":
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
 | `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, claim_paths?: list[str], claim_reason?: str, claim_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, claims, inbox}` | Orchestrates ensure→register→optional claim→inbox fetch |
 | `macro_prepare_thread` | `macro_prepare_thread(project_key: str, thread_id: str, program: str, model: str, agent_name?: str, task_description?: str, register_if_missing?: bool, include_examples?: bool, inbox_limit?: int, include_inbox_bodies?: bool, llm_mode?: bool, llm_model?: str)` | `{project, agent, thread, inbox}` | Bundles registration, thread summary, and inbox context |
+| `macro_claim_cycle` | `macro_claim_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{claims, released}` | Claim + optionally release surfaces around a focused edit block |
+| `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester: str, target: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
 | `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
 | `claim_paths` | `claim_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
@@ -775,8 +777,9 @@ if __name__ == "__main__":
 | URI | Params | Returns | Notes |
 | :-- | :-- | :-- | :-- |
 | `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
-| `resource://tooling/directory` | — | `{generated_at, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
+| `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
 | `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
+| `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | Claims for a project |
@@ -790,7 +793,8 @@ if __name__ == "__main__":
 1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
 2. **Scope tools per workflow.** When the agent enters a new phase (e.g., “Messaging Lifecycle”), remount only the cluster’s tools in your MCP client. This mirrors the workflow macros already provided and prevents “tool overload.”
 3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
-4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro tools (`macro_start_session`, `macro_prepare_thread`) and hide the granular verbs until the agent explicitly asks for them.
+4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
+5. **Show recent actions.** Read `resource://tooling/recent` to display the last few successful tool invocations relevant to the agent/project when building UI hints.
 
 ```jsonc
 // Typical client bootstrap flow
@@ -1014,4 +1018,3 @@ Start the MCP HTTP server:
 ```bash
 uv run python -m mcp_agent_mail.cli serve-http
 ```
-
