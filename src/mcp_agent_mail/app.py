@@ -177,6 +177,9 @@ def _instrument_tool(
                 _record_recent(tool_name, project_value, agent_value)
             return result
 
+        # Preserve annotations so FastMCP can infer output schema
+        with suppress(Exception):
+            wrapper.__annotations__ = getattr(func, "__annotations__", {})
         return wrapper
 
     return decorator
@@ -2851,7 +2854,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> list:
         """
         Full-text search over subject and body for a project.
 
@@ -4774,5 +4777,46 @@ def build_mcp_server() -> FastMCP:
                 pass
             enriched.append(item)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+
+    # Attach explicit output schema for search_messages so clients populate .data
+    try:
+        from fastmcp.tools import Tool  # type: ignore
+
+        try:
+            search_tool = mcp.get_tool("search_messages")
+        except Exception:
+            search_tool = None
+
+        if search_tool is not None:
+            output_schema = {
+                "type": "object",
+                "required": ["result"],
+                "x-fastmcp-wrap-result": True,
+                "properties": {
+                    "result": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": True,
+                            "properties": {
+                                "id": {"type": "integer"},
+                                "subject": {"type": "string"},
+                                "importance": {"type": "string"},
+                                "ack_required": {"type": "boolean"},
+                                "created_ts": {"type": "string"},
+                                "thread_id": {"type": ["string", "null"]},
+                                "from": {"type": "string"},
+                            },
+                        },
+                    }
+                },
+            }
+            transformed = Tool.from_tool(search_tool, output_schema=output_schema)
+            mcp.add_tool(transformed)
+            # Prefer the transformed schema-bearing variant
+            search_tool.disable()
+    except Exception:
+        # Non-fatal: if transformation fails, original tool still works
+        pass
 
     return mcp
