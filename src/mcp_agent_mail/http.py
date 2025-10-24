@@ -471,14 +471,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
-    # Create the MCP HTTP app at the configured path
-    mcp_http_app = server.http_app(path=settings.http.path)
+    # Create the MCP HTTP app at root path and mount under configured base
+    mcp_http_app = server.http_app(path="/")
     # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
     mount_base = settings.http.path or "/mcp"
     if not mount_base.startswith("/"):
         mount_base = "/" + mount_base
     base_no_slash = mount_base.rstrip("/") or "/"
-    fastapi_app.mount(base_no_slash, mcp_http_app)
+    base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
+    with contextlib.suppress(Exception):
+        fastapi_app.mount(base_no_slash, mcp_http_app)
+    with contextlib.suppress(Exception):
+        fastapi_app.mount(base_with_slash, mcp_http_app)
 
     # Optional periodic claims cleanup background task and ACK TTL warnings using lifespan
     async def _startup() -> None:  # pragma: no cover - service lifecycle
@@ -749,11 +753,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan_context(app: FastAPI):
-        await _startup()
-        try:
-            yield
-        finally:
-            await _shutdown()
+        # Ensure the mounted MCP app initializes its internal task group
+        async with mcp_http_app.lifespan(mcp_http_app):
+            await _startup()
+            try:
+                yield
+            finally:
+                await _shutdown()
 
     fastapi_app.router.lifespan_context = lifespan_context
     return fastapi_app

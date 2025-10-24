@@ -1958,6 +1958,7 @@ def build_mcp_server() -> FastMCP:
         """
         project = await _get_project_by_identifier(project_key)
         sender = await _get_agent(project, sender_name)
+        settings_local = get_settings()
         original = await _get_message(project, message_id)
         original_sender = await _get_agent_by_id(project, original.sender_id)
         thread_key = original.thread_id or str(original.id)
@@ -1968,24 +1969,162 @@ def build_mcp_server() -> FastMCP:
         else:
             reply_subject = f"{subject_prefix_clean} {base_subject}".strip()
         to_names = to or [original_sender.name]
-        payload = await _deliver_message(
-            ctx,
-            project,
-            sender,
-            to_names,
-            cc or [],
-            bcc or [],
-            reply_subject,
-            body_md,
-            None,
-            None,
-            importance=original.importance,
-            ack_required=original.ack_required,
-            thread_id=thread_key,
-        )
-        payload["thread_id"] = thread_key
-        payload["reply_to"] = message_id
-        return payload
+        cc_list = cc or []
+        bcc_list = bcc or []
+
+        local_to: list[str] = []
+        local_cc: list[str] = []
+        local_bcc: list[str] = []
+        external: dict[int, dict[str, Any]] = {}
+
+        async with get_session() as sx:
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            local_names = {row[0] for row in existing.fetchall()}
+
+            class _ContactBlocked(Exception):
+                pass
+
+            async def _route(name_list: list[str], kind: str) -> None:
+                for nm in name_list:
+                    target_project_override: Project | None = None
+                    target_name_override: str | None = None
+                    if nm.startswith("project:") and "#" in nm:
+                        try:
+                            _, rest = nm.split(":", 1)
+                            slug_part, agent_part = rest.split("#", 1)
+                            target_project_override = await _get_project_by_identifier(slug_part)
+                            target_name_override = agent_part.strip()
+                        except Exception:
+                            target_project_override = None
+                            target_name_override = None
+                    if nm in local_names:
+                        if kind == "to":
+                            local_to.append(nm)
+                        elif kind == "cc":
+                            local_cc.append(nm)
+                        else:
+                            local_bcc.append(nm)
+                        continue
+                    rows = None
+                    if target_project_override is not None and target_name_override:
+                        rows = await sx.execute(
+                            select(AgentLink, Project, Agent)
+                            .join(Project, Project.id == AgentLink.b_project_id)
+                            .join(Agent, Agent.id == AgentLink.b_agent_id)
+                            .where(
+                                AgentLink.a_project_id == project.id,
+                                AgentLink.a_agent_id == sender.id,
+                                AgentLink.status == "approved",
+                                Project.id == target_project_override.id,
+                                Agent.name == target_name_override,
+                            )
+                            .limit(1)
+                        )
+                    else:
+                        rows = await sx.execute(
+                            select(AgentLink, Project, Agent)
+                            .join(Project, Project.id == AgentLink.b_project_id)
+                            .join(Agent, Agent.id == AgentLink.b_agent_id)
+                            .where(
+                                AgentLink.a_project_id == project.id,
+                                AgentLink.a_agent_id == sender.id,
+                                AgentLink.status == "approved",
+                                Agent.name == nm,
+                            )
+                            .limit(1)
+                        )
+                    rec = rows.first()
+                    if rec:
+                        _link, target_project, target_agent = rec
+                        recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
+                        if recipient_policy == "block_all":
+                            await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                            raise _ContactBlocked()
+                        bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
+                        bucket[kind].append(target_agent.name)
+                    else:
+                        if kind == "to":
+                            local_to.append(nm)
+                        elif kind == "cc":
+                            local_cc.append(nm)
+                        else:
+                            local_bcc.append(nm)
+
+        try:
+            await _route(to_names, "to")
+            await _route(cc_list, "cc")
+            await _route(bcc_list, "bcc")
+        except _ContactBlocked:
+            return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+
+        deliveries: list[dict[str, Any]] = []
+        if local_to or local_cc or local_bcc:
+            payload_local = await _deliver_message(
+                ctx,
+                project,
+                sender,
+                local_to,
+                local_cc,
+                local_bcc,
+                reply_subject,
+                body_md,
+                None,
+                None,
+                importance=original.importance,
+                ack_required=original.ack_required,
+                thread_id=thread_key,
+            )
+            deliveries.append({"project": project.human_key, "payload": payload_local})
+
+        for _pid, group in external.items():
+            target_project: Project = group["project"]
+            try:
+                alias = await _get_or_create_agent(
+                    target_project,
+                    sender.name,
+                    sender.program,
+                    sender.model,
+                    sender.task_description,
+                    settings_local,
+                )
+                payload_ext = await _deliver_message(
+                    ctx,
+                    target_project,
+                    alias,
+                    group.get("to", []),
+                    group.get("cc", []),
+                    group.get("bcc", []),
+                    reply_subject,
+                    body_md,
+                    None,
+                    None,
+                    importance=original.importance,
+                    ack_required=original.ack_required,
+                    thread_id=thread_key,
+                )
+                deliveries.append({"project": target_project.human_key, "payload": payload_ext})
+            except Exception:
+                continue
+
+        if not deliveries:
+            return {
+                "thread_id": thread_key,
+                "reply_to": message_id,
+                "deliveries": [],
+                "count": 0,
+            }
+
+        base_payload = deliveries[0].get("payload") or {}
+        primary_payload = dict(base_payload) if isinstance(base_payload, dict) else {}
+        primary_payload.setdefault("thread_id", thread_key)
+        primary_payload["reply_to"] = message_id
+        primary_payload["deliveries"] = deliveries
+        primary_payload["count"] = len(deliveries)
+        if len(deliveries) == 1:
+            attachments = base_payload.get("attachments") if isinstance(base_payload, dict) else None
+            if attachments is not None:
+                primary_payload.setdefault("attachments", attachments)
+        return primary_payload
 
     @mcp.tool(name="request_contact")
     @_instrument_tool(
@@ -2715,11 +2854,11 @@ def build_mcp_server() -> FastMCP:
                     """
                     SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
                            m.thread_id, a.name AS sender_name
-                    FROM fts_messages fm
-                    JOIN messages m ON fm.message_id = m.id
+                    FROM fts_messages
+                    JOIN messages m ON fts_messages.rowid = m.id
                     JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id = :project_id AND fm MATCH :query
-                    ORDER BY bm25(fm) ASC
+                    WHERE m.project_id = :project_id AND fts_messages MATCH :query
+                    ORDER BY bm25(fts_messages) ASC
                     LIMIT :limit
                     """
                 ),
@@ -3701,7 +3840,7 @@ def build_mcp_server() -> FastMCP:
             "tools": _tool_metrics_snapshot(),
         }
 
-    @mcp.resource("resource://tooling/capabilities/{agent}{?project}", mime_type="application/json")
+    @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
     def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
         caps = _capabilities_for(agent, project)
         return {
@@ -3804,7 +3943,7 @@ def build_mcp_server() -> FastMCP:
             "agents": [_agent_to_dict(agent) for agent in agents],
         }
 
-    @mcp.resource("resource://claims/{slug}{?active_only}", mime_type="application/json")
+    @mcp.resource("resource://claims/{slug}", mime_type="application/json")
     async def claims_resource(slug: str, active_only: bool = True) -> list[dict[str, Any]]:
         """
         List claims for a project, optionally filtering to active-only.
@@ -3862,7 +4001,7 @@ def build_mcp_server() -> FastMCP:
             for claim, holder in rows
         ]
 
-    @mcp.resource("resource://message/{message_id}{?project}", mime_type="application/json")
+    @mcp.resource("resource://message/{message_id}", mime_type="application/json")
     async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
         """
         Read a single message by id within a project.
@@ -3903,7 +4042,7 @@ def build_mcp_server() -> FastMCP:
         payload["from"] = sender.name
         return payload
 
-    @mcp.resource("resource://thread/{thread_id}{?project,include_bodies}", mime_type="application/json")
+    @mcp.resource("resource://thread/{thread_id}", mime_type="application/json")
     async def thread_resource(
         thread_id: str,
         project: Optional[str] = None,

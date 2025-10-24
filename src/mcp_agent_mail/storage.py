@@ -40,10 +40,10 @@ class AsyncFileLock:
         self._timeout = float(timeout_seconds)
 
     async def __aenter__(self) -> None:
-        await asyncio.to_thread(self._lock.acquire, self._timeout)
+        self._lock.acquire(timeout=self._timeout)
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        await asyncio.to_thread(self._lock.release)
+        self._lock.release()
 
 
 async def _to_thread(func, /, *args, **kwargs):
