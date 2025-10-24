@@ -348,7 +348,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception:
                 await self._app_inner(scope, receive, send)
 
-    mcp_http_entry = _LifespanPerRequestWrapper(mcp_http_app)
+    _LifespanPerRequestWrapper(mcp_http_app)
 
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
@@ -775,16 +775,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 first = content[0]
                                 text_val = first.get("text") if isinstance(first, dict) else None
                                 if isinstance(text_val, str):
-            with contextlib.suppress(Exception):
+                                    with contextlib.suppress(Exception):
                                         unwrapped = json.loads(text_val)
-                                    payload["result"] = unwrapped
-                                    body_bytes = json.dumps(payload).encode("utf-8")
-                                    message = {**message, "body": body_bytes}
+                                        payload["result"] = unwrapped
+                                        body_bytes = json.dumps(payload).encode("utf-8")
+                                        message = {**message, "body": body_bytes}
                     await send(message)
 
                 try:
                     await http_transport.handle_request(new_scope, receive, send_wrapper)
-            finally:
+                finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
                     with contextlib.suppress(Exception):

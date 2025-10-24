@@ -10,7 +10,7 @@ import json
 import logging
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
@@ -4198,17 +4198,15 @@ def build_mcp_server() -> FastMCP:
                     project = parsed["project"][0]
                 if since_ts is None and "since_ts" in parsed and parsed["since_ts"]:
                     since_ts = parsed["since_ts"][0]
-                if "urgent_only" in parsed and parsed["urgent_only"]:
+                if parsed.get("urgent_only"):
                     val = parsed["urgent_only"][0].strip().lower()
                     urgent_only = val in ("1", "true", "t", "yes", "y")
-                if "include_bodies" in parsed and parsed["include_bodies"]:
+                if parsed.get("include_bodies"):
                     val = parsed["include_bodies"][0].strip().lower()
                     include_bodies = val in ("1", "true", "t", "yes", "y")
-                if "limit" in parsed and parsed["limit"]:
-                    try:
+                if parsed.get("limit"):
+                    with suppress(Exception):
                         limit = int(parsed["limit"][0])
-                    except Exception:
-                        pass
             except Exception:
                 pass
 
@@ -4493,9 +4491,9 @@ def build_mcp_server() -> FastMCP:
             if len(projects) >= 1:
                 project_obj = projects[0]
             else:
-            raise ValueError("project parameter is required for mailbox resource")
+                raise ValueError("project parameter is required for mailbox resource")
         else:
-        project_obj = await _get_project_by_identifier(project)
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4545,9 +4543,9 @@ def build_mcp_server() -> FastMCP:
             if len(projects) >= 1:
                 project_obj = projects[0]
             else:
-            raise ValueError("project parameter is required for mailbox-with-commits resource")
+                raise ValueError("project parameter is required for mailbox-with-commits resource")
         else:
-        project_obj = await _get_project_by_identifier(project)
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4584,9 +4582,9 @@ def build_mcp_server() -> FastMCP:
             if len(projects) == 1:
                 project_obj = projects[0]
             else:
-            raise ValueError("project parameter is required for outbox resource")
+                raise ValueError("project parameter is required for outbox resource")
         else:
-        project_obj = await _get_project_by_identifier(project)
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
         enriched: list[dict[str, Any]] = []
