@@ -41,7 +41,7 @@ def _configure_logging(settings: Settings) -> None:
         structlog.processors.add_log_level,
     ]
     if settings.log_json_enabled:
-        processors.append(structlog.processors.JSONRenderer(serializer=lambda obj: obj))
+        processors.append(structlog.processors.JSONRenderer())
     else:
         processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
     structlog.configure(

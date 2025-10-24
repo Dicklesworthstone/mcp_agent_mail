@@ -810,17 +810,14 @@ def build_mcp_server() -> FastMCP:
                                 "expires_ts": _iso(claim_record.expires_ts),
                             })
                 if conflicts:
-                    raise RuntimeError(
-                        json.dumps(
-                            {
-                                "error": {
-                                    "type": "CLAIM_CONFLICT",
-                                    "message": "Conflicting active claims prevent message write.",
-                                    "conflicts": conflicts,
-                                }
-                            }
-                        )
-                    )
+                    # Return a structured error payload that clients can surface directly
+                    return {
+                        "error": {
+                            "type": "CLAIM_CONFLICT",
+                            "message": "Conflicting active claims prevent message write.",
+                            "conflicts": conflicts,
+                        }
+                    }
 
             processed_body, attachments_meta, attachment_files = await process_attachments(
                 archive,
