@@ -15,9 +15,9 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlparse
 
 import litellm
-from litellm.types.caching import LiteLLMCacheType
 import structlog
 from decouple import Config as DecoupleConfig, RepositoryEnv
+from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
 

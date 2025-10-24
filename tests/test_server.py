@@ -44,7 +44,10 @@ async def test_messaging_flow(isolated_env):
                 "body_md": "hello",
             },
         )
-        assert message.data["subject"] == "Test"
+        # New response shape: deliveries list
+        deliveries = message.data.get("deliveries") or []
+        assert isinstance(deliveries, list)
+        assert deliveries and deliveries[0]["payload"]["subject"] == "Test"
 
         inbox = await client.call_tool(
             "fetch_inbox",
@@ -267,7 +270,7 @@ async def test_attachment_conversion(isolated_env):
                 "attachment_paths": [str(image_path)],
             },
         )
-        attachments = result.data["attachments"]
+        attachments = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments")
         assert attachments
         storage_root = storage / "backend"
         attachment_files = list((storage_root / "attachments").rglob("*.webp"))

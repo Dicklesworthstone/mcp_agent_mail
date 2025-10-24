@@ -1962,11 +1962,9 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             if get_settings().tools_log_enabled:
                 try:
-                    import importlib as _imp
-                    _rc = _imp.import_module("rich.console")
-                    _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console
-                    JSON = _rj.JSON
+                    from rich.console import Console  # type: ignore
+                    from rich.json import JSON  # type: ignore
+
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -2619,11 +2617,9 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                import importlib as _imp
-                _rc = _imp.import_module("rich.console")
-                _rp = _imp.import_module("rich.panel")
-                Console = getattr(_rc, "Console")
-                Panel = getattr(_rp, "Panel")
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+
                 details = [
                     f"project={project_key}",
                     f"agent={agent_name}",
@@ -2704,9 +2700,9 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                import importlib as _imp
-                _rc = _imp.import_module("rich.console")
-                _rp = _imp.import_module("rich.panel")
+                from rich.console import Console  # type: ignore
+                from rich.panel import Panel  # type: ignore
+
                 meta = [
                     f"project={project_key}",
                     f"agent={agent_name}",

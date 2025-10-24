@@ -431,13 +431,21 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if not all([Resource, TracerProvider, OTLPSpanExporter, BatchSpanProcessor, FastAPIInstrumentor, set_tracer_provider]):
                 raise RuntimeError("opentelemetry modules unavailable")
 
-            resource = Resource.create({"service.name": settings.http.otel_service_name})
-            provider = TracerProvider(resource=resource)
-            span_exporter = OTLPSpanExporter(endpoint=settings.http.otel_exporter_otlp_endpoint or None)
-            processor = BatchSpanProcessor(span_exporter)
+            from typing import Any, cast
+            ResourceT = cast(Any, Resource)
+            TracerProviderT = cast(Any, TracerProvider)
+            OTLPSpanExporterT = cast(Any, OTLPSpanExporter)
+            BatchSpanProcessorT = cast(Any, BatchSpanProcessor)
+            FastAPIInstrumentorT = cast(Any, FastAPIInstrumentor)
+            set_tracer_provider_fn = cast(Any, set_tracer_provider)
+
+            resource = ResourceT.create({"service.name": settings.http.otel_service_name})
+            provider = TracerProviderT(resource=resource)
+            span_exporter = OTLPSpanExporterT(endpoint=settings.http.otel_exporter_otlp_endpoint or None)
+            processor = BatchSpanProcessorT(span_exporter)
             provider.add_span_processor(processor)
-            set_tracer_provider(provider)
-            FastAPIInstrumentor.instrument_app(fastapi_app)
+            set_tracer_provider_fn(provider)
+            FastAPIInstrumentorT.instrument_app(fastapi_app)
         except Exception:  # pragma: no cover - optional dependency path
             pass
 
