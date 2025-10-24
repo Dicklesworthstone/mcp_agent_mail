@@ -312,8 +312,8 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 maybe_claims = getattr(request.state, "jwt_claims", None)
                 if isinstance(maybe_claims, dict):
                     sub = maybe_claims.get("sub")
-                    if isinstance(sub, str) and sub:
-                        identity = f"sub:{sub}"
+                if isinstance(sub, str) and sub:
+                    identity = f"sub:{sub}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
@@ -338,17 +338,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Build MCP HTTP sub-app with stateless mode for ASGI test transports
     mcp_http_app = server.http_app(path="/", stateless_http=True, json_response=True)
 
-    class _LifespanPerRequestWrapper:
-        def __init__(self, app_inner):
-            self._app_inner = app_inner
-        async def __call__(self, scope, receive, send):
-            try:
-                async with self._app_inner.lifespan(self._app_inner):
-                    await self._app_inner(scope, receive, send)
-            except Exception:
-                await self._app_inner(scope, receive, send)
-
-    _LifespanPerRequestWrapper(mcp_http_app)
+    # no-op wrapper removed; using explicit stateless adapter below
 
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
@@ -726,7 +716,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if scope.get("type") != "http":
                 res = JSONResponse({"detail": "Not Found"}, status_code=404)
                 await res(scope, receive, send)
-            return
+                return
 
             # Ensure Accept and Content-Type headers are present per StreamableHTTP expectations
             headers = list(scope.get("headers") or [])

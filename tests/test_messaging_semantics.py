@@ -85,3 +85,45 @@ async def test_mark_read_then_ack_updates_state(isolated_env):
         assert isinstance(ack.data.get("read_at"), str)
 
 
+@pytest.mark.asyncio
+async def test_acknowledge_idempotent_multiple_calls(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Sender"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Recv"},
+        )
+        m1 = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Sender",
+                "to": ["Recv"],
+                "subject": "AckTwice",
+                "body_md": "hello",
+                "ack_required": True,
+            },
+        )
+        msg = (m1.data.get("deliveries") or [{}])[0].get("payload", {})
+        mid = int(msg.get("id"))
+
+        first = await client.call_tool(
+            "acknowledge_message",
+            {"project_key": "Backend", "agent_name": "Recv", "message_id": mid},
+        )
+        first_ack_at = first.data.get("acknowledged_at")
+        assert first.data.get("acknowledged") is True and isinstance(first_ack_at, str)
+
+        second = await client.call_tool(
+            "acknowledge_message",
+            {"project_key": "Backend", "agent_name": "Recv", "message_id": mid},
+        )
+        # Timestamps should remain the same (idempotent)
+        assert second.data.get("acknowledged_at") == first_ack_at
+
+

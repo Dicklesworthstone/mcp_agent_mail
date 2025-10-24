@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional, cast
+from typing import Any, Optional, cast
 
 from fastmcp import Context, FastMCP
 from git import Repo
@@ -2715,26 +2715,28 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Claim a set of paths and optionally release them at the end of the workflow."""
 
-        claims_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, claim_paths))
-        claims_result = await claims_tool(
-            ctx,
-            project_key=project_key,
-            agent_name=agent_name,
-            paths=paths,
-            ttl_seconds=ttl_seconds,
-            exclusive=exclusive,
-            reason=reason,
-        )
+        # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
+        from fastmcp.tools.tool import FunctionTool
+        claims_tool = cast(FunctionTool, cast(Any, claim_paths))
+        claims_tool_result = await claims_tool.run({
+            "project_key": project_key,
+            "agent_name": agent_name,
+            "paths": paths,
+            "ttl_seconds": ttl_seconds,
+            "exclusive": exclusive,
+            "reason": reason,
+        })
+        claims_result = cast(dict[str, Any], claims_tool_result.structured_content or {})
 
         release_result = None
         if auto_release:
-            release_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, release_claims_tool))
-            release_result = await release_tool(
-                ctx,
-                project_key=project_key,
-                agent_name=agent_name,
-                paths=paths,
-            )
+            release_tool = cast(FunctionTool, cast(Any, release_claims_tool))
+            release_tool_result = await release_tool.run({
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": paths,
+            })
+            release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
 
         await ctx.info(
             f"macro_claim_cycle issued {len(claims_result['granted'])} claim(s) for '{agent_name}' on '{project_key}'" +
@@ -2766,40 +2768,41 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
 
-        request_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, request_contact))
-        request_result = await request_tool(
-            ctx,
-            project_key=project_key,
-            from_agent=requester,
-            to_agent=target,
-            reason=reason,
-            ttl_seconds=ttl_seconds,
-        )
+        from fastmcp.tools.tool import FunctionTool
+        request_tool = cast(FunctionTool, cast(Any, request_contact))
+        request_tool_result = await request_tool.run({
+            "project_key": project_key,
+            "from_agent": requester,
+            "to_agent": target,
+            "reason": reason,
+            "ttl_seconds": ttl_seconds,
+        })
+        request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
 
         response_result = None
         if auto_accept:
-            respond_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, respond_contact))
-            response_result = await respond_tool(
-                ctx,
-                project_key=project_key,
-                to_agent=target,
-                from_agent=requester,
-                accept=True,
-                ttl_seconds=ttl_seconds,
-            )
+            respond_tool = cast(FunctionTool, cast(Any, respond_contact))
+            respond_tool_result = await respond_tool.run({
+                "project_key": project_key,
+                "to_agent": target,
+                "from_agent": requester,
+                "accept": True,
+                "ttl_seconds": ttl_seconds,
+            })
+            response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
         welcome_result = None
         if welcome_subject and welcome_body:
             try:
-                send_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, send_message))
-                welcome_result = await send_tool(
-                    ctx,
-                    project_key=project_key,
-                    sender_name=requester,
-                    to=[target],
-                    subject=welcome_subject,
-                    body_md=welcome_body,
-                )
+                send_tool = cast(FunctionTool, cast(Any, send_message))
+                send_tool_result = await send_tool.run({
+                    "project_key": project_key,
+                    "sender_name": requester,
+                    "to": [target],
+                    "subject": welcome_subject,
+                    "body_md": welcome_body,
+                })
+                welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
             except ToolExecutionError as exc:
                 # surface but do not abort handshake
                 await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
