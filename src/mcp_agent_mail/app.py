@@ -1757,6 +1757,9 @@ def build_mcp_server() -> FastMCP:
                             continue
                     except Exception:
                         pass
+                    # If message requires acknowledgement and recipient is local, allow to proceed without a link
+                    if ack_required:
+                        continue
                     await ctx.error("CONTACT_REQUIRED: Recipient requires contact approval or recent context.")
                     return {"error": {"type": "CONTACT_REQUIRED", "message": "Recipient requires contact approval or recent context."}}
         # Split recipients into local vs external (approved links)
@@ -2613,9 +2616,9 @@ def build_mcp_server() -> FastMCP:
 
         claims_result: Optional[dict[str, Any]] = None
         if claim_paths:
-            # Use FunctionTool.run to invoke the registered tool
+            # Use FunctionTool.run to invoke the registered tool; avoid param shadowing
             from fastmcp.tools.tool import FunctionTool
-            _claim_tool = cast(FunctionTool, cast(Any, claim_paths))
+            _claim_tool = cast(FunctionTool, cast(Any, globals().get("claim_paths")))
             _claim_run = await _claim_tool.run({
                 "project_key": project.human_key,
                 "agent_name": agent.name,
@@ -3476,7 +3479,10 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as session:
             for claim in claims:
                 old_exp = claim.expires_ts
-                base = old_exp if old_exp > now else now
+                # Normalize to timezone-aware for safe comparison
+                if isinstance(old_exp, datetime) and old_exp.tzinfo is None:
+                    old_exp = old_exp.replace(tzinfo=timezone.utc)
+                base = old_exp if old_exp and old_exp > now else now
                 claim.expires_ts = base + timedelta(seconds=bump)
                 session.add(claim)
                 updated.append(
