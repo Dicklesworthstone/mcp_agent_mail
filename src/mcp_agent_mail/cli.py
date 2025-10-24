@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -136,12 +137,10 @@ def migrate() -> None:
     settings = get_settings()
     with console.status("Applying migrations..."):
         # Prefer Alembic if configured; fall back to ensure_schema for first-time init
-        try:
+        with contextlib.suppress(SystemExit):
             _run_command(["uv", "run", "alembic", "upgrade", "head"])  # non-interactive
-        except SystemExit:
-            # Fallback path: ensure baseline schema if migrations are unavailable or fail
-            asyncio.run(ensure_schema(settings))
-        # Always ensure FTS structures and common indexes
+        # Always ensure baseline schema and then FTS structures/common indexes
+        asyncio.run(ensure_schema(settings))
         asyncio.run(ensure_fts(settings))
     console.print("[green]Database migrations + FTS complete.[/]")
 

@@ -21,10 +21,9 @@ agents:
       - workflow
       - contact
       - messaging
-      - summmarization
+      - summarization
 
 # Example: pass these capabilities to an MCP client (pseudo-code)
 #
 # allowed = lookup_capabilities(agent_name, project)
 # client = MCPClient(..., metadata={"allowed_capabilities": allowed})
-

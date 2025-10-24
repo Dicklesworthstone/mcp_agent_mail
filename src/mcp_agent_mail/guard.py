@@ -19,88 +19,82 @@ __all__ = [
 
 
 def render_precommit_script(archive: ProjectArchive) -> str:
-    """Return the pre-commit script content for the given archive."""
+    """Return the pre-commit script content for the given archive.
 
-    template = Template(
-        textwrap.dedent(
-            """#!/usr/bin/env python3
-            import json
-            import os
-            import sys
-            import subprocess
-            from pathlib import Path
-            from fnmatch import fnmatch
-            from datetime import datetime, timezone
+    Construct with explicit lines at column 0 to avoid indentation errors.
+    """
 
-            CLAIMS_DIR = Path("$claims_dir")
-            STORAGE_ROOT = Path("$storage_root")
-            AGENT_NAME = os.environ.get("AGENT_NAME")
-            if not AGENT_NAME:
-                sys.stderr.write("[pre-commit] AGENT_NAME environment variable is required.\n")
-                sys.exit(1)
-
-            if not CLAIMS_DIR.exists():
-                sys.exit(0)
-
-            now = datetime.now(timezone.utc)
-
-            staged = subprocess.run(
-                ["git", "diff", "--cached", "--name-only"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if staged.returncode != 0:
-                sys.stderr.write("[pre-commit] Failed to enumerate staged files.\n")
-                sys.exit(1)
-
-            paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]
-
-            if not paths:
-                sys.exit(0)
-
-            def load_claims():
-                for candidate in CLAIMS_DIR.glob("*.json"):
-                    try:
-                        data = json.loads(candidate.read_text())
-                    except Exception:
-                        continue
-                    yield data
-
-            conflicts = []
-            for claim in load_claims():
-                if claim.get("agent") == AGENT_NAME:
-                    continue
-                expires = claim.get("expires_ts")
-                if expires:
-                    try:
-                        expires_dt = datetime.fromisoformat(expires)
-                        if expires_dt < now:
-                            continue
-                    except Exception:
-                        pass
-                pattern = claim.get("path_pattern")
-                if not pattern:
-                    continue
-                for path_value in paths:
-                    if fnmatch(path_value, pattern) or fnmatch(pattern, path_value):
-                        conflicts.append((path_value, claim.get("agent"), pattern))
-
-            if conflicts:
-                sys.stderr.write("[pre-commit] Exclusive claim conflicts detected:\n")
-                for path_value, agent_name, pattern in conflicts:
-                    sys.stderr.write("  - {} matches claim '{}' held by {}\n".format(path_value, pattern, agent_name))
-                sys.stderr.write("Resolve conflicts or release claims before committing.\n")
-                sys.exit(1)
-
-            sys.exit(0)
-            """
-        )
-    )
-    return template.substitute(
-        claims_dir=str((archive.root / "claims").resolve()),
-        storage_root=str(archive.root.resolve()),
-    )
+    claims_dir = str((archive.root / "claims").resolve())
+    storage_root = str(archive.root.resolve())
+    lines = [
+        "#!/usr/bin/env python3",
+        "import json",
+        "import os",
+        "import sys",
+        "import subprocess",
+        "from pathlib import Path",
+        "from fnmatch import fnmatch",
+        "from datetime import datetime, timezone",
+        "",
+        f"CLAIMS_DIR = Path(\"{claims_dir}\")",
+        f"STORAGE_ROOT = Path(\"{storage_root}\")",
+        "AGENT_NAME = os.environ.get(\"AGENT_NAME\")",
+        "if not AGENT_NAME:",
+        "    sys.stderr.write(\"[pre-commit] AGENT_NAME environment variable is required.\\n\")",
+        "    sys.exit(1)",
+        "",
+        "if not CLAIMS_DIR.exists():",
+        "    sys.exit(0)",
+        "",
+        "now = datetime.now(timezone.utc)",
+        "",
+        "staged = subprocess.run([\"git\", \"diff\", \"--cached\", \"--name-only\"], capture_output=True, text=True, check=False)",
+        "if staged.returncode != 0:",
+        "    sys.stderr.write(\"[pre-commit] Failed to enumerate staged files.\\n\")",
+        "    sys.exit(1)",
+        "",
+        "paths = [line.strip() for line in staged.stdout.splitlines() if line.strip()]",
+        "",
+        "if not paths:",
+        "    sys.exit(0)",
+        "",
+        "def load_claims():",
+        "    for candidate in CLAIMS_DIR.glob(\"*.json\"):",
+        "        try:",
+        "            data = json.loads(candidate.read_text())",
+        "        except Exception:",
+        "            continue",
+        "        yield data",
+        "",
+        "conflicts = []",
+        "for claim in load_claims():",
+        "    if claim.get(\"agent\") == AGENT_NAME:",
+        "        continue",
+        "    expires = claim.get(\"expires_ts\")",
+        "    if expires:",
+        "        try:",
+        "            expires_dt = datetime.fromisoformat(expires)",
+        "            if expires_dt < now:",
+        "                continue",
+        "        except Exception:",
+        "            pass",
+        "    pattern = claim.get(\"path_pattern\")",
+        "    if not pattern:",
+        "        continue",
+        "    for path_value in paths:",
+        "        if fnmatch(path_value, pattern) or fnmatch(pattern, path_value):",
+        "            conflicts.append((path_value, claim.get(\"agent\"), pattern))",
+        "",
+        "if conflicts:",
+        "    sys.stderr.write(\"[pre-commit] Exclusive claim conflicts detected:\\n\")",
+        "    for path_value, agent_name, pattern in conflicts:",
+        "        sys.stderr.write(f\"  - {path_value} matches claim '{pattern}' held by {agent_name}\\n\")",
+        "    sys.stderr.write(\"Resolve conflicts or release claims before committing.\\n\")",
+        "    sys.exit(1)",
+        "",
+        "sys.exit(0)",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 async def install_guard(settings: Settings, project_slug: str, repo_path: Path) -> Path:

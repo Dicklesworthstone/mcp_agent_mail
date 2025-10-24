@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import functools
 import inspect
+import json
 import logging
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-import json
-import functools
 from functools import wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, cast
@@ -1679,6 +1679,9 @@ def build_mcp_server() -> FastMCP:
                     except Exception:
                         continue
                     rec_policy = getattr(rec, "contact_policy", "auto").lower()
+                    # allow self always
+                    if rec.name == sender.name:
+                        continue
                     if rec_policy == "open":
                         continue
                     if rec_policy == "block_all":
@@ -3699,11 +3702,11 @@ def build_mcp_server() -> FastMCP:
             "capabilities": caps,
         }
 
-    @mcp.resource("resource://tooling/recent{?agent,project,window_seconds}", mime_type="application/json")
+    @mcp.resource("resource://tooling/recent/{window_seconds}", mime_type="application/json")
     def tooling_recent_resource(
+        window_seconds: int,
         agent: Optional[str] = None,
         project: Optional[str] = None,
-        window_seconds: int = 900,
     ) -> dict[str, Any]:
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, window_seconds))
         entries: list[dict[str, Any]] = []
