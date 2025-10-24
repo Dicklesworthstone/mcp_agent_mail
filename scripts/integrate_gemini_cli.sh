@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Google Gemini CLI Integration (reference MCP config + env setup)"
+echo "==> Google Gemini CLI Integration (one-stop MCP config)"
 echo
 echo "This script will:"
 echo "  1) Detect MCP HTTP endpoint from settings."
-echo "  2) Generate a gemini.mcp.json (reference)."
-echo "  3) Optionally export GOOGLE_API_KEY if you provide it now."
+echo "  2) Auto-generate a bearer token if missing and embed it."
+echo "  3) Generate gemini.mcp.json (auto-backup existing)."
+echo "  4) Create scripts/run_server_with_token.sh to start the server with the token."
 echo
 read -r -p "Proceed? [y/N] " _ans
 if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
@@ -31,8 +32,20 @@ _TOKEN=""
 if [[ -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
+if [[ -z "${_TOKEN}" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    _TOKEN=$(openssl rand -hex 32)
+  else
+    _TOKEN=$(uv run python - <<'PY'
+import secrets; print(secrets.token_hex(32))
+PY
+)
+  fi
+  echo "Generated bearer token."
+fi
 
 OUT_JSON="${ROOT_DIR}/gemini.mcp.json"
+if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
 if [[ -n "${_TOKEN}" ]]; then
   AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
 else
@@ -50,12 +63,17 @@ cat > "$OUT_JSON" <<JSON
 }
 JSON
 
-read -r -p "Provide GOOGLE_API_KEY now to export in current shell? (leave blank to skip): " _GKEY || true
-if [[ -n "${_GKEY:-}" ]]; then
-  export GOOGLE_API_KEY="${_GKEY}"
-  echo "Exported GOOGLE_API_KEY for current shell session."
-fi
+echo "==> Creating run helper script with token"
+mkdir -p scripts
+RUN_HELPER="scripts/run_server_with_token.sh"
+cat > "$RUN_HELPER" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+export HTTP_BEARER_TOKEN="${_TOKEN}"
+uv run python -m mcp_agent_mail.cli serve-http "${@:-}"
+SH
+chmod +x "$RUN_HELPER"
 
-echo "Wrote ${OUT_JSON}. Some Gemini CLIs do not yet support MCP; keep for reference."
-echo "Server start: uv run python -m mcp_agent_mail.cli serve-http"
+echo "Wrote ${OUT_JSON}. Some Gemini CLIs may not yet support MCP; keep for reference."
+echo "Server start: $RUN_HELPER"
 

@@ -4,9 +4,10 @@ set -euo pipefail
 echo "==> Claude Code Integration (HTTP MCP + Hooks)"
 echo
 echo "This script will:"
-echo "  1) Detect your server endpoint (host/port/path) from .env via our settings."
-echo "  2) Create/update a project-local .claude/settings.json with MCP server config and safe hooks."
-echo "  3) Optionally add an Authorization header using your token (from .env or manual input)."
+echo "  1) Detect your server endpoint (host/port/path) from settings."
+echo "  2) Create/update a project-local .claude/settings.json with MCP server config and safe hooks (auto-backup existing)."
+echo "  3) Auto-generate a bearer token if missing and embed it in the client config."
+echo "  4) Create scripts/run_server_with_token.sh that exports the token and starts the server."
 echo
 read -r -p "Proceed? [y/N] " _ans
 if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
@@ -30,14 +31,21 @@ PY
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 echo "Detected MCP HTTP endpoint: ${_URL}"
 
-# Determine bearer token (prefer .env if present)
+# Determine or generate bearer token (prefer .env if present)
 _TOKEN=""
 if [[ -f .env ]]; then
-  # naive read; .env controlled by decouple in app
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
 if [[ -z "${_TOKEN}" ]]; then
-  read -r -p "Enter bearer token for Authorization header (or leave blank for none): " _TOKEN || true
+  if command -v openssl >/dev/null 2>&1; then
+    _TOKEN=$(openssl rand -hex 32)
+  else
+    _TOKEN=$(uv run python - <<'PY'
+import secrets; print(secrets.token_hex(32))
+PY
+)
+  fi
+  echo "Generated bearer token."
 fi
 
 echo "==> Preparing project-local .claude/settings.json"
@@ -45,27 +53,15 @@ CLAUDE_DIR="${ROOT_DIR}/.claude"
 SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
 mkdir -p "$CLAUDE_DIR"
 
-# Confirm before overwriting existing file
-if [[ -f "$SETTINGS_PATH" ]]; then
-  echo "Found existing .claude/settings.json"
-  read -r -p "Backup and overwrite with updated MCP config? [y/N] " _ow
-  if [[ "${_ow:-}" != "y" && "${_ow:-}" != "Y" ]]; then
-    echo "Skipping settings update."
-  else
-    cp "$SETTINGS_PATH" "${SETTINGS_PATH}.bak.$(date +%s)"
-    _DO_WRITE=1
-  fi
-else
-  _DO_WRITE=1
-fi
+# Derive defaults for hooks without prompting
+_PROJ="backend"
+_AGENT="${USER:-user}"
 
-if [[ "${_DO_WRITE:-0}" -eq 1 ]]; then
+if [[ -f "$SETTINGS_PATH" ]]; then
+  cp "$SETTINGS_PATH" "${SETTINGS_PATH}.bak.$(date +%s)"
+fi
   echo "==> Writing MCP server config and hooks"
-  if [[ -n "${_TOKEN}" ]]; then
-    AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
-  else
-    AUTH_HEADER_LINE=''
-  fi
+  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
   cat > "$SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
@@ -77,20 +73,31 @@ if [[ "${_DO_WRITE:-0}" -eq 1 ]]; then
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project backend" },
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 20" }
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project backend --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project backend --agent $USER --limit 10" } ] },
-      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project backend" } ] }
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
+      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project ${_PROJ}" } ] }
     ]
   }
 }
 JSON
-fi
+
+echo "==> Creating run helper script with token"
+mkdir -p scripts
+RUN_HELPER="scripts/run_server_with_token.sh"
+cat > "$RUN_HELPER" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+export HTTP_BEARER_TOKEN="${_TOKEN}"
+uv run python -m mcp_agent_mail.cli serve-http "${@:-}"
+SH
+chmod +x "$RUN_HELPER"
+echo "Created $RUN_HELPER"
 
 echo "==> Verifying server readiness"
 set +e

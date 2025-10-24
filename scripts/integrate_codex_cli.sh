@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> OpenAI Codex CLI Integration (project-local MCP config)"
+echo "==> OpenAI Codex CLI Integration (one-stop MCP config)"
 echo
 echo "This script will:"
-echo "  1) Detect your MCP HTTP endpoint from .env via our settings."
-echo "  2) Generate a project-local codex.mcp.json describing the MCP server."
-echo "  3) Optionally copy it to a user config directory if you confirm."
+echo "  1) Detect your MCP HTTP endpoint from settings."
+echo "  2) Auto-generate a bearer token if missing and embed it."
+echo "  3) Generate a project-local codex.mcp.json (auto-backup existing)."
+echo "  4) Create scripts/run_server_with_token.sh to start the server with the token."
 echo
-read -r -p "Proceed? [y/N] " _ans
+if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+  _ans="y"
+else
+  read -r -p "Proceed? [y/N] " _ans
+fi
 if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
   echo "Aborted."
   exit 1
@@ -34,11 +39,23 @@ _TOKEN=""
 if [[ -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
+if [[ -z "${_TOKEN}" && -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+  _TOKEN="${INTEGRATION_BEARER_TOKEN}"
+fi
 if [[ -z "${_TOKEN}" ]]; then
-  read -r -p "Enter MCP bearer token (Authorization) for Codex CLI use (blank to skip): " _TOKEN || true
+  if command -v openssl >/dev/null 2>&1; then
+    _TOKEN=$(openssl rand -hex 32)
+  else
+    _TOKEN=$(uv run python - <<'PY'
+import secrets; print(secrets.token_hex(32))
+PY
+)
+  fi
+  echo "Generated bearer token."
 fi
 
 OUT_JSON="${ROOT_DIR}/codex.mcp.json"
+if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
 echo "==> Writing ${OUT_JSON}"
 if [[ -n "${_TOKEN}" ]]; then
   AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"
@@ -58,10 +75,16 @@ cat > "$OUT_JSON" <<JSON
 }
 JSON
 
-echo
-echo "If your Codex/OpenAI CLI supports MCP configuration, point it to codex.mcp.json, e.g.:"
-echo "  export MCP_SERVERS_FILE=\"${OUT_JSON}\""
-echo "(If unsupported, keep this file as documentation/reference for MCP settings.)"
+echo "==> Creating run helper script with token"
+mkdir -p scripts
+RUN_HELPER="scripts/run_server_with_token.sh"
+cat > "$RUN_HELPER" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+export HTTP_BEARER_TOKEN="${_TOKEN}"
+uv run python -m mcp_agent_mail.cli serve-http "${@:-}"
+SH
+chmod +x "$RUN_HELPER"
 
 echo "==> Attempt readiness check"
 set +e
