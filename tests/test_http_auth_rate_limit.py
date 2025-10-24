@@ -1,7 +1,7 @@
 import contextlib
 
-import pytest  # type: ignore[import-not-found]
-from authlib.jose import jwt  # type: ignore[import-not-found]
+import pytest
+from authlib.jose import jwt
 from httpx import ASGITransport, AsyncClient
 
 from mcp_agent_mail import config as _config
@@ -26,7 +26,7 @@ async def test_http_jwt_rbac_and_rate_limit(monkeypatch):
     monkeypatch.setenv("HTTP_RATE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("HTTP_RATE_LIMIT_TOOLS_PER_MINUTE", "1")
     with contextlib.suppress(Exception):
-        _config.get_settings.cache_clear()  # type: ignore[attr-defined]
+        _config.clear_settings_cache()
     settings = _config.get_settings()
 
     server = build_mcp_server()

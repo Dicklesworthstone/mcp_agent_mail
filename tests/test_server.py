@@ -1,7 +1,7 @@
 import contextlib
 from pathlib import Path
 
-import pytest  # type: ignore[import-not-found]
+import pytest
 from fastmcp import Client
 from git import Repo
 from PIL import Image
@@ -283,7 +283,7 @@ async def test_rich_logger_does_not_throw(isolated_env, monkeypatch):
     monkeypatch.setenv("LOG_INCLUDE_TRACE", "true")
     # Rebuild settings cache
     with contextlib.suppress(Exception):
-        _config.get_settings.cache_clear()
+        _config.clear_settings_cache()
     server = build_mcp_server()
     # Start a client and hit a couple of endpoints to produce logs
     async with Client(server) as client:

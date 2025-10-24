@@ -1,8 +1,8 @@
 from pathlib import Path
 
-import pytest  # type: ignore[import-not-found]
+import pytest
 
-from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.db import reset_database_state
 
 
@@ -20,12 +20,12 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_AUTHOR_NAME", "test-agent")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.com")
     monkeypatch.setenv("INLINE_IMAGE_MAX_BYTES", "128")
-    get_settings.cache_clear()
+    clear_settings_cache()
     reset_database_state()
     try:
         yield
     finally:
-        get_settings.cache_clear()
+        clear_settings_cache()
         reset_database_state()
         if db_path.exists():
             db_path.unlink()

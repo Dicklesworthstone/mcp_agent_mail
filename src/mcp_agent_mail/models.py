@@ -84,6 +84,7 @@ class AgentLink(SQLModel, table=True):
     """
 
     __tablename__ = "agent_links"
+    __table_args__ = (UniqueConstraint("a_project_id", "a_agent_id", "b_project_id", "b_agent_id", name="uq_agentlink_pair"),)
 
     id: Optional[int] = Field(default=None, primary_key=True)
     a_project_id: int = Field(foreign_key="projects.id", index=True)

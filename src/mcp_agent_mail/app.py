@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
-import json
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -108,8 +107,11 @@ def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
     try:
         if not get_settings().tools_log_enabled:
             return
-        from rich.console import Console  # type: ignore
-        from rich.json import JSON  # type: ignore
+        import importlib as _imp
+        _rc = _imp.import_module("rich.console")
+        _rj = _imp.import_module("rich.json")
+        Console = _rc.Console
+        JSON = _rj.JSON
         Console().print(JSON.from_data({"title": title, **payload}))
     except Exception:
         return
@@ -422,10 +424,17 @@ def _claims_conflict(existing: Claim, candidate_path: str, candidate_exclusive: 
 
 
 def _patterns_overlap(a: str, b: str) -> bool:
+    # Normalize simple relative prefixes for matching
+    def _norm(s: str) -> str:
+        while s.startswith("./"):
+            s = s[2:]
+        return s
+    a1 = _norm(a)
+    b1 = _norm(b)
     return (
-        fnmatch.fnmatchcase(a, b)
-        or fnmatch.fnmatchcase(b, a)
-        or a == b
+        fnmatch.fnmatchcase(a1, b1)
+        or fnmatch.fnmatchcase(b1, a1)
+        or a1 == b1
     )
 
 
@@ -1041,8 +1050,11 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 c = Console()
                 c.print(Panel(f"project=[bold]{project.human_key}[/]\nname=[bold]{name or '(generated)'}[/]\nprogram={program}\nmodel={model}", title="tool: register_agent", border_style="green"))
             except Exception:
@@ -1292,9 +1304,13 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
-                from rich.text import Text  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                _rt = _imp.import_module("rich.text")
+                Console = _rc.Console
+                Panel = _rp.Panel
+                Text = _rt.Text
                 c = Console()
                 title = f"tool: send_message — to={len(to)} cc={len(cc or [])} bcc={len(bcc or [])}"
                 body = Text.assemble(
@@ -1372,7 +1388,8 @@ def build_mcp_server() -> FastMCP:
                     if rec_policy == "open":
                         continue
                     if rec_policy == "block_all":
-                        raise RuntimeError("{\"error\":{\"type\":\"CONTACT_BLOCKED\",\"message\":\"Recipient is not accepting messages.\"}}")
+                        await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                        return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
                     # contacts_only or auto -> must have approved link or prior contact within TTL
                     ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
                     recent_ok = False
@@ -1415,7 +1432,8 @@ def build_mcp_server() -> FastMCP:
                             continue
                     except Exception:
                         pass
-                    raise RuntimeError("{\"error\":{\"type\":\"CONTACT_REQUIRED\",\"message\":\"Recipient requires contact approval or recent context.\"}}")
+                    await ctx.error("CONTACT_REQUIRED: Recipient requires contact approval or recent context.")
+                    return {"error": {"type": "CONTACT_REQUIRED", "message": "Recipient requires contact approval or recent context."}}
         # Split recipients into local vs external (approved links)
         local_to: list[str] = []
         local_cc: list[str] = []
@@ -1426,6 +1444,9 @@ def build_mcp_server() -> FastMCP:
             # Preload local agent names
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_names = {row[0] for row in existing.fetchall()}
+
+            class _ContactBlocked(Exception):
+                pass
 
             async def _route(name_list: list[str], kind: str) -> None:
                 for nm in name_list:
@@ -1484,7 +1505,8 @@ def build_mcp_server() -> FastMCP:
                         # Check recipient policy in target project
                         pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
                         if pol == "block_all":
-                            raise RuntimeError("{\"error\":{\"type\":\"CONTACT_BLOCKED\",\"message\":\"Recipient is not accepting messages.\"}}")
+                            await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                            raise _ContactBlocked()
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
@@ -1496,9 +1518,12 @@ def build_mcp_server() -> FastMCP:
                         else:
                             local_bcc.append(nm)
 
-            await _route(to, "to")
-            await _route(cc or [], "cc")
-            await _route(bcc or [], "bcc")
+            try:
+                await _route(to, "to")
+                await _route(cc or [], "cc")
+                await _route(bcc or [], "bcc")
+            except _ContactBlocked:
+                return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
 
         deliveries: list[dict[str, Any]] = []
         # Local deliver if any
@@ -1655,6 +1680,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         from_agent: str,
         to_agent: str,
+        to_project: Optional[str] = None,
         reason: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
     ) -> dict[str, Any]:
@@ -1664,7 +1690,21 @@ def build_mcp_server() -> FastMCP:
         """
         project = await _get_project_by_identifier(project_key)
         a = await _get_agent(project, from_agent)
-        b = await _get_agent(project, to_agent)
+        # Allow explicit external addressing in to_agent as project:<slug>#<Name>
+        target_project = project
+        target_name = to_agent
+        if to_project:
+            target_project = await _get_project_by_identifier(to_project)
+        elif to_agent.startswith("project:") and "#" in to_agent:
+            try:
+                _, rest = to_agent.split(":", 1)
+                slug_part, agent_part = rest.split("#", 1)
+                target_project = await _get_project_by_identifier(slug_part)
+                target_name = agent_part.strip()
+            except Exception:
+                target_project = project
+                target_name = to_agent
+        b = await _get_agent(target_project, target_name)
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds))
         async with get_session() as s:
@@ -1673,7 +1713,7 @@ def build_mcp_server() -> FastMCP:
                 select(AgentLink).where(
                     AgentLink.a_project_id == project.id,
                     AgentLink.a_agent_id == a.id,
-                    AgentLink.b_project_id == project.id,
+                    AgentLink.b_project_id == target_project.id,
                     AgentLink.b_agent_id == b.id,
                 )
             )
@@ -1688,7 +1728,7 @@ def build_mcp_server() -> FastMCP:
                 link = AgentLink(
                     a_project_id=project.id or 0,
                     a_agent_id=a.id or 0,
-                    b_project_id=project.id or 0,
+                    b_project_id=target_project.id or 0,
                     b_agent_id=b.id or 0,
                     status="pending",
                     reason=reason,
@@ -1701,8 +1741,22 @@ def build_mcp_server() -> FastMCP:
         # Send an intro message with ack_required
         subject = f"Contact request from {a.name}"
         body = reason or f"{a.name} requests permission to contact {b.name}."
-        await _deliver_message(ctx, project, a, [b.name], [], [], subject, body, None, None, importance="normal", ack_required=True, thread_id=None)
-        return {"from": a.name, "to": b.name, "status": "pending", "expires_ts": _iso(exp)}
+        await _deliver_message(
+            ctx,
+            target_project,
+            a,
+            [b.name],
+            [],
+            [],
+            subject,
+            body,
+            None,
+            None,
+            importance="normal",
+            ack_required=True,
+            thread_id=None,
+        )
+        return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
     @mcp.tool(name="respond_contact")
     async def respond_contact(
@@ -1712,10 +1766,13 @@ def build_mcp_server() -> FastMCP:
         from_agent: str,
         accept: bool,
         ttl_seconds: int = 30 * 24 * 3600,
+        from_project: Optional[str] = None,
     ) -> dict[str, Any]:
         """Approve or deny a contact request."""
         project = await _get_project_by_identifier(project_key)
-        a = await _get_agent(project, from_agent)
+        # Resolve remote requestor project if provided
+        a_project = project if not from_project else await _get_project_by_identifier(from_project)
+        a = await _get_agent(a_project, from_agent)
         b = await _get_agent(project, to_agent)
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
@@ -1723,7 +1780,7 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as s:
             existing = await s.execute(
                 select(AgentLink).where(
-                    AgentLink.a_project_id == project.id,
+                    AgentLink.a_project_id == a_project.id,
                     AgentLink.a_agent_id == a.id,
                     AgentLink.b_project_id == project.id,
                     AgentLink.b_agent_id == b.id,
@@ -1833,8 +1890,11 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nlimit={limit}\nurgent_only={urgent_only}", title="tool: fetch_inbox", border_style="green"))
             except Exception:
                 pass
@@ -1884,8 +1944,11 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: mark_message_read", border_style="green"))
             except Exception:
                 pass
@@ -1899,8 +1962,11 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             if get_settings().tools_log_enabled:
                 try:
-                    from rich.console import Console  # type: ignore
-                    from rich.json import JSON  # type: ignore
+                    import importlib as _imp
+                    _rc = _imp.import_module("rich.console")
+                    _rj = _imp.import_module("rich.json")
+                    Console = _rc.Console
+                    JSON = _rj.JSON
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -1945,8 +2011,11 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: acknowledge_message", border_style="green"))
             except Exception:
                 pass
@@ -1966,8 +2035,11 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             if get_settings().tools_log_enabled:
                 try:
-                    from rich.console import Console  # type: ignore
-                    from rich.json import JSON  # type: ignore
+                    import importlib as _imp
+                    _rc = _imp.import_module("rich.console")
+                    _rj = _imp.import_module("rich.json")
+                    Console = _rc.Console
+                    JSON = _rj.JSON
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -2021,9 +2093,13 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
-                from rich.text import Text  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                _rt = _imp.import_module("rich.text")
+                Console = _rc.Console
+                Panel = _rp.Panel
+                Text = _rt.Text
                 cons = Console()
                 body = Text.assemble(
                     ("project: ", "cyan"), (project.human_key, "white"), "\n",
@@ -2056,8 +2132,11 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel(f"results={len(rows)}", title="tool: search_messages — done", border_style="green"))
             except Exception:
                 pass
@@ -2326,8 +2405,11 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel.fit(f"project={project_key}\nrepo={code_repo_path}", title="tool: install_precommit_guard", border_style="green"))
             except Exception:
                 pass
@@ -2344,8 +2426,11 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 Console().print(Panel.fit(f"repo={code_repo_path}", title="tool: uninstall_precommit_guard", border_style="green"))
             except Exception:
                 pass
@@ -2419,8 +2504,11 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
                 c = Console()
                 c.print(Panel("\n".join(paths), title=f"tool: claim_paths — agent={agent_name} ttl={ttl_seconds}s", border_style="green"))
             except Exception:
@@ -2531,8 +2619,11 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = getattr(_rc, "Console")
+                Panel = getattr(_rp, "Panel")
                 details = [
                     f"project={project_key}",
                     f"agent={agent_name}",
@@ -2571,8 +2662,11 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             if get_settings().tools_log_enabled:
                 try:
-                    from rich.console import Console  # type: ignore
-                    from rich.json import JSON  # type: ignore
+                    import importlib as _imp
+                    _rc = _imp.import_module("rich.console")
+                    _rj = _imp.import_module("rich.json")
+                    Console = _rc.Console
+                    JSON = _rj.JSON
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -2610,8 +2704,9 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
                 meta = [
                     f"project={project_key}",
                     f"agent={agent_name}",
@@ -2723,6 +2818,212 @@ def build_mcp_server() -> FastMCP:
                 "port": settings.http.port,
                 "path": settings.http.path,
             },
+        }
+
+    @mcp.resource("resource://tooling/directory", mime_type="application/json")
+    def tooling_directory_resource() -> dict[str, Any]:
+        """
+        Provide a clustered view of exposed MCP tools to combat option overload.
+
+        The directory groups tools by workflow, outlines primary use cases,
+        highlights nearby alternatives, and shares starter playbooks so agents
+        can focus on the verbs relevant to their immediate task.
+        """
+
+        clusters = [
+            {
+                "name": "Infrastructure & Workspace Setup",
+                "purpose": "Bootstrap coordination and guardrails before agents begin editing.",
+                "tools": [
+                    {
+                        "name": "health_check",
+                        "summary": "Report environment and HTTP wiring so orchestrators confirm connectivity.",
+                        "use_when": "Beginning a session or during incident response triage.",
+                        "related": ["ensure_project"],
+                    },
+                    {
+                        "name": "ensure_project",
+                        "summary": "Ensure project slug, schema, and archive exist for a shared repo identifier.",
+                        "use_when": "First call against a repo or when switching projects.",
+                        "related": ["register_agent", "claim_paths"],
+                    },
+                    {
+                        "name": "install_precommit_guard",
+                        "summary": "Install Git pre-commit hook that enforces advisory claims locally.",
+                        "use_when": "Onboarding a repository into coordinated mode.",
+                        "related": ["claim_paths", "uninstall_precommit_guard"],
+                    },
+                    {
+                        "name": "uninstall_precommit_guard",
+                        "summary": "Remove the advisory pre-commit hook from a repo.",
+                        "use_when": "Decommissioning or debugging the guard hook.",
+                        "related": ["install_precommit_guard"],
+                    },
+                ],
+            },
+            {
+                "name": "Identity & Directory",
+                "purpose": "Register agents, mint unique identities, and inspect directory metadata.",
+                "tools": [
+                    {
+                        "name": "register_agent",
+                        "summary": "Upsert an agent profile and refresh last_active_ts for a known persona.",
+                        "use_when": "Resuming an identity or updating program/model/task metadata.",
+                        "related": ["create_agent_identity", "whois"],
+                    },
+                    {
+                        "name": "create_agent_identity",
+                        "summary": "Always create a new unique agent name (optionally using a sanitized hint).",
+                        "use_when": "Spawning a brand-new helper that should not overwrite existing profiles.",
+                        "related": ["register_agent"],
+                    },
+                    {
+                        "name": "whois",
+                        "summary": "Return enriched profile info plus recent archive commits for an agent.",
+                        "use_when": "Dashboarding, routing coordination messages, or auditing activity.",
+                        "related": ["register_agent"],
+                    },
+                    {
+                        "name": "set_contact_policy",
+                        "summary": "Set inbound contact policy (open, auto, contacts_only, block_all).",
+                        "use_when": "Adjusting how permissive an agent is about unsolicited messages.",
+                        "related": ["request_contact", "respond_contact"],
+                    },
+                ],
+            },
+            {
+                "name": "Messaging Lifecycle",
+                "purpose": "Send, receive, and acknowledge threaded Markdown mail.",
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "summary": "Deliver a new message with attachments, WebP conversion, and policy enforcement.",
+                        "use_when": "Starting new threads or broadcasting plans across projects.",
+                        "related": ["reply_message", "request_contact"],
+                    },
+                    {
+                        "name": "reply_message",
+                        "summary": "Reply within an existing thread, inheriting flags and default recipients.",
+                        "use_when": "Continuing discussions or acknowledging decisions.",
+                        "related": ["send_message"],
+                    },
+                    {
+                        "name": "fetch_inbox",
+                        "summary": "Poll recent messages for an agent with filters (urgent_only, since_ts).",
+                        "use_when": "After each work unit to ingest coordination updates.",
+                        "related": ["mark_message_read", "acknowledge_message"],
+                    },
+                    {
+                        "name": "mark_message_read",
+                        "summary": "Record read_ts for FYI messages without sending acknowledgements.",
+                        "use_when": "Clearing inbox notifications once reviewed.",
+                        "related": ["acknowledge_message"],
+                    },
+                    {
+                        "name": "acknowledge_message",
+                        "summary": "Set read_ts and ack_ts so senders know action items landed.",
+                        "use_when": "Responding to ack_required messages.",
+                        "related": ["mark_message_read"],
+                    },
+                ],
+            },
+            {
+                "name": "Contact Governance",
+                "purpose": "Manage messaging permissions when policies are not open by default.",
+                "tools": [
+                    {
+                        "name": "request_contact",
+                        "summary": "Create or refresh a pending AgentLink and notify the target with ack_required intro.",
+                        "use_when": "Requesting permission before messaging another agent.",
+                        "related": ["respond_contact", "set_contact_policy"],
+                    },
+                    {
+                        "name": "respond_contact",
+                        "summary": "Approve or block a pending contact request, optionally setting expiry.",
+                        "use_when": "Granting or revoking messaging permissions.",
+                        "related": ["request_contact"],
+                    },
+                    {
+                        "name": "list_contacts",
+                        "summary": "List outbound contact links, statuses, and expirations for an agent.",
+                        "use_when": "Auditing who an agent may message or rotating expiring approvals.",
+                        "related": ["request_contact", "respond_contact"],
+                    },
+                ],
+            },
+            {
+                "name": "Search & Summaries",
+                "purpose": "Surface signal from large mailboxes and compress long threads.",
+                "tools": [
+                    {
+                        "name": "search_messages",
+                        "summary": "Run FTS5 queries across subject/body text to locate relevant threads.",
+                        "use_when": "Triage or gathering context before editing.",
+                        "related": ["fetch_inbox", "summarize_thread"],
+                    },
+                    {
+                        "name": "summarize_thread",
+                        "summary": "Extract participants, key points, and action items for a single thread.",
+                        "use_when": "Briefing new agents on long discussions or closing loops.",
+                        "related": ["summarize_threads"],
+                    },
+                    {
+                        "name": "summarize_threads",
+                        "summary": "Produce a digest across multiple threads with aggregate mentions/actions.",
+                        "use_when": "Daily standups or cross-team sync summaries.",
+                        "related": ["summarize_thread"],
+                    },
+                ],
+            },
+            {
+                "name": "Claims & Workspace Guardrails",
+                "purpose": "Coordinate file/glob ownership to avoid overwriting concurrent work.",
+                "tools": [
+                    {
+                        "name": "claim_paths",
+                        "summary": "Issue advisory claims with overlap detection and Git artifacts.",
+                        "use_when": "Before touching high-traffic surfaces or long-lived refactors.",
+                        "related": ["release_claims", "renew_claims"],
+                    },
+                    {
+                        "name": "release_claims",
+                        "summary": "Release active claims (fully or by subset) and stamp released_ts.",
+                        "use_when": "Finishing work so surfaces become available again.",
+                        "related": ["claim_paths", "renew_claims"],
+                    },
+                    {
+                        "name": "renew_claims",
+                        "summary": "Extend claim expiry windows without allocating new claim IDs.",
+                        "use_when": "Long-running work needs more time but should retain ownership.",
+                        "related": ["claim_paths", "release_claims"],
+                    },
+                ],
+            },
+        ]
+
+        playbooks = [
+            {
+                "workflow": "Kick off new agent session",
+                "sequence": ["health_check", "ensure_project", "register_agent", "fetch_inbox"],
+            },
+            {
+                "workflow": "Start focused refactor",
+                "sequence": ["ensure_project", "claim_paths", "send_message", "fetch_inbox", "acknowledge_message"],
+            },
+            {
+                "workflow": "Join existing discussion",
+                "sequence": ["ensure_project", "register_agent", "fetch_inbox", "summarize_thread", "reply_message"],
+            },
+            {
+                "workflow": "Manage contact approvals",
+                "sequence": ["set_contact_policy", "request_contact", "respond_contact", "send_message"],
+            },
+        ]
+
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "clusters": clusters,
+            "playbooks": playbooks,
         }
 
     @mcp.resource("resource://projects", mime_type="application/json")

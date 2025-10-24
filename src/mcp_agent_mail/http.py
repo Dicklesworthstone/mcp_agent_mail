@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
+import importlib
+import json
 import logging
+from typing import Any, cast
 
-import structlog  # type: ignore
+import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,10 +34,26 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
         return res[0] if res and res[0] else None
 
 __all__ = ["build_http_app", "main"]
+
+
+def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
+    """Return decoded JWT header without verifying signature."""
+    try:
+        segment = token.split(".", 1)[0]
+        padded = segment + "=" * (-len(segment) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+_LOGGING_CONFIGURED = False
+
+
 def _configure_logging(settings: Settings) -> None:
     """Initialize structlog and stdlib logging formatting."""
     # Idempotent setup
-    if getattr(_configure_logging, "_configured", False):  # type: ignore[attr-defined]
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
         return
     processors = [
         structlog.contextvars.merge_contextvars,
@@ -50,9 +70,8 @@ def _configure_logging(settings: Settings) -> None:
         cache_logger_on_first_use=True,
     )
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
-    # mark configured without setattr
-    with contextlib.suppress(Exception):
-        _configure_logging._configured = True  # type: ignore[attr-defined]
+    # mark configured
+    _LOGGING_CONFIGURED = True
 
 
 
@@ -101,8 +120,8 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             and getattr(settings.http, "rate_limit_redis_url", "")
         ):
             try:
-                from redis.asyncio import Redis  # type: ignore
-
+                redis_asyncio = importlib.import_module("redis.asyncio")
+                Redis = redis_asyncio.Redis
                 self._redis = Redis.from_url(settings.http.rate_limit_redis_url)
             except Exception:
                 self._redis = None
@@ -110,7 +129,9 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
     async def _decode_jwt(self, token: str) -> dict | None:
         """Validate and decode JWT, returning claims or None on failure."""
         with contextlib.suppress(Exception):
-            from authlib.jose import JsonWebKey, JsonWebToken  # type: ignore
+            jose_mod = importlib.import_module("authlib.jose")
+            JsonWebKey = jose_mod.JsonWebKey
+            JsonWebToken = jose_mod.JsonWebToken
             algs = list(getattr(self.settings.http, "jwt_algorithms", ["HS256"]))
             jwt = JsonWebToken(algs)
             audience = getattr(self.settings.http, "jwt_audience", None) or None
@@ -118,12 +139,15 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             jwks_url = getattr(self.settings.http, "jwt_jwks_url", None) or None
             secret = getattr(self.settings.http, "jwt_secret", None) or None
 
-            header = jwt.peek_header(token)
+            header = _decode_jwt_header_segment(token)
+            if header is None:
+                return None
             key = None
             if jwks_url:
                 with contextlib.suppress(Exception):
-                    import httpx  # type: ignore
-                    async with httpx.AsyncClient(timeout=5) as client:
+                    httpx = importlib.import_module("httpx")
+                    AsyncClient = httpx.AsyncClient
+                    async with AsyncClient(timeout=5) as client:
                         jwks = (await client.get(jwks_url)).json()
                     key_set = JsonWebKey.import_key_set(jwks)
                     kid = header.get("kid")
@@ -167,11 +191,14 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         # return (per_minute, burst)
         if kind == "tools":
             rpm = int(getattr(self.settings.http, "rate_limit_tools_per_minute", 60) or 60)
+            burst = int(getattr(self.settings.http, "rate_limit_tools_burst", 0) or 0)
         elif kind == "resources":
             rpm = int(getattr(self.settings.http, "rate_limit_resources_per_minute", 120) or 120)
+            burst = int(getattr(self.settings.http, "rate_limit_resources_burst", 0) or 0)
         else:
             rpm = int(getattr(self.settings.http, "rate_limit_per_minute", 60) or 60)
-        burst = max(1, rpm)
+            burst = 0
+        burst = int(burst) if burst > 0 else max(1, rpm)
         return rpm, burst
 
     async def _consume_bucket(self, key: str, per_minute: int, burst: int) -> bool:
@@ -217,7 +244,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         # Allow CORS preflight and health endpoints
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
@@ -227,7 +254,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             body_bytes = await request.body()
             async def _receive() -> dict:
                 return {"type": "http.request", "body": body_bytes, "more_body": False}
-            request._receive = _receive  # type: ignore[attr-defined]
+            cast(Any, request)._receive = _receive
         except Exception:
             body_bytes = b""
 
@@ -239,11 +266,12 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             if not auth_header.startswith("Bearer "):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
             token = auth_header.split(" ", 1)[1].strip()
-            claims = await self._decode_jwt(token)
-            if not claims:
+            claims_dict = await self._decode_jwt(token)
+            if claims_dict is None:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
-            request.state.jwt_claims = claims  # type: ignore[attr-defined]
-            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])  # type: ignore[arg-type]
+            claims = cast(dict[str, Any], claims_dict)
+            request.state.jwt_claims = claims
+            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])
             if isinstance(roles_raw, str):
                 roles = {roles_raw}
             elif isinstance(roles_raw, (list, tuple)):
@@ -280,9 +308,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             identity = (request.client.host if request.client else "ip-unknown")
             # Prefer stable subject from JWT if present
             with contextlib.suppress(Exception):
-                sub = getattr(request.state, "jwt_claims", {}).get("sub")  # type: ignore[attr-defined]
-                if isinstance(sub, str) and sub:
-                    identity = f"sub:{sub}"
+                maybe_claims = getattr(request.state, "jwt_claims", None)
+                if isinstance(maybe_claims, dict):
+                    sub = maybe_claims.get("sub")
+                    if isinstance(sub, str) and sub:
+                        identity = f"sub:{sub}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
@@ -307,8 +337,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Rich traceback (optional)
     if getattr(settings, "log_rich_enabled", False) and getattr(settings, "log_include_trace", False):
         try:
-            from rich.traceback import install as rich_traceback_install  # type: ignore
-
+            rich_tb_mod = importlib.import_module("rich.traceback")
+            rich_traceback_install = rich_tb_mod.install
             rich_traceback_install(show_locals=False)
         except Exception:
             pass
@@ -336,9 +366,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         client_ip=client,
                     )
                 try:
-                    from rich.console import Console  # type: ignore
-                    from rich.panel import Panel  # type: ignore
-                    from rich.text import Text  # type: ignore
+                    rich_console = importlib.import_module("rich.console")
+                    rich_panel = importlib.import_module("rich.panel")
+                    rich_text = importlib.import_module("rich.text")
+
+                    Console = rich_console.Console
+                    Panel = rich_panel.Panel
+                    Text = rich_text.Text
 
                     console = Console(width=100)
                     title = Text.assemble(
@@ -380,25 +414,29 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Optional OpenTelemetry auto-instrumentation for FastAPI
     if settings.http.otel_enabled:
         try:
-            from opentelemetry import trace  # type: ignore
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (  # type: ignore
-                OTLPSpanExporter,
-            )
-            from opentelemetry.instrumentation.fastapi import (  # type: ignore
-                FastAPIInstrumentor,
-            )
-            from opentelemetry.sdk.resources import Resource  # type: ignore
-            from opentelemetry.sdk.trace import TracerProvider  # type: ignore
-            from opentelemetry.sdk.trace.export import (  # type: ignore
-                BatchSpanProcessor,
-            )
+            ot_trace = importlib.import_module("opentelemetry.trace")
+            ot_export_http = importlib.import_module("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+            ot_fastapi = importlib.import_module("opentelemetry.instrumentation.fastapi")
+            ot_resources = importlib.import_module("opentelemetry.sdk.resources")
+            ot_trace_sdk = importlib.import_module("opentelemetry.sdk.trace")
+            ot_trace_export = importlib.import_module("opentelemetry.sdk.trace.export")
+
+            Resource = getattr(ot_resources, "Resource", None)
+            TracerProvider = getattr(ot_trace_sdk, "TracerProvider", None)
+            OTLPSpanExporter = getattr(ot_export_http, "OTLPSpanExporter", None)
+            BatchSpanProcessor = getattr(ot_trace_export, "BatchSpanProcessor", None)
+            FastAPIInstrumentor = getattr(ot_fastapi, "FastAPIInstrumentor", None)
+            set_tracer_provider = getattr(ot_trace, "set_tracer_provider", None)
+
+            if not all([Resource, TracerProvider, OTLPSpanExporter, BatchSpanProcessor, FastAPIInstrumentor, set_tracer_provider]):
+                raise RuntimeError("opentelemetry modules unavailable")
 
             resource = Resource.create({"service.name": settings.http.otel_service_name})
             provider = TracerProvider(resource=resource)
             span_exporter = OTLPSpanExporter(endpoint=settings.http.otel_exporter_otlp_endpoint or None)
             processor = BatchSpanProcessor(span_exporter)
             provider.add_span_processor(processor)
-            trace.set_tracer_provider(provider)
+            set_tracer_provider(provider)
             FastAPIInstrumentor.instrument_app(fastapi_app)
         except Exception:  # pragma: no cover - optional dependency path
             pass
@@ -413,8 +451,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             await readiness_check()
         except Exception as exc:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                rich_console = importlib.import_module("rich.console")
+                rich_panel = importlib.import_module("rich.panel")
+                Console = rich_console.Console
+                Panel = rich_panel.Panel
                 Console().print(Panel.fit(str(exc), title="Readiness Error", border_style="red"))
             except Exception:
                 pass
@@ -443,8 +483,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             await _expire_stale_claims(pid)
                     # Log a compact Rich panel with scan summary
                     try:
-                        from rich.console import Console  # type: ignore
-                        from rich.panel import Panel  # type: ignore
+                        rich_console = importlib.import_module("rich.console")
+                        rich_panel = importlib.import_module("rich.panel")
+                        Console = rich_console.Console
+                        Panel = rich_panel.Panel
                         Console().print(Panel.fit(f"projects_scanned={len(pids)}", title="Claims Cleanup", border_style="cyan"))
                     except Exception:
                         pass
@@ -474,9 +516,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         age = (now - created_ts).total_seconds()
                         if age >= settings.ack_ttl_seconds:
                             try:
-                                from rich.console import Console  # type: ignore
-                                from rich.panel import Panel  # type: ignore
-                                from rich.text import Text  # type: ignore
+                                rich_console = importlib.import_module("rich.console")
+                                rich_panel = importlib.import_module("rich.panel")
+                                rich_text = importlib.import_module("rich.text")
+                                Console = rich_console.Console
+                                Panel = rich_panel.Panel
+                                Text = rich_text.Text
                                 con = Console()
                                 body = Text.assemble(
                                     ("message_id: ", "cyan"), (str(mid), "white"), "\n",

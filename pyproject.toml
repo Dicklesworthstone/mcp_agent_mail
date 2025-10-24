@@ -48,6 +48,8 @@ dependencies = [
   "authlib>=1.5.2,<1.6",
   "litellm>=1.40.0,<2",
   "alembic>=1.13.2",
+  "pytest>=8.4.2",
+  "ruff>=0.14.1",
 ]
 
 [project.optional-dependencies]

@@ -148,3 +148,15 @@ def _setup_fts(connection) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent ON message_recipients(agent_id)"
     )
+
+
+async def ensure_fts(settings: Settings | None = None) -> None:
+    """Ensure FTS virtual tables, triggers, and common indexes exist.
+
+    This can be called after Alembic migrations to create or repair FTS structures
+    without relying on create_all.
+    """
+    init_engine(settings)
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(_setup_fts)

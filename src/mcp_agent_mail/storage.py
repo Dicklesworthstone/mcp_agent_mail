@@ -252,26 +252,40 @@ async def _convert_markdown_images(
     matches = list(_IMAGE_PATTERN.finditer(body_md))
     if not matches:
         return body_md
-    result = body_md
+    result_parts: list[str] = []
+    last_idx = 0
     for match in matches:
-        raw_path = match.group("path").strip()
+        path_start, path_end = match.span("path")
+        result_parts.append(body_md[last_idx:path_start])
+        raw_path = match.group("path")
+        normalized_path = raw_path.strip()
         if raw_path.startswith("data:"):
+            result_parts.append(raw_path)
+            last_idx = path_end
             continue
-        file_path = Path(raw_path)
+        file_path = Path(normalized_path)
         if not file_path.is_absolute():
             file_path = (archive.root / raw_path).resolve()
         if not file_path.is_file():
+            result_parts.append(raw_path)
+            last_idx = path_end
             continue
         attachment_meta, rel_path = await _store_image(archive, file_path, embed_policy=embed_policy)
         if attachment_meta["type"] == "inline":
-            replacement = f"data:image/webp;base64,{attachment_meta['data_base64']}"
+            replacement_value = f"data:image/webp;base64,{attachment_meta['data_base64']}"
         else:
-            replacement = attachment_meta["path"]
-        result = result.replace(raw_path, str(replacement))
+            replacement_value = attachment_meta["path"]
+        leading_ws_len = len(raw_path) - len(raw_path.lstrip())
+        trailing_ws_len = len(raw_path) - len(raw_path.rstrip())
+        leading_ws = raw_path[:leading_ws_len] if leading_ws_len else ""
+        trailing_ws = raw_path[len(raw_path) - trailing_ws_len :] if trailing_ws_len else ""
+        result_parts.append(f"{leading_ws}{replacement_value}{trailing_ws}")
         meta.append(attachment_meta)
         if rel_path:
             commit_paths.append(rel_path)
-    return result
+        last_idx = path_end
+    result_parts.append(body_md[last_idx:])
+    return "".join(result_parts)
 
 
 async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str = "auto") -> tuple[dict[str, object], str | None]:

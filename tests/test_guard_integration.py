@@ -4,7 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest  # type: ignore[import-not-found]
+import pytest
 
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.guard import render_precommit_script

@@ -16,7 +16,7 @@ from sqlalchemy import asc, desc, func, select
 
 from .app import build_mcp_server
 from .config import get_settings
-from .db import ensure_schema, get_session
+from .db import ensure_fts, ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import Agent, Claim, Message, MessageRecipient, Project
@@ -132,11 +132,19 @@ def typecheck() -> None:
 
 @app.command("migrate")
 def migrate() -> None:
-    """Ensure database schema and FTS structures exist."""
+    """Apply migrations (Alembic if available) and ensure FTS structures exist."""
     settings = get_settings()
     with console.status("Applying migrations..."):
-        asyncio.run(ensure_schema(settings))
-    console.print("[green]Database migrations complete.[/]")
+        # Prefer Alembic if configured; fall back to ensure_schema for first-time init
+        try:
+            _run_command(["uv", "run", "alembic", "upgrade", "head"])  # non-interactive
+        except SystemExit as exc:
+            # If Alembic not initialized or fails, fall back to ensure_schema
+            if exc.code != 0:
+                asyncio.run(ensure_schema(settings))
+        # Always ensure FTS structures and common indexes
+        asyncio.run(ensure_fts(settings))
+    console.print("[green]Database migrations + FTS complete.[/]")
 
 
 @app.command("list-projects")

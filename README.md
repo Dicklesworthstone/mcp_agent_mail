@@ -143,7 +143,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 1) Create an identity
 
-- `create_agent(project_key, program, model, task_description, name_hint?)` → creates a memorable name, stores to DB, writes `agents/<Name>/profile.json` in Git, and commits.
+- `register_agent(project_key, program, model, name?, task_description?)` → creates/updates a named identity, persists profile to Git, and commits.
 
 2) Send a message
 
@@ -230,7 +230,7 @@ sequenceDiagram
 
 | Tool | Purpose |
 | :-- | :-- |
-| `create_agent(...)` | Register a new agent identity and write `profile.json` in Git |
+| `register_agent(...)` | Register a new agent identity and write `profile.json` in Git |
 | `whois(project_key, agent_name)` | Fetch a profile for one agent |
 | `list_agents(project_key, active_only=True)` | Directory-style listing of agents and activity |
 | `send_message(...)` | Create canonical + inbox/outbox markdown artifacts and commit |
@@ -306,9 +306,8 @@ Expose common reads as resources that clients can fetch:
 - `resource://views/urgent-unread/{agent}{?project,limit}`
 - `resource://views/ack-required/{agent}{?project,limit}`
 - `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}`: ack-required messages older than TTL without acknowledgements
-- `resource://mailbox/{agent}{?project,limit}`: recent inbox items with basic commit metadata
-- `resource://mailbox-with-commits/{agent}{?project,limit}`: inbox items enriched with commit metadata and diff summaries per message
-- `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}`: messages sent by agent with commit metadata
+- `resource://mailbox-with-commits/{agent}{?project,limit}`: inbox items enriched with per-message commit metadata and diff summaries (recommended)
+- `resource://mailbox/{agent}{?project,limit}`: recent inbox items with a basic/heuristic commit reference (legacy/simple)
 
 Example (conceptual) resource read:
 
@@ -402,13 +401,15 @@ Common variables you may set:
 | `HTTP_RBAC_ENABLED` | `true` | Enforce read-only vs tools RBAC |
 | `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
 | `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
-| `HTTP_RBAC_DEFAULT_ROLE` | `tools` | Role used when none present |
+| `HTTP_RBAC_DEFAULT_ROLE` | `reader` | Role used when none present |
 | `HTTP_RBAC_READONLY_TOOLS` | see code | CSV of read-only tool names |
 | `HTTP_RATE_LIMIT_ENABLED` | `false` | Enable token-bucket limiter |
 | `HTTP_RATE_LIMIT_BACKEND` | `memory` | `memory` or `redis` |
 | `HTTP_RATE_LIMIT_PER_MINUTE` | `60` | Legacy per-IP limit (fallback) |
 | `HTTP_RATE_LIMIT_TOOLS_PER_MINUTE` | `60` | Per-minute for tools/call |
+| `HTTP_RATE_LIMIT_TOOLS_BURST` | `0` | Optional burst for tools (0=auto=rpm) |
 | `HTTP_RATE_LIMIT_RESOURCES_PER_MINUTE` | `120` | Per-minute for resources/read |
+| `HTTP_RATE_LIMIT_RESOURCES_BURST` | `0` | Optional burst for resources (0=auto=rpm) |
 | `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
 | `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
 | `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
@@ -495,8 +496,8 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 1. Create two agent identities (backend and frontend projects):
 
 ```json
-{"method":"tools/call","params":{"name":"create_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"}}}
-{"method":"tools/call","params":{"name":"create_agent","arguments":{"project_key":"/abs/path/frontend","program":"claude-code","model":"opus-4.1","task_description":"Navbar redesign"}}}
+{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name":"GreenCastle","task_description":"Auth refactor"}}}
+{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/frontend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"}}}
 ```
 
 2. Backend agent claims `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
@@ -595,11 +596,12 @@ Create an agent:
 {
   "method": "tools/call",
   "params": {
-    "name": "create_agent",
+    "name": "register_agent",
     "arguments": {
       "project_key": "/abs/path/backend",
       "program": "codex-cli",
       "model": "gpt5-codex",
+      "name": "GreenCastle",
       "task_description": "Auth refactor"
     }
   }
@@ -658,7 +660,9 @@ Claim a surface for editing:
 - Transport
   - HTTP-only (Streamable HTTP). Place behind a reverse proxy (e.g., NGINX) with TLS termination for production
 - Auth
-  - Optional Bearer or JWT (HS*/JWKS) via HTTP middleware; enable with `HTTP_JWT_ENABLED=true`
+  - Optional JWT (HS*/JWKS) via HTTP middleware; enable with `HTTP_JWT_ENABLED=true`
+  - Static Bearer token is supported only when JWT is disabled
+  - When JWKS is configured (`HTTP_JWT_JWKS_URL`), incoming JWTs must include a matching `kid` header; tokens without `kid` or with unknown `kid` are rejected
   - Starter RBAC (reader vs writer) using role claim; see `HTTP_RBAC_*` settings
 - Reverse proxy + TLS (minimal example)
   - NGINX location block:
@@ -710,7 +714,7 @@ def read_resource(uri: str) -> dict:
     return data.get("result")
 
 if __name__ == "__main__":
-    profile = call_tool("create_agent", {
+    profile = call_tool("register_agent", {
         "project_key": "/abs/path/backend",
         "program": "codex-cli",
         "model": "gpt5-codex",
@@ -746,6 +750,8 @@ if __name__ == "__main__":
 
 ### Tools
 
+> Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory`.
+
 | Name | Signature | Returns | Notes |
 | :-- | :-- | :-- | :-- |
 | `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
@@ -767,6 +773,7 @@ if __name__ == "__main__":
 | URI | Params | Returns | Notes |
 | :-- | :-- | :-- | :-- |
 | `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
+| `resource://tooling/directory` | — | `{generated_at, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | Claims for a project |

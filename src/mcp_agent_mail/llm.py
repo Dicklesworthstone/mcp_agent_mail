@@ -8,11 +8,14 @@ python-decouple in `config.py`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 import litellm
+from litellm.types.caching import LiteLLMCacheType
 import structlog
 from decouple import Config as DecoupleConfig, RepositoryEnv
 
@@ -41,7 +44,7 @@ def _setup_callbacks() -> None:
     if not settings.llm.cost_logging_enabled:
         return
 
-    def _on_success(kwargs: dict[str, Any], completion_response: Any, start_time: float, end_time: float) -> None:  # type: ignore[no-untyped-def]
+    def _on_success(kwargs: dict[str, Any], completion_response: Any, start_time: float, end_time: float) -> None:
         try:
             cost = float(kwargs.get("response_cost", 0.0) or 0.0)
             model = str(kwargs.get("model", ""))
@@ -49,9 +52,13 @@ def _setup_callbacks() -> None:
                 # Prefer rich terminal output when enabled; fallback to structlog
                 if settings.log_rich_enabled:
                     try:
-                        from rich.console import Console  # type: ignore
-                        from rich.panel import Panel  # type: ignore
-                        from rich.text import Text  # type: ignore
+                        import importlib as _imp
+                        _rc = _imp.import_module("rich.console")
+                        _rp = _imp.import_module("rich.panel")
+                        _rt = _imp.import_module("rich.text")
+                        Console = _rc.Console
+                        Panel = _rp.Panel
+                        Text = _rt.Text
 
                         body = Text.assemble(
                             ("model: ", "cyan"), (model, "white"), "\n",
@@ -67,7 +74,10 @@ def _setup_callbacks() -> None:
             pass
 
     if _on_success not in _existing_callbacks():
-        litellm.success_callback = [*_existing_callbacks(), _on_success]
+        callbacks: list[Callable[..., Any]] = [*_existing_callbacks(), _on_success]
+        # Attribute exists on modern LiteLLM; fall back safely if absent
+        with contextlib.suppress(Exception):
+            litellm.success_callback = callbacks
 
 
 async def _ensure_initialized() -> None:
@@ -85,17 +95,20 @@ async def _ensure_initialized() -> None:
         except Exception:
             _logger.debug("litellm.env.bridge_failed")
 
-        # Enable cache globally (memory or redis via env)
+        # Enable cache globally (in-memory or Redis) using LiteLLM's API
         if settings.llm.cache_enabled:
             from contextlib import suppress
 
             with suppress(Exception):
-                # If Redis requested, set environment hints LiteLLM recognizes
-                if settings.llm.cache_backend.lower() == "redis" and settings.llm.cache_redis_url:
-                    os.environ.setdefault("LITELLM_CACHE", "redis")
-                    os.environ.setdefault("REDIS_URL", settings.llm.cache_redis_url)
-                    os.environ.setdefault("LITELLM_REDIS_URL", settings.llm.cache_redis_url)
-                litellm.set_cache(True)  # type: ignore[attr-defined]
+                backend = (getattr(settings.llm, "cache_backend", "local") or "local").lower()
+                if backend == "redis" and getattr(settings.llm, "cache_redis_url", ""):
+                    parsed = urlparse(settings.llm.cache_redis_url)
+                    host = parsed.hostname or "localhost"
+                    port = str(parsed.port or "6379")
+                    pwd = parsed.password or None
+                    litellm.enable_cache(type=LiteLLMCacheType.REDIS, host=str(host), port=str(port), password=pwd)
+                else:
+                    litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
 
         _setup_callbacks()
 
@@ -124,8 +137,8 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
 
     def _call():
         if _router is not None:
-            return _router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks, cache=True)
-        return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks, cache=True)
+            return _router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+        return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp = await asyncio.to_thread(_call)
 

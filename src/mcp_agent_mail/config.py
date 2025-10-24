@@ -29,6 +29,9 @@ class HttpSettings:
     rate_limit_tools_per_minute: int
     rate_limit_resources_per_minute: int
     rate_limit_redis_url: str
+    # Optional bursts to control spikiness
+    rate_limit_tools_burst: int
+    rate_limit_resources_burst: int
     request_log_enabled: bool
     otel_enabled: bool
     otel_service_name: str
@@ -167,6 +170,8 @@ def get_settings() -> Settings:
         rate_limit_tools_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_TOOLS_PER_MINUTE", default="60"), default=60),
         rate_limit_resources_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_RESOURCES_PER_MINUTE", default="120"), default=120),
         rate_limit_redis_url=_decouple_config("HTTP_RATE_LIMIT_REDIS_URL", default=""),
+        rate_limit_tools_burst=_int(_decouple_config("HTTP_RATE_LIMIT_TOOLS_BURST", default="0"), default=0),
+        rate_limit_resources_burst=_int(_decouple_config("HTTP_RATE_LIMIT_RESOURCES_BURST", default="0"), default=0),
         request_log_enabled=_bool(_decouple_config("HTTP_REQUEST_LOG_ENABLED", default="false"), default=False),
         otel_enabled=_bool(_decouple_config("HTTP_OTEL_ENABLED", default="false"), default=False),
         otel_service_name=_decouple_config("OTEL_SERVICE_NAME", default="mcp-agent-mail"),
@@ -181,10 +186,10 @@ def get_settings() -> Settings:
         rbac_enabled=_bool(_decouple_config("HTTP_RBAC_ENABLED", default="true"), default=True),
         rbac_reader_roles=_csv("HTTP_RBAC_READER_ROLES", default="reader,read,ro"),
         rbac_writer_roles=_csv("HTTP_RBAC_WRITER_ROLES", default="writer,write,tools,rw"),
-        rbac_default_role=_decouple_config("HTTP_RBAC_DEFAULT_ROLE", default="tools"),
+        rbac_default_role=_decouple_config("HTTP_RBAC_DEFAULT_ROLE", default="reader"),
         rbac_readonly_tools=_csv(
             "HTTP_RBAC_READONLY_TOOLS",
-            default="health_check,fetch_inbox,list_agents,whois,search_messages,summarize_thread,summarize_threads",
+            default="health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads",
         ),
     )
 
@@ -253,3 +258,10 @@ def get_settings() -> Settings:
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
     )
+
+
+def clear_settings_cache() -> None:
+    """Clear the lru_cache for get_settings in a mypy-friendly way."""
+    cache_clear = getattr(get_settings, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
