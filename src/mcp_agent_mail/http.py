@@ -747,8 +747,31 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         stateless=True,
                     )
                 )
+                # Wrap ASGI send to capture and normalize JSON-RPC to simple tool result
+                async def send_wrapper(message: dict) -> None:
+                    if message.get("type") == "http.response.body" and message.get("more_body") in (False, None):
+                        body_bytes = message.get("body") or b""
+                        try:
+                            payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else None
+                        except Exception:
+                            payload = None
+                        if isinstance(payload, dict) and "result" in payload and isinstance(payload["result"], dict):
+                            result_obj = payload["result"]
+                            # If MCP content blocks present, try to unwrap first text block assuming JSON
+                            content = result_obj.get("content")
+                            if isinstance(content, list) and content:
+                                first = content[0]
+                                text_val = first.get("text") if isinstance(first, dict) else None
+                                if isinstance(text_val, str):
+                                    with contextlib.suppress(Exception):
+                                        unwrapped = json.loads(text_val)
+                                        payload["result"] = unwrapped
+                                        body_bytes = json.dumps(payload).encode("utf-8")
+                                        message = {**message, "body": body_bytes}
+                    await send(message)
+
                 try:
-                    await http_transport.handle_request(new_scope, receive, send)
+                    await http_transport.handle_request(new_scope, receive, send_wrapper)
                 finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()

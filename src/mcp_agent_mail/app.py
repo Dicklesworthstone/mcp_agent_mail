@@ -1883,6 +1883,11 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 continue
 
+        # If a single delivery returned a structured error payload, bubble it up to top-level
+        if len(deliveries) == 1:
+            maybe_payload = deliveries[0].get("payload")
+            if isinstance(maybe_payload, dict) and isinstance(maybe_payload.get("error"), dict):
+                return {"error": maybe_payload["error"]}
         result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries)}
         # Back-compat: expose top-level attachments when a single local delivery exists
         if len(deliveries) == 1:
@@ -2360,7 +2365,7 @@ def build_mcp_server() -> FastMCP:
         urgent_only: bool = False,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> Any:
         """
         Retrieve recent messages for an agent without mutating read/ack state.
 

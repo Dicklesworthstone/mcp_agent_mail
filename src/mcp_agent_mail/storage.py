@@ -44,7 +44,9 @@ class AsyncFileLock:
         import os as _os
         t = self._timeout
         if (_os.environ.get("APP_ENVIRONMENT") or "").lower() == "test":
-            t = min(t, 1.0)
+            # Allow a small but sufficient timeout for sequential test operations
+            # that perform back-to-back archive writes (e.g., register two agents).
+            t = max(2.0, min(t, 3.0))
         await _to_thread(self._lock.acquire, timeout=t)
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
