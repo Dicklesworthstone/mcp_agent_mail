@@ -2854,7 +2854,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
-    ) -> list:
+    ) -> Any:
         """
         Full-text search over subject and body for a project.
 
