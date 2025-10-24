@@ -5,7 +5,6 @@ import sys
 
 from typer.testing import CliRunner
 
-from mcp_agent_mail.__main__ import main as module_main
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
@@ -48,23 +47,15 @@ def test_cli_list_acks_runs(isolated_env):
     assert res.exit_code == 0
 
 
-def test_module_main_dispatches_cli(monkeypatch):
-    # Run module main with a harmless command (lint) by faking _run_command
+def test_cli_lint_command(monkeypatch):
+    # Verify lint command wiring
     called: dict[str, bool] = {"ok": False}
-
     def fake_run(cmd: list[str]) -> None:
         called["ok"] = True
-
     monkeypatch.setattr("mcp_agent_mail.cli._run_command", fake_run)
-    monkeypatch.setenv("PYTHONWARNINGS", "ignore")
     runner = CliRunner()
-    # invoke module main by simulating argv via CliRunner runner.invoke on app
-    r = runner.invoke(app, ["lint"])  # sanity for CLI itself
+    r = runner.invoke(app, ["lint"])  # smoke test
     assert r.exit_code == 0
-    # Ensure no external argv leaks
-    monkeypatch.setattr(sys, "argv", ["mcp-agent-mail"])  # no flags
-    module_main()  # should not raise and will call into typer app
-    # Our fake may or may not be hit based on Typer execution context; ensure at least callable works
-    assert True
+    assert called["ok"] is True
 
 

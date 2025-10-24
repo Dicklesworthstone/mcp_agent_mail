@@ -14,6 +14,9 @@ def test_main_module_dispatch(monkeypatch):
     # Ensure calling __main__.main() renders help via Typer without consuming pytest argv
     import mcp_agent_mail.__main__ as entry
     from mcp_agent_mail.cli import app as real_app
+    # Ensure pytest argv isn't passed through
+    import sys as _sys
+    monkeypatch.setattr(_sys, "argv", ["mcp-agent-mail", "--help"])  # safe
     monkeypatch.setattr(entry, "app", real_app)
     entry.main()  # should not raise
 

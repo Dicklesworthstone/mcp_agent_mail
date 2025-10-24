@@ -1,15 +1,22 @@
-"""Allow `python -m mcp_agent_mail` to invoke the CLI entry-point."""
+"""Allow `python -m mcp_agent_mail` to invoke the CLI entry-point safely under pytest."""
 
+import sys
 from typer.main import get_command
 
 from .cli import app
 
 
 def main() -> None:
-    """Dispatch to the Typer CLI entry-point, tolerating external argv."""
+    """Dispatch to the Typer CLI entry-point with sanitized argv.
+
+    Avoid consuming pytest's own options by forcing help display only.
+    """
     cmd = get_command(app)
-    # Show help to avoid requiring a command; prevent pytest argv from breaking
-    cmd.main(args=["--help"], prog_name="mcp-agent-mail", standalone_mode=False)
+    try:
+        cmd.main(args=["--help"], prog_name="mcp-agent-mail")
+    except SystemExit:
+        # Help prints then exits; suppress for embedding
+        return
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution path
