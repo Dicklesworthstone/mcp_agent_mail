@@ -4531,7 +4531,11 @@ def build_mcp_server() -> FastMCP:
                 .limit(limit * 5)
             )
             for msg, kind, read_ts in rows.all():
-                age_s = int((now - msg.created_ts).total_seconds())
+                # Coerce potential naive datetimes from SQLite to UTC for arithmetic
+                created = msg.created_ts
+                if getattr(created, "tzinfo", None) is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age_s = int((now - created).total_seconds())
                 if age_s >= ttl:
                     payload = _message_to_dict(msg, include_body=False)
                     payload["kind"] = kind

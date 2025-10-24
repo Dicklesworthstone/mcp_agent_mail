@@ -831,7 +831,8 @@ def main() -> None:
     parser.add_argument("--host", help="Override HTTP host", default=None)
     parser.add_argument("--port", help="Override HTTP port", type=int, default=None)
     parser.add_argument("--log-level", help="Uvicorn log level", default="info")
-    args = parser.parse_args()
+    # Be tolerant of extraneous argv when invoked under test runners
+    args, _unknown = parser.parse_known_args()
 
     settings = get_settings()
     host = args.host or settings.http.host

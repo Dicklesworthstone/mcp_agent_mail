@@ -435,6 +435,9 @@ def acks_pending(
 
     now = datetime.now(timezone.utc)
     def _age(dt: datetime) -> str:
+        # Coerce naive datetimes from SQLite to UTC for arithmetic
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = now - dt
         total = int(delta.total_seconds())
         h, r = divmod(max(total, 0), 3600)
@@ -493,7 +496,9 @@ def acks_remind(
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=min_age_minutes)
-    stale = [(m, rts, ats, k) for (m, rts, ats, k) in rows if m.created_ts <= cutoff]
+    def _aware(dt: datetime) -> datetime:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    stale = [(m, rts, ats, k) for (m, rts, ats, k) in rows if _aware(m.created_ts) <= cutoff]
 
     table = Table(title=f"ACK Reminders (>{min_age_minutes}m) for {agent_record.name}")
     table.add_column("ID")
@@ -504,6 +509,8 @@ def acks_remind(
     table.add_column("Read?")
 
     def _age(dt: datetime) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = now - dt
         total = int(delta.total_seconds())
         h, r = divmod(max(total, 0), 3600)
@@ -572,6 +579,8 @@ def acks_overdue(
 
     now = datetime.now(timezone.utc)
     def _age(dt: datetime) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = now - dt
         total = int(delta.total_seconds())
         h, r = divmod(max(total, 0), 3600)
