@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
-from .app import _expire_stale_claims, build_mcp_server
+from .app import _expire_stale_claims, _tool_metrics_snapshot, build_mcp_server
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import AsyncFileLock, ensure_archive, write_agent_profile, write_claim_record
@@ -641,11 +641,24 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     pass
                 await asyncio.sleep(settings.ack_ttl_scan_interval_seconds)
 
+        async def _worker_tool_metrics() -> None:
+            log = structlog.get_logger("tool.metrics")
+            while True:
+                try:
+                    snapshot = _tool_metrics_snapshot()
+                    if snapshot:
+                        log.info("tool_metrics_snapshot", tools=snapshot)
+                except Exception:
+                    pass
+                await asyncio.sleep(max(5, settings.tool_metrics_emit_interval_seconds))
+
         tasks = []
         if settings.claims_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
         if settings.ack_ttl_enabled:
             tasks.append(asyncio.create_task(_worker_ack_ttl()))
+        if settings.tool_metrics_emit_enabled:
+            tasks.append(asyncio.create_task(_worker_tool_metrics()))
         fastapi_app.state._background_tasks = tasks
 
     async def _shutdown() -> None:  # pragma: no cover - service lifecycle

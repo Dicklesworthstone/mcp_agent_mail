@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import logging
+from collections import defaultdict
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -30,6 +33,65 @@ from .storage import (
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify
+
+logger = logging.getLogger(__name__)
+
+TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
+TOOL_CLUSTER_MAP: dict[str, str] = {}
+
+CLUSTER_SETUP = "infrastructure"
+CLUSTER_IDENTITY = "identity"
+CLUSTER_MESSAGING = "messaging"
+CLUSTER_CONTACT = "contact"
+CLUSTER_SEARCH = "search"
+CLUSTER_CLAIMS = "claims"
+CLUSTER_MACROS = "workflow_macros"
+
+
+def _record_tool_error(tool_name: str, exc: Exception) -> None:
+    logger.warning(
+        "tool_error",
+        extra={
+            "tool": tool_name,
+            "error": type(exc).__name__,
+            "message": str(exc),
+        },
+    )
+
+
+def _instrument_tool(tool_name: str, *, cluster: str):
+    TOOL_CLUSTER_MAP[tool_name] = cluster
+
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            metrics = TOOL_METRICS[tool_name]
+            metrics["calls"] += 1
+            try:
+                result = await func(*args, **kwargs)
+            except Exception as exc:
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                raise
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+def _tool_metrics_snapshot() -> list[dict[str, Any]]:
+    snapshot = []
+    for name, data in sorted(TOOL_METRICS.items()):
+        snapshot.append(
+            {
+                "name": name,
+                "calls": data["calls"],
+                "errors": data["errors"],
+                "cluster": TOOL_CLUSTER_MAP.get(name, "unclassified"),
+            }
+        )
+    return snapshot
 
 
 def _lifespan_factory(settings: Settings):
@@ -678,6 +740,84 @@ def _summarize_messages(messages: Sequence[tuple[Message, str]]) -> dict[str, An
     return summary
 
 
+async def _compute_thread_summary(
+    project: Project,
+    thread_id: str,
+    include_examples: bool,
+    llm_mode: bool,
+    llm_model: Optional[str],
+    *,
+    per_thread_limit: Optional[int] = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+    if project.id is None:
+        raise ValueError("Project must have an id before summarizing threads.")
+    await ensure_schema()
+    sender_alias = aliased(Agent)
+    try:
+        message_id = int(thread_id)
+    except ValueError:
+        message_id = None
+    criteria = [Message.thread_id == thread_id]
+    if message_id is not None:
+        criteria.append(Message.id == message_id)
+    async with get_session() as session:
+        stmt = (
+            select(Message, sender_alias.name)
+            .join(sender_alias, Message.sender_id == sender_alias.id)
+            .where(Message.project_id == project.id, or_(*criteria))
+            .order_by(asc(Message.created_ts))
+        )
+        if per_thread_limit:
+            stmt = stmt.limit(per_thread_limit)
+        result = await session.execute(stmt)
+        rows = result.all()
+    summary = _summarize_messages(rows)
+
+    if llm_mode and get_settings().llm.enabled:
+        try:
+            excerpts: list[str] = []
+            for message, sender_name in rows[:15]:
+                excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
+            if excerpts:
+                system = (
+                    "You are a senior engineer. Produce a concise JSON summary with keys: "
+                    "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
+                    "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
+                )
+                user = "\n\n".join(excerpts)
+                llm_resp = await complete_system_user(system, user, model=llm_model)
+                parsed = _parse_json_safely(llm_resp.content)
+                if parsed:
+                    for key in (
+                        "participants",
+                        "key_points",
+                        "action_items",
+                        "mentions",
+                        "code_references",
+                        "total_messages",
+                        "open_actions",
+                        "done_actions",
+                    ):
+                        value = parsed.get(key)
+                        if value:
+                            summary[key] = value
+        except Exception as e:
+            logger.debug("thread_summary.llm_skipped", extra={"thread_id": thread_id, "error": str(e)})
+
+    examples: list[dict[str, Any]] = []
+    if include_examples:
+        for message, sender_name in rows[:3]:
+            examples.append(
+                {
+                    "id": message.id,
+                    "subject": message.subject,
+                    "from": sender_name,
+                    "created_ts": _iso(message.created_ts),
+                }
+            )
+    return summary, examples, len(rows)
+
+
 async def _get_message(project: Project, message_id: int) -> Message:
     if project.id is None:
         raise ValueError("Project must have an id before reading messages.")
@@ -880,6 +1020,7 @@ def build_mcp_server() -> FastMCP:
         return payload
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
+    @_instrument_tool("health_check", cluster=CLUSTER_SETUP)
     async def health_check(ctx: Context) -> dict[str, Any]:
         """
         Quick readiness probe for agents and orchestrators.
@@ -928,6 +1069,7 @@ def build_mcp_server() -> FastMCP:
         }
 
     @mcp.tool(name="ensure_project")
+    @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP)
     async def ensure_project(ctx: Context, human_key: str) -> dict[str, Any]:
         """
         Idempotently create or ensure a project exists for the given human key.
@@ -983,6 +1125,7 @@ def build_mcp_server() -> FastMCP:
         return _project_to_dict(project)
 
     @mcp.tool(name="register_agent")
+    @_instrument_tool("register_agent", cluster=CLUSTER_IDENTITY)
     async def register_agent(
         ctx: Context,
         project_key: str,
@@ -1078,6 +1221,7 @@ def build_mcp_server() -> FastMCP:
         return _agent_to_dict(agent)
 
     @mcp.tool(name="whois")
+    @_instrument_tool("whois", cluster=CLUSTER_IDENTITY)
     async def whois(
         ctx: Context,
         project_key: str,
@@ -1129,6 +1273,7 @@ def build_mcp_server() -> FastMCP:
         return profile
 
     @mcp.tool(name="create_agent_identity")
+    @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY)
     async def create_agent_identity(
         ctx: Context,
         project_key: str,
@@ -1196,6 +1341,7 @@ def build_mcp_server() -> FastMCP:
         return _agent_to_dict(agent)
 
     @mcp.tool(name="send_message")
+    @_instrument_tool("send_message", cluster=CLUSTER_MESSAGING)
     async def send_message(
         ctx: Context,
         project_key: str,
@@ -1571,6 +1717,7 @@ def build_mcp_server() -> FastMCP:
         return {"deliveries": deliveries, "count": len(deliveries)}
 
     @mcp.tool(name="reply_message")
+    @_instrument_tool("reply_message", cluster=CLUSTER_MESSAGING)
     async def reply_message(
         ctx: Context,
         project_key: str,
@@ -1675,6 +1822,7 @@ def build_mcp_server() -> FastMCP:
         return payload
 
     @mcp.tool(name="request_contact")
+    @_instrument_tool("request_contact", cluster=CLUSTER_CONTACT)
     async def request_contact(
         ctx: Context,
         project_key: str,
@@ -1759,6 +1907,7 @@ def build_mcp_server() -> FastMCP:
         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
     @mcp.tool(name="respond_contact")
+    @_instrument_tool("respond_contact", cluster=CLUSTER_CONTACT)
     async def respond_contact(
         ctx: Context,
         project_key: str,
@@ -1812,6 +1961,7 @@ def build_mcp_server() -> FastMCP:
         return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
 
     @mcp.tool(name="list_contacts")
+    @_instrument_tool("list_contacts", cluster=CLUSTER_CONTACT)
     async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
         """List contact links for an agent in a project."""
         project = await _get_project_by_identifier(project_key)
@@ -1834,6 +1984,7 @@ def build_mcp_server() -> FastMCP:
         return out
 
     @mcp.tool(name="set_contact_policy")
+    @_instrument_tool("set_contact_policy", cluster=CLUSTER_CONTACT)
     async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
         project = await _get_project_by_identifier(project_key)
@@ -1850,6 +2001,7 @@ def build_mcp_server() -> FastMCP:
         return {"agent": agent.name, "policy": pol}
 
     @mcp.tool(name="fetch_inbox")
+    @_instrument_tool("fetch_inbox", cluster=CLUSTER_MESSAGING)
     async def fetch_inbox(
         ctx: Context,
         project_key: str,
@@ -1909,6 +2061,7 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="mark_message_read")
+    @_instrument_tool("mark_message_read", cluster=CLUSTER_MESSAGING)
     async def mark_message_read(
         ctx: Context,
         project_key: str,
@@ -1971,6 +2124,7 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="acknowledge_message")
+    @_instrument_tool("acknowledge_message", cluster=CLUSTER_MESSAGING)
     async def acknowledge_message(
         ctx: Context,
         project_key: str,
@@ -2043,7 +2197,117 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
+    @mcp.tool(name="macro_start_session")
+    @_instrument_tool("macro_start_session", cluster=CLUSTER_MACROS)
+    async def macro_start_session(
+        ctx: Context,
+        human_key: str,
+        program: str,
+        model: str,
+        task_description: str = "",
+        agent_name: Optional[str] = None,
+        claim_paths: Optional[list[str]] = None,
+        claim_reason: str = "macro-session",
+        claim_ttl_seconds: int = 3600,
+        inbox_limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Macro helper that boots a project session: ensure project, register agent,
+        optionally claim paths, and fetch the latest inbox snapshot.
+        """
+        settings = get_settings()
+        project = await _ensure_project(human_key)
+        agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
+
+        claims_result: Optional[dict[str, Any]] = None
+        if claim_paths:
+            claims_result = await claim_paths(
+                ctx,
+                project.human_key,
+                agent.name,
+                claim_paths,
+                ttl_seconds=claim_ttl_seconds,
+                exclusive=True,
+                reason=claim_reason,
+            )
+
+        inbox_items = await _list_inbox(
+            project,
+            agent,
+            inbox_limit,
+            urgent_only=False,
+            include_bodies=False,
+            since_ts=None,
+        )
+        await ctx.info(
+            f"macro_start_session prepared agent '{agent.name}' on project '{project.human_key}' "
+            f"(claims={len(claims_result['granted']) if claims_result else 0})."
+        )
+        return {
+            "project": _project_to_dict(project),
+            "agent": _agent_to_dict(agent),
+            "claims": claims_result or {"granted": [], "conflicts": []},
+            "inbox": inbox_items,
+        }
+
+    @mcp.tool(name="macro_prepare_thread")
+    @_instrument_tool("macro_prepare_thread", cluster=CLUSTER_MACROS)
+    async def macro_prepare_thread(
+        ctx: Context,
+        project_key: str,
+        thread_id: str,
+        program: str,
+        model: str,
+        agent_name: Optional[str] = None,
+        task_description: str = "",
+        register_if_missing: bool = True,
+        include_examples: bool = True,
+        inbox_limit: int = 10,
+        include_inbox_bodies: bool = False,
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Macro helper that aligns an agent with an existing thread by ensuring registration,
+        summarising the thread, and fetching recent inbox context.
+        """
+        settings = get_settings()
+        project = await _get_project_by_identifier(project_key)
+        if register_if_missing:
+            agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
+        else:
+            if not agent_name:
+                raise ValueError("agent_name is required when register_if_missing is False.")
+            agent = await _get_agent(project, agent_name)
+
+        inbox_items = await _list_inbox(
+            project,
+            agent,
+            inbox_limit,
+            urgent_only=False,
+            include_bodies=include_inbox_bodies,
+            since_ts=None,
+        )
+        summary, examples, total_messages = await _compute_thread_summary(
+            project,
+            thread_id,
+            include_examples,
+            llm_mode,
+            llm_model,
+        )
+        await ctx.info(
+            f"macro_prepare_thread prepared agent '{agent.name}' for thread '{thread_id}' "
+            f"on project '{project.human_key}' (messages={total_messages})."
+        )
+        return {
+            "project": _project_to_dict(project),
+            "agent": _agent_to_dict(agent),
+            "thread": {"thread_id": thread_id, "summary": summary, "examples": examples, "total_messages": total_messages},
+            "inbox": inbox_items,
+        }
+
     @mcp.tool(name="search_messages")
+    @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH)
     async def search_messages(
         ctx: Context,
         project_key: str,
@@ -2152,6 +2416,7 @@ def build_mcp_server() -> FastMCP:
         ]
 
     @mcp.tool(name="summarize_thread")
+    @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH)
     async def summarize_thread(
         ctx: Context,
         project_key: str,
@@ -2188,78 +2453,20 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
-        if project.id is None:
-            raise ValueError("Project must have an id before summarizing threads.")
-        await ensure_schema()
-        sender_alias = aliased(Agent)
-        try:
-            message_id = int(thread_id)
-        except ValueError:
-            message_id = None
-        criteria = [Message.thread_id == thread_id]
-        if message_id is not None:
-            criteria.append(Message.id == message_id)
-        async with get_session() as session:
-            stmt = (
-                select(Message, sender_alias.name)
-                .join(sender_alias, Message.sender_id == sender_alias.id)
-                .where(Message.project_id == project.id, or_(*criteria))
-                .order_by(asc(Message.created_ts))
-            )
-            result = await session.execute(stmt)
-            rows = result.all()
-        summary = _summarize_messages(rows)
-
-        # Optional: refine with LLM if enabled
-        if llm_mode and get_settings().llm.enabled:
-            try:
-                # Prepare a compact prompt with message excerpts
-                excerpts: list[str] = []
-                for message, sender_name in rows[:15]:
-                    excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
-                system = (
-                    "You are a senior engineer. Produce a concise JSON summary with keys: "
-                    "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
-                    "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
-                )
-                user = "\n\n".join(excerpts)
-                llm_resp = await complete_system_user(system, user, model=llm_model)
-                # Best-effort parse: if JSON present, merge selective fields
-                parsed = _parse_json_safely(llm_resp.content)
-                if parsed:
-                    # Only merge known fields if present
-                    for key in (
-                        "participants",
-                        "key_points",
-                        "action_items",
-                        "mentions",
-                        "code_references",
-                        "total_messages",
-                        "open_actions",
-                        "done_actions",
-                    ):
-                        value = parsed.get(key)
-                        if value:
-                            summary[key] = value
-            except Exception as e:
-                await ctx.debug(f"summarize_thread.llm_skipped: {e}")
-        examples = []
-        if include_examples:
-            for message, sender_name in rows[:3]:
-                examples.append(
-                    {
-                        "id": message.id,
-                        "subject": message.subject,
-                        "from": sender_name,
-                        "created_ts": _iso(message.created_ts),
-                    }
-                )
+        summary, examples, total_messages = await _compute_thread_summary(
+            project,
+            thread_id,
+            include_examples,
+            llm_mode,
+            llm_model,
+        )
         await ctx.info(
-            f"Summarized thread '{thread_id}' for project '{project.human_key}' with {len(rows)} messages"
+            f"Summarized thread '{thread_id}' for project '{project.human_key}' with {total_messages} messages"
         )
         return {"thread_id": thread_id, "summary": summary, "examples": examples}
 
     @mcp.tool(name="summarize_threads")
+    @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH)
     async def summarize_threads(
         ctx: Context,
         project_key: str,
@@ -2396,6 +2603,7 @@ def build_mcp_server() -> FastMCP:
         return {"threads": thread_summaries, "aggregate": aggregate}
 
     @mcp.tool(name="install_precommit_guard")
+    @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP)
     async def install_precommit_guard(
         ctx: Context,
         project_key: str,
@@ -2418,6 +2626,7 @@ def build_mcp_server() -> FastMCP:
         return {"hook": str(hook_path)}
 
     @mcp.tool(name="uninstall_precommit_guard")
+    @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP)
     async def uninstall_precommit_guard(
         ctx: Context,
         code_repo_path: str,
@@ -2441,6 +2650,7 @@ def build_mcp_server() -> FastMCP:
         return {"removed": removed}
 
     @mcp.tool(name="claim_paths")
+    @_instrument_tool("claim_paths", cluster=CLUSTER_CLAIMS)
     async def claim_paths(
         ctx: Context,
         project_key: str,
@@ -2574,6 +2784,7 @@ def build_mcp_server() -> FastMCP:
         return {"granted": granted, "conflicts": conflicts}
 
     @mcp.tool(name="release_claims")
+    @_instrument_tool("release_claims", cluster=CLUSTER_CLAIMS)
     async def release_claims_tool(
         ctx: Context,
         project_key: str,
@@ -2669,6 +2880,7 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="renew_claims")
+    @_instrument_tool("renew_claims", cluster=CLUSTER_CLAIMS)
     async def renew_claims(
         ctx: Context,
         project_key: str,
@@ -2836,24 +3048,36 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Report environment and HTTP wiring so orchestrators confirm connectivity.",
                         "use_when": "Beginning a session or during incident response triage.",
                         "related": ["ensure_project"],
+                        "expected_frequency": "Once per agent session or when connectivity is in doubt.",
+                        "required_capabilities": ["infrastructure"],
+                        "usage_examples": [{"hint": "Pre-flight", "sample": "health_check()"}],
                     },
                     {
                         "name": "ensure_project",
                         "summary": "Ensure project slug, schema, and archive exist for a shared repo identifier.",
                         "use_when": "First call against a repo or when switching projects.",
                         "related": ["register_agent", "claim_paths"],
+                        "expected_frequency": "Whenever a new repo/path is encountered.",
+                        "required_capabilities": ["infrastructure", "storage"],
+                        "usage_examples": [{"hint": "First action", "sample": "ensure_project(human_key='/abs/path/backend')"}],
                     },
                     {
                         "name": "install_precommit_guard",
                         "summary": "Install Git pre-commit hook that enforces advisory claims locally.",
                         "use_when": "Onboarding a repository into coordinated mode.",
                         "related": ["claim_paths", "uninstall_precommit_guard"],
+                        "expected_frequency": "Infrequent—per repository setup.",
+                        "required_capabilities": ["repository", "filesystem"],
+                        "usage_examples": [{"hint": "Onboard", "sample": "install_precommit_guard(project_key='backend', code_repo_path='~/repo')"}],
                     },
                     {
                         "name": "uninstall_precommit_guard",
                         "summary": "Remove the advisory pre-commit hook from a repo.",
                         "use_when": "Decommissioning or debugging the guard hook.",
                         "related": ["install_precommit_guard"],
+                        "expected_frequency": "Rare; only when disabling guard enforcement.",
+                        "required_capabilities": ["repository"],
+                        "usage_examples": [{"hint": "Cleanup", "sample": "uninstall_precommit_guard(code_repo_path='~/repo')"}],
                     },
                 ],
             },
@@ -2866,24 +3090,36 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Upsert an agent profile and refresh last_active_ts for a known persona.",
                         "use_when": "Resuming an identity or updating program/model/task metadata.",
                         "related": ["create_agent_identity", "whois"],
+                        "expected_frequency": "At the start of each automated work session.",
+                        "required_capabilities": ["identity"],
+                        "usage_examples": [{"hint": "Resume persona", "sample": "register_agent(project_key='/abs/path/backend', program='codex', model='gpt5')"}],
                     },
                     {
                         "name": "create_agent_identity",
                         "summary": "Always create a new unique agent name (optionally using a sanitized hint).",
                         "use_when": "Spawning a brand-new helper that should not overwrite existing profiles.",
                         "related": ["register_agent"],
+                        "expected_frequency": "When minting fresh, short-lived identities.",
+                        "required_capabilities": ["identity"],
+                        "usage_examples": [{"hint": "New helper", "sample": "create_agent_identity(project_key='backend', name_hint='GreenCastle', program='codex', model='gpt5')"}],
                     },
                     {
                         "name": "whois",
                         "summary": "Return enriched profile info plus recent archive commits for an agent.",
                         "use_when": "Dashboarding, routing coordination messages, or auditing activity.",
                         "related": ["register_agent"],
+                        "expected_frequency": "Ad hoc when context about an agent is required.",
+                        "required_capabilities": ["identity", "audit"],
+                        "usage_examples": [{"hint": "Directory lookup", "sample": "whois(project_key='backend', agent_name='BlueLake')"}],
                     },
                     {
                         "name": "set_contact_policy",
                         "summary": "Set inbound contact policy (open, auto, contacts_only, block_all).",
                         "use_when": "Adjusting how permissive an agent is about unsolicited messages.",
                         "related": ["request_contact", "respond_contact"],
+                        "expected_frequency": "Occasional configuration change.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Restrict inbox", "sample": "set_contact_policy(project_key='backend', agent_name='BlueLake', policy='contacts_only')"}],
                     },
                 ],
             },
@@ -2896,30 +3132,45 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Deliver a new message with attachments, WebP conversion, and policy enforcement.",
                         "use_when": "Starting new threads or broadcasting plans across projects.",
                         "related": ["reply_message", "request_contact"],
+                        "expected_frequency": "Frequent—core write operation.",
+                        "required_capabilities": ["messaging"],
+                        "usage_examples": [{"hint": "New plan", "sample": "send_message(project_key='backend', sender_name='GreenCastle', to=['BlueLake'], subject='Plan', body_md='...')"}],
                     },
                     {
                         "name": "reply_message",
                         "summary": "Reply within an existing thread, inheriting flags and default recipients.",
                         "use_when": "Continuing discussions or acknowledging decisions.",
                         "related": ["send_message"],
+                        "expected_frequency": "Frequent when collaborating inside a thread.",
+                        "required_capabilities": ["messaging"],
+                        "usage_examples": [{"hint": "Thread reply", "sample": "reply_message(project_key='backend', message_id=42, sender_name='BlueLake', body_md='Got it!')"}],
                     },
                     {
                         "name": "fetch_inbox",
                         "summary": "Poll recent messages for an agent with filters (urgent_only, since_ts).",
                         "use_when": "After each work unit to ingest coordination updates.",
                         "related": ["mark_message_read", "acknowledge_message"],
+                        "expected_frequency": "Frequent polling in agent loops.",
+                        "required_capabilities": ["messaging", "read"],
+                        "usage_examples": [{"hint": "Poll", "sample": "fetch_inbox(project_key='backend', agent_name='BlueLake', since_ts='2025-10-24T00:00:00Z')"}],
                     },
                     {
                         "name": "mark_message_read",
                         "summary": "Record read_ts for FYI messages without sending acknowledgements.",
                         "use_when": "Clearing inbox notifications once reviewed.",
                         "related": ["acknowledge_message"],
+                        "expected_frequency": "Whenever FYI mail is processed.",
+                        "required_capabilities": ["messaging", "read"],
+                        "usage_examples": [{"hint": "Read receipt", "sample": "mark_message_read(project_key='backend', agent_name='BlueLake', message_id=42)"}],
                     },
                     {
                         "name": "acknowledge_message",
                         "summary": "Set read_ts and ack_ts so senders know action items landed.",
                         "use_when": "Responding to ack_required messages.",
                         "related": ["mark_message_read"],
+                        "expected_frequency": "Each time a message requests acknowledgement.",
+                        "required_capabilities": ["messaging", "ack"],
+                        "usage_examples": [{"hint": "Ack", "sample": "acknowledge_message(project_key='backend', agent_name='BlueLake', message_id=42)"}],
                     },
                 ],
             },
@@ -2932,18 +3183,27 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Create or refresh a pending AgentLink and notify the target with ack_required intro.",
                         "use_when": "Requesting permission before messaging another agent.",
                         "related": ["respond_contact", "set_contact_policy"],
+                        "expected_frequency": "Occasional—when new communication lines are needed.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake')"}],
                     },
                     {
                         "name": "respond_contact",
                         "summary": "Approve or block a pending contact request, optionally setting expiry.",
                         "use_when": "Granting or revoking messaging permissions.",
                         "related": ["request_contact"],
+                        "expected_frequency": "As often as requests arrive.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True)"}],
                     },
                     {
                         "name": "list_contacts",
                         "summary": "List outbound contact links, statuses, and expirations for an agent.",
                         "use_when": "Auditing who an agent may message or rotating expiring approvals.",
                         "related": ["request_contact", "respond_contact"],
+                        "expected_frequency": "Periodic audits or dashboards.",
+                        "required_capabilities": ["contact", "audit"],
+                        "usage_examples": [{"hint": "Audit", "sample": "list_contacts(project_key='backend', agent_name='BlueLake')"}],
                     },
                 ],
             },
@@ -2956,18 +3216,27 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Run FTS5 queries across subject/body text to locate relevant threads.",
                         "use_when": "Triage or gathering context before editing.",
                         "related": ["fetch_inbox", "summarize_thread"],
+                        "expected_frequency": "Regular during investigation phases.",
+                        "required_capabilities": ["search"],
+                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20)"}],
                     },
                     {
                         "name": "summarize_thread",
                         "summary": "Extract participants, key points, and action items for a single thread.",
                         "use_when": "Briefing new agents on long discussions or closing loops.",
                         "related": ["summarize_threads"],
+                        "expected_frequency": "When threads exceed quick skim length.",
+                        "required_capabilities": ["search", "summarization"],
+                        "usage_examples": [{"hint": "Thread brief", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"}],
                     },
                     {
                         "name": "summarize_threads",
                         "summary": "Produce a digest across multiple threads with aggregate mentions/actions.",
                         "use_when": "Daily standups or cross-team sync summaries.",
                         "related": ["summarize_thread"],
+                        "expected_frequency": "At cadence checkpoints (daily/weekly).",
+                        "required_capabilities": ["search", "summarization"],
+                        "usage_examples": [{"hint": "Digest", "sample": "summarize_threads(project_key='backend', thread_ids=['TKT-123','UX-42'])"}],
                     },
                 ],
             },
@@ -2980,18 +3249,51 @@ def build_mcp_server() -> FastMCP:
                         "summary": "Issue advisory claims with overlap detection and Git artifacts.",
                         "use_when": "Before touching high-traffic surfaces or long-lived refactors.",
                         "related": ["release_claims", "renew_claims"],
+                        "expected_frequency": "Whenever starting work on contested surfaces.",
+                        "required_capabilities": ["claims", "repository"],
+                        "usage_examples": [{"hint": "Lock file", "sample": "claim_paths(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], ttl_seconds=7200)"}],
                     },
                     {
                         "name": "release_claims",
                         "summary": "Release active claims (fully or by subset) and stamp released_ts.",
                         "use_when": "Finishing work so surfaces become available again.",
                         "related": ["claim_paths", "renew_claims"],
+                        "expected_frequency": "Each time work on a surface completes.",
+                        "required_capabilities": ["claims"],
+                        "usage_examples": [{"hint": "Unlock", "sample": "release_claims(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
                     },
                     {
                         "name": "renew_claims",
                         "summary": "Extend claim expiry windows without allocating new claim IDs.",
                         "use_when": "Long-running work needs more time but should retain ownership.",
                         "related": ["claim_paths", "release_claims"],
+                        "expected_frequency": "Periodically during multi-hour work items.",
+                        "required_capabilities": ["claims"],
+                        "usage_examples": [{"hint": "Extend", "sample": "renew_claims(project_key='backend', agent_name='BlueLake', extend_seconds=1800)"}],
+                    },
+                ],
+            },
+            {
+                "name": "Workflow Macros",
+                "purpose": "Opinionated orchestrations that compose multiple primitives for smaller agents.",
+                "tools": [
+                    {
+                        "name": "macro_start_session",
+                        "summary": "Ensure project, register/update agent, optionally claim surfaces, and return inbox context.",
+                        "use_when": "Kickstarting a focused work session with one call.",
+                        "related": ["ensure_project", "register_agent", "claim_paths", "fetch_inbox"],
+                        "expected_frequency": "At the beginning of each autonomous session.",
+                        "required_capabilities": ["workflow", "messaging", "claims"],
+                        "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', claim_paths=['src/api/*.py'])"}],
+                    },
+                    {
+                        "name": "macro_prepare_thread",
+                        "summary": "Register or refresh an agent, summarise a thread, and fetch inbox context in one call.",
+                        "use_when": "Briefing a helper before joining an ongoing discussion.",
+                        "related": ["register_agent", "summarize_thread", "fetch_inbox"],
+                        "expected_frequency": "Whenever onboarding a new contributor to an active thread.",
+                        "required_capabilities": ["workflow", "messaging", "summarization"],
+                        "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
                     },
                 ],
             },
@@ -2999,7 +3301,11 @@ def build_mcp_server() -> FastMCP:
 
         playbooks = [
             {
-                "workflow": "Kick off new agent session",
+                "workflow": "Kick off new agent session (macro)",
+                "sequence": ["health_check", "macro_start_session", "summarize_thread"],
+            },
+            {
+                "workflow": "Kick off new agent session (manual)",
                 "sequence": ["health_check", "ensure_project", "register_agent", "fetch_inbox"],
             },
             {
@@ -3008,7 +3314,7 @@ def build_mcp_server() -> FastMCP:
             },
             {
                 "workflow": "Join existing discussion",
-                "sequence": ["ensure_project", "register_agent", "fetch_inbox", "summarize_thread", "reply_message"],
+                "sequence": ["macro_prepare_thread", "reply_message", "acknowledge_message"],
             },
             {
                 "workflow": "Manage contact approvals",
@@ -3018,8 +3324,17 @@ def build_mcp_server() -> FastMCP:
 
         return {
             "generated_at": _iso(datetime.now(timezone.utc)),
+            "metrics_uri": "resource://tooling/metrics",
             "clusters": clusters,
             "playbooks": playbooks,
+        }
+
+    @mcp.resource("resource://tooling/metrics", mime_type="application/json")
+    def tooling_metrics_resource() -> dict[str, Any]:
+        """Expose aggregated tool call/error counts for analysis."""
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "tools": _tool_metrics_snapshot(),
         }
 
     @mcp.resource("resource://projects", mime_type="application/json")

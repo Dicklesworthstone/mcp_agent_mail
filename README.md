@@ -762,6 +762,8 @@ if __name__ == "__main__":
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
+| `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, claim_paths?: list[str], claim_reason?: str, claim_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, claims, inbox}` | Orchestrates ensure→register→optional claim→inbox fetch |
+| `macro_prepare_thread` | `macro_prepare_thread(project_key: str, thread_id: str, program: str, model: str, agent_name?: str, task_description?: str, register_if_missing?: bool, include_examples?: bool, inbox_limit?: int, include_inbox_bodies?: bool, llm_mode?: bool, llm_model?: str)` | `{project, agent, thread, inbox}` | Bundles registration, thread summary, and inbox context |
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
 | `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
 | `claim_paths` | `claim_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
@@ -774,6 +776,7 @@ if __name__ == "__main__":
 | :-- | :-- | :-- | :-- |
 | `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
 | `resource://tooling/directory` | — | `{generated_at, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
+| `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | Claims for a project |
@@ -781,6 +784,13 @@ if __name__ == "__main__":
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
 | `resource://mailbox/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing (all messages for an agent) |
+
+### Client Integration Guide
+
+1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
+2. **Scope tools per workflow.** When the agent enters a new phase (e.g., “Messaging Lifecycle”), remount only the cluster’s tools in your MCP client. This mirrors the workflow macros already provided and prevents “tool overload.”
+3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
+4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro tools (`macro_start_session`, `macro_prepare_thread`) and hide the granular verbs until the agent explicitly asks for them.
 
 ## Roadmap (selected)
 

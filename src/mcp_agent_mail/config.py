@@ -131,6 +131,16 @@ class Settings:
     log_json_enabled: bool
     # Tools logging
     tools_log_enabled: bool
+    # Tool metrics emission
+    tool_metrics_emit_enabled: bool
+    tool_metrics_emit_interval_seconds: int
+    # Retention/quota reporting (non-destructive)
+    retention_report_enabled: bool
+    retention_report_interval_seconds: int
+    retention_max_age_days: int
+    quota_enabled: bool
+    quota_attachments_limit_bytes: int
+    quota_inbox_limit_count: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -257,6 +267,14 @@ def get_settings() -> Settings:
         contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="true"), default=True),
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
+        tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
+        tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),
+        retention_report_enabled=_bool(_decouple_config("RETENTION_REPORT_ENABLED", default="false"), default=False),
+        retention_report_interval_seconds=_int(_decouple_config("RETENTION_REPORT_INTERVAL_SECONDS", default="3600"), default=3600),
+        retention_max_age_days=_int(_decouple_config("RETENTION_MAX_AGE_DAYS", default="180"), default=180),
+        quota_enabled=_bool(_decouple_config("QUOTA_ENABLED", default="false"), default=False),
+        quota_attachments_limit_bytes=_int(_decouple_config("QUOTA_ATTACHMENTS_LIMIT_BYTES", default="0"), default=0),
+        quota_inbox_limit_count=_int(_decouple_config("QUOTA_INBOX_LIMIT_COUNT", default="0"), default=0),
     )
 
 
