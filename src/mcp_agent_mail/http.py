@@ -264,11 +264,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         if self._jwt_enabled:
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+                return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
             token = auth_header.split(" ", 1)[1].strip()
             claims_dict = await self._decode_jwt(token)
             if claims_dict is None:
-                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+                return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
             claims = cast(dict[str, Any], claims_dict)
             request.state.jwt_claims = claims
             roles_raw = claims.get(self.settings.http.jwt_role_claim, [])
@@ -293,14 +293,14 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 if not tool_name:
                     # Without name, assume write-required to be safe
                     if not is_writer:
-                        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+                        return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
                 else:
                     if tool_name in self._readonly_tools:
                         if not is_reader and not is_writer:
-                            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+                            return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
                     else:
                         if not is_writer:
-                            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+                            return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
 
         # Rate limiting
         if self.settings.http.rate_limit_enabled:
@@ -317,7 +317,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
             if not allowed:
-                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+                return JSONResponse({"detail": "Rate limit exceeded"}, status_code=status.HTTP_429_TOO_MANY_REQUESTS)
 
         return await call_next(request)
 
@@ -471,8 +471,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
+    # Create the MCP HTTP app at the configured path
     mcp_http_app = server.http_app(path=settings.http.path)
-    fastapi_app.mount(settings.http.path.rstrip("/"), mcp_http_app)
+    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
+    mount_base = settings.http.path or "/mcp"
+    if not mount_base.startswith("/"):
+        mount_base = "/" + mount_base
+    base_no_slash = mount_base.rstrip("/") or "/"
+    fastapi_app.mount(base_no_slash, mcp_http_app)
 
     # Optional periodic claims cleanup background task and ACK TTL warnings using lifespan
     async def _startup() -> None:  # pragma: no cover - service lifecycle
