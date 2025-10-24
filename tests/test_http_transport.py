@@ -68,7 +68,7 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
     settings = _config.get_settings()
 
     # Generate RSA key + JWKS using Authlib utilities
-    private_jwk = JsonWebKey.generate_key("RSA", 2048, is_private=True).as_dict()
+    private_jwk = JsonWebKey.generate_key("RSA", 2048, is_private=True).as_dict(is_private=True)
     private_jwk["kid"] = "abc"
     public_jwk = JsonWebKey.import_key(private_jwk).as_dict(is_private=False)
     jwks_payload = {"keys": [public_jwk]}

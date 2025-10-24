@@ -794,6 +794,33 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
+
+    # Add a direct route at the base path without redirect to tolerate clients omitting trailing slash
+    @fastapi_app.post(base_no_slash)
+    async def _base_passthrough(request: Request) -> JSONResponse:
+        # Re-dispatch to mounted stateless app by calling it directly
+        response_body = {}
+        status_code = 200
+        headers: dict[str, str] = {}
+        async def _send(message: dict) -> None:
+            nonlocal response_body, status_code, headers
+            if message.get("type") == "http.response.start":
+                status_code = int(message.get("status", 200))
+                hdrs = message.get("headers") or []
+                for k, v in hdrs:
+                    headers[k.decode("latin1")] = v.decode("latin1")
+            elif message.get("type") == "http.response.body":
+                body = message.get("body") or b""
+                try:
+                    response_body = json.loads(body.decode("utf-8")) if body else {}
+                except Exception:
+                    response_body = {}
+        await stateless_app(
+            {**request.scope, "path": base_with_slash},  # ensure mounted path
+            request.receive,
+            _send,
+        )
+        return JSONResponse(response_body, status_code=status_code, headers=headers)
     return fastapi_app
 
 

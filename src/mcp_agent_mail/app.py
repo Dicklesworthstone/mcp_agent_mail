@@ -2375,7 +2375,7 @@ def build_mcp_server() -> FastMCP:
         urgent_only: bool = False,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
-    ) -> Any:
+    ) -> list[dict[str, Any]]:
         """
         Retrieve recent messages for an agent without mutating read/ack state.
 
