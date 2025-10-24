@@ -1,0 +1,5 @@
+# Project-local Codex MCP configuration
+[mcp_servers.mcp_agent_mail]
+transport = "http"
+url = "http://127.0.0.1:8765/mcp/"
+# headers can be added if needed; localhost allowed without Authorization

@@ -98,10 +98,36 @@ chmod +x "$RUN_HELPER"
 
 echo "Wrote ${OUT_JSON}. Some Gemini CLIs may not yet support MCP; keep for reference."
 echo "Server start: $RUN_HELPER"
+echo "==> Installing user-level Gemini MCP config (best-effort)"
+HOME_GEMINI_DIR="${HOME}/.gemini"
+mkdir -p "$HOME_GEMINI_DIR"
+HOME_GEMINI_JSON="${HOME_GEMINI_DIR}/mcp.json"
+if [[ -f "$HOME_GEMINI_JSON" ]]; then cp "$HOME_GEMINI_JSON" "${HOME_GEMINI_JSON}.bak.$(date +%s)"; fi
+cat > "$HOME_GEMINI_JSON" <<JSON
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "${_URL}"
+    }
+  }
+}
+JSON
 echo "==> Attempt readiness check (non-blocking)"
 set +e
 curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _rc=$?
 set -e
 [[ $_rc -eq 0 ]] && echo "Server readiness OK." || echo "Note: server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
+
+echo "==> Bootstrapping project and agent on server"
+_AUTH_ARGS=()
+if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+_HUMAN_KEY="${TARGET_DIR}"
+curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
+  "${_URL}" >/dev/null 2>&1 || true
+curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"gemini-cli\",\"model\":\"gemini\",\"name\":\"${USER:-gemini}\",\"task_description\":\"setup\"}}}" \
+  "${_URL}" >/dev/null 2>&1 || true
 

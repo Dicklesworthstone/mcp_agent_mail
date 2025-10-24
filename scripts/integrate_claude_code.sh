@@ -207,5 +207,18 @@ if command -v claude >/dev/null 2>&1; then
   (cd "${TARGET_DIR}" && claude mcp add --transport http --scope project mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}") || true
 fi
 
+echo "==> Bootstrapping project and agent on server"
+_AUTH_ARGS=()
+if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+_HUMAN_KEY="${TARGET_DIR}"
+# ensure_project
+curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
+  "${_URL}" >/dev/null 2>&1 || true
+# register_agent
+curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":\"${_AGENT}\",\"task_description\":\"setup\"}}}" \
+  "${_URL}" >/dev/null 2>&1 || true
+
 echo "==> Done. Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
 

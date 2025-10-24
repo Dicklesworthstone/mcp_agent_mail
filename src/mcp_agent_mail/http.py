@@ -258,14 +258,16 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
 
-        # Read body once and restore for downstream
-        try:
-            body_bytes = await request.body()
-            async def _receive() -> dict:
-                return {"type": "http.request", "body": body_bytes, "more_body": False}
-            cast(Any, request)._receive = _receive
-        except Exception:
-            body_bytes = b""
+        # Only read/patch body for POST requests. GET (including SSE) must not receive http.request messages.
+        body_bytes = b""
+        if request.method.upper() == "POST":
+            try:
+                body_bytes = await request.body()
+                async def _receive() -> dict:
+                    return {"type": "http.request", "body": body_bytes, "more_body": False}
+                cast(Any, request)._receive = _receive
+            except Exception:
+                body_bytes = b""
 
         kind, tool_name = self._classify_request(request.url.path, request.method, body_bytes)
 
@@ -291,9 +293,24 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 roles = {self._default_role}
         else:
             roles = {self._default_role}
+            # Elevate localhost to writer when unauthenticated localhost is allowed
+            try:
+                client_host = request.client.host if request.client else ""
+            except Exception:
+                client_host = ""
+            if (
+                bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
+                and client_host in {"127.0.0.1", "::1", "localhost"}
+            ):
+                roles.add("writer")
 
-        # RBAC enforcement
-        if self._rbac_enabled and kind in {"tools", "resources"}:
+        # RBAC enforcement (skip for localhost when allowed)
+        try:
+            client_host = request.client.host if request.client else ""
+        except Exception:
+            client_host = ""
+        is_local_ok = bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {"127.0.0.1", "::1", "localhost"}
+        if self._rbac_enabled and not is_local_ok and kind in {"tools", "resources"}:
             is_reader = bool(roles & self._reader_roles)
             is_writer = bool(roles & self._writer_roles) or (not roles)
             if kind == "resources":
@@ -723,6 +740,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
+    # Well-known OAuth metadata endpoints (some clients probe these); return harmless JSON
+    @fastapi_app.get("/.well-known/oauth-authorization-server")
+    async def oauth_meta_root() -> JSONResponse:
+        return JSONResponse({"mcp_oauth": False})
+    @fastapi_app.get("/.well-known/oauth-authorization-server/mcp")
+    async def oauth_meta_root_mcp() -> JSONResponse:
+        return JSONResponse({"mcp_oauth": False})
+
     # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
     # and runs a fresh StreamableHTTP transport per request.
     from mcp.server.streamable_http import StreamableHTTPServerTransport
@@ -841,11 +866,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         except Exception:
             client_host = ""
         if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
-            headers = list(scope.get("headers") or [])
-            has_auth = any(k.lower() == b"authorization" for k, _ in headers)
+            scope_headers = list(scope.get("headers") or [])
+            has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
             if not has_auth and settings.http.bearer_token:
-                headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
-            scope["headers"] = headers
+                scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
+            scope["headers"] = scope_headers
         await stateless_app(
             {**scope, "path": base_with_slash},  # ensure mounted path
             request.receive,
