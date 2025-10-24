@@ -88,7 +88,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
         if auth_header != f"Bearer {self._token}":
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+            return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
         return await call_next(request)
 
 
