@@ -78,7 +78,7 @@ def _record_tool_error(tool_name: str, exc: Exception) -> None:
         extra={
             "tool": tool_name,
             "error": type(exc).__name__,
-            "message": str(exc),
+            "error_message": str(exc),
         },
     )
 

@@ -62,6 +62,14 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
         return Repo(str(root))
 
     repo = await _to_thread(Repo.init, str(root))
+    # Ensure deterministic, non-interactive commits (disable GPG signing)
+    try:
+        def _configure_repo() -> None:
+            with repo.config_writer() as cw:
+                cw.set_value("commit", "gpgsign", "false")
+        await _to_thread(_configure_repo)
+    except Exception:
+        pass
     attributes_path = root / ".gitattributes"
     if not attributes_path.exists():
         await _write_text(attributes_path, "*.json text\n*.md text\n")
