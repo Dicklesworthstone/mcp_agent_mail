@@ -329,6 +329,19 @@ async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str
             "original_ext": path.suffix.lower(),
         }
         await _write_json(manifest_path, manifest_payload)
+        await _append_attachment_audit(
+            archive,
+            digest,
+            {
+                "event": "stored",
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "webp_path": rel_path,
+                "bytes_webp": len(new_bytes),
+                "original_path": original_rel,
+                "bytes_original": len(data),
+                "ext": path.suffix.lower(),
+            },
+        )
     except Exception:
         pass
 
@@ -376,6 +389,26 @@ async def _write_text(path: Path, content: str) -> None:
 async def _write_json(path: Path, payload: dict[str, object]) -> None:
     content = json.dumps(payload, indent=2, sort_keys=True)
     await _write_text(path, content + "\n")
+
+
+async def _append_attachment_audit(archive: ProjectArchive, sha1: str, event: dict[str, object]) -> None:
+    """Append a single JSON line audit record for an attachment digest.
+
+    Creates attachments/_audit/<sha1>.log if missing. Best-effort; failures are ignored.
+    """
+    try:
+        audit_dir = archive.root / "attachments" / "_audit"
+        await _to_thread(audit_dir.mkdir, parents=True, exist_ok=True)
+        audit_path = audit_dir / f"{sha1}.log"
+
+        def _append_line() -> None:
+            line = json.dumps(event, sort_keys=True)
+            with audit_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+        await _to_thread(_append_line)
+    except Exception:
+        pass
 
 
 async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:

@@ -977,3 +977,41 @@ See also:
 - `resource://inbox/{agent}` for inbox browsing
 - `cli acks pending`/`overdue` for reminder views
 - `cli claims active/soon` for active claims
+
+## Claude Code Integration (HTTP MCP + Hooks)
+
+Add our MCP server to Claude Code settings and optional hooks for safety/automation.
+
+Example `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project backend" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 20" }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project backend --minutes 10" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project backend --agent $USER --limit 10" } ] },
+      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project backend" } ] }
+    ]
+  }
+}
+```
+
+Start the MCP HTTP server:
+
+```bash
+uv run python -m mcp_agent_mail.cli serve-http
+```
+

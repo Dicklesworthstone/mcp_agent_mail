@@ -168,7 +168,7 @@
 - [ ] **Advanced roadmap items**  
   - [ ] Integrate optional LLM summarizer for threads, action items, and triage.  
   - [ ] Build watchers/notifications (e.g., send urgent ack reminders).  
-  - [ ] Provide integration scripts for Codex/Claude agents (watch repo, send/receive messages).  
+  - [x] Provide integration scripts for Codex/Claude agents (watch repo, send/receive messages).  
   - [ ] Track attachments via hashed directories with accountability logs.
 
 - [x] **Recent Internal Note**
