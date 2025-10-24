@@ -77,14 +77,22 @@ def _configure_logging(settings: Settings) -> None:
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI, token: str) -> None:
+    def __init__(self, app: FastAPI, token: str, allow_localhost: bool = False) -> None:
         super().__init__(app)
         self._token = token
+        self._allow_localhost = allow_localhost
 
     async def dispatch(self, request: Request, call_next):
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
+            return await call_next(request)
+        # Allow localhost without Authorization when enabled
+        try:
+            client_host = request.client.host if request.client else ""
+        except Exception:
+            client_host = ""
+        if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
         if auth_header != f"Bearer {self._token}":
@@ -677,7 +685,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
     # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
     if settings.http.bearer_token:
-        fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
+        fastapi_app.add_middleware(
+            BearerAuthMiddleware,
+            token=settings.http.bearer_token,
+            allow_localhost=bool(getattr(settings.http, "allow_localhost_unauthenticated", False)),
+        )
 
     # Optional CORS
     if settings.cors.enabled:
