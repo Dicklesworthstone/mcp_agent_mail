@@ -1,6 +1,5 @@
 """Allow `python -m mcp_agent_mail` to invoke the CLI entry-point safely under pytest."""
 
-import sys
 from typer.main import get_command
 
 from .cli import app

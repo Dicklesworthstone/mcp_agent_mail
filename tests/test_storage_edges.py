@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,8 @@ async def test_data_uri_embed_without_conversion(isolated_env, monkeypatch):
     from mcp_agent_mail import config as _config
     with pytest.raises(Exception):  # harmless if cache clear missing; use suppress in runtime
         raise Exception
-    try:
+    with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    except Exception:
-        pass
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "Backend"})
@@ -57,10 +56,8 @@ async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, 
     # First: originals disabled
     monkeypatch.setenv("KEEP_ORIGINAL_IMAGES", "false")
     from mcp_agent_mail import config as _config
-    try:
+    with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    except Exception:
-        pass
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "Backend"})
@@ -82,10 +79,8 @@ async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, 
 
     # Now originals enabled
     monkeypatch.setenv("KEEP_ORIGINAL_IMAGES", "true")
-    try:
+    with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    except Exception:
-        pass
     server2 = build_mcp_server()
     async with Client(server2) as client2:
         await client2.call_tool(

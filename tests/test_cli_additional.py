@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from typer.testing import CliRunner
 
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.db import ensure_schema, get_session
-from mcp_agent_mail.models import Agent, Claim, Message, MessageRecipient, Project
+from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
 
 
 def _seed_with_ack() -> dict[str, Any]:

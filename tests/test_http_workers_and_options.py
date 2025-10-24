@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import contextlib
 import asyncio
+import contextlib
 from typing import Any
 
 import pytest

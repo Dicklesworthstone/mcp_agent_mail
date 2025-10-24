@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import importlib
-import runpy
 from pathlib import Path
-
-import pytest
 
 
 def test_module_entry_point_executes_main(monkeypatch, tmp_path: Path):

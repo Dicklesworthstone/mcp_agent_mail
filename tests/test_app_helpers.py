@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 
 import pytest
+from fastmcp import Client
 
 from mcp_agent_mail.app import (
     ToolExecutionError,
@@ -13,7 +13,6 @@ from mcp_agent_mail.app import (
     _parse_json_safely,
     build_mcp_server,
 )
-from fastmcp import Client
 
 
 def test_iso_and_parse_helpers():
@@ -34,13 +33,15 @@ def test_iso_and_parse_helpers():
 
 
 def test_enforce_capabilities_denied():
-    class DummyCtx:
+    # Minimal stand-in that matches the Context metadata surface
+    class DummyCtx:  # type: ignore[override]
         def __init__(self):
             self.metadata = {"allowed_capabilities": ["read", "audit"]}
 
+    # Call through and expect a ToolExecutionError with explanatory message
     with pytest.raises(ToolExecutionError) as exc:
         _enforce_capabilities(DummyCtx(), {"write"}, "send_message")
-    assert exc.value.error_type == "CAPABILITY_DENIED"
+    assert "requires capabilities" in str(exc.value)
 
 
 @pytest.mark.asyncio

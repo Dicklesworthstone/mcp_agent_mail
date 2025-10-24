@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -9,7 +8,7 @@ from fastmcp import Client
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import ensure_schema, get_session
-from mcp_agent_mail.models import Agent, AgentLink, Message, Project
+from mcp_agent_mail.models import Agent, AgentLink, Project
 
 
 @pytest.mark.asyncio

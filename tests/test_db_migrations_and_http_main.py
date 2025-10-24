@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import contextlib
-
-from httpx import ASGITransport, AsyncClient
 import sys
 
+from httpx import ASGITransport, AsyncClient
+
 from mcp_agent_mail import config as _config
-from mcp_agent_mail.http import main as http_main, build_http_app
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema, run_migrations
+from mcp_agent_mail.http import build_http_app, main as http_main
 
 
 def test_run_migrations_apply_hook_called(isolated_env):

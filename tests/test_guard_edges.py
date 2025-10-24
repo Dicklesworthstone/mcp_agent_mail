@@ -38,7 +38,7 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     # Install the guard and run it with AGENT_NAME set to Blue
     hook_path = await install_guard(settings, "backend", repo_dir)
     assert hook_path.exists()
-    env = {"AGENT_NAME": "Blue", **dict()}
+    env = {"AGENT_NAME": "Blue", **{}}
     result = subprocess.run([str(hook_path)], cwd=str(repo_dir), env=env, capture_output=True, text=True)
     # Expect non-zero due to conflict and helpful message
     assert result.returncode != 0

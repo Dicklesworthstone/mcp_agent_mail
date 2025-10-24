@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 from fastmcp import Client
 
@@ -11,10 +13,8 @@ from mcp_agent_mail.app import build_mcp_server
 async def test_summarize_threads_without_llm_path(isolated_env, monkeypatch):
     # Ensure LLM disabled to exercise non-LLM branch
     monkeypatch.setenv("LLM_ENABLED", "false")
-    try:
+    with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    except Exception:
-        pass
 
     server = build_mcp_server()
     async with Client(server) as client:
