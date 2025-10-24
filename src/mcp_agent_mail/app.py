@@ -2136,7 +2136,13 @@ def build_mcp_server() -> FastMCP:
         return {"agent": agent.name, "policy": pol}
 
     @mcp.tool(name="fetch_inbox")
-    @_instrument_tool("fetch_inbox", cluster=CLUSTER_MESSAGING)
+    @_instrument_tool(
+        "fetch_inbox",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "read"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def fetch_inbox(
         ctx: Context,
         project_key: str,
@@ -2196,7 +2202,13 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="mark_message_read")
-    @_instrument_tool("mark_message_read", cluster=CLUSTER_MESSAGING)
+    @_instrument_tool(
+        "mark_message_read",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "read"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def mark_message_read(
         ctx: Context,
         project_key: str,
@@ -2259,7 +2271,13 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="acknowledge_message")
-    @_instrument_tool("acknowledge_message", cluster=CLUSTER_MESSAGING)
+    @_instrument_tool(
+        "acknowledge_message",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "ack"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def acknowledge_message(
         ctx: Context,
         project_key: str,
@@ -2333,7 +2351,13 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="macro_start_session")
-    @_instrument_tool("macro_start_session", cluster=CLUSTER_MACROS)
+    @_instrument_tool(
+        "macro_start_session",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "messaging", "claims", "identity"},
+        project_arg="human_key",
+        agent_arg="agent_name",
+    )
     async def macro_start_session(
         ctx: Context,
         human_key: str,
@@ -2386,7 +2410,13 @@ def build_mcp_server() -> FastMCP:
         }
 
     @mcp.tool(name="macro_prepare_thread")
-    @_instrument_tool("macro_prepare_thread", cluster=CLUSTER_MACROS)
+    @_instrument_tool(
+        "macro_prepare_thread",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "messaging", "summarization"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def macro_prepare_thread(
         ctx: Context,
         project_key: str,
@@ -2441,8 +2471,118 @@ def build_mcp_server() -> FastMCP:
             "inbox": inbox_items,
         }
 
+    @mcp.tool(name="macro_claim_cycle")
+    @_instrument_tool(
+        "macro_claim_cycle",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "claims", "repository"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def macro_claim_cycle(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        paths: list[str],
+        ttl_seconds: int = 3600,
+        exclusive: bool = True,
+        reason: str = "macro-claim",
+        auto_release: bool = False,
+    ) -> dict[str, Any]:
+        """Claim a set of paths and optionally release them at the end of the workflow."""
+
+        claims_result = await claim_paths(
+            ctx,
+            project_key=project_key,
+            agent_name=agent_name,
+            paths=paths,
+            ttl_seconds=ttl_seconds,
+            exclusive=exclusive,
+            reason=reason,
+        )
+
+        release_result = None
+        if auto_release:
+            release_result = await release_claims_tool(
+                ctx,
+                project_key=project_key,
+                agent_name=agent_name,
+                paths=paths,
+            )
+
+        await ctx.info(
+            f"macro_claim_cycle issued {len(claims_result['granted'])} claim(s) for '{agent_name}' on '{project_key}'" +
+            (" and released them immediately." if auto_release else ".")
+        )
+        return {
+            "claims": claims_result,
+            "released": release_result,
+        }
+
+    @mcp.tool(name="macro_contact_handshake")
+    @_instrument_tool(
+        "macro_contact_handshake",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "contact", "messaging"},
+        project_arg="project_key",
+        agent_arg="requester",
+    )
+    async def macro_contact_handshake(
+        ctx: Context,
+        project_key: str,
+        requester: str,
+        target: str,
+        reason: str = "",
+        ttl_seconds: int = 7 * 24 * 3600,
+        auto_accept: bool = False,
+        welcome_subject: Optional[str] = None,
+        welcome_body: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Request contact permissions and optionally auto-approve plus send a welcome message."""
+
+        request_result = await request_contact(
+            ctx,
+            project_key=project_key,
+            from_agent=requester,
+            to_agent=target,
+            reason=reason,
+            ttl_seconds=ttl_seconds,
+        )
+
+        response_result = None
+        if auto_accept:
+            response_result = await respond_contact(
+                ctx,
+                project_key=project_key,
+                to_agent=target,
+                from_agent=requester,
+                accept=True,
+                ttl_seconds=ttl_seconds,
+            )
+
+        welcome_result = None
+        if welcome_subject and welcome_body:
+            try:
+                welcome_result = await send_message(
+                    ctx,
+                    project_key=project_key,
+                    sender_name=requester,
+                    to=[target],
+                    subject=welcome_subject,
+                    body_md=welcome_body,
+                )
+            except ToolExecutionError as exc:
+                # surface but do not abort handshake
+                await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
+
+        return {
+            "request": request_result,
+            "response": response_result,
+            "welcome_message": welcome_result,
+        }
+
     @mcp.tool(name="search_messages")
-    @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH)
+    @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH, capabilities={"search"}, project_arg="project_key")
     async def search_messages(
         ctx: Context,
         project_key: str,
@@ -2551,7 +2691,7 @@ def build_mcp_server() -> FastMCP:
         ]
 
     @mcp.tool(name="summarize_thread")
-    @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH)
+    @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
     async def summarize_thread(
         ctx: Context,
         project_key: str,
@@ -2601,7 +2741,7 @@ def build_mcp_server() -> FastMCP:
         return {"thread_id": thread_id, "summary": summary, "examples": examples}
 
     @mcp.tool(name="summarize_threads")
-    @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH)
+    @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
     async def summarize_threads(
         ctx: Context,
         project_key: str,
@@ -2738,7 +2878,7 @@ def build_mcp_server() -> FastMCP:
         return {"threads": thread_summaries, "aggregate": aggregate}
 
     @mcp.tool(name="install_precommit_guard")
-    @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP)
+    @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")
     async def install_precommit_guard(
         ctx: Context,
         project_key: str,
@@ -2761,7 +2901,7 @@ def build_mcp_server() -> FastMCP:
         return {"hook": str(hook_path)}
 
     @mcp.tool(name="uninstall_precommit_guard")
-    @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP)
+    @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"})
     async def uninstall_precommit_guard(
         ctx: Context,
         code_repo_path: str,
@@ -2785,7 +2925,7 @@ def build_mcp_server() -> FastMCP:
         return {"removed": removed}
 
     @mcp.tool(name="claim_paths")
-    @_instrument_tool("claim_paths", cluster=CLUSTER_CLAIMS)
+    @_instrument_tool("claim_paths", cluster=CLUSTER_CLAIMS, capabilities={"claims", "repository"}, project_arg="project_key", agent_arg="agent_name")
     async def claim_paths(
         ctx: Context,
         project_key: str,
@@ -2919,7 +3059,7 @@ def build_mcp_server() -> FastMCP:
         return {"granted": granted, "conflicts": conflicts}
 
     @mcp.tool(name="release_claims")
-    @_instrument_tool("release_claims", cluster=CLUSTER_CLAIMS)
+    @_instrument_tool("release_claims", cluster=CLUSTER_CLAIMS, capabilities={"claims"}, project_arg="project_key", agent_arg="agent_name")
     async def release_claims_tool(
         ctx: Context,
         project_key: str,
@@ -3015,7 +3155,7 @@ def build_mcp_server() -> FastMCP:
             raise
 
     @mcp.tool(name="renew_claims")
-    @_instrument_tool("renew_claims", cluster=CLUSTER_CLAIMS)
+    @_instrument_tool("renew_claims", cluster=CLUSTER_CLAIMS, capabilities={"claims"}, project_arg="project_key", agent_arg="agent_name")
     async def renew_claims(
         ctx: Context,
         project_key: str,
@@ -3418,7 +3558,7 @@ def build_mcp_server() -> FastMCP:
                         "use_when": "Kickstarting a focused work session with one call.",
                         "related": ["ensure_project", "register_agent", "claim_paths", "fetch_inbox"],
                         "expected_frequency": "At the beginning of each autonomous session.",
-                        "required_capabilities": ["workflow", "messaging", "claims"],
+                        "required_capabilities": ["workflow", "messaging", "claims", "identity"],
                         "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', claim_paths=['src/api/*.py'])"}],
                     },
                     {
@@ -3430,9 +3570,37 @@ def build_mcp_server() -> FastMCP:
                         "required_capabilities": ["workflow", "messaging", "summarization"],
                         "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
                     },
+                    {
+                        "name": "macro_claim_cycle",
+                        "summary": "Claim a set of paths and optionally release them once work is complete.",
+                        "use_when": "Wrapping a focused edit cycle that needs advisory locks.",
+                        "related": ["claim_paths", "release_claims", "renew_claims"],
+                        "expected_frequency": "Per guarded work block.",
+                        "required_capabilities": ["workflow", "claims", "repository"],
+                        "usage_examples": [{"hint": "Claim & release", "sample": "macro_claim_cycle(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], auto_release=true)"}],
+                    },
+                    {
+                        "name": "macro_contact_handshake",
+                        "summary": "Request contact approval, optionally auto-accept, and send a welcome message.",
+                        "use_when": "Spinning up collaboration between two agents who lack permissions.",
+                        "related": ["request_contact", "respond_contact", "send_message"],
+                        "expected_frequency": "When onboarding new agent pairs.",
+                        "required_capabilities": ["workflow", "contact", "messaging"],
+                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
+                    },
                 ],
             },
         ]
+
+        for cluster in clusters:
+            for tool in cluster["tools"]:
+                meta = TOOL_METADATA.get(tool["name"])
+                if not meta:
+                    continue
+                tool["capabilities"] = meta["capabilities"]
+                tool.setdefault("complexity", meta["complexity"])
+                if "required_capabilities" in tool:
+                    tool["required_capabilities"] = meta["capabilities"]
 
         playbooks = [
             {
@@ -3470,6 +3638,36 @@ def build_mcp_server() -> FastMCP:
         return {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "tools": _tool_metrics_snapshot(),
+        }
+
+    @mcp.resource("resource://tooling/recent{?agent,project,window_seconds}", mime_type="application/json")
+    def tooling_recent_resource(
+        agent: Optional[str] = None,
+        project: Optional[str] = None,
+        window_seconds: int = 900,
+    ) -> dict[str, Any]:
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, window_seconds))
+        entries: list[dict[str, Any]] = []
+        for ts, tool_name, proj, ag in list(RECENT_TOOL_USAGE):
+            if ts < cutoff:
+                continue
+            if project and proj != project:
+                continue
+            if agent and ag != agent:
+                continue
+            record = {
+                "timestamp": _iso(ts),
+                "tool": tool_name,
+                "project": proj,
+                "agent": ag,
+                "cluster": TOOL_CLUSTER_MAP.get(tool_name, "unclassified"),
+            }
+            entries.append(record)
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "window_seconds": window_seconds,
+            "count": len(entries),
+            "entries": entries,
         }
 
     @mcp.resource("resource://projects", mime_type="application/json")
