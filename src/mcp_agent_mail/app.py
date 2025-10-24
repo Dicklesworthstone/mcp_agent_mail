@@ -1020,14 +1020,29 @@ async def _update_recipient_timestamp(
         raise ValueError("Agent must have an id before updating message state.")
     now = datetime.now(timezone.utc)
     async with get_session() as session:
+        # Read current value first
+        result_sel = await session.execute(
+            select(MessageRecipient).where(
+                MessageRecipient.message_id == message_id,
+                MessageRecipient.agent_id == agent.id,
+            )
+        )
+        rec = result_sel.scalars().first()
+        if not rec:
+            return None
+        current: Optional[datetime] = getattr(rec, field, None)
+        if current is not None:
+            # Already set; return existing value without updating
+            return current
+        # Set only if null
         stmt = (
             update(MessageRecipient)
             .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)
             .values({field: now})
         )
-        result = await session.execute(stmt)
+        await session.execute(stmt)
         await session.commit()
-    return now if result.rowcount else None
+    return now
 
 
 def build_mcp_server() -> FastMCP:
@@ -3482,7 +3497,13 @@ def build_mcp_server() -> FastMCP:
                 # Normalize to timezone-aware for safe comparison
                 if isinstance(old_exp, datetime) and old_exp.tzinfo is None:
                     old_exp = old_exp.replace(tzinfo=timezone.utc)
-                base = old_exp if old_exp and old_exp > now else now
+                # Compare using epoch seconds to avoid tz pitfalls
+                try:
+                    old_ts = old_exp.timestamp() if isinstance(old_exp, datetime) else now.timestamp()
+                except Exception:
+                    old_ts = now.timestamp()
+                base_ts = max(old_ts, now.timestamp())
+                base = datetime.fromtimestamp(base_ts, timezone.utc)
                 claim.expires_ts = base + timedelta(seconds=bump)
                 session.add(claim)
                 updated.append(
