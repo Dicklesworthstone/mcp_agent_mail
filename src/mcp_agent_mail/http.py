@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.types import Scope, Receive, Send
 
 from .app import _expire_stale_claims, _tool_metrics_snapshot, build_mcp_server
 from .config import Settings, get_settings
@@ -333,8 +334,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     _configure_logging(settings)
     if server is None:
         server = build_mcp_server()
-    # Create the MCP HTTP app first so we can wire its lifespan into FastAPI
-    mcp_http_app = server.http_app(path="/")
+
+    # Build MCP HTTP sub-app with stateless mode for ASGI test transports
+    mcp_http_app = server.http_app(path="/", stateless_http=True, json_response=True)
 
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
@@ -351,453 +353,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     for pid in pids:
                         with contextlib.suppress(Exception):
                             await _expire_stale_claims(pid)
-                    try:
-                        rich_console = importlib.import_module("rich.console")
-                        rich_panel = importlib.import_module("rich.panel")
-                        Console = rich_console.Console
-                        Panel = rich_panel.Panel
-                        Console().print(Panel.fit(f"projects_scanned={len(pids)}", title="Claims Cleanup", border_style="cyan"))
-                    except Exception:
-                        pass
-                    with contextlib.suppress(Exception):
-                        structlog.get_logger("tasks").info("claims_cleanup", projects_scanned=len(pids))
-                except Exception:
-                    pass
-                await asyncio.sleep(settings.claims_cleanup_interval_seconds)
-
-        async def _worker_ack_ttl() -> None:
-            import datetime as _dt
-            while True:
-                try:
-                    await ensure_schema()
-                    async with get_session() as session:
-                        result = await session.execute(text(
-                            """
-                            SELECT m.id, m.project_id, m.created_ts, mr.agent_id
-                            FROM messages m
-                            JOIN message_recipients mr ON mr.message_id = m.id
-                            WHERE m.ack_required = 1 AND mr.ack_ts IS NULL
-                            """
-                        ))
-                        rows = result.fetchall()
-                    now = _dt.datetime.now(_dt.timezone.utc)
-                    for mid, project_id, created_ts, agent_id in rows:
-                        age = (now - created_ts).total_seconds()
-                        if age >= settings.ack_ttl_seconds:
-                            try:
-                                rich_console = importlib.import_module("rich.console")
-                                rich_panel = importlib.import_module("rich.panel")
-                                rich_text = importlib.import_module("rich.text")
-                                Console = rich_console.Console
-                                Panel = rich_panel.Panel
-                                Text = rich_text.Text
-                                con = Console()
-                                body = Text.assemble(
-                                    ("message_id: ", "cyan"), (str(mid), "white"), "\n",
-                                    ("agent_id: ", "cyan"), (str(agent_id), "white"), "\n",
-                                    ("project_id: ", "cyan"), (str(project_id), "white"), "\n",
-                                    ("age_s: ", "cyan"), (str(int(age)), "white"), "\n",
-                                    ("ttl_s: ", "cyan"), (str(settings.ack_ttl_seconds), "white"),
-                                )
-                                con.print(Panel(body, title="ACK Overdue", border_style="red"))
-                            except Exception:
-                                print(f"ack-warning message_id={mid} project_id={project_id} agent_id={agent_id} age_s={int(age)} ttl_s={settings.ack_ttl_seconds}")
-                            with contextlib.suppress(Exception):
-                                structlog.get_logger("tasks").warning(
-                                    "ack_overdue",
-                                    message_id=str(mid),
-                                    project_id=str(project_id),
-                                    agent_id=str(agent_id),
-                                    age_s=int(age),
-                                    ttl_s=int(settings.ack_ttl_seconds),
-                                )
-                            if settings.ack_escalation_enabled:
-                                mode = (settings.ack_escalation_mode or "log").lower()
-                                if mode == "claim":
-                                    try:
-                                        y_dir = created_ts.strftime("%Y")
-                                        m_dir = created_ts.strftime("%m")
-                                        async with get_session() as s_lookup:
-                                            name_row = await s_lookup.execute(text("SELECT name FROM agents WHERE id = :aid"), {"aid": agent_id})
-                                            name_res = name_row.fetchone()
-                                        recipient_name = name_res[0] if name_res and name_res[0] else "*"
-                                        pattern = f"agents/{recipient_name}/inbox/{y_dir}/{m_dir}/*.md" if recipient_name != "*" else f"agents/*/inbox/{y_dir}/{m_dir}/*.md"
-                                        holder_agent_id = int(agent_id)
-                                        if settings.ack_escalation_claim_holder_name:
-                                            async with get_session() as s_holder:
-                                                hid_row = await s_holder.execute(
-                                                    text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
-                                                    {"pid": project_id, "name": settings.ack_escalation_claim_holder_name},
-                                                )
-                                                hid = hid_row.scalar_one_or_none()
-                                                if isinstance(hid, int):
-                                                    holder_agent_id = hid
-                                                else:
-                                                    await s_holder.execute(text(
-                                                        "INSERT INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts) VALUES (:pid, :name, :program, :model, :task, :ts, :ts)"
-                                                    ), {
-                                                        "pid": project_id,
-                                                        "name": settings.ack_escalation_claim_holder_name,
-                                                        "program": "ops",
-                                                        "model": "system",
-                                                        "task": "ops-escalation",
-                                                        "ts": now,
-                                                    })
-                                                    await s_holder.commit()
-                                                    hid_row2 = await s_holder.execute(
-                                                        text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
-                                                        {"pid": project_id, "name": settings.ack_escalation_claim_holder_name},
-                                                    )
-                                                    hid2 = hid_row2.scalar_one_or_none()
-                                                    if isinstance(hid2, int):
-                                                        holder_agent_id = hid2
-                                                        archive = await ensure_archive(settings, (await _project_slug_from_id(project_id)) or "")
-                                                        async with AsyncFileLock(archive.lock_path):
-                                                            await write_agent_profile(archive, {
-                                                                "id": holder_agent_id,
-                                                                "name": settings.ack_escalation_claim_holder_name,
-                                                                "program": "ops",
-                                                                "model": "system",
-                                                                "project_slug": (await _project_slug_from_id(project_id)) or "",
-                                                                "inception_ts": now.astimezone().isoformat(),
-                                                                "inception_iso": now.astimezone().isoformat(),
-                                                                "task": "ops-escalation",
-                                                            })
-                                        async with get_session() as s2:
-                                            await s2.execute(text(
-                                                """
-                                                INSERT INTO claims(project_id, agent_id, path_pattern, exclusive, reason, created_ts, expires_ts)
-                                                VALUES (:pid, :holder, :pattern, :exclusive, :reason, :cts, :ets)
-                                                """
-                                            ), {
-                                                "pid": project_id,
-                                                "holder": holder_agent_id,
-                                                "pattern": pattern,
-                                                "exclusive": 1 if settings.ack_escalation_claim_exclusive else 0,
-                                                "reason": "ack-overdue",
-                                                "cts": now,
-                                                "ets": now + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds),
-                                            })
-                                            await s2.commit()
-                                        project_slug = (await _project_slug_from_id(project_id)) or ""
-                                        archive = await ensure_archive(settings, project_slug)
-                                        expires_at = now + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds)
-                                        async with AsyncFileLock(archive.lock_path):
-                                            await write_claim_record(archive, {
-                                                "agent": settings.ack_escalation_claim_holder_name or recipient_name,
-                                                "project": project_slug,
-                                                "path_pattern": pattern,
-                                                "exclusive": bool(settings.ack_escalation_claim_exclusive),
-                                                "reason": "ack-overdue",
-                                                "created_ts": now.isoformat(),
-                                                "expires_ts": expires_at.isoformat(),
-                                            })
-                                    except Exception:
-                                        pass
-                except Exception:
-                    pass
-                await asyncio.sleep(settings.ack_ttl_scan_interval_seconds)
-
-        async def _worker_tool_metrics() -> None:
-            log = structlog.get_logger("tool.metrics")
-            while True:
-                try:
-                    snapshot = _tool_metrics_snapshot()
-                    if snapshot:
-                        log.info("tool_metrics_snapshot", tools=snapshot)
-                except Exception:
-                    pass
-                await asyncio.sleep(max(5, settings.tool_metrics_emit_interval_seconds))
-
-        async def _worker_retention_quota() -> None:
-            import datetime as _dt
-            from pathlib import Path as _Path
-            while True:
-                from contextlib import suppress as _suppress
-                with _suppress(Exception):
-                    storage_root = _Path(settings.storage.root).expanduser().resolve()
-                    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=int(settings.retention_max_age_days))
-                    old_messages = 0
-                    total_attach_bytes = 0
-                    per_project_attach: dict[str, int] = {}
-                    per_project_inbox_counts: dict[str, int] = {}
-                    for proj_dir in storage_root.iterdir() if storage_root.exists() else []:
-                        if not proj_dir.is_dir():
-                            continue
-                        proj_name = proj_dir.name
-                        msg_root = proj_dir / "messages"
-                        if msg_root.exists():
-                            for ydir in msg_root.iterdir():
-                                for mdir in (ydir.iterdir() if ydir.is_dir() else []):
-                                    for f in (mdir.iterdir() if mdir.is_dir() else []):
-                                        if f.suffix.lower() == ".md":
-                                            with _suppress(Exception):
-                                                ts = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
-                                                if ts < cutoff:
-                                                    old_messages += 1
-                        inbox_root = proj_dir / "agents"
-                        if inbox_root.exists():
-                            count_inbox = 0
-                            for f in inbox_root.rglob("inbox/*/*/*.md"):
-                                with _suppress(Exception):
-                                    if f.is_file():
-                                        count_inbox += 1
-                            per_project_inbox_counts[proj_name] = count_inbox
-                        att_root = proj_dir / "attachments"
-                        if att_root.exists():
-                            for sub in att_root.rglob("*.webp"):
-                                with _suppress(Exception):
-                                    sz = sub.stat().st_size
-                                    total_attach_bytes += sz
-                                    per_project_attach[proj_name] = per_project_attach.get(proj_name, 0) + sz
-                    structlog.get_logger("maintenance").info(
-                        "retention_quota_report",
-                        old_messages=old_messages,
-                        retention_max_age_days=int(settings.retention_max_age_days),
-                        total_attachments_bytes=total_attach_bytes,
-                        quota_limit_bytes=int(settings.quota_attachments_limit_bytes),
-                        per_project_attach=per_project_attach,
-                        per_project_inbox_counts=per_project_inbox_counts,
-                    )
-                    limit_b = int(settings.quota_attachments_limit_bytes)
-                    inbox_limit = int(settings.quota_inbox_limit_count)
-                    if limit_b > 0:
-                        for proj, used in per_project_attach.items():
-                            if used >= limit_b:
-                                structlog.get_logger("maintenance").warning(
-                                    "quota_attachments_exceeded", project=proj, used_bytes=used, limit_bytes=limit_b
-                                )
-                    if inbox_limit > 0:
-                        for proj, cnt in per_project_inbox_counts.items():
-                            if cnt >= inbox_limit:
-                                structlog.get_logger("maintenance").warning(
-                                    "quota_inbox_exceeded", project=proj, inbox_count=cnt, limit=inbox_limit
-                                )
-                await asyncio.sleep(max(60, settings.retention_report_interval_seconds))
-
-        tasks = []
-        if settings.claims_cleanup_enabled:
-            tasks.append(asyncio.create_task(_worker_cleanup()))
-        if settings.ack_ttl_enabled:
-            tasks.append(asyncio.create_task(_worker_ack_ttl()))
-        if settings.tool_metrics_emit_enabled:
-            tasks.append(asyncio.create_task(_worker_tool_metrics()))
-        if settings.retention_report_enabled or settings.quota_enabled:
-            tasks.append(asyncio.create_task(_worker_retention_quota()))
-        fastapi_app.state._background_tasks = tasks
-
-    async def _shutdown() -> None:  # pragma: no cover - service lifecycle
-        tasks = getattr(fastapi_app.state, "_background_tasks", [])
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            with contextlib.suppress(Exception):
-                await task
-
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def lifespan_context(app: FastAPI):
-        # First, start FastMCP's own lifespan, then run our background workers
-        async with mcp_http_app.lifespan(mcp_http_app):
-            await _startup()
-            try:
-                yield
-            finally:
-                await _shutdown()
-
-    # Now construct FastAPI with the composed lifespan so ASGI transports run it
-    fastapi_app = FastAPI(lifespan=lifespan_context)
-
-    # Ensure FastMCP lifespan is started even when client transport does not manage ASGI lifespan (e.g., httpx.ASGITransport)
-    class OnDemandMCPLifespanMiddleware(BaseHTTPMiddleware):
-        def __init__(self, app: FastAPI, mcp_app) -> None:  # type: ignore[override]
-            super().__init__(app)
-            self._mcp_app = mcp_app
-            self._started = False
-            self._lock = asyncio.Lock()
-            self._cm = None
-
-        async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
-            if not self._started:
-                async with self._lock:
-                    if not self._started:
-                        # Synchronously enter MCP app lifespan so session_manager is ready
-                        self._cm = self._mcp_app.lifespan(self._mcp_app)
-                        try:
-                            await self._cm.__aenter__()
-                        except Exception:
-                            self._cm = None
-                            raise
-                        self._started = True
-            return await call_next(request)
-
-    # Install as the first middleware so it's guaranteed to run before routing into the mounted app
-    fastapi_app.add_middleware(OnDemandMCPLifespanMiddleware, mcp_app=mcp_http_app)
-    # Rich traceback (optional)
-    if getattr(settings, "log_rich_enabled", False) and getattr(settings, "log_include_trace", False):
-        try:
-            rich_tb_mod = importlib.import_module("rich.traceback")
-            rich_traceback_install = rich_tb_mod.install
-            rich_traceback_install(show_locals=False)
-        except Exception:
-            pass
-
-    # Simple request logging (configurable)
-    if settings.http.request_log_enabled:
-        import time as _time
-
-        class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
-                start = _time.time()
-                response = await call_next(request)
-                dur_ms = int((_time.time() - start) * 1000)
-                method = request.method
-                path = request.url.path
-                status_code = getattr(response, "status_code", 0)
-                client = request.client.host if request.client else "-"
-                with contextlib.suppress(Exception):
-                    structlog.get_logger("http").info(
-                        "request",
-                        method=method,
-                        path=path,
-                        status=status_code,
-                        duration_ms=dur_ms,
-                        client_ip=client,
-                    )
-                try:
-                    rich_console = importlib.import_module("rich.console")
-                    rich_panel = importlib.import_module("rich.panel")
-                    rich_text = importlib.import_module("rich.text")
-
-                    Console = rich_console.Console
-                    Panel = rich_panel.Panel
-                    Text = rich_text.Text
-
-                    console = Console(width=100)
-                    title = Text.assemble(
-                        (method, "bold blue"),
-                        ("  "),
-                        (path, "bold white"),
-                        ("  "),
-                        (f"{status_code}", "bold green" if 200 <= status_code < 400 else "bold red"),
-                        ("  "),
-                        (f"{dur_ms}ms", "bold yellow"),
-                    )
-                    body = Text.assemble(
-                        ("client: ", "cyan"), (client, "white"),
-                    )
-                    console.print(Panel(body, title=title, border_style="dim"))
-                except Exception:
-                    print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
-                return response
-
-        fastapi_app.add_middleware(RequestLoggingMiddleware)
-
-    # Unified JWT/RBAC and robust rate limiter middleware
-    if settings.http.rate_limit_enabled or getattr(settings.http, "jwt_enabled", False) or getattr(settings.http, "rbac_enabled", True):
-        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
-
-    if settings.http.bearer_token:
-        fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
-
-    # Optional CORS (add last so it can handle preflight and attach headers to errors)
-    if settings.cors.enabled:
-        fastapi_app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.cors.origins or ["*"],
-            allow_credentials=settings.cors.allow_credentials,
-            allow_methods=settings.cors.allow_methods or ["*"],
-            allow_headers=settings.cors.allow_headers or ["*"],
-        )
-
-    # Optional OpenTelemetry auto-instrumentation for FastAPI
-    if settings.http.otel_enabled:
-        try:
-            ot_trace = importlib.import_module("opentelemetry.trace")
-            ot_export_http = importlib.import_module("opentelemetry.exporter.otlp.proto.http.trace_exporter")
-            ot_fastapi = importlib.import_module("opentelemetry.instrumentation.fastapi")
-            ot_resources = importlib.import_module("opentelemetry.sdk.resources")
-            ot_trace_sdk = importlib.import_module("opentelemetry.sdk.trace")
-            ot_trace_export = importlib.import_module("opentelemetry.sdk.trace.export")
-
-            Resource = getattr(ot_resources, "Resource", None)
-            TracerProvider = getattr(ot_trace_sdk, "TracerProvider", None)
-            OTLPSpanExporter = getattr(ot_export_http, "OTLPSpanExporter", None)
-            BatchSpanProcessor = getattr(ot_trace_export, "BatchSpanProcessor", None)
-            FastAPIInstrumentor = getattr(ot_fastapi, "FastAPIInstrumentor", None)
-            set_tracer_provider = getattr(ot_trace, "set_tracer_provider", None)
-
-            if not all([Resource, TracerProvider, OTLPSpanExporter, BatchSpanProcessor, FastAPIInstrumentor, set_tracer_provider]):
-                raise RuntimeError("opentelemetry modules unavailable")
-
-            from typing import Any, cast
-            ResourceT = cast(Any, Resource)
-            TracerProviderT = cast(Any, TracerProvider)
-            OTLPSpanExporterT = cast(Any, OTLPSpanExporter)
-            BatchSpanProcessorT = cast(Any, BatchSpanProcessor)
-            FastAPIInstrumentorT = cast(Any, FastAPIInstrumentor)
-            set_tracer_provider_fn = cast(Any, set_tracer_provider)
-
-            resource = ResourceT.create({"service.name": settings.http.otel_service_name})
-            provider = TracerProviderT(resource=resource)
-            span_exporter = OTLPSpanExporterT(endpoint=settings.http.otel_exporter_otlp_endpoint or None)
-            processor = BatchSpanProcessorT(span_exporter)
-            provider.add_span_processor(processor)
-            set_tracer_provider_fn(provider)
-            FastAPIInstrumentorT.instrument_app(fastapi_app)
-        except Exception:  # pragma: no cover - optional dependency path
-            pass
-
-    @fastapi_app.get("/health/liveness")
-    async def liveness() -> JSONResponse:
-        return JSONResponse({"status": "alive"})
-
-    @fastapi_app.get("/health/readiness")
-    async def readiness() -> JSONResponse:
-        try:
-            await readiness_check()
-        except Exception as exc:
-            try:
-                rich_console = importlib.import_module("rich.console")
-                rich_panel = importlib.import_module("rich.panel")
-                Console = rich_console.Console
-                Panel = rich_panel.Panel
-                Console().print(Panel.fit(str(exc), title="Readiness Error", border_style="red"))
-            except Exception:
-                pass
-            with contextlib.suppress(Exception):
-                structlog.get_logger("health").error("readiness_error", error=str(exc))
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-        return JSONResponse({"status": "ready"})
-
-    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
-    mount_base = settings.http.path or "/mcp"
-    if not mount_base.startswith("/"):
-        mount_base = "/" + mount_base
-    base_no_slash = mount_base.rstrip("/") or "/"
-    base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_no_slash, mcp_http_app)
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_with_slash, mcp_http_app)
-
-    # Optional periodic claims cleanup background task and ACK TTL warnings using lifespan
-    async def _startup() -> None:  # pragma: no cover - service lifecycle
-        if not (settings.claims_cleanup_enabled or settings.ack_ttl_enabled or settings.retention_report_enabled or settings.quota_enabled or settings.tool_metrics_emit_enabled):
-            fastapi_app.state._background_tasks = []
-            return
-        async def _worker_cleanup() -> None:
-            while True:
-                try:
-                    await ensure_schema()
-                    async with get_session() as session:
-                        rows = await session.execute(text("SELECT DISTINCT project_id FROM claims"))
-                        pids = [r[0] for r in rows.fetchall() if r[0] is not None]
-                    for pid in pids:
-                        with contextlib.suppress(Exception):
-                            await _expire_stale_claims(pid)
-                    # Log a compact Rich panel with scan summary
                     try:
                         rich_console = importlib.import_module("rich.console")
                         rich_panel = importlib.import_module("rich.panel")
@@ -935,13 +490,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                         expires_at = now + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds)
                                         async with AsyncFileLock(archive.lock_path):
                                             await write_claim_record(archive, {
-                                                "agent": settings.ack_escalation_claim_holder_name or recipient_name,
                                                 "project": project_slug,
+                                                "agent": settings.ack_escalation_claim_holder_name or "ops",
                                                 "path_pattern": pattern,
-                                                "exclusive": bool(settings.ack_escalation_claim_exclusive),
+                                                "exclusive": settings.ack_escalation_claim_exclusive,
                                                 "reason": "ack-overdue",
-                                                "created_ts": now.isoformat(),
-                                                "expires_ts": expires_at.isoformat(),
+                                                "created_ts": now.astimezone().isoformat(),
+                                                "expires_ts": expires_at.astimezone().isoformat(),
                                             })
                                     except Exception:
                                         pass
@@ -1059,6 +614,160 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             finally:
                 await _shutdown()
 
+    # Now construct FastAPI with the composed lifespan so ASGI transports run it
+    fastapi_app = FastAPI(lifespan=lifespan_context)
+
+    # Simple request logging (configurable)
+    if settings.http.request_log_enabled:
+        import time as _time
+        class RequestLoggingMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+                start = _time.time()
+                response = await call_next(request)
+                dur_ms = int((_time.time() - start) * 1000)
+                method = request.method
+                path = request.url.path
+                status_code = getattr(response, "status_code", 0)
+                client = request.client.host if request.client else "-"
+                with contextlib.suppress(Exception):
+                    structlog.get_logger("http").info(
+                        "request",
+                        method=method,
+                        path=path,
+                        status=status_code,
+                        duration_ms=dur_ms,
+                        client_ip=client,
+                    )
+                try:
+                    rich_console = importlib.import_module("rich.console")
+                    rich_panel = importlib.import_module("rich.panel")
+                    rich_text = importlib.import_module("rich.text")
+                    Console = rich_console.Console
+                    Panel = rich_panel.Panel
+                    Text = rich_text.Text
+                    console = Console(width=100)
+                    title = Text.assemble(
+                        (method, "bold blue"),
+                        ("  "),
+                        (path, "bold white"),
+                        ("  "),
+                        (f"{status_code}", "bold green" if 200 <= status_code < 400 else "bold red"),
+                        ("  "),
+                        (f"{dur_ms}ms", "bold yellow"),
+                    )
+                    body = Text.assemble(
+                        ("client: ", "cyan"), (client, "white"),
+                    )
+                    console.print(Panel(body, title=title, border_style="dim"))
+                except Exception:
+                    print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
+                return response
+        fastapi_app.add_middleware(RequestLoggingMiddleware)
+
+    # Unified JWT/RBAC and robust rate limiter middleware
+    if settings.http.rate_limit_enabled or getattr(settings.http, "jwt_enabled", False) or getattr(settings.http, "rbac_enabled", True):
+        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
+    if settings.http.bearer_token:
+        fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
+
+    # Optional CORS
+    if settings.cors.enabled:
+        fastapi_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors.origins or ["*"],
+            allow_credentials=settings.cors.allow_credentials,
+            allow_methods=settings.cors.allow_methods or ["*"],
+            allow_headers=settings.cors.allow_headers or ["*"],
+        )
+
+    # Health endpoints
+    @fastapi_app.get("/health/liveness")
+    async def liveness() -> JSONResponse:
+        return JSONResponse({"status": "alive"})
+    @fastapi_app.get("/health/readiness")
+    async def readiness() -> JSONResponse:
+        try:
+            await readiness_check()
+        except Exception as exc:
+            try:
+                rich_console = importlib.import_module("rich.console")
+                rich_panel = importlib.import_module("rich.panel")
+                Console = rich_console.Console
+                Panel = rich_panel.Panel
+                Console().print(Panel.fit(str(exc), title="Readiness Error", border_style="red"))
+            except Exception:
+                pass
+            with contextlib.suppress(Exception):
+                structlog.get_logger("health").error("readiness_error", error=str(exc))
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+        return JSONResponse({"status": "ready"})
+
+    # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
+    # and runs a fresh StreamableHTTP transport per request.
+    from mcp.server.streamable_http import StreamableHTTPServerTransport
+
+    class StatelessMCPASGIApp:
+        def __init__(self, mcp_server) -> None:
+            self._server = mcp_server
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            if scope.get("type") != "http":
+                res = JSONResponse({"detail": "Not Found"}, status_code=404)
+                await res(scope, receive, send)
+                return
+
+            # Ensure Accept and Content-Type headers are present per StreamableHTTP expectations
+            headers = list(scope.get("headers") or [])
+            def _has_header(key: bytes) -> bool:
+                lk = key.lower()
+                return any(h[0].lower() == lk for h in headers)
+
+            # Ensure both JSON and SSE are present; httpx defaults no Accept header
+            headers = [(k, v) for (k, v) in headers if k.lower() != b"accept"]
+            headers.append((b"accept", b"application/json, text/event-stream"))
+            if scope.get("method") == "POST" and not _has_header(b"content-type"):
+                headers.append((b"content-type", b"application/json"))
+            new_scope = dict(scope)
+            new_scope["headers"] = headers
+
+            http_transport = StreamableHTTPServerTransport(
+                mcp_session_id=None,
+                is_json_response_enabled=True,
+                event_store=None,
+                security_settings=None,
+            )
+
+            async with http_transport.connect() as streams:
+                read_stream, write_stream = streams
+                server_task = asyncio.create_task(
+                    self._server._mcp_server.run(
+                        read_stream,
+                        write_stream,
+                        self._server._mcp_server.create_initialization_options(),
+                        stateless=True,
+                    )
+                )
+                try:
+                    await http_transport.handle_request(new_scope, receive, send)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await http_transport.terminate()
+                    with contextlib.suppress(Exception):
+                        await server_task
+
+    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
+    mount_base = settings.http.path or "/mcp"
+    if not mount_base.startswith("/"):
+        mount_base = "/" + mount_base
+    base_no_slash = mount_base.rstrip("/") or "/"
+    base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
+    stateless_app = StatelessMCPASGIApp(server)
+    with contextlib.suppress(Exception):
+        fastapi_app.mount(base_no_slash, stateless_app)
+    with contextlib.suppress(Exception):
+        fastapi_app.mount(base_with_slash, stateless_app)
+
+    # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
     return fastapi_app
 
