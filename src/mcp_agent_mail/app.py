@@ -1300,11 +1300,18 @@ def build_mcp_server() -> FastMCP:
                 try:
                     thread_rows: list[tuple[Message, str]]
                     sender_alias = aliased(Agent)
+                    # Build criteria: thread_id match or numeric id seed
+                    criteria = [Message.thread_id == thread_id]
+                    try:
+                        seed_id = int(thread_id)
+                        criteria.append(Message.id == seed_id)
+                    except Exception:
+                        pass
                     async with get_session() as s:
                         stmt = (
                             select(Message, sender_alias.name)
                             .join(sender_alias, Message.sender_id == sender_alias.id)
-                            .where(Message.project_id == project.id, or_(Message.thread_id == thread_id, Message.id == cast(Any, thread_id)))
+                            .where(Message.project_id == project.id, or_(*criteria))
                             .limit(500)
                         )
                         thread_rows = list((await s.execute(stmt)).all())
@@ -1327,6 +1334,9 @@ def build_mcp_server() -> FastMCP:
                     for c, nm in claim_rows.all():
                         name_to_claims.setdefault(nm, []).append(c.path_pattern)
                 for nm in to + (cc or []) + (bcc or []):
+                    # Always allow self-messages
+                    if nm == sender.name:
+                        continue
                     if nm in name_to_claims and sender.name in name_to_claims:
                         auto_ok_names.add(nm)
             except Exception:
@@ -1389,23 +1399,106 @@ def build_mcp_server() -> FastMCP:
                     except Exception:
                         pass
                     raise RuntimeError("{\"error\":{\"type\":\"CONTACT_REQUIRED\",\"message\":\"Recipient requires contact approval or recent context.\"}}")
-        # Deliver locally
-        local_payload = await _deliver_message(
-            ctx,
-            project,
-            sender,
-            to,
-            cc or [],
-            bcc or [],
-            subject,
-            body_md,
-            attachment_paths,
-            convert_images,
-            importance,
-            ack_required,
-            thread_id,
-        )
-        return local_payload
+        # Split recipients into local vs external (approved links)
+        local_to: list[str] = []
+        local_cc: list[str] = []
+        local_bcc: list[str] = []
+        external: dict[int, dict[str, Any]] = {}
+
+        async with get_session() as sx:
+            # Preload local agent names
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            local_names = {row[0] for row in existing.fetchall()}
+
+            async def _route(name_list: list[str], kind: str) -> None:
+                for nm in name_list:
+                    if nm in local_names:
+                        if kind == "to":
+                            local_to.append(nm)
+                        elif kind == "cc":
+                            local_cc.append(nm)
+                        else:
+                            local_bcc.append(nm)
+                        continue
+                    # Attempt approved cross-project mapping
+                    rows = await sx.execute(
+                        select(AgentLink, Project, Agent)
+                        .join(Project, Project.id == AgentLink.b_project_id)
+                        .join(Agent, Agent.id == AgentLink.b_agent_id)
+                        .where(
+                            AgentLink.a_project_id == project.id,
+                            AgentLink.a_agent_id == sender.id,
+                            AgentLink.status == "approved",
+                            Agent.name == nm,
+                        )
+                        .limit(1)
+                    )
+                    rec = rows.first()
+                    if rec:
+                        _link, target_project, target_agent = rec
+                        bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
+                        bucket[kind].append(target_agent.name)
+                    else:
+                        # stays local (will 404 later if unknown)
+                        if kind == "to":
+                            local_to.append(nm)
+                        elif kind == "cc":
+                            local_cc.append(nm)
+                        else:
+                            local_bcc.append(nm)
+
+            await _route(to, "to")
+            await _route(cc or [], "cc")
+            await _route(bcc or [], "bcc")
+
+        results: list[dict[str, Any]] = []
+        # Local deliver if any
+        if local_to or local_cc or local_bcc:
+            results.append(
+                await _deliver_message(
+                    ctx,
+                    project,
+                    sender,
+                    local_to,
+                    local_cc,
+                    local_bcc,
+                    subject,
+                    body_md,
+                    attachment_paths,
+                    convert_images,
+                    importance,
+                    ack_required,
+                    thread_id,
+                )
+            )
+        # External per-target project deliver (requires aliasing sender in target project)
+        for _pid, group in external.items():
+            p: Project = group["project"]
+            try:
+                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
+                results.append(
+                    await _deliver_message(
+                        ctx,
+                        p,
+                        alias,
+                        group.get("to", []),
+                        group.get("cc", []),
+                        group.get("bcc", []),
+                        subject,
+                        body_md,
+                        attachment_paths,
+                        convert_images,
+                        importance,
+                        ack_required,
+                        thread_id,
+                    )
+                )
+            except Exception:
+                continue
+
+        if len(results) == 1:
+            return results[0]
+        return {"results": results}
 
     @mcp.tool(name="reply_message")
     async def reply_message(
@@ -3104,6 +3197,30 @@ def build_mcp_server() -> FastMCP:
             payload["commit"] = commit_meta
             out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource(
+        "resource://mailbox-with-commits/{agent}{?project,limit}",
+        mime_type="application/json",
+    )
+    async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
+        if project is None:
+            raise ValueError("project parameter is required for mailbox-with-commits resource")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
+
+        enriched: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
 
     @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts}", mime_type="application/json")
     async def outbox_resource(

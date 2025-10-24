@@ -66,11 +66,13 @@
   - [x] Include optional log rotation config (logrotate snippet) for when journald isn’t available.  
   - [x] Document manual deployment steps: copy binaries, set permissions, enable service.
 
-- [ ] **Automation scripts**  (partial: scripts present; env copy/verification still pending)
+- [ ] **Automation scripts**  (partial: scripts present; .env copy and decouple verification pending)
   Simplify bootstrap and recurring ops.  
-  - [ ] Add `scripts/` directory with `deploy.sh` / `bootstrap.sh` that: runs `uv sync`, copies `.env.example`, seeds initial DB (calling `cli migrate`), installs pre-commit guard, and prints next steps.  (partial: scripts exist and run `uv sync` + `migrate`; .env example copy not implemented; using `deploy/env/*` templates)
+  - [ ] Add `scripts/` directory with `deploy.sh` / `bootstrap.sh` that: runs `uv sync`, copies `.env` from a template if missing, seeds initial DB (calling `cli migrate`), optionally installs pre-commit guard, and prints next steps.  (current scripts run `uv sync` + `migrate`; .env copy/guard messaging pending)
   - [x] Optionally add a Makefile (or uv’s `task`/`run` alias) with targets: `make serve`, `make lint`, `make typecheck`, `make guard-install`, etc.  (verified: `Makefile` present)
+  - [ ] Verify `python-decouple` can load key variables from `.env` (e.g., `HTTP_HOST`, `HTTP_PORT`, `DATABASE_URL`, `STORAGE_ROOT`) and fail fast if missing.
   - [ ] Consider templating environment files (staging/prod) and verifying they load via `python-decouple`.  (templates present under `deploy/env/`; add verification step)
+  - [ ] Print clear “Next steps” at script end (server start command, guard install example).
 
 - [x] **CI/CD integration**  
   Establish automated safeguards.  
@@ -80,9 +82,9 @@
 
 # Spec Alignment Backlog (from project_idea_and_guide.md)
 
-- [ ] **Messaging persistence & Git history**  (partially complete: commit summaries present; diff summaries not implemented)  
-  Current status: we archive markdown and commit, but missing richer human review surfaces.  
-  - [ ] Expose resource/tool for per-agent inbox/outbox browsing, with context about commit history and diff summaries.  (commit summaries attached; diff summaries not implemented)  
+- [x] **Messaging persistence & Git history**  (implemented: commit & diff summaries in resources)  
+  Current status: canonical markdown archived and commits enriched with diff summaries.  
+  - [x] Expose resource/tool for per-agent inbox/outbox browsing, with context about commit history and diff summaries.  (verified: `resource://inbox/{agent}` and `resource://outbox/{agent}` include per-message `commit` with `diff_summary`)  
   - [x] Store thread-level metadata (e.g., transcripts, digest files) so history of a conversation is easy to review from Git.  
   - [x] Add commit message trailers (e.g., `Agent:`, `Thread:`) to enable log filtering.  
     - [x] Verified: Commit trailers present in storage commits; formatting validated across send/claim flows.
@@ -145,8 +147,8 @@
   - [ ] Attachment policy tests for agent/server overrides.
 
 - [ ] **Migrations**  
-  - [ ] Add Alembic migration for `attachments_policy` and any schema drift.  
-  - [ ] Wire CLI migrate to Alembic consistently.
+  - [ ] Add Alembic migrations for recent schema changes: `agents.attachments_policy`, `agents.contact_policy`, and the `agent_links` table.  
+  - [ ] Wire CLI `migrate` to Alembic (`alembic upgrade head`) consistently (currently uses `ensure_schema`).
 
 - [ ] **Database improvements**  
   - [x] Add indexes on created_ts, thread_id, importance for faster queries.  

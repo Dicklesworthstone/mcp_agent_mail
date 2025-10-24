@@ -307,6 +307,7 @@ Expose common reads as resources that clients can fetch:
 - `resource://views/ack-required/{agent}{?project,limit}`
 - `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}`: ack-required messages older than TTL without acknowledgements
 - `resource://mailbox/{agent}{?project,limit}`: recent inbox items with basic commit metadata
+- `resource://mailbox-with-commits/{agent}{?project,limit}`: inbox items enriched with commit metadata and diff summaries per message
 - `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}`: messages sent by agent with commit metadata
 
 Example (conceptual) resource read:
@@ -388,8 +389,29 @@ Common variables you may set:
 | Name | Default | Description |
 | :-- | :-- | :-- |
 | `MCP_MAIL_STORE` | `~/.mcp-agent-mail` | Root for per-project repos and SQLite DB |
-| `HOST` | `127.0.0.1` | Bind host for HTTP transport |
-| `PORT` | `8765` | Bind port for HTTP transport |
+| `HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport |
+| `HTTP_PORT` | `8765` | Bind port for HTTP transport |
+| `HTTP_PATH` | `/mcp/` | HTTP path where MCP endpoint is mounted |
+| `HTTP_JWT_ENABLED` | `false` | Enable JWT validation middleware |
+| `HTTP_JWT_SECRET` |  | HMAC secret for HS* algorithms (dev) |
+| `HTTP_JWT_JWKS_URL` |  | JWKS URL for public key verification |
+| `HTTP_JWT_ALGORITHMS` | `HS256` | CSV of allowed algs |
+| `HTTP_JWT_AUDIENCE` |  | Expected `aud` (optional) |
+| `HTTP_JWT_ISSUER` |  | Expected `iss` (optional) |
+| `HTTP_JWT_ROLE_CLAIM` | `role` | Claim name containing role(s) |
+| `HTTP_RBAC_ENABLED` | `true` | Enforce read-only vs tools RBAC |
+| `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
+| `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
+| `HTTP_RBAC_DEFAULT_ROLE` | `tools` | Role used when none present |
+| `HTTP_RBAC_READONLY_TOOLS` | see code | CSV of read-only tool names |
+| `HTTP_RATE_LIMIT_ENABLED` | `false` | Enable token-bucket limiter |
+| `HTTP_RATE_LIMIT_BACKEND` | `memory` | `memory` or `redis` |
+| `HTTP_RATE_LIMIT_PER_MINUTE` | `60` | Legacy per-IP limit (fallback) |
+| `HTTP_RATE_LIMIT_TOOLS_PER_MINUTE` | `60` | Per-minute for tools/call |
+| `HTTP_RATE_LIMIT_RESOURCES_PER_MINUTE` | `120` | Per-minute for resources/read |
+| `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
+| `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
+| `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
 | `IMAGE_INLINE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
 | `LOG_LEVEL` | `info` | Future: server log level |
@@ -614,8 +636,21 @@ Claim a surface for editing:
 
 - Transport
   - HTTP-only (Streamable HTTP). Place behind a reverse proxy (e.g., NGINX) with TLS termination for production
-- Auth (future-ready)
-  - Add Bearer/JWT to the server or mount under a parent FastAPI app with auth middleware
+- Auth
+  - Optional Bearer or JWT (HS*/JWKS) via HTTP middleware; enable with `HTTP_JWT_ENABLED=true`
+  - Starter RBAC (reader vs writer) using role claim; see `HTTP_RBAC_*` settings
+- Reverse proxy + TLS (minimal example)
+  - NGINX location block:
+    ```nginx
+    upstream mcp_mail { server 127.0.0.1:8765; }
+    server {
+      listen 443 ssl;
+      server_name mcp.example.com;
+      ssl_certificate /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
+      ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
+      location /mcp/ { proxy_pass http://mcp_mail; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; }
+    }
+    ```
 - Backups and retention
   - The Git repos and SQLite DB live under `MCP_MAIL_STORE`; back them up together for consistency
 - Observability

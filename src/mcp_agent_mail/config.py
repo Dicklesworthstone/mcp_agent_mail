@@ -21,12 +21,31 @@ class HttpSettings:
     port: int
     path: str
     bearer_token: str | None
+    # Basic per-IP limiter (legacy/simple)
     rate_limit_enabled: bool
     rate_limit_per_minute: int
+    # Robust token-bucket limiter
+    rate_limit_backend: str  # "memory" | "redis"
+    rate_limit_tools_per_minute: int
+    rate_limit_resources_per_minute: int
+    rate_limit_redis_url: str
     request_log_enabled: bool
     otel_enabled: bool
     otel_service_name: str
     otel_exporter_otlp_endpoint: str
+    # JWT / RBAC
+    jwt_enabled: bool
+    jwt_algorithms: list[str]
+    jwt_secret: str | None
+    jwt_jwks_url: str | None
+    jwt_audience: str | None
+    jwt_issuer: str | None
+    jwt_role_claim: str
+    rbac_enabled: bool
+    rbac_reader_roles: list[str]
+    rbac_writer_roles: list[str]
+    rbac_default_role: str
+    rbac_readonly_tools: list[str]
 
 
 @dataclass(slots=True, frozen=True)
@@ -106,6 +125,7 @@ class Settings:
     log_rich_enabled: bool
     log_level: str
     log_include_trace: bool
+    log_json_enabled: bool
     # Tools logging
     tools_log_enabled: bool
 
@@ -131,6 +151,11 @@ def get_settings() -> Settings:
     """Return cached application settings."""
     environment = _decouple_config("APP_ENVIRONMENT", default="development")
 
+    def _csv(name: str, default: str) -> list[str]:
+        raw = _decouple_config(name, default=default)
+        items = [part.strip() for part in raw.split(",") if part.strip()]
+        return items
+
     http_settings = HttpSettings(
         host=_decouple_config("HTTP_HOST", default="127.0.0.1"),
         port=_int(_decouple_config("HTTP_PORT", default="8765"), default=8765),
@@ -138,10 +163,29 @@ def get_settings() -> Settings:
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
+        rate_limit_backend=_decouple_config("HTTP_RATE_LIMIT_BACKEND", default="memory").lower(),
+        rate_limit_tools_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_TOOLS_PER_MINUTE", default="60"), default=60),
+        rate_limit_resources_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_RESOURCES_PER_MINUTE", default="120"), default=120),
+        rate_limit_redis_url=_decouple_config("HTTP_RATE_LIMIT_REDIS_URL", default=""),
         request_log_enabled=_bool(_decouple_config("HTTP_REQUEST_LOG_ENABLED", default="false"), default=False),
         otel_enabled=_bool(_decouple_config("HTTP_OTEL_ENABLED", default="false"), default=False),
         otel_service_name=_decouple_config("OTEL_SERVICE_NAME", default="mcp-agent-mail"),
         otel_exporter_otlp_endpoint=_decouple_config("OTEL_EXPORTER_OTLP_ENDPOINT", default=""),
+        jwt_enabled=_bool(_decouple_config("HTTP_JWT_ENABLED", default="false"), default=False),
+        jwt_algorithms=_csv("HTTP_JWT_ALGORITHMS", default="HS256"),
+        jwt_secret=_decouple_config("HTTP_JWT_SECRET", default="") or None,
+        jwt_jwks_url=_decouple_config("HTTP_JWT_JWKS_URL", default="") or None,
+        jwt_audience=_decouple_config("HTTP_JWT_AUDIENCE", default="") or None,
+        jwt_issuer=_decouple_config("HTTP_JWT_ISSUER", default="") or None,
+        jwt_role_claim=_decouple_config("HTTP_JWT_ROLE_CLAIM", default="role") or "role",
+        rbac_enabled=_bool(_decouple_config("HTTP_RBAC_ENABLED", default="true"), default=True),
+        rbac_reader_roles=_csv("HTTP_RBAC_READER_ROLES", default="reader,read,ro"),
+        rbac_writer_roles=_csv("HTTP_RBAC_WRITER_ROLES", default="writer,write,tools,rw"),
+        rbac_default_role=_decouple_config("HTTP_RBAC_DEFAULT_ROLE", default="tools"),
+        rbac_readonly_tools=_csv(
+            "HTTP_RBAC_READONLY_TOOLS",
+            default="health_check,fetch_inbox,list_agents,whois,search_messages,summarize_thread,summarize_threads",
+        ),
     )
 
     database_settings = DatabaseSettings(
@@ -157,11 +201,6 @@ def get_settings() -> Settings:
         convert_images=_bool(_decouple_config("CONVERT_IMAGES", default="true"), default=True),
         keep_original_images=_bool(_decouple_config("KEEP_ORIGINAL_IMAGES", default="false"), default=False),
     )
-
-    def _csv(name: str, default: str) -> list[str]:
-        raw = _decouple_config(name, default=default)
-        items = [part.strip() for part in raw.split(",") if part.strip()]
-        return items
 
     cors_settings = CorsSettings(
         enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default="false"), default=False),
@@ -212,4 +251,5 @@ def get_settings() -> Settings:
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),
         contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="true"), default=True),
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
+        log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
     )

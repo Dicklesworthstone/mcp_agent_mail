@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import logging
 
+import structlog  # type: ignore
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +30,30 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
         return res[0] if res and res[0] else None
 
 __all__ = ["build_http_app", "main"]
+def _configure_logging(settings: Settings) -> None:
+    """Initialize structlog and stdlib logging formatting."""
+    # Idempotent setup
+    if getattr(_configure_logging, "_configured", False):  # type: ignore[attr-defined]
+        return
+    processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.add_log_level,
+    ]
+    if settings.log_json_enabled:
+        processors.append(structlog.processors.JSONRenderer(serializer=lambda obj: obj))
+    else:
+        processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.log_level.upper(), logging.INFO)),
+        cache_logger_on_first_use=True,
+    )
+    logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    # mark configured without setattr
+    with contextlib.suppress(Exception):
+        _configure_logging._configured = True  # type: ignore[attr-defined]
+
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -46,6 +72,226 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
+    """JWT auth (optional), RBAC, and token-bucket rate limiting.
+
+    - If JWT is enabled, validates Authorization: Bearer <token> using either HMAC secret or JWKS URL.
+    - Enforces basic RBAC when enabled: read-only roles may only call whitelisted tools and resource reads.
+    - Applies per-endpoint token-bucket limits (tools vs resources) with in-memory or Redis backend.
+    """
+
+    def __init__(self, app: FastAPI, settings: Settings):
+        super().__init__(app)
+        self.settings = settings
+        self._jwt_enabled = bool(getattr(settings.http, "jwt_enabled", False))
+        self._rbac_enabled = bool(getattr(settings.http, "rbac_enabled", True))
+        self._reader_roles = set(getattr(settings.http, "rbac_reader_roles", []) or [])
+        self._writer_roles = set(getattr(settings.http, "rbac_writer_roles", []) or [])
+        self._readonly_tools = set(getattr(settings.http, "rbac_readonly_tools", []) or [])
+        self._default_role = getattr(settings.http, "rbac_default_role", "tools")
+        # Token bucket state (memory)
+        from time import monotonic
+
+        self._monotonic = monotonic
+        self._buckets: dict[str, tuple[float, float]] = {}
+        # Redis client (optional)
+        self._redis = None
+        if (
+            getattr(settings.http, "rate_limit_backend", "memory") == "redis"
+            and getattr(settings.http, "rate_limit_redis_url", "")
+        ):
+            try:
+                from redis.asyncio import Redis  # type: ignore
+
+                self._redis = Redis.from_url(settings.http.rate_limit_redis_url)
+            except Exception:
+                self._redis = None
+
+    async def _decode_jwt(self, token: str) -> dict | None:
+        """Validate and decode JWT, returning claims or None on failure."""
+        with contextlib.suppress(Exception):
+            from authlib.jose import JsonWebKey, JsonWebToken  # type: ignore
+            algs = list(getattr(self.settings.http, "jwt_algorithms", ["HS256"]))
+            jwt = JsonWebToken(algs)
+            audience = getattr(self.settings.http, "jwt_audience", None) or None
+            issuer = getattr(self.settings.http, "jwt_issuer", None) or None
+            jwks_url = getattr(self.settings.http, "jwt_jwks_url", None) or None
+            secret = getattr(self.settings.http, "jwt_secret", None) or None
+
+            header = jwt.peek_header(token)
+            key = None
+            if jwks_url:
+                with contextlib.suppress(Exception):
+                    import httpx  # type: ignore
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        jwks = (await client.get(jwks_url)).json()
+                    key_set = JsonWebKey.import_key_set(jwks)
+                    kid = header.get("kid")
+                    key = key_set.find_by_kid(kid) if kid else key_set.keys[0]
+            elif secret:
+                with contextlib.suppress(Exception):
+                    key = JsonWebKey.import_key(secret, {'kty': 'oct'})
+            if key is None:
+                return None
+            with contextlib.suppress(Exception):
+                claims = jwt.decode(token, key)
+                if audience:
+                    claims.validate_aud(audience)
+                if issuer and str(claims.get('iss') or '') != issuer:
+                    return None
+                claims.validate()
+                return dict(claims)
+        return None
+
+    @staticmethod
+    def _classify_request(path: str, method: str, body_bytes: bytes) -> tuple[str, str | None]:
+        """Return (kind, tool_name) where kind is 'tools'|'resources'|'other'."""
+        if method.upper() != "POST":
+            return "other", None
+        if not body_bytes:
+            return "other", None
+        with contextlib.suppress(Exception):
+            import json as _json
+            payload = _json.loads(body_bytes)
+            rpc_method = str(payload.get("method", ""))
+            if rpc_method == "tools/call":
+                params = payload.get("params", {}) or {}
+                tool_name = params.get("name")
+                return "tools", tool_name if isinstance(tool_name, str) else None
+            if rpc_method == "resources/read":
+                return "resources", None
+            return "other", None
+        return "other", None
+
+    def _rate_limits_for(self, kind: str) -> tuple[int, int]:
+        # return (per_minute, burst)
+        if kind == "tools":
+            rpm = int(getattr(self.settings.http, "rate_limit_tools_per_minute", 60) or 60)
+        elif kind == "resources":
+            rpm = int(getattr(self.settings.http, "rate_limit_resources_per_minute", 120) or 120)
+        else:
+            rpm = int(getattr(self.settings.http, "rate_limit_per_minute", 60) or 60)
+        burst = max(1, rpm)
+        return rpm, burst
+
+    async def _consume_bucket(self, key: str, per_minute: int, burst: int) -> bool:
+        """Return True if token granted, False if limited."""
+        if per_minute <= 0:
+            return True
+        rate_per_sec = per_minute / 60.0
+        now = self._monotonic()
+
+        # Redis backend
+        if self._redis is not None:
+            try:
+                lua = (
+                    "local key = KEYS[1]\n"
+                    "local now = tonumber(ARGV[1])\n"
+                    "local rate = tonumber(ARGV[2])\n"
+                    "local burst = tonumber(ARGV[3])\n"
+                    "local state = redis.call('HMGET', key, 'tokens', 'ts')\n"
+                    "local tokens = tonumber(state[1]) or burst\n"
+                    "local ts = tonumber(state[2]) or now\n"
+                    "local delta = now - ts\n"
+                    "tokens = math.min(burst, tokens + delta * rate)\n"
+                    "local allowed = 0\n"
+                    "if tokens >= 1 then tokens = tokens - 1 allowed = 1 end\n"
+                    "redis.call('HMSET', key, 'tokens', tokens, 'ts', now)\n"
+                    "redis.call('EXPIRE', key, math.ceil(burst / math.max(rate, 0.001)))\n"
+                    "return allowed\n"
+                )
+                allowed = await self._redis.eval(lua, 1, f"rl:{key}", now, rate_per_sec, burst)
+                return bool(int(allowed or 0) == 1)
+            except Exception:
+                # Fallback to memory on Redis failure
+                pass
+
+        # In-memory token bucket
+        tokens, ts = self._buckets.get(key, (float(burst), now))
+        elapsed = max(0.0, now - ts)
+        tokens = min(float(burst), tokens + elapsed * rate_per_sec)
+        if tokens < 1.0:
+            self._buckets[key] = (tokens, now)
+            return False
+        tokens -= 1.0
+        self._buckets[key] = (tokens, now)
+        return True
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override]
+        # Allow CORS preflight and health endpoints
+        if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
+            return await call_next(request)
+
+        # Read body once and restore for downstream
+        try:
+            body_bytes = await request.body()
+            async def _receive() -> dict:
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
+            request._receive = _receive  # type: ignore[attr-defined]
+        except Exception:
+            body_bytes = b""
+
+        kind, tool_name = self._classify_request(request.url.path, request.method, body_bytes)
+
+        # JWT auth (if enabled)
+        if self._jwt_enabled:
+            auth_header = request.headers.get("Authorization", "")
+            if not auth_header.startswith("Bearer "):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+            token = auth_header.split(" ", 1)[1].strip()
+            claims = await self._decode_jwt(token)
+            if not claims:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
+            request.state.jwt_claims = claims  # type: ignore[attr-defined]
+            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])  # type: ignore[arg-type]
+            if isinstance(roles_raw, str):
+                roles = {roles_raw}
+            elif isinstance(roles_raw, (list, tuple)):
+                roles = {str(r) for r in roles_raw}
+            else:
+                roles = set()
+            if not roles:
+                roles = {self._default_role}
+        else:
+            roles = {self._default_role}
+
+        # RBAC enforcement
+        if self._rbac_enabled and kind in {"tools", "resources"}:
+            is_reader = bool(roles & self._reader_roles)
+            is_writer = bool(roles & self._writer_roles) or (not roles)
+            if kind == "resources":
+                pass  # readers allowed
+            elif kind == "tools":
+                if not tool_name:
+                    # Without name, assume write-required to be safe
+                    if not is_writer:
+                        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+                else:
+                    if tool_name in self._readonly_tools:
+                        if not is_reader and not is_writer:
+                            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+                    else:
+                        if not is_writer:
+                            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+        # Rate limiting
+        if self.settings.http.rate_limit_enabled:
+            rpm, burst = self._rate_limits_for(kind)
+            identity = (request.client.host if request.client else "ip-unknown")
+            # Prefer stable subject from JWT if present
+            with contextlib.suppress(Exception):
+                sub = getattr(request.state, "jwt_claims", {}).get("sub")  # type: ignore[attr-defined]
+                if isinstance(sub, str) and sub:
+                    identity = f"sub:{sub}"
+            endpoint = tool_name or "*"
+            key = f"{kind}:{endpoint}:{identity}"
+            allowed = await self._consume_bucket(key, rpm, burst)
+            if not allowed:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
+
+        return await call_next(request)
+
+
 async def readiness_check() -> None:
     await ensure_schema()
     async with get_session() as session:
@@ -53,6 +299,8 @@ async def readiness_check() -> None:
 
 
 def build_http_app(settings: Settings, server=None) -> FastAPI:
+    # Configure logging once
+    _configure_logging(settings)
     fastapi_app = FastAPI()
     if server is None:
         server = build_mcp_server()
@@ -78,6 +326,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 path = request.url.path
                 status_code = getattr(response, "status_code", 0)
                 client = request.client.host if request.client else "-"
+                with contextlib.suppress(Exception):
+                    structlog.get_logger("http").info(
+                        "request",
+                        method=method,
+                        path=path,
+                        status=status_code,
+                        duration_ms=dur_ms,
+                        client_ip=client,
+                    )
                 try:
                     from rich.console import Console  # type: ignore
                     from rich.panel import Panel  # type: ignore
@@ -103,39 +360,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         fastapi_app.add_middleware(RequestLoggingMiddleware)
 
-    # Lightweight IP-based rate limiting (best-effort, per-process)
-    if settings.http.rate_limit_enabled and settings.http.rate_limit_per_minute > 0:
-        from collections import defaultdict, deque
-        from time import time
-
-        window_seconds = 60
-        limit = int(settings.http.rate_limit_per_minute)
-        hits: dict[str, deque[float]] = defaultdict(deque)
-
-        class RateLimitMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next):
-                if request.method == "OPTIONS":
-                    return await call_next(request)
-                if request.url.path.startswith("/health/"):
-                    return await call_next(request)
-                client_ip = request.client.host if request.client else "unknown"
-                now = time()
-                dq = hits[client_ip]
-                while dq and now - dq[0] >= window_seconds:
-                    dq.popleft()
-                if len(dq) >= limit:
-                    try:
-                        from rich.console import Console  # type: ignore
-                        from rich.panel import Panel  # type: ignore
-                        cons = Console(width=100)
-                        cons.print(Panel.fit(f"ip={client_ip} window={window_seconds}s limit={limit}", title="429 Rate Limit", border_style="red"))
-                    except Exception:
-                        pass
-                    raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")
-                dq.append(now)
-                return await call_next(request)
-
-        fastapi_app.add_middleware(RateLimitMiddleware)
+    # Unified JWT/RBAC and robust rate limiter middleware
+    if settings.http.rate_limit_enabled or getattr(settings.http, "jwt_enabled", False) or getattr(settings.http, "rbac_enabled", True):
+        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
 
     if settings.http.bearer_token:
         fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
@@ -191,6 +418,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 Console().print(Panel.fit(str(exc), title="Readiness Error", border_style="red"))
             except Exception:
                 pass
+            with contextlib.suppress(Exception):
+                structlog.get_logger("health").error("readiness_error", error=str(exc))
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
@@ -219,6 +448,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         Console().print(Panel.fit(f"projects_scanned={len(pids)}", title="Claims Cleanup", border_style="cyan"))
                     except Exception:
                         pass
+                    with contextlib.suppress(Exception):
+                        structlog.get_logger("tasks").info("claims_cleanup", projects_scanned=len(pids))
                 except Exception:
                     pass
                 await asyncio.sleep(settings.claims_cleanup_interval_seconds)
@@ -257,6 +488,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 con.print(Panel(body, title="ACK Overdue", border_style="red"))
                             except Exception:
                                 print(f"ack-warning message_id={mid} project_id={project_id} agent_id={agent_id} age_s={int(age)} ttl_s={settings.ack_ttl_seconds}")
+                            with contextlib.suppress(Exception):
+                                structlog.get_logger("tasks").warning(
+                                    "ack_overdue",
+                                    message_id=str(mid),
+                                    project_id=str(project_id),
+                                    agent_id=str(agent_id),
+                                    age_s=int(age),
+                                    ttl_s=int(settings.ack_ttl_seconds),
+                                )
                             if settings.ack_escalation_enabled:
                                 mode = (settings.ack_escalation_mode or "log").lower()
                                 if mode == "claim":
