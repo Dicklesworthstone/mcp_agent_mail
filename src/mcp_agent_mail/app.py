@@ -1661,7 +1661,8 @@ def build_mcp_server() -> FastMCP:
         sender = await _get_agent(project, sender_name)
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
-        if settings_local.contact_enforcement_enabled:
+        # Allow ack-required messages to bypass contact enforcement entirely
+        if settings_local.contact_enforcement_enabled and not ack_required:
             # allow replies always; if thread present and recipient already on thread, allow
             auto_ok_names: set[str] = set()
             if thread_id:
@@ -4586,6 +4587,21 @@ def build_mcp_server() -> FastMCP:
         dict
             { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
         """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
@@ -4638,6 +4654,20 @@ def build_mcp_server() -> FastMCP:
     )
     async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
@@ -4677,6 +4707,26 @@ def build_mcp_server() -> FastMCP:
         since_ts: Optional[str] = None,
     ) -> dict[str, Any]:
         """List messages sent by the agent, enriched with commit metadata for canonical files."""
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+                if parsed.get("include_bodies"):
+                    val = parsed["include_bodies"][0].strip().lower()
+                    include_bodies = val in ("1", "true", "t", "yes", "y")
+                if parsed.get("since_ts") and since_ts is None:
+                    since_ts = parsed["since_ts"][0]
+            except Exception:
+                pass
+
         if project is None:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
