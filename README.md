@@ -803,7 +803,8 @@ if __name__ == "__main__":
     "resources/read -> resource://tooling/directory",
     "select active cluster (e.g. messaging)",
     "mount tools listed in cluster.tools plus macros if model size <= S",
-    "optional: resources/read -> resource://tooling/metrics for dashboard display"
+    "optional: resources/read -> resource://tooling/metrics for dashboard display",
+    "optional: resources/read -> resource://tooling/recent?agent=<name>&project=<slug> for UI hints"
   ]
 }
 ```

@@ -72,7 +72,8 @@ fi
 
 echo
 echo "==> Summary"
-echo "Bearer token used: ${INTEGRATION_BEARER_TOKEN}"
+MASKED_TOKEN="${INTEGRATION_BEARER_TOKEN:0:6}********${INTEGRATION_BEARER_TOKEN: -4}"
+echo "Bearer token (masked): ${MASKED_TOKEN}"
 echo "Run server with: scripts/run_server_with_token.sh"
 echo "Client configs written in project root (e.g., *.mcp.json) and .claude/settings.json (if Claude present)."
 echo "All done."

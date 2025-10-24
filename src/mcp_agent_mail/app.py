@@ -182,12 +182,15 @@ def _instrument_tool(
 def _tool_metrics_snapshot() -> list[dict[str, Any]]:
     snapshot = []
     for name, data in sorted(TOOL_METRICS.items()):
+        metadata = TOOL_METADATA.get(name, {})
         snapshot.append(
             {
                 "name": name,
                 "calls": data["calls"],
                 "errors": data["errors"],
                 "cluster": TOOL_CLUSTER_MAP.get(name, "unclassified"),
+                "capabilities": metadata.get("capabilities", []),
+                "complexity": metadata.get("complexity", "unknown"),
             }
         )
     return snapshot
