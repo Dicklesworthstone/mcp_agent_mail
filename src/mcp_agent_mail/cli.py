@@ -632,8 +632,8 @@ def list_acks(
                 .where(
                     Message.project_id == project.id,
                     MessageRecipient.agent_id == agent.id,
-                    Message.ack_required,
-                    MessageRecipient.ack_ts is None,
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
                 )
                 .order_by(desc(Message.created_ts))
                 .limit(limit)

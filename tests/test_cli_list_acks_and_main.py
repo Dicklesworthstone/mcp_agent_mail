@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from typer.testing import CliRunner
 
 from mcp_agent_mail.__main__ import main as module_main
-import sys
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
@@ -62,7 +62,7 @@ def test_module_main_dispatches_cli(monkeypatch):
     r = runner.invoke(app, ["lint"])  # sanity for CLI itself
     assert r.exit_code == 0
     # Ensure no external argv leaks
-    monkeypatch.setattr(sys, "argv", ["mcp-agent-mail"])
+    monkeypatch.setattr(sys, "argv", ["mcp-agent-mail"])  # no flags
     module_main()  # should not raise and will call into typer app
     # Our fake may or may not be hit based on Typer execution context; ensure at least callable works
     assert True

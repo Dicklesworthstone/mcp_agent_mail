@@ -18,8 +18,7 @@ def test_decode_jwt_header_segment_variants():
 
 
 def test_rate_limits_for_branches(monkeypatch):
-    with _config.clear_settings_cache.__wrapped__ if hasattr(_config.clear_settings_cache, "__wrapped__") else (lambda: None)():
-        pass
+    _config.clear_settings_cache()
     settings = _config.get_settings()
     app = FastAPI()
     mw = SecurityAndRateLimitMiddleware(app, settings)

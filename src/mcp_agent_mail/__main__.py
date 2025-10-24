@@ -6,9 +6,9 @@ from .cli import app
 
 
 def main() -> None:
-    """Dispatch to the Typer CLI without inheriting external argv flags."""
+    """Dispatch to the Typer CLI entry-point, tolerating external argv."""
     cmd = get_command(app)
-    # Run help to avoid UsageError and to avoid pytest args leakage
+    # Show help to avoid requiring a command; prevent pytest argv from breaking
     cmd.main(args=["--help"], prog_name="mcp-agent-mail", standalone_mode=False)
 
 
