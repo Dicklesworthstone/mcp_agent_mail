@@ -119,6 +119,9 @@ addopts = [
   "--cov-report=term-missing",
 ]
 pythonpath = ["src"]
+filterwarnings = [
+  "ignore:coroutine 'FastMCP.get_tool' was never awaited:RuntimeWarning",
+]
 
 [dependency-groups]
 dev = [
