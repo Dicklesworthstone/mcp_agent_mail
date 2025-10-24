@@ -726,7 +726,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if scope.get("type") != "http":
                 res = JSONResponse({"detail": "Not Found"}, status_code=404)
                 await res(scope, receive, send)
-                return
+            return
 
             # Ensure Accept and Content-Type headers are present per StreamableHTTP expectations
             headers = list(scope.get("headers") or [])
@@ -767,7 +767,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else None
                         except Exception:
                             payload = None
-                    if isinstance(payload, dict) and "result" in payload and isinstance(payload["result"], dict):
+                        if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
                             result_obj = payload["result"]
                             # If MCP content blocks present, try to unwrap first text block assuming JSON
                             content = result_obj.get("content")
@@ -775,16 +775,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 first = content[0]
                                 text_val = first.get("text") if isinstance(first, dict) else None
                                 if isinstance(text_val, str):
-                                    with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):
                                         unwrapped = json.loads(text_val)
                                     payload["result"] = unwrapped
-                                        body_bytes = json.dumps(payload).encode("utf-8")
-                                        message = {**message, "body": body_bytes}
+                                    body_bytes = json.dumps(payload).encode("utf-8")
+                                    message = {**message, "body": body_bytes}
                     await send(message)
 
                 try:
                     await http_transport.handle_request(new_scope, receive, send_wrapper)
-                finally:
+            finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
                     with contextlib.suppress(Exception):
@@ -798,9 +798,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = StatelessMCPASGIApp(server)
     with contextlib.suppress(Exception):
-        fastapi_app.mount(base_no_slash, mcp_http_entry)
+        fastapi_app.mount(base_no_slash, stateless_app)
     with contextlib.suppress(Exception):
-        fastapi_app.mount(base_with_slash, mcp_http_entry)
+        fastapi_app.mount(base_with_slash, stateless_app)
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context

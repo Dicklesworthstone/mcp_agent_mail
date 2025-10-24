@@ -1057,6 +1057,8 @@ def build_mcp_server() -> FastMCP:
         ack_required: bool,
         thread_id: Optional[str],
     ) -> dict[str, Any]:
+        # Re-fetch settings at call time so tests that mutate env + clear cache take effect
+        settings = get_settings()
         if not to_names and not cc_names and not bcc_names:
             raise ValueError("At least one recipient must be specified.")
         def _unique(items: Sequence[str]) -> list[str]:
@@ -1088,49 +1090,49 @@ def build_mcp_server() -> FastMCP:
             convert_markdown = True
             embed_policy = sender.attachments_policy
             # "auto" falls back to server defaults
-        # Server-side claims enforcement: block if conflicting active exclusive claim exists
-        if settings.claims_enforcement_enabled:
-            await _expire_stale_claims(project.id or 0)
-            now_ts = datetime.now(timezone.utc)
-            y_dir = now_ts.strftime("%Y")
-            m_dir = now_ts.strftime("%m")
-            candidate_surfaces: list[str] = []
-            candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
-            for r in to_agents + cc_agents + bcc_agents:
-                candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
+            # Server-side claims enforcement: block if conflicting active exclusive claim exists
+            if settings.claims_enforcement_enabled:
+                await _expire_stale_claims(project.id or 0)
+                now_ts = datetime.now(timezone.utc)
+                y_dir = now_ts.strftime("%Y")
+                m_dir = now_ts.strftime("%m")
+                candidate_surfaces: list[str] = []
+                candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
+                for r in to_agents + cc_agents + bcc_agents:
+                    candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
 
-            async with get_session() as session:
-                rows = await session.execute(
-                    select(Claim, Agent.name)
-                    .join(Agent, Claim.agent_id == Agent.id)
-                    .where(
-                        Claim.project_id == project.id,
-                        cast(Any, Claim.released_ts).is_(None),
-                        Claim.expires_ts > now_ts,
+                async with get_session() as session:
+                    rows = await session.execute(
+                        select(Claim, Agent.name)
+                        .join(Agent, Claim.agent_id == Agent.id)
+                        .where(
+                            Claim.project_id == project.id,
+                            cast(Any, Claim.released_ts).is_(None),
+                            Claim.expires_ts > now_ts,
+                        )
                     )
-                )
-                active_claims = rows.all()
+                    active_claims = rows.all()
 
-            conflicts: list[dict[str, Any]] = []
-            for surface in candidate_surfaces:
-                for claim_record, holder_name in active_claims:
-                    if _claims_conflict(claim_record, surface, True, sender):
-                        conflicts.append({
-                            "surface": surface,
-                            "holder": holder_name,
-                            "path_pattern": claim_record.path_pattern,
-                            "exclusive": claim_record.exclusive,
-                            "expires_ts": _iso(claim_record.expires_ts),
-                        })
-            if conflicts:
-                # Return a structured error payload that clients can surface directly
-                return {
-                    "error": {
-                        "type": "CLAIM_CONFLICT",
-                        "message": "Conflicting active claims prevent message write.",
-                        "conflicts": conflicts,
+                conflicts: list[dict[str, Any]] = []
+                for surface in candidate_surfaces:
+                    for claim_record, holder_name in active_claims:
+                        if _claims_conflict(claim_record, surface, True, sender):
+                            conflicts.append({
+                                "surface": surface,
+                                "holder": holder_name,
+                                "path_pattern": claim_record.path_pattern,
+                                "exclusive": claim_record.exclusive,
+                                "expires_ts": _iso(claim_record.expires_ts),
+                            })
+                if conflicts:
+                    # Return a structured error payload that clients can surface directly
+                    return {
+                        "error": {
+                            "type": "CLAIM_CONFLICT",
+                            "message": "Conflicting active claims prevent message write.",
+                            "conflicts": conflicts,
+                        }
                     }
-                }
 
         async with AsyncFileLock(archive.lock_path):
             processed_body, attachments_meta, attachment_files = await process_attachments(
@@ -2088,20 +2090,20 @@ def build_mcp_server() -> FastMCP:
         deliveries: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
             payload_local = await _deliver_message(
-                ctx,
-                project,
-                sender,
+            ctx,
+            project,
+            sender,
                 local_to,
                 local_cc,
                 local_bcc,
-                reply_subject,
-                body_md,
-                None,
-                None,
-                importance=original.importance,
-                ack_required=original.ack_required,
-                thread_id=thread_key,
-            )
+            reply_subject,
+            body_md,
+            None,
+            None,
+            importance=original.importance,
+            ack_required=original.ack_required,
+            thread_id=thread_key,
+        )
             deliveries.append({"project": project.human_key, "payload": payload_local})
 
         for _pid, group in external.items():
@@ -2961,7 +2963,7 @@ def build_mcp_server() -> FastMCP:
             include_examples,
             llm_mode,
             llm_model,
-        )
+                )
         await ctx.info(
             f"Summarized thread '{thread_id}' for project '{project.human_key}' with {total_messages} messages"
         )
@@ -4183,6 +4185,33 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z"}}
         ```
         """
+        # Robust query parsing: some FastMCP versions do not inject query args.
+        # If the templating layer included the query string in the last path segment,
+        # extract it and fill missing parameters.
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and "project" in parsed and parsed["project"]:
+                    project = parsed["project"][0]
+                if since_ts is None and "since_ts" in parsed and parsed["since_ts"]:
+                    since_ts = parsed["since_ts"][0]
+                if "urgent_only" in parsed and parsed["urgent_only"]:
+                    val = parsed["urgent_only"][0].strip().lower()
+                    urgent_only = val in ("1", "true", "t", "yes", "y")
+                if "include_bodies" in parsed and parsed["include_bodies"]:
+                    val = parsed["include_bodies"][0].strip().lower()
+                    include_bodies = val in ("1", "true", "t", "yes", "y")
+                if "limit" in parsed and parsed["limit"]:
+                    try:
+                        limit = int(parsed["limit"][0])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         if project is None:
             # Auto-detect project by agent name if uniquely identifiable
             async with get_session() as s_auto:
@@ -4242,7 +4271,7 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
+            if len(projects) >= 1:
                 project_obj = projects[0]
             else:
                 raise ValueError("project parameter is required for urgent view")
@@ -4461,12 +4490,12 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
+            if len(projects) >= 1:
                 project_obj = projects[0]
             else:
-                raise ValueError("project parameter is required for mailbox resource")
+            raise ValueError("project parameter is required for mailbox resource")
         else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4513,12 +4542,12 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
+            if len(projects) >= 1:
                 project_obj = projects[0]
             else:
-                raise ValueError("project parameter is required for mailbox-with-commits resource")
+            raise ValueError("project parameter is required for mailbox-with-commits resource")
         else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4555,9 +4584,9 @@ def build_mcp_server() -> FastMCP:
             if len(projects) == 1:
                 project_obj = projects[0]
             else:
-                raise ValueError("project parameter is required for outbox resource")
+            raise ValueError("project parameter is required for outbox resource")
         else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
         enriched: list[dict[str, Any]] = []
