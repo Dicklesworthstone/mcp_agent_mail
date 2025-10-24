@@ -312,3 +312,122 @@ async def test_rich_logger_does_not_throw(isolated_env, monkeypatch):
                 "body_md": "hello",
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_server_level_attachment_policy_override(isolated_env, monkeypatch):
+    # Force server to convert images regardless of agent policy
+    monkeypatch.setenv("CONVERT_IMAGES", "true")
+    from mcp_agent_mail import config as _config
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    storage = Path(get_settings().storage.root).resolve()
+    image_path = storage.parent / "temp2.png"
+    image = Image.new("RGB", (2, 2), color=(0, 255, 0))
+    image.save(image_path)
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Photographer",
+                # leave attachments_policy default (auto)
+            },
+        )
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Photographer",
+                "to": ["Photographer"],
+                "subject": "ServerOverride",
+                "body_md": "Here ![pic](%s)" % image_path,
+                "attachment_paths": [str(image_path)],
+                # Do not set convert_images; rely on server default
+            },
+        )
+        attachments = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments")
+        assert attachments and any(att.get("type") in {"file", "inline"} for att in attachments)
+    image_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, monkeypatch):
+    # Ensure enforcement is enabled
+    monkeypatch.setenv("CLAIMS_ENFORCEMENT_ENABLED", "true")
+    from mcp_agent_mail import config as _config
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Alpha",
+            },
+        )
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Beta",
+            },
+        )
+        # Beta claims Alpha inbox surface, short TTL
+        claim = await client.call_tool(
+            "claim_paths",
+            {
+                "project_key": "Backend",
+                "agent_name": "Beta",
+                "paths": ["agents/Alpha/inbox/*/*/*.md"],
+                "ttl_seconds": 1,
+                "exclusive": True,
+            },
+        )
+        assert claim.data["granted"]
+
+        # Immediately blocked
+        resp = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Alpha",
+                "to": ["Alpha"],
+                "subject": "BlockedNow",
+                "body_md": "hello",
+            },
+        )
+        payload = resp.structured_content.get("error") or resp.structured_content.get("result") or {}
+        if not payload and hasattr(resp, "data"):
+            payload = getattr(resp, "data", {})
+        assert isinstance(payload, dict)
+        assert payload.get("type") == "CLAIM_CONFLICT" or payload.get("error", {}).get("type") == "CLAIM_CONFLICT"
+
+        # Wait for TTL to expire and retry
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.2)
+        resp2 = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Alpha",
+                "to": ["Alpha"],
+                "subject": "AllowedAfterTTL",
+                "body_md": "hello",
+            },
+        )
+        deliveries = resp2.data.get("deliveries") or []
+        assert deliveries and deliveries[0]["payload"]["subject"] == "AllowedAfterTTL"

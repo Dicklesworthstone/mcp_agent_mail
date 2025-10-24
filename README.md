@@ -792,6 +792,36 @@ if __name__ == "__main__":
 3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
 4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro tools (`macro_start_session`, `macro_prepare_thread`) and hide the granular verbs until the agent explicitly asks for them.
 
+```jsonc
+// Typical client bootstrap flow
+{
+  "steps": [
+    "resources/read -> resource://tooling/directory",
+    "select active cluster (e.g. messaging)",
+    "mount tools listed in cluster.tools plus macros if model size <= S",
+    "optional: resources/read -> resource://tooling/metrics for dashboard display"
+  ]
+}
+```
+
+### Monitoring & Alerts
+
+1. **Enable metric emission.** Set `TOOL_METRICS_EMIT_ENABLED=true` and choose an interval (`TOOL_METRICS_EMIT_INTERVAL_SECONDS=120` is a good starting point). The server will periodically emit a structured log entry such as:
+
+```json
+{
+  "event": "tool_metrics_snapshot",
+  "tools": [
+    {"name": "send_message", "cluster": "messaging", "calls": 42, "errors": 1},
+    {"name": "claim_paths", "cluster": "claims", "calls": 11, "errors": 0}
+  ]
+}
+```
+
+2. **Ship the logs.** Forward the structured stream (stderr/stdout or JSON log files) into your observability stack (e.g., Loki, Datadog, Elastic) and parse the `tools[]` array.
+3. **Alert on anomalies.** Create a rule that raises when `errors / calls` exceeds a threshold for any tool (for example 5% over a 5‑minute window) so you can decide whether to expose a macro or improve documentation.
+4. **Dashboard the clusters.** Group by `cluster` to see where agents are spending time and which workflows might warrant additional macros or guard-rails.
+
 ## Roadmap (selected)
 
 See `TODO.md` for the in-progress task list, including:
@@ -901,3 +931,49 @@ This repo includes a GitHub Actions workflow that runs on pushes and PRs:
 - Type check: `uvx ty check`
 
 See `.github/workflows/ci.yml`.
+
+## Agent Onboarding Guide
+
+This quick guide shows how to register an agent, claim paths, send a message, and acknowledge.
+
+1) Start the server
+
+```bash
+uv run python -m mcp_agent_mail.cli serve-http
+```
+
+2) Register a project and an agent
+
+```bash
+uv run python -m mcp_agent_mail.cli list-projects
+```
+
+Or via MCP tools (using your client):
+
+- ensure project
+- register agent
+
+Example JSON-RPC payload (abbreviated):
+
+```json
+{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"ensure_project","arguments":{"human_key":"/abs/path/backend"}}}
+```
+
+3) Claim a path for focused work (optional but recommended)
+
+- Use `claim_paths` to create an exclusive claim on your working surface.
+- Renew with `renew_claims` before expiry.
+- Release with `release_claims` when done.
+
+4) Send a message
+
+Use `send_message` with `to` set to recipients by agent name. Attach files via `attachment_paths` or inline images in Markdown. Attachments are converted to WebP and stored under `attachments/` by default.
+
+5) Acknowledge messages
+
+Use `acknowledge_message` to record receipt; overdue ACKs may be surfaced by background checks.
+
+See also:
+- `resource://inbox/{agent}` for inbox browsing
+- `cli acks pending`/`overdue` for reminder views
+- `cli claims active/soon` for active claims

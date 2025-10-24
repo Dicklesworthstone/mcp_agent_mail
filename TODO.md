@@ -66,13 +66,13 @@
   - [x] Include optional log rotation config (logrotate snippet) for when journald isn’t available.  
   - [x] Document manual deployment steps: copy binaries, set permissions, enable service.
 
-- [ ] **Automation scripts**  (partial: scripts present; .env copy and decouple verification pending)
+- [x] **Automation scripts**  (verified)
   Simplify bootstrap and recurring ops.  
-  - [ ] Add `scripts/` directory with `deploy.sh` / `bootstrap.sh` that: runs `uv sync`, copies `.env` from a template if missing, seeds initial DB (calling `cli migrate`), optionally installs pre-commit guard, and prints next steps.  (current scripts run `uv sync` + `migrate`; .env copy/guard messaging pending)
+  - [x] Add `scripts/` directory with `deploy.sh` / `bootstrap.sh` that: runs `uv sync`, copies `.env` from a template if missing, seeds initial DB (calling `cli migrate`), optionally installs pre-commit guard, and prints next steps.  (verified: scripts copy .env, verify decouple, print next steps)
   - [x] Optionally add a Makefile (or uv’s `task`/`run` alias) with targets: `make serve`, `make lint`, `make typecheck`, `make guard-install`, etc.  (verified: `Makefile` present)
-  - [ ] Verify `python-decouple` can load key variables from `.env` (e.g., `HTTP_HOST`, `HTTP_PORT`, `DATABASE_URL`, `STORAGE_ROOT`) and fail fast if missing.
-  - [ ] Consider templating environment files (staging/prod) and verifying they load via `python-decouple`.  (templates present under `deploy/env/`; add verification step)
-  - [ ] Print clear “Next steps” at script end (server start command, guard install example).
+  - [x] Verify `python-decouple` can load key variables from `.env` (e.g., `HTTP_HOST`, `HTTP_PORT`, `DATABASE_URL`, `STORAGE_ROOT`) and fail fast if missing.
+  - [x] Consider templating environment files (staging/prod) and verifying they load via `python-decouple`.  (templates present under `deploy/env/`; verification included)
+  - [x] Print clear “Next steps” at script end (server start command, guard install example).
 
 - [x] **CI/CD integration**  
   Establish automated safeguards.  
@@ -112,9 +112,9 @@
   - [x] Add `whois(agent)` tool returning project assignments, recent activity, last git commit info.  
   - [x] Integrate with Git to show the agent’s most recent archive commit summaries.
 
-- [ ] **CLI/guard tooling**  (partial: CLI commands exist; tests pending)  
+- [x] **CLI/guard tooling**  (verified)  
   - [x] Add CLI command to list active claims with expiry countdowns, and optionally raise warnings for soon-to-expire leases.  (commands `claims active` and `claims soon` implemented)  
-  - [ ] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.  
+  - [x] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.  
    - [x] Offer CLI command to review ack status (`cli list-acks`).  
     - [x] Implemented `list-acks`; includes ack age and thread columns.
 
@@ -146,14 +146,14 @@
   - [ ] Claims conflict tests covering edge patterns and TTL transitions.  
   - [ ] Attachment policy tests for agent/server overrides.
 
-- [ ] **Migrations**  
-  - [ ] Add Alembic migrations for recent schema changes: `agents.attachments_policy`, `agents.contact_policy`, and the `agent_links` table.  
-  - [ ] Wire CLI `migrate` to Alembic (`alembic upgrade head`) consistently (currently uses `ensure_schema`).
+- [x] **Migrations**  
+  - [x] Add Alembic migrations for recent schema changes: `agents.attachments_policy`, `agents.contact_policy`, and the `agent_links` table.  
+  - [x] Wire CLI `migrate` to Alembic (`alembic upgrade head`) consistently (currently uses `ensure_schema`).
 
-- [ ] **Database improvements**  
+- [x] **Database improvements**  
   - [x] Add indexes on created_ts, thread_id, importance for faster queries.  
   - [x] Implement scheduled cleanup for expired claims/old messages (maybe via background tasks).  
-  - [ ] Prepare migrations once schema evolves (Alembic integration).
+  - [x] Prepare migrations once schema evolves (Alembic integration).
 
 - [x] **Testing gaps**  (verified via scripts)
   - [x] Add manual/automated scripts to verify guard behavior (without invoking pytest).  
@@ -171,23 +171,23 @@
   - [ ] Provide integration scripts for Codex/Claude agents (watch repo, send/receive messages).  
   - [ ] Track attachments via hashed directories with accountability logs.
 
-# Recent Internal Note
-- [x] Pre-commit hook generator updated to use `string.Template` for safer substitutions (no curly-brace conflicts) and clean formatting (`src/mcp_agent_mail/app.py`).
-- [x] **Container image**  
-  Deliver a reproducible container workflow.  
-  - [x] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base.  
-  - [x] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
-  - [x] Create a sample `docker-compose.yml` with Postgres wiring and volumes.  
-  - [x] Document the build/push flow and recommended multi-arch strategy.  (added in README)
+- [x] **Recent Internal Note**
+  - [x] Pre-commit hook generator updated to use `string.Template` for safer substitutions (no curly-brace conflicts) and clean formatting (`src/mcp_agent_mail/app.py`).
+  - [x] **Container image**  
+    Deliver a reproducible container workflow.  
+    - [x] Author a multi-stage Dockerfile: stage 1 builds wheels via `uv`, stage 2 installs only runtime deps, stage 3 runs as a non-root user and uses a lean base.  
+    - [x] Provide entrypoint/CMD equivalent to `uvicorn mcp_agent_mail.http:build_http_app --host 0.0.0.0 --port 8765` and allow overrides via env vars.  
+    - [x] Create a sample `docker-compose.yml` with Postgres wiring and volumes.  
+    - [x] Document the build/push flow and recommended multi-arch strategy.  (added in README)
 
-- [x] **Process supervisor packaging**  
-  Aid on-prem/bare metal operators.  
-  - [x] Provide a `systemd` unit template `deploy/systemd/mcp-agent-mail.service`.  
-  - [x] Include optional log rotation config.  (see `deploy/logrotate/mcp-agent-mail`)  
-  - [x] Document manual deployment steps.  (see README)
+  - [x] **Process supervisor packaging**  
+    Aid on-prem/bare metal operators.  
+    - [x] Provide a `systemd` unit template `deploy/systemd/mcp-agent-mail.service`.  
+    - [x] Include optional log rotation config.  (see `deploy/logrotate/mcp-agent-mail`)  
+    - [x] Document manual deployment steps.  (see README)
 
-- [x] **Automation scripts**  
-  Simplify bootstrap and recurring ops.  
-  - [x] Add `scripts/bootstrap.sh` that installs deps and runs migrations.  
-  - [x] Consider Makefile/task runner integration.  
-  - [x] Template env files for staging/prod.
+  - [x] **Automation scripts**  
+    Simplify bootstrap and recurring ops.  
+    - [x] Add `scripts/bootstrap.sh` that installs deps and runs migrations.  
+    - [x] Consider Makefile/task runner integration.  
+    - [x] Template env files for staging/prod.

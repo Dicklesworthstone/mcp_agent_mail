@@ -476,7 +476,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # Optional periodic claims cleanup background task and ACK TTL warnings using lifespan
     async def _startup() -> None:  # pragma: no cover - service lifecycle
-        if not (settings.claims_cleanup_enabled or settings.ack_ttl_enabled):
+        if not (settings.claims_cleanup_enabled or settings.ack_ttl_enabled or settings.retention_report_enabled or settings.quota_enabled or settings.tool_metrics_emit_enabled):
             fastapi_app.state._background_tasks = []
             return
         async def _worker_cleanup() -> None:
@@ -652,6 +652,68 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     pass
                 await asyncio.sleep(max(5, settings.tool_metrics_emit_interval_seconds))
 
+        async def _worker_retention_quota() -> None:
+            import datetime as _dt
+            from pathlib import Path as _Path
+            while True:
+                from contextlib import suppress as _suppress
+                with _suppress(Exception):
+                    storage_root = _Path(settings.storage.root).expanduser().resolve()
+                    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=int(settings.retention_max_age_days))
+                    old_messages = 0
+                    total_attach_bytes = 0
+                    per_project_attach: dict[str, int] = {}
+                    per_project_inbox_counts: dict[str, int] = {}
+                    for proj_dir in storage_root.iterdir() if storage_root.exists() else []:
+                        if not proj_dir.is_dir():
+                            continue
+                        proj_name = proj_dir.name
+                        msg_root = proj_dir / "messages"
+                        if msg_root.exists():
+                            count_inbox = 0
+                            for ydir in msg_root.iterdir():
+                                for mdir in (ydir.iterdir() if ydir.is_dir() else []):
+                                    for f in (mdir.iterdir() if mdir.is_dir() else []):
+                                        if f.suffix.lower() == ".md":
+                                            with _suppress(Exception):
+                                                ts = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
+                                                if ts < cutoff:
+                                                    old_messages += 1
+                                                count_inbox += 1
+                            per_project_inbox_counts[proj_name] = count_inbox
+                        att_root = proj_dir / "attachments"
+                        if att_root.exists():
+                            for sub in att_root.rglob("*.webp"):
+                                with _suppress(Exception):
+                                    sz = sub.stat().st_size
+                                    total_attach_bytes += sz
+                                    per_project_attach[proj_name] = per_project_attach.get(proj_name, 0) + sz
+                    structlog.get_logger("maintenance").info(
+                        "retention_quota_report",
+                        old_messages=old_messages,
+                        retention_max_age_days=int(settings.retention_max_age_days),
+                        total_attachments_bytes=total_attach_bytes,
+                        quota_limit_bytes=int(settings.quota_attachments_limit_bytes),
+                        per_project_attach=per_project_attach,
+                        per_project_inbox_counts=per_project_inbox_counts,
+                    )
+                    # Quota alerts
+                    limit_b = int(settings.quota_attachments_limit_bytes)
+                    inbox_limit = int(settings.quota_inbox_limit_count)
+                    if limit_b > 0:
+                        for proj, used in per_project_attach.items():
+                            if used >= limit_b:
+                                structlog.get_logger("maintenance").warning(
+                                    "quota_attachments_exceeded", project=proj, used_bytes=used, limit_bytes=limit_b
+                                )
+                    if inbox_limit > 0:
+                        for proj, cnt in per_project_inbox_counts.items():
+                            if cnt >= inbox_limit:
+                                structlog.get_logger("maintenance").warning(
+                                    "quota_inbox_exceeded", project=proj, inbox_count=cnt, limit=inbox_limit
+                                )
+                await asyncio.sleep(max(60, settings.retention_report_interval_seconds))
+
         tasks = []
         if settings.claims_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
@@ -659,6 +721,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             tasks.append(asyncio.create_task(_worker_ack_ttl()))
         if settings.tool_metrics_emit_enabled:
             tasks.append(asyncio.create_task(_worker_tool_metrics()))
+        if settings.retention_report_enabled or settings.quota_enabled:
+            tasks.append(asyncio.create_task(_worker_retention_quota()))
         fastapi_app.state._background_tasks = tasks
 
     async def _shutdown() -> None:  # pragma: no cover - service lifecycle
