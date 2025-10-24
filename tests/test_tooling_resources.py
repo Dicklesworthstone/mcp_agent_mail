@@ -43,7 +43,17 @@ async def test_tooling_recent_filters(isolated_env):
             {},
         )
         blocks = await client.read_resource("resource://tooling/recent/60?agent=Alpha&project=Backend")
-        # Expect entries slice mentioning tools
-        assert blocks and ("tools" in (blocks[0].text or "") or "entries" in (blocks[0].text or ""))
+        assert blocks and blocks[0].text
+        import json as _json
+        data = _json.loads(blocks[0].text)
+        assert isinstance(data, dict)
+        assert data.get("project") is None or data.get("project") == "Backend" or data.get("entries") is not None
+        assert isinstance(data.get("count"), int)
+        entries = data.get("entries") or []
+        assert isinstance(entries, list)
+        for e in entries:
+            assert "tool" in e and isinstance(e["tool"], str)
+            if e.get("agent") is not None:
+                assert e["agent"] == "Alpha"
 
 

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import datetime as _dt
+
 import pytest
 from fastmcp import Client
+from sqlalchemy import text
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_session
 
 
 @pytest.mark.asyncio
@@ -37,9 +41,15 @@ async def test_views_ack_required_and_ack_overdue_resources(isolated_env):
         blocks = await client.read_resource("resource://views/ack-required/Recv?project=Backend&limit=10")
         assert blocks and "NeedsAck" in (blocks[0].text or "")
 
-        # ack-overdue with ttl_minutes=0 (min 1 enforced server-side) — just ensure resource responds
-        blocks2 = await client.read_resource("resource://views/ack-overdue/Recv?project=Backend&ttl_minutes=0&limit=10")
-        assert blocks2 and "messages" in (blocks2[0].text or "")
+        # Backdate created_ts in DB to ensure it's older than 1 minute
+        backdate = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=5)
+        async with get_session() as session:
+            await session.execute(text("UPDATE messages SET created_ts = :ts WHERE id = :mid"), {"ts": backdate, "mid": mid})
+            await session.commit()
+
+        # ack-overdue with ttl_minutes=1 should include it
+        blocks2 = await client.read_resource("resource://views/ack-overdue/Recv?project=Backend&ttl_minutes=1&limit=10")
+        assert blocks2 and "NeedsAck" in (blocks2[0].text or "")
 
         # After acknowledgement, it should disappear from ack-required
         await client.call_tool(
