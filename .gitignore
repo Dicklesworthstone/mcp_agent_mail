@@ -204,3 +204,4 @@ benchmarks/**/*.json
 data/baselines/*
 *.sqlite3
 .env
+.pytest_out/*
