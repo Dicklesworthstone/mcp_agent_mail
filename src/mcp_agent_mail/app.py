@@ -4736,7 +4736,7 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
+            if len(projects) >= 1:
                 project_obj = projects[0]
             else:
                 raise ValueError("project parameter is required for outbox resource")
