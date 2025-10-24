@@ -1117,8 +1117,8 @@ def build_mcp_server() -> FastMCP:
                 convert_markdown,
                 embed_policy=embed_policy,
             )
-            # Fallback: if agent requested inline and body contains a data URI, ensure at least one inline meta
-            if not attachments_meta and embed_policy == "inline" and ("data:image" in body_md):
+            # Fallback: if body contains inline data URI, reflect that in attachments meta for API parity
+            if not attachments_meta and ("data:image" in body_md):
                 attachments_meta.append({"type": "inline", "media_type": "image/webp"})
             message = await _create_message(
                 project,
@@ -1868,7 +1868,13 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 continue
 
-        return {"deliveries": deliveries, "count": len(deliveries)}
+        result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries)}
+        # Back-compat: expose top-level attachments when a single local delivery exists
+        if len(deliveries) == 1:
+            payload = deliveries[0].get("payload") or {}
+            if isinstance(payload, dict) and "attachments" in payload:
+                result["attachments"] = payload.get("attachments")
+        return result
 
     @mcp.tool(name="reply_message")
     @_instrument_tool(

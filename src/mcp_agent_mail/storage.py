@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from filelock import FileLock
+from filelock import SoftFileLock
 from git import Actor, Repo
 from PIL import Image
 
