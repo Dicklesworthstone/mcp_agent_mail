@@ -32,8 +32,8 @@ async def test_core_resources(isolated_env):
         # message
         mres = await client.read_resource(f"resource://message/{mid}?project=backend")
         assert mres
-        # thread
-        tres = await client.read_resource("resource://thread/1?project=Backend&include_bodies=true")
+        # thread (seed with numeric id and correct lowercase project)
+        tres = await client.read_resource(f"resource://thread/{mid}?project=backend&include_bodies=true")
         assert tres
         # inbox
         ires = await client.read_resource("resource://inbox/Blue?project=backend&limit=5")
