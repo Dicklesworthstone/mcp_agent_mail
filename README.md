@@ -796,6 +796,8 @@ if __name__ == "__main__":
 4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
 5. **Show recent actions.** Read `resource://tooling/recent` to display the last few successful tool invocations relevant to the agent/project when building UI hints.
 
+See `examples/client_bootstrap.py` for a runnable reference implementation that applies the guidance above.
+
 ```jsonc
 // Typical client bootstrap flow
 {
@@ -826,6 +828,8 @@ if __name__ == "__main__":
 2. **Ship the logs.** Forward the structured stream (stderr/stdout or JSON log files) into your observability stack (e.g., Loki, Datadog, Elastic) and parse the `tools[]` array.
 3. **Alert on anomalies.** Create a rule that raises when `errors / calls` exceeds a threshold for any tool (for example 5% over a 5‑minute window) so you can decide whether to expose a macro or improve documentation.
 4. **Dashboard the clusters.** Group by `cluster` to see where agents are spending time and which workflows might warrant additional macros or guard-rails.
+
+See `docs/observability.md` for a step-by-step cookbook (Loki/Prometheus example pipelines included), and `docs/GUIDE_TO_OPTIMAL_MCP_SERVER_DESIGN.md` for a comprehensive design guide covering tool curation, capability gating, security, and observability best practices.
 
 ## Roadmap (selected)
 

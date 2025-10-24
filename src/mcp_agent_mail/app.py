@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import inspect
 import logging
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-import inspect
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Awaitable, Callable, Optional, cast
 
 from fastmcp import Context, FastMCP
 from git import Repo
@@ -151,8 +151,9 @@ def _instrument_tool(
             metrics["calls"] += 1
             bound = _bind_arguments(signature, args, kwargs)
             ctx = bound.arguments.get("ctx")
-            if isinstance(ctx, Context) and capabilities:
-                _enforce_capabilities(ctx, set(meta["capabilities"]), tool_name)
+            if isinstance(ctx, Context) and meta["capabilities"]:
+                required_caps = set(cast(list[str], meta["capabilities"]))
+                _enforce_capabilities(ctx, required_caps, tool_name)
             project_value = _extract_argument(bound, project_arg)
             agent_value = _extract_argument(bound, agent_arg)
             try:
@@ -2494,7 +2495,8 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Claim a set of paths and optionally release them at the end of the workflow."""
 
-        claims_result = await claim_paths(
+        claims_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, claim_paths))
+        claims_result = await claims_tool(
             ctx,
             project_key=project_key,
             agent_name=agent_name,
@@ -2506,7 +2508,8 @@ def build_mcp_server() -> FastMCP:
 
         release_result = None
         if auto_release:
-            release_result = await release_claims_tool(
+            release_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, release_claims_tool))
+            release_result = await release_tool(
                 ctx,
                 project_key=project_key,
                 agent_name=agent_name,
@@ -2543,7 +2546,8 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
 
-        request_result = await request_contact(
+        request_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, request_contact))
+        request_result = await request_tool(
             ctx,
             project_key=project_key,
             from_agent=requester,
@@ -2554,7 +2558,8 @@ def build_mcp_server() -> FastMCP:
 
         response_result = None
         if auto_accept:
-            response_result = await respond_contact(
+            respond_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, respond_contact))
+            response_result = await respond_tool(
                 ctx,
                 project_key=project_key,
                 to_agent=target,
@@ -2566,7 +2571,8 @@ def build_mcp_server() -> FastMCP:
         welcome_result = None
         if welcome_subject and welcome_body:
             try:
-                welcome_result = await send_message(
+                send_tool = cast(Callable[..., Awaitable[dict[str, Any]]], cast(Any, send_message))
+                welcome_result = await send_tool(
                     ctx,
                     project_key=project_key,
                     sender_name=requester,
@@ -3596,14 +3602,15 @@ def build_mcp_server() -> FastMCP:
         ]
 
         for cluster in clusters:
-            for tool in cluster["tools"]:
-                meta = TOOL_METADATA.get(tool["name"])
+            for tool_entry in cluster["tools"]:
+                tool_dict = cast(dict[str, Any], tool_entry)
+                meta = TOOL_METADATA.get(str(tool_dict.get("name", "")))
                 if not meta:
                     continue
-                tool["capabilities"] = meta["capabilities"]
-                tool.setdefault("complexity", meta["complexity"])
-                if "required_capabilities" in tool:
-                    tool["required_capabilities"] = meta["capabilities"]
+                tool_dict["capabilities"] = meta["capabilities"]
+                tool_dict.setdefault("complexity", meta["complexity"])
+                if "required_capabilities" in tool_dict:
+                    tool_dict["required_capabilities"] = meta["capabilities"]
 
         playbooks = [
             {
