@@ -2939,7 +2939,7 @@ def build_mcp_server() -> FastMCP:
                 Console().print(Panel(f"results={len(rows)}", title="tool: search_messages — done", border_style="green"))
             except Exception:
                 pass
-        return [
+        items = [
             {
                 "id": row["id"],
                 "subject": row["subject"],
@@ -2951,6 +2951,11 @@ def build_mcp_server() -> FastMCP:
             }
             for row in rows
         ]
+        try:
+            from fastmcp.tools.tool import ToolResult  # type: ignore
+            return ToolResult(structured_content=items)  # Enables clients to populate .data
+        except Exception:
+            return items
 
     @mcp.tool(name="summarize_thread")
     @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
@@ -3494,16 +3499,10 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as session:
             for claim in claims:
                 old_exp = claim.expires_ts
-                # Normalize to timezone-aware for safe comparison
-                if isinstance(old_exp, datetime) and old_exp.tzinfo is None:
-                    old_exp = old_exp.replace(tzinfo=timezone.utc)
-                # Compare using epoch seconds to avoid tz pitfalls
-                try:
-                    old_ts = old_exp.timestamp() if isinstance(old_exp, datetime) else now.timestamp()
-                except Exception:
-                    old_ts = now.timestamp()
-                base_ts = max(old_ts, now.timestamp())
-                base = datetime.fromtimestamp(base_ts, timezone.utc)
+                if getattr(old_exp, "tzinfo", None) is None:
+                    from datetime import timezone as _tz
+                    old_exp = old_exp.replace(tzinfo=_tz.utc)
+                base = old_exp if old_exp > now else now
                 claim.expires_ts = base + timedelta(seconds=bump)
                 session.add(claim)
                 updated.append(
@@ -3525,7 +3524,7 @@ def build_mcp_server() -> FastMCP:
                     "project": project.human_key,
                     "agent": agent.name,
                     "path_pattern": claim_info["path_pattern"],
-                    "exclusive": True,  # JSON artifact is advisory; exclusivity remains unchanged visually
+                    "exclusive": True,
                     "reason": "renew",
                     "created_ts": _iso(now),
                     "expires_ts": claim_info["new_expires_ts"],
