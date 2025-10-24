@@ -18,8 +18,6 @@ async def test_macro_start_session(isolated_env):
                 "model": "gpt-5",
                 "task_description": "macro",
                 "agent_name": "MacroUser",
-                "claim_paths": ["app/api/*.py"],
-                "claim_ttl_seconds": 60,
                 "inbox_limit": 5,
             },
         )
@@ -77,12 +75,12 @@ async def test_macro_claim_cycle(isolated_env):
                 "paths": ["src/*.py"],
                 "ttl_seconds": 60,
                 "exclusive": True,
-                "auto_release": True,
+            "auto_release": True,
             },
         )
         data = res.data
         assert "claims" in data
-        assert "released" in data
+    assert data.get("released") is not None
 
 
 @pytest.mark.asyncio

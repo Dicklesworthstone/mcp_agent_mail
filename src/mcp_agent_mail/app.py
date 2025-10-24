@@ -1787,6 +1787,15 @@ def build_mcp_server() -> FastMCP:
                         except Exception:
                             target_project_override = None
                             target_name_override = None
+                    # Always allow self-send regardless of policy
+                    if nm == sender.name:
+                        if kind == "to":
+                            local_to.append(nm)
+                        elif kind == "cc":
+                            local_cc.append(nm)
+                        else:
+                            local_bcc.append(nm)
+                        continue
                     if nm in local_names:
                         if kind == "to":
                             local_to.append(nm)
@@ -2604,15 +2613,18 @@ def build_mcp_server() -> FastMCP:
 
         claims_result: Optional[dict[str, Any]] = None
         if claim_paths:
-            claims_result = await claim_paths(
-                ctx,
-                project.human_key,
-                agent.name,
-                claim_paths,
-                ttl_seconds=claim_ttl_seconds,
-                exclusive=True,
-                reason=claim_reason,
-            )
+            # Use FunctionTool.run to invoke the registered tool
+            from fastmcp.tools.tool import FunctionTool
+            _claim_tool = cast(FunctionTool, cast(Any, claim_paths))
+            _claim_run = await _claim_tool.run({
+                "project_key": project.human_key,
+                "agent_name": agent.name,
+                "paths": claim_paths,
+                "ttl_seconds": claim_ttl_seconds,
+                "exclusive": True,
+                "reason": claim_reason,
+            })
+            claims_result = cast(dict[str, Any], _claim_run.structured_content or {})
 
         inbox_items = await _list_inbox(
             project,
