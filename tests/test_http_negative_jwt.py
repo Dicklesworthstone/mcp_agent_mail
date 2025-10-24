@@ -73,3 +73,39 @@ async def test_http_jwt_wrong_alg_rejected(isolated_env, monkeypatch):
         assert r.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_http_jwt_missing_aud_iss_rejected_when_configured(isolated_env, monkeypatch):
+    monkeypatch.setenv("HTTP_JWT_ENABLED", "true")
+    monkeypatch.setenv("HTTP_JWT_ALGORITHMS", "HS256")
+    monkeypatch.setenv("HTTP_JWT_SECRET", "secret")
+    monkeypatch.setenv("HTTP_JWT_AUDIENCE", "api://me")
+    monkeypatch.setenv("HTTP_JWT_ISSUER", "https://issuer")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+    settings = _config.get_settings()
+    # Build token without aud/iss
+    token = jwt.encode({"alg": "HS256"}, {"sub": "u1", settings.http.jwt_role_claim: "reader"}, settings.http.jwt_secret).decode("utf-8")
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": f"Bearer {token}"}
+        r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_http_jwt_malformed_token(isolated_env, monkeypatch):
+    monkeypatch.setenv("HTTP_JWT_ENABLED", "true")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = {"Authorization": "Bearer not.a.jwt"}
+        r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
+        assert r.status_code == 401
+
+

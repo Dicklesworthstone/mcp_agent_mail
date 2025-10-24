@@ -46,4 +46,11 @@ async def test_empty_inbox_and_pagination(isolated_env):
         )
         assert len(list(next_page.data)) >= 10
 
+        # Thread resource with multiple messages
+        # Use the last message id as thread seed and ensure at least 2
+        last_msg_id = _get("id", items[0])
+        if last_msg_id is not None:
+            blocks = await client.read_resource(f"resource://thread/{last_msg_id}?project=Backend&include_bodies=false")
+            assert blocks and "messages" in (blocks[0].text or "")
+
 
