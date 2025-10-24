@@ -61,15 +61,18 @@ fi
 
 if [[ "${_DO_WRITE:-0}" -eq 1 ]]; then
   echo "==> Writing MCP server config and hooks"
+  if [[ -n "${_TOKEN}" ]]; then
+    AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+  else
+    AUTH_HEADER_LINE=''
+  fi
   cat > "$SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
       "type": "http",
       "url": "${_URL}",
-      "headers": {
-        "Authorization": "Bearer ${_TOKEN}"
-      }
+      "headers": {${AUTH_HEADER_LINE}}
     }
   },
   "hooks": {

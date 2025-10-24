@@ -33,13 +33,18 @@ if [[ -f .env ]]; then
 fi
 
 OUT_JSON="${ROOT_DIR}/gemini.mcp.json"
+if [[ -n "${_TOKEN}" ]]; then
+  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+else
+  AUTH_HEADER_LINE=''
+fi
 cat > "$OUT_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
       "type": "http",
       "url": "${_URL}",
-      "headers": { "Authorization": "Bearer ${_TOKEN}" }
+      "headers": {${AUTH_HEADER_LINE}}
     }
   }
 }

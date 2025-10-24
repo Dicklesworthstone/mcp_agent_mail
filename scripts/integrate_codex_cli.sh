@@ -40,15 +40,19 @@ fi
 
 OUT_JSON="${ROOT_DIR}/codex.mcp.json"
 echo "==> Writing ${OUT_JSON}"
+if [[ -n "${_TOKEN}" ]]; then
+  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"
+'
+else
+  AUTH_HEADER_LINE=''
+fi
 cat > "$OUT_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
       "type": "http",
       "url": "${_URL}",
-      "headers": {
-        "Authorization": "Bearer ${_TOKEN}"
-      }
+      "headers": {${AUTH_HEADER_LINE}}
     }
   }
 }

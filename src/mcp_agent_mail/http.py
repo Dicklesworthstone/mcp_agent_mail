@@ -670,7 +670,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         proj_name = proj_dir.name
                         msg_root = proj_dir / "messages"
                         if msg_root.exists():
-                            count_inbox = 0
                             for ydir in msg_root.iterdir():
                                 for mdir in (ydir.iterdir() if ydir.is_dir() else []):
                                     for f in (mdir.iterdir() if mdir.is_dir() else []):
@@ -679,7 +678,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                                 ts = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
                                                 if ts < cutoff:
                                                     old_messages += 1
-                                                count_inbox += 1
+                        # Count per-agent inbox files (agents/*/inbox/YYYY/MM/*.md)
+                        inbox_root = proj_dir / "agents"
+                        if inbox_root.exists():
+                            count_inbox = 0
+                            for f in inbox_root.rglob("inbox/*/*/*.md"):
+                                with _suppress(Exception):
+                                    if f.is_file():
+                                        count_inbox += 1
                             per_project_inbox_counts[proj_name] = count_inbox
                         att_root = proj_dir / "attachments"
                         if att_root.exists():

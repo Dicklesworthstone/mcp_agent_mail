@@ -138,10 +138,9 @@ def migrate() -> None:
         # Prefer Alembic if configured; fall back to ensure_schema for first-time init
         try:
             _run_command(["uv", "run", "alembic", "upgrade", "head"])  # non-interactive
-        except SystemExit as exc:
-            # If Alembic not initialized or fails, fall back to ensure_schema
-            if exc.code != 0:
-                asyncio.run(ensure_schema(settings))
+        except SystemExit:
+            # Fallback path: ensure baseline schema if migrations are unavailable or fail
+            asyncio.run(ensure_schema(settings))
         # Always ensure FTS structures and common indexes
         asyncio.run(ensure_fts(settings))
     console.print("[green]Database migrations + FTS complete.[/]")

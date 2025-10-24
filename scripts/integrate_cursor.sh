@@ -30,7 +30,11 @@ _TOKEN=""
 if [[ -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
-
+if [[ -n "${_TOKEN}" ]]; then
+  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+else
+  AUTH_HEADER_LINE=''
+fi
 OUT_JSON="${ROOT_DIR}/cursor.mcp.json"
 cat > "$OUT_JSON" <<JSON
 {
@@ -38,7 +42,7 @@ cat > "$OUT_JSON" <<JSON
     "mcp-agent-mail": {
       "type": "http",
       "url": "${_URL}",
-      "headers": { "Authorization": "Bearer ${_TOKEN}" }
+      "headers": {${AUTH_HEADER_LINE}}
     }
   }
 }
