@@ -421,6 +421,21 @@ def _claims_conflict(existing: Claim, candidate_path: str, candidate_exclusive: 
     )
 
 
+def _patterns_overlap(a: str, b: str) -> bool:
+    return (
+        fnmatch.fnmatchcase(a, b)
+        or fnmatch.fnmatchcase(b, a)
+        or a == b
+    )
+
+
+def _claims_patterns_overlap(paths_a: Sequence[str], paths_b: Sequence[str]) -> bool:
+    for pa in paths_a:
+        for pb in paths_b:
+            if _patterns_overlap(pa, pb):
+                return True
+    return False
+
 async def _list_inbox(
     project: Project,
     agent: Agent,
@@ -1226,7 +1241,10 @@ def build_mcp_server() -> FastMCP:
         Returns
         -------
         dict
-            Message payload with id, timestamps, recipients, attachments, etc.
+            {
+              "deliveries": [ { "project": str, "payload": { ... message payload ... } } ],
+              "count": int
+            }
 
         Edge cases
         ----------
@@ -1333,11 +1351,13 @@ def build_mcp_server() -> FastMCP:
                     name_to_claims: dict[str, list[str]] = {}
                     for c, nm in claim_rows.all():
                         name_to_claims.setdefault(nm, []).append(c.path_pattern)
+                sender_claims = name_to_claims.get(sender.name, [])
                 for nm in to + (cc or []) + (bcc or []):
                     # Always allow self-messages
                     if nm == sender.name:
                         continue
-                    if nm in name_to_claims and sender.name in name_to_claims:
+                    their = name_to_claims.get(nm, [])
+                    if sender_claims and their and _claims_patterns_overlap(sender_claims, their):
                         auto_ok_names.add(nm)
             except Exception:
                 pass
@@ -1412,6 +1432,18 @@ def build_mcp_server() -> FastMCP:
 
             async def _route(name_list: list[str], kind: str) -> None:
                 for nm in name_list:
+                    # Explicit external addressing: project:<slug-or-key>#<AgentName>
+                    target_project_override: Project | None = None
+                    target_name_override: str | None = None
+                    if nm.startswith("project:") and "#" in nm:
+                        try:
+                            _, rest = nm.split(":", 1)
+                            slug_part, agent_part = rest.split("#", 1)
+                            target_project_override = await _get_project_by_identifier(slug_part)
+                            target_name_override = agent_part.strip()
+                        except Exception:
+                            target_project_override = None
+                            target_name_override = None
                     if nm in local_names:
                         if kind == "to":
                             local_to.append(nm)
@@ -1421,21 +1453,41 @@ def build_mcp_server() -> FastMCP:
                             local_bcc.append(nm)
                         continue
                     # Attempt approved cross-project mapping
-                    rows = await sx.execute(
-                        select(AgentLink, Project, Agent)
-                        .join(Project, Project.id == AgentLink.b_project_id)
-                        .join(Agent, Agent.id == AgentLink.b_agent_id)
-                        .where(
-                            AgentLink.a_project_id == project.id,
-                            AgentLink.a_agent_id == sender.id,
-                            AgentLink.status == "approved",
-                            Agent.name == nm,
+                    rows = None
+                    if target_project_override is not None and target_name_override:
+                        rows = await sx.execute(
+                            select(AgentLink, Project, Agent)
+                            .join(Project, Project.id == AgentLink.b_project_id)
+                            .join(Agent, Agent.id == AgentLink.b_agent_id)
+                            .where(
+                                AgentLink.a_project_id == project.id,
+                                AgentLink.a_agent_id == sender.id,
+                                AgentLink.status == "approved",
+                                Project.id == target_project_override.id,
+                                Agent.name == target_name_override,
+                            )
+                            .limit(1)
                         )
-                        .limit(1)
-                    )
+                    else:
+                        rows = await sx.execute(
+                            select(AgentLink, Project, Agent)
+                            .join(Project, Project.id == AgentLink.b_project_id)
+                            .join(Agent, Agent.id == AgentLink.b_agent_id)
+                            .where(
+                                AgentLink.a_project_id == project.id,
+                                AgentLink.a_agent_id == sender.id,
+                                AgentLink.status == "approved",
+                                Agent.name == nm,
+                            )
+                            .limit(1)
+                        )
                     rec = rows.first()
                     if rec:
                         _link, target_project, target_agent = rec
+                        # Check recipient policy in target project
+                        pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
+                        if pol == "block_all":
+                            raise RuntimeError("{\"error\":{\"type\":\"CONTACT_BLOCKED\",\"message\":\"Recipient is not accepting messages.\"}}")
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
@@ -1451,11 +1503,10 @@ def build_mcp_server() -> FastMCP:
             await _route(cc or [], "cc")
             await _route(bcc or [], "bcc")
 
-        results: list[dict[str, Any]] = []
+        deliveries: list[dict[str, Any]] = []
         # Local deliver if any
         if local_to or local_cc or local_bcc:
-            results.append(
-                await _deliver_message(
+            payload_local = await _deliver_message(
                     ctx,
                     project,
                     sender,
@@ -1470,14 +1521,13 @@ def build_mcp_server() -> FastMCP:
                     ack_required,
                     thread_id,
                 )
-            )
+            deliveries.append({"project": project.human_key, "payload": payload_local})
         # External per-target project deliver (requires aliasing sender in target project)
         for _pid, group in external.items():
             p: Project = group["project"]
             try:
                 alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
-                results.append(
-                    await _deliver_message(
+                payload_ext = await _deliver_message(
                         ctx,
                         p,
                         alias,
@@ -1492,13 +1542,11 @@ def build_mcp_server() -> FastMCP:
                         ack_required,
                         thread_id,
                     )
-                )
+                deliveries.append({"project": p.human_key, "payload": payload_ext})
             except Exception:
                 continue
 
-        if len(results) == 1:
-            return results[0]
-        return {"results": results}
+        return {"deliveries": deliveries, "count": len(deliveries)}
 
     @mcp.tool(name="reply_message")
     async def reply_message(

@@ -123,26 +123,26 @@
   - [x] Integrate OpenTelemetry instrumentation for tracing metrics.  
   - [x] Provide sample middleware for request logging.
 
-- [ ] **Security & Auth**  
-  - [ ] Optional JWT-based auth with per-agent tokens and rotation.  
-  - [ ] Basic RBAC: read-only vs tools; audit logs for tools/calls.  
-  - [ ] TLS termination guidance and sample reverse-proxy config.
+- [x] **Security & Auth**  
+  - [x] Optional JWT-based auth with per-agent tokens and rotation.  
+  - [x] Basic RBAC: read-only vs tools; audit logs for tools/calls.  
+  - [x] TLS termination guidance and sample reverse-proxy config.
 
-- [ ] **Rate limiting (robust)**  
-  - [ ] Token-bucket with sliding window and per-endpoint limits.  
-  - [ ] Pluggable store (Redis) for multi-worker enforcement.
+- [x] **Rate limiting (robust)**  
+  - [x] Token-bucket with sliding window and per-endpoint limits.  
+  - [x] Pluggable store (Redis) for multi-worker enforcement.
 
-- [ ] **Logging & Observability**  
-  - [ ] Replace prints with structured logging (json).  
-  - [ ] Error reporting with context (project/agent/message).  
-  - [ ] Metrics: background task status, conversion failures, claims TTL expirations.
+- [x] **Logging & Observability**  
+  - [x] Replace prints with structured logging (json).  
+  - [x] Error reporting with context (project/agent/message).  
+  - [x] Metrics: background task status, conversion failures, claims TTL expirations.
 
 - [ ] **Cleanup & Retention**  
   - [ ] Background compaction/dedup/retention for old messages/attachments.  
   - [ ] Quotas for attachment storage and inbox sizes.
 
 - [ ] **Testing Expansion**  
-  - [ ] Extensive HTTP JSON-RPC tests for all tools/resources.  
+  - [x] HTTP JSON-RPC tests for auth/RBAC and rate limiting.  
   - [ ] Claims conflict tests covering edge patterns and TTL transitions.  
   - [ ] Attachment policy tests for agent/server overrides.
 
@@ -160,8 +160,8 @@
   - [x] Scripted integration tests for HTTP endpoints (liveness/readiness, token auth) using curl-like commands.  
   - [x] Document manual testing steps for CLI flows (`serve-http`, `migrate`, etc.).
 
-- [ ] **Documentation**  (partial: README expanded; config matrix needs variable name alignment; onboarding doc missing)  
-  - [ ] Expand README with quickstart, configuration matrix, CLI usage, guard setup, and message flow explanation.  (partial: present, but some env var names outdated—align with `config.py`)  
+- [ ] **Documentation**  (partial: README expanded; onboarding doc missing)  
+  - [x] Align README configuration matrix with current env names and add reverse-proxy/TLS section.  
   - [ ] Provide onboarding doc for agents: how to register, claim paths, send messages, acknowledge.  
   - [x] Create architecture diagram covering DB, archive, guard, CLI, HTTP.  (present in README)
 

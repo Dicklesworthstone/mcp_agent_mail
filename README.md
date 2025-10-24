@@ -469,6 +469,27 @@ uv run python server.py
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port.
 
+### Quick onboarding for agents
+
+1) Register an identity
+
+```json
+{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name":"BlueLake"}}}
+```
+
+2) Claim edit surface (optional)
+
+```json
+{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","paths":["app/api/*.py"],"ttl_seconds":3600,"exclusive":true}}}
+```
+
+3) Send and acknowledge messages
+
+```json
+{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"BlueLake","to":["BlueLake"],"subject":"Plan","body_md":"hello"}}}
+{"method":"tools/call","params":{"name":"acknowledge_message","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":"<id>"}}}
+```
+
 ## End-to-end walkthrough
 
 1. Create two agent identities (backend and frontend projects):
