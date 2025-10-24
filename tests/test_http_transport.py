@@ -4,7 +4,7 @@ import contextlib
 from typing import Any
 
 import pytest
-from authlib.jose import jwk, jwt
+from authlib.jose import JsonWebKey, jwt
 from httpx import ASGITransport, AsyncClient
 
 from mcp_agent_mail import config as _config
@@ -67,20 +67,27 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
         _config.clear_settings_cache()
     settings = _config.get_settings()
 
-    # Generate RSA key + JWKS
-    rsa_key = jwk.dumps({"kty": "RSA"}, kty="RSA", crv_or_size=2048)
-    rsa_key["kid"] = "abc"
-    public_jwk = jwk.dumps(rsa_key, kty="RSA", public_only=True)
+    # Generate RSA key + JWKS using Authlib utilities
+    private_jwk = JsonWebKey.generate_key("RSA", 2048, is_private=True).as_dict()
+    private_jwk["kid"] = "abc"
+    public_jwk = JsonWebKey.import_key(private_jwk).as_dict(is_private=False)
     jwks_payload = {"keys": [public_jwk]}
 
     async def fake_get(self, url: str):  # type: ignore[override]
         class _Resp:
+            status_code = 200
             def json(self) -> dict[str, Any]:
                 return jwks_payload
         return _Resp()
 
     # Build token with RS256
-    token = jwt.encode({"alg": "RS256", "kid": "abc"}, {"sub": "u1", settings.http.jwt_role_claim: "reader"}, rsa_key).decode("utf-8")
+    token = (
+        jwt.encode(
+            {"alg": "RS256", "kid": "abc"},
+            {"sub": "u1", settings.http.jwt_role_claim: "reader"},
+            private_jwk,
+        ).decode("utf-8")
+    )
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
@@ -111,7 +118,7 @@ async def test_http_path_mount_trailing_and_no_slash(isolated_env):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         base = settings.http.path.rstrip("/")
         r1 = await client.post(base, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
-        assert r1.status_code in (200, 401, 403)  # depending on auth env
+        assert r1.status_code in (200, 401, 403)
         r2 = await client.post(base + "/", json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r2.status_code in (200, 401, 403)
 

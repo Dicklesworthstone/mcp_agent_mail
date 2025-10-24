@@ -33,7 +33,8 @@ async def test_reply_message_inherits_thread_and_subject_prefix(isolated_env):
             {"project_key": "Backend", "message_id": orig_id, "sender_name": "Alice", "body_md": "ack"},
         )
         rdata = r.data
-        assert rdata.get("thread_id") in {msg.get("thread_id") or str(orig_id)}
+        expected_thread = msg.get("thread_id") or str(orig_id)
+        assert rdata.get("thread_id") == expected_thread
         assert str(rdata.get("reply_to")) == str(orig_id)
         # Subject on delivery payload should be prefixed
         deliveries = rdata.get("deliveries") or []

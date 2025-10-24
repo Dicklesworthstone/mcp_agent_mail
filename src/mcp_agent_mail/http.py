@@ -338,6 +338,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Build MCP HTTP sub-app with stateless mode for ASGI test transports
     mcp_http_app = server.http_app(path="/", stateless_http=True, json_response=True)
 
+    class _LifespanPerRequestWrapper:
+        def __init__(self, app_inner):
+            self._app_inner = app_inner
+        async def __call__(self, scope, receive, send):
+            try:
+                async with self._app_inner.lifespan(self._app_inner):
+                    await self._app_inner(scope, receive, send)
+            except Exception:
+                await self._app_inner(scope, receive, send)
+
+    mcp_http_entry = _LifespanPerRequestWrapper(mcp_http_app)
+
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
         if not (settings.claims_cleanup_enabled or settings.ack_ttl_enabled or settings.retention_report_enabled or settings.quota_enabled or settings.tool_metrics_emit_enabled):
@@ -765,11 +777,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 if isinstance(text_val, str):
                                     with contextlib.suppress(Exception):
                                         unwrapped = json.loads(text_val)
-                                    # Special-case resources/read JSON payloads to return the unwrapped dict directly
-                                    if payload.get("result", {}).get("type") == "resources/read":
-                                        payload = unwrapped
-                                    else:
-                                        payload["result"] = unwrapped
+                                    payload["result"] = unwrapped
                                         body_bytes = json.dumps(payload).encode("utf-8")
                                         message = {**message, "body": body_bytes}
                     await send(message)
@@ -790,9 +798,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = StatelessMCPASGIApp(server)
     with contextlib.suppress(Exception):
-        fastapi_app.mount(base_no_slash, stateless_app)
+        fastapi_app.mount(base_no_slash, mcp_http_entry)
     with contextlib.suppress(Exception):
-        fastapi_app.mount(base_with_slash, stateless_app)
+        fastapi_app.mount(base_with_slash, mcp_http_entry)
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
