@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.types import Scope, Receive, Send
+from starlette.types import Receive, Scope, Send
 
 from .app import _expire_stale_claims, _tool_metrics_snapshot, build_mcp_server
 from .config import Settings, get_settings
@@ -755,7 +755,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else None
                         except Exception:
                             payload = None
-                        if isinstance(payload, dict) and "result" in payload and isinstance(payload["result"], dict):
+                    if isinstance(payload, dict) and "result" in payload and isinstance(payload["result"], dict):
                             result_obj = payload["result"]
                             # If MCP content blocks present, try to unwrap first text block assuming JSON
                             content = result_obj.get("content")
@@ -765,6 +765,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 if isinstance(text_val, str):
                                     with contextlib.suppress(Exception):
                                         unwrapped = json.loads(text_val)
+                                    # Special-case resources/read JSON payloads to return the unwrapped dict directly
+                                    if payload.get("result", {}).get("type") == "resources/read":
+                                        payload = unwrapped
+                                    else:
                                         payload["result"] = unwrapped
                                         body_bytes = json.dumps(payload).encode("utf-8")
                                         message = {**message, "body": body_bytes}

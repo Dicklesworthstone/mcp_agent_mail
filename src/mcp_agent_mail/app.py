@@ -635,10 +635,18 @@ def _claims_conflict(existing: Claim, candidate_path: str, candidate_exclusive: 
     if not existing.exclusive and not candidate_exclusive:
         return False
     normalized_existing = existing.path_pattern
+    # Treat simple directory patterns like "src/*" as inclusive of files under that directory
+    # when comparing against concrete file paths like "src/app.py".
+    def _expand_dir_star(p: str) -> str:
+        if p.endswith("/*"):
+            return p[:-1] + "*"  # "src/*" -> "src/**"-like breadth for fnmatchcase approximation
+        return p
+    a = _expand_dir_star(candidate_path)
+    b = _expand_dir_star(normalized_existing)
     return (
-        fnmatch.fnmatchcase(candidate_path, normalized_existing)
-        or fnmatch.fnmatchcase(normalized_existing, candidate_path)
-        or normalized_existing == candidate_path
+        fnmatch.fnmatchcase(a, b)
+        or fnmatch.fnmatchcase(b, a)
+        or a == b
     )
 
 
@@ -2807,7 +2815,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> Any:
         """
         Full-text search over subject and body for a project.
 
@@ -3249,9 +3257,8 @@ def build_mcp_server() -> FastMCP:
                             }
                         )
                 if conflicting_holders:
+                    # Advisory model: still grant the claim but surface conflicts
                     conflicts.append({"path": path, "holders": conflicting_holders})
-                    continue
-
                 claim = await _create_claim(project, agent, path, exclusive, reason, ttl_seconds)
                 claim_payload = {
                     "id": claim.id,
@@ -4132,7 +4139,7 @@ def build_mcp_server() -> FastMCP:
         return {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
 
     @mcp.resource(
-        "resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}",
+        "resource://inbox/{agent}",
         mime_type="application/json",
     )
     async def inbox_resource(
@@ -4199,7 +4206,7 @@ def build_mcp_server() -> FastMCP:
             "messages": enriched,
         }
 
-    @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit}", mime_type="application/json")
+    @mcp.resource("resource://views/urgent-unread/{agent}", mime_type="application/json")
     async def urgent_unread_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """
         Convenience view listing urgent and high-importance messages that are unread for an agent.
@@ -4214,8 +4221,20 @@ def build_mcp_server() -> FastMCP:
             Max number of messages.
         """
         if project is None:
-            raise ValueError("project parameter is required for urgent view")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for urgent view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=True, include_bodies=False, since_ts=None)
         # Filter unread (no read_ts recorded)
@@ -4234,7 +4253,7 @@ def build_mcp_server() -> FastMCP:
                     unread.append(item)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
 
-    @mcp.resource("resource://views/ack-required/{agent}{?project,limit}", mime_type="application/json")
+    @mcp.resource("resource://views/ack-required/{agent}", mime_type="application/json")
     async def ack_required_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """
         Convenience view listing messages requiring acknowledgement for an agent where ack is pending.
@@ -4249,8 +4268,20 @@ def build_mcp_server() -> FastMCP:
             Max number of messages.
         """
         if project is None:
-            raise ValueError("project parameter is required for ack view")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for ack view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
@@ -4275,7 +4306,7 @@ def build_mcp_server() -> FastMCP:
                 out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
-    @mcp.resource("resource://views/acks-stale/{agent}{?project,ttl_seconds,limit}", mime_type="application/json")
+    @mcp.resource("resource://views/acks-stale/{agent}", mime_type="application/json")
     async def acks_stale_view(
         agent: str,
         project: Optional[str] = None,
@@ -4297,8 +4328,20 @@ def build_mcp_server() -> FastMCP:
             Max number of messages to return.
         """
         if project is None:
-            raise ValueError("project parameter is required for stale acks view")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for stale acks view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
@@ -4337,7 +4380,7 @@ def build_mcp_server() -> FastMCP:
             "messages": out,
         }
 
-    @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}", mime_type="application/json")
+    @mcp.resource("resource://views/ack-overdue/{agent}", mime_type="application/json")
     async def ack_overdue_view(
         agent: str,
         project: Optional[str] = None,
@@ -4346,8 +4389,20 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """List messages requiring acknowledgement older than ttl_minutes without ack."""
         if project is None:
-            raise ValueError("project parameter is required for ack-overdue view")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for ack-overdue view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
@@ -4374,7 +4429,7 @@ def build_mcp_server() -> FastMCP:
                 out.append(payload)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
-    @mcp.resource("resource://mailbox/{agent}{?project,limit}", mime_type="application/json")
+    @mcp.resource("resource://mailbox/{agent}", mime_type="application/json")
     async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """
         List recent messages in an agent's mailbox with lightweight Git commit context.
@@ -4385,8 +4440,20 @@ def build_mcp_server() -> FastMCP:
             { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
         """
         if project is None:
-            raise ValueError("project parameter is required for mailbox resource")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for mailbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4419,14 +4486,26 @@ def build_mcp_server() -> FastMCP:
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
     @mcp.resource(
-        "resource://mailbox-with-commits/{agent}{?project,limit}",
+        "resource://mailbox-with-commits/{agent}",
         mime_type="application/json",
     )
     async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
         """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
         if project is None:
-            raise ValueError("project parameter is required for mailbox-with-commits resource")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for mailbox-with-commits resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
@@ -4442,7 +4521,7 @@ def build_mcp_server() -> FastMCP:
             enriched.append(item)
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
 
-    @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts}", mime_type="application/json")
+    @mcp.resource("resource://outbox/{agent}", mime_type="application/json")
     async def outbox_resource(
         agent: str,
         project: Optional[str] = None,
@@ -4452,8 +4531,20 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """List messages sent by the agent, enriched with commit metadata for canonical files."""
         if project is None:
-            raise ValueError("project parameter is required for outbox resource")
-        project_obj = await _get_project_by_identifier(project)
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, Agent.project_id == Project.id)
+                    .where(Agent.name == agent)
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for outbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
         enriched: list[dict[str, Any]] = []
