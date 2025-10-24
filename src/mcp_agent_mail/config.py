@@ -141,6 +141,8 @@ class Settings:
     quota_enabled: bool
     quota_attachments_limit_bytes: int
     quota_inbox_limit_count: int
+    # Retention/project listing filters
+    retention_ignore_project_patterns: list[str]
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -275,6 +277,10 @@ def get_settings() -> Settings:
         quota_enabled=_bool(_decouple_config("QUOTA_ENABLED", default="false"), default=False),
         quota_attachments_limit_bytes=_int(_decouple_config("QUOTA_ATTACHMENTS_LIMIT_BYTES", default="0"), default=0),
         quota_inbox_limit_count=_int(_decouple_config("QUOTA_INBOX_LIMIT_COUNT", default="0"), default=0),
+        retention_ignore_project_patterns=_csv(
+            "RETENTION_IGNORE_PROJECT_PATTERNS",
+            default="demo,test*,testproj*,testproject,backendproj*,frontendproj*",
+        ),
     )
 
 

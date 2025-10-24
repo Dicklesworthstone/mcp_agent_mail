@@ -105,7 +105,14 @@ def serve_http(
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
-    uvicorn.run(app, host=resolved_host, port=resolved_port, log_level="info")
+    # Disable WebSockets: HTTP-only MCP transport. Stay compatible with tests that
+    # monkeypatch uvicorn.run without the 'ws' parameter.
+    import inspect as _inspect
+    _sig = _inspect.signature(uvicorn.run)
+    _kwargs: dict[str, Any] = {"host": resolved_host, "port": resolved_port, "log_level": "info"}
+    if "ws" in _sig.parameters:
+        _kwargs["ws"] = "none"
+    uvicorn.run(app, **_kwargs)
 
 
 def _run_command(command: list[str]) -> None:

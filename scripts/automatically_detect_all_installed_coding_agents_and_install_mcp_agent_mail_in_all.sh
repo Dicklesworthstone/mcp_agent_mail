@@ -6,7 +6,10 @@ echo
 echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.gemini and generate per-agent MCP configs."
 echo "It will also create scripts/run_server_with_token.sh to start the server with a bearer token."
 echo
-if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+# Detect non-interactive mode regardless of argument position
+_auto_yes=0
+for _a in "$@"; do [[ "$_a" == "--yes" ]] && _auto_yes=1; done
+if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
   _ans="y"
 else
   read -r -p "Proceed? [y/N] " _ans
@@ -43,6 +46,20 @@ fi
 
 echo "==> Detecting installed agents and applying integrations"
 
+# Parse optional --project-dir to tell integrators where to write client configs
+TARGET_DIR=""
+_argv=("$@")
+for ((i=0; i<${#_argv[@]}; i++)); do
+  a="${_argv[$i]}"
+  case "$a" in
+    --project-dir) i=$((i+1)); TARGET_DIR="${_argv[$i]:-}" ;;
+    --project-dir=*) TARGET_DIR="${a#*=}" ;;
+  esac
+done
+if [[ -n "${TARGET_DIR}" ]]; then
+  echo "Target project directory: ${TARGET_DIR}"
+fi
+
 HAS_CLAUDE=0; [[ -d "${HOME}/.claude" ]] && HAS_CLAUDE=1
 HAS_CODEX=0;  [[ -d "${HOME}/.codex"  ]] && HAS_CODEX=1
 HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
@@ -52,22 +69,22 @@ echo "Found: claude=$HAS_CLAUDE codex=$HAS_CODEX cursor=$HAS_CURSOR gemini=$HAS_
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
-  bash "${ROOT_DIR}/scripts/integrate_claude_code.sh" --yes || echo "(warn) Claude integration reported a non-fatal issue"
+  bash "${ROOT_DIR}/scripts/integrate_claude_code.sh" --yes "$@" || echo "(warn) Claude integration reported a non-fatal issue"
 fi
 
 if [[ $HAS_CODEX -eq 1 ]]; then
   echo "-- Integrating Codex CLI..."
-  bash "${ROOT_DIR}/scripts/integrate_codex_cli.sh" --yes || echo "(warn) Codex integration reported a non-fatal issue"
+  bash "${ROOT_DIR}/scripts/integrate_codex_cli.sh" --yes "$@" || echo "(warn) Codex integration reported a non-fatal issue"
 fi
 
 if [[ $HAS_CURSOR -eq 1 ]]; then
   echo "-- Integrating Cursor..."
-  bash "${ROOT_DIR}/scripts/integrate_cursor.sh" --yes || echo "(warn) Cursor integration reported a non-fatal issue"
+  bash "${ROOT_DIR}/scripts/integrate_cursor.sh" --yes "$@" || echo "(warn) Cursor integration reported a non-fatal issue"
 fi
 
 if [[ $HAS_GEMINI -eq 1 ]]; then
   echo "-- Integrating Gemini CLI..."
-  bash "${ROOT_DIR}/scripts/integrate_gemini_cli.sh" --yes || echo "(warn) Gemini integration reported a non-fatal issue"
+  bash "${ROOT_DIR}/scripts/integrate_gemini_cli.sh" --yes "$@" || echo "(warn) Gemini integration reported a non-fatal issue"
 fi
 
 echo
@@ -75,6 +92,9 @@ echo "==> Summary"
 MASKED_TOKEN="${INTEGRATION_BEARER_TOKEN:0:6}********${INTEGRATION_BEARER_TOKEN: -4}"
 echo "Bearer token (masked): ${MASKED_TOKEN}"
 echo "Run server with: scripts/run_server_with_token.sh"
+if [[ -n "${TARGET_DIR}" ]]; then
+  echo "Client configs were written under: ${TARGET_DIR} (e.g., ${TARGET_DIR}/.claude/settings.json)"
+fi
 echo "Client configs written in project root (e.g., *.mcp.json) and .claude/settings.json (if Claude present)."
 echo "All done."
 

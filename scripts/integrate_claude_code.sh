@@ -9,7 +9,19 @@ echo "  2) Create/update a project-local .claude/settings.json with MCP server c
 echo "  3) Auto-generate a bearer token if missing and embed it in the client config."
 echo "  4) Create scripts/run_server_with_token.sh that exports the token and starts the server."
 echo
-if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+# Parse args: --yes and --project-dir
+_auto_yes=0
+TARGET_DIR=""
+_args=("$@")
+for ((i=0; i<${#_args[@]}; i++)); do
+  a="${_args[$i]}"
+  case "$a" in
+    --yes) _auto_yes=1 ;;
+    --project-dir) i=$((i+1)); TARGET_DIR="${_args[$i]:-}" ;;
+    --project-dir=*) TARGET_DIR="${a#*=}" ;;
+  esac
+done
+if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
   _ans="y"
 else
   read -r -p "Proceed? [y/N] " _ans
@@ -21,6 +33,10 @@ fi
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
+# Target project directory where client config will be written
+if [[ -z "${TARGET_DIR}" ]]; then
+  TARGET_DIR="$ROOT_DIR"
+fi
 
 echo "==> Resolving HTTP endpoint from settings"
 eval "$(uv run python - <<'PY'
@@ -53,7 +69,7 @@ PY
 fi
 
 echo "==> Preparing project-local .claude/settings.json"
-CLAUDE_DIR="${ROOT_DIR}/.claude"
+CLAUDE_DIR="${TARGET_DIR}/.claude"
 SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
 mkdir -p "$CLAUDE_DIR"
 
@@ -98,10 +114,11 @@ cat > "$RUN_HELPER" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
 export HTTP_BEARER_TOKEN="${_TOKEN}"
-uv run python -m mcp_agent_mail.cli serve-http "${@:-}"
+uv run python -m mcp_agent_mail.cli serve-http "\$@"
 SH
 chmod +x "$RUN_HELPER"
 echo "Created $RUN_HELPER"
+echo "Client config written at: ${SETTINGS_PATH}"
 
 echo "==> Verifying server readiness"
 set +e

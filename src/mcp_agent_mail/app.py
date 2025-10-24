@@ -3991,11 +3991,18 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://projects"}}
         ```
         """
-        await ensure_schema()
+        settings = get_settings()
+        await ensure_schema(settings)
+        # Build ignore matcher for test/demo projects
+        import fnmatch as _fnmatch
+        ignore_patterns = set(getattr(settings, "retention_ignore_project_patterns", []) or [])
         async with get_session() as session:
             result = await session.execute(select(Project).order_by(asc(Project.created_at)))
             projects = result.scalars().all()
-            return [_project_to_dict(project) for project in projects]
+            def _is_ignored(name: str) -> bool:
+                return any(_fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
+            filtered = [p for p in projects if not (_is_ignored(p.slug) or _is_ignored(p.human_key))]
+            return [_project_to_dict(project) for project in filtered]
 
     @mcp.resource("resource://project/{slug}", mime_type="application/json")
     async def project_detail(slug: str) -> dict[str, Any]:

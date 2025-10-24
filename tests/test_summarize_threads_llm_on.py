@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 from fastmcp import Client
 
@@ -19,10 +21,8 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
     from mcp_agent_mail import config as _config
 
     monkeypatch.setenv("LLM_ENABLED", "true")
-    try:
+    with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    except Exception:
-        pass
 
     # Monkeypatch LLM call to return JSON content the app will parse
     from mcp_agent_mail import app as app_mod

@@ -9,7 +9,19 @@ echo "  2) Auto-generate a bearer token if missing and embed it."
 echo "  3) Produce a cursor.mcp.json (auto-backup existing)."
 echo "  4) Create scripts/run_server_with_token.sh to start the server with the token."
 echo
-if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+# Parse args: --yes and --project-dir
+_auto_yes=0
+TARGET_DIR=""
+_args=("$@")
+for ((i=0; i<${#_args[@]}; i++)); do
+  a="${_args[$i]}"
+  case "$a" in
+    --yes) _auto_yes=1 ;;
+    --project-dir) i=$((i+1)); TARGET_DIR="${_args[$i]:-}" ;;
+    --project-dir=*) TARGET_DIR="${a#*=}" ;;
+  esac
+done
+if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
   _ans="y"
 else
   read -r -p "Proceed? [y/N] " _ans
@@ -21,6 +33,9 @@ fi
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
+if [[ -z "${TARGET_DIR}" ]]; then
+  TARGET_DIR="$ROOT_DIR"
+fi
 
 eval "$(uv run python - <<'PY'
 from mcp_agent_mail.config import get_settings
@@ -51,7 +66,7 @@ PY
   echo "Generated bearer token."
 fi
 AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
-OUT_JSON="${ROOT_DIR}/cursor.mcp.json"
+OUT_JSON="${TARGET_DIR}/cursor.mcp.json"
 if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
 cat > "$OUT_JSON" <<JSON
 {
@@ -72,7 +87,7 @@ cat > "$RUN_HELPER" <<SH
 #!/usr/bin/env bash
 set -euo pipefail
 export HTTP_BEARER_TOKEN="${_TOKEN}"
-uv run python -m mcp_agent_mail.cli serve-http "${@:-}"
+uv run python -m mcp_agent_mail.cli serve-http "\$@"
 SH
 chmod +x "$RUN_HELPER"
 

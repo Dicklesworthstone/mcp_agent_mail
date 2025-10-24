@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": {        "Authorization": "Bearer ${_TOKEN}"}
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project backend" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent ubuntu --limit 20" }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project backend --minutes 10" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project backend --agent ubuntu --limit 10" } ] },
+      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project backend" } ] }
+    ]
+  }
+}

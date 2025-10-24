@@ -529,10 +529,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     total_attach_bytes = 0
                     per_project_attach: dict[str, int] = {}
                     per_project_inbox_counts: dict[str, int] = {}
+                    # Compile ignore patterns once per loop
+                    import fnmatch as _fnmatch
+                    ignore_patterns = list(getattr(settings, "retention_ignore_project_patterns", []) or [])
                     for proj_dir in storage_root.iterdir() if storage_root.exists() else []:
                         if not proj_dir.is_dir():
                             continue
                         proj_name = proj_dir.name
+                        # Skip test/demo projects in real server runs
+                        if any(_fnmatch.fnmatch(proj_name, pat) for pat in ignore_patterns):
+                            continue
                         msg_root = proj_dir / "messages"
                         if msg_root.exists():
                             for ydir in msg_root.iterdir():
@@ -839,7 +845,13 @@ def main() -> None:
     port = args.port or settings.http.port
 
     app = build_http_app(settings)
-    uvicorn.run(app, host=host, port=port, log_level=args.log_level)
+    # Disable WebSockets when running the service directly; HTTP-only transport
+    import inspect as _inspect
+    _sig = _inspect.signature(uvicorn.run)
+    _kwargs: dict[str, Any] = {"host": host, "port": port, "log_level": args.log_level}
+    if "ws" in _sig.parameters:
+        _kwargs["ws"] = "none"
+    uvicorn.run(app, **_kwargs)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution path
