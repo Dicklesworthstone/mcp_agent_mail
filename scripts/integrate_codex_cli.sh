@@ -101,9 +101,9 @@ uv run python -m mcp_agent_mail.cli serve-http "\$@"
 SH
 chmod +x "$RUN_HELPER"
 
-echo "==> Attempt readiness check"
+echo "==> Attempt readiness check (non-blocking)"
 set +e
-curl -fsS "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
+curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _rc=$?
 set -e
 [[ $_rc -eq 0 ]] && echo "Server readiness OK." || echo "Note: server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"

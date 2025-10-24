@@ -675,6 +675,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Unified JWT/RBAC and robust rate limiter middleware
     if settings.http.rate_limit_enabled or getattr(settings.http, "jwt_enabled", False) or getattr(settings.http, "rbac_enabled", True):
         fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
+    # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
     if settings.http.bearer_token:
         fastapi_app.add_middleware(BearerAuthMiddleware, token=settings.http.bearer_token)
 
@@ -821,8 +822,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     response_body = json.loads(body.decode("utf-8")) if body else {}
                 except Exception:
                     response_body = {}
+        # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
+        scope = dict(request.scope)
+        try:
+            client_host = request.client.host if request.client else ""
+        except Exception:
+            client_host = ""
+        if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+            headers = list(scope.get("headers") or [])
+            has_auth = any(k.lower() == b"authorization" for k, _ in headers)
+            if not has_auth and settings.http.bearer_token:
+                headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
+            scope["headers"] = headers
         await stateless_app(
-            {**request.scope, "path": base_with_slash},  # ensure mounted path
+            {**scope, "path": base_with_slash},  # ensure mounted path
             request.receive,
             _send,
         )

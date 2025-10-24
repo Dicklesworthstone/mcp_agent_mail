@@ -49,6 +49,8 @@ class HttpSettings:
     rbac_writer_roles: list[str]
     rbac_default_role: str
     rbac_readonly_tools: list[str]
+    # Dev convenience
+    allow_localhost_unauthenticated: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -203,6 +205,7 @@ def get_settings() -> Settings:
             "HTTP_RBAC_READONLY_TOOLS",
             default="health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads",
         ),
+        allow_localhost_unauthenticated=_bool(_decouple_config("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", default="true"), default=True),
     )
 
     database_settings = DatabaseSettings(

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export HTTP_BEARER_TOKEN="9576f01a89aacf5d94334f725705b94b8d6220de8d5baa686f2fa925fca2cb95"
+export HTTP_BEARER_TOKEN="3dc4ca2f3ed6072c3c228511fe50c121ae9a9b31fc1758a92853c906c2c9258e"
 uv run python -m mcp_agent_mail.cli serve-http "$@"

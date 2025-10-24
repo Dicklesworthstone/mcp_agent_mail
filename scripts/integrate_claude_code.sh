@@ -52,9 +52,16 @@ _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 echo "Detected MCP HTTP endpoint: ${_URL}"
 
 # Determine or generate bearer token (prefer .env if present)
+# Reuse existing token if possible (run helper > .env > env var)
 _TOKEN=""
-if [[ -f .env ]]; then
+if [[ -f scripts/run_server_with_token.sh ]]; then
+  _TOKEN=$(grep -E 'export HTTP_BEARER_TOKEN="' scripts/run_server_with_token.sh | sed -E 's/.*HTTP_BEARER_TOKEN="([^"]+)".*/\1/') || true
+fi
+if [[ -z "${_TOKEN}" && -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
+fi
+if [[ -z "${_TOKEN}" && -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+  _TOKEN="${INTEGRATION_BEARER_TOKEN}"
 fi
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
@@ -81,7 +88,7 @@ if [[ -f "$SETTINGS_PATH" ]]; then
   cp "$SETTINGS_PATH" "${SETTINGS_PATH}.bak.$(date +%s)"
 fi
   echo "==> Writing MCP server config and hooks"
-  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+  AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
   cat > "$SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
@@ -107,6 +114,66 @@ fi
 }
 JSON
 
+  # Also write to settings.local.json to ensure Claude Code picks it up when local overrides are used
+  LOCAL_SETTINGS_PATH="${CLAUDE_DIR}/settings.local.json"
+  if [[ -f "$LOCAL_SETTINGS_PATH" ]]; then
+    cp "$LOCAL_SETTINGS_PATH" "${LOCAL_SETTINGS_PATH}.bak.$(date +%s)"
+  fi
+  cat > "$LOCAL_SETTINGS_PATH" <<JSON
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "${_URL}",
+      "headers": {${AUTH_HEADER_LINE}}
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project ${_PROJ} --minutes 10" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
+      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project ${_PROJ}" } ] }
+    ]
+  }
+}
+JSON
+
+  # Update global user-level ~/.claude/settings.json to ensure CLI picks up MCP (non-destructive merge)
+  HOME_CLAUDE_DIR="${HOME}/.claude"
+  mkdir -p "$HOME_CLAUDE_DIR"
+  HOME_SETTINGS_PATH="${HOME_CLAUDE_DIR}/settings.json"
+  if [[ -f "$HOME_SETTINGS_PATH" ]]; then
+    cp "$HOME_SETTINGS_PATH" "${HOME_SETTINGS_PATH}.bak.$(date +%s)"
+  else
+    echo '{ "mcpServers": {} }' > "$HOME_SETTINGS_PATH"
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    TMP_MERGE="${HOME_SETTINGS_PATH}.tmp.$(date +%s)"
+    jq --arg url "${_URL}" --arg token "${_TOKEN}" \
+      '.mcpServers = (.mcpServers // {}) | .mcpServers["mcp-agent-mail"] = {"type":"http","url":$url,"headers":{"Authorization": ("Bearer " + $token)}}' \
+      "$HOME_SETTINGS_PATH" > "$TMP_MERGE" && mv "$TMP_MERGE" "$HOME_SETTINGS_PATH"
+  else
+    # Fallback: overwrite with minimal config
+    cat > "$HOME_SETTINGS_PATH" <<JSON
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "${_URL}",
+      "headers": {${AUTH_HEADER_LINE}}
+    }
+  }
+}
+JSON
+  fi
+
+# Create run helper script with token
 echo "==> Creating run helper script with token"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
@@ -118,11 +185,10 @@ uv run python -m mcp_agent_mail.cli serve-http "\$@"
 SH
 chmod +x "$RUN_HELPER"
 echo "Created $RUN_HELPER"
-echo "Client config written at: ${SETTINGS_PATH}"
 
-echo "==> Verifying server readiness"
+echo "==> Verifying server readiness (non-blocking)"
 set +e
-curl -fsS "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
+curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _curl_rc=$?
 set -e
 if [[ $_curl_rc -ne 0 ]]; then
@@ -130,6 +196,15 @@ if [[ $_curl_rc -ne 0 ]]; then
   echo "  uv run python -m mcp_agent_mail.cli serve-http"
 else
   echo "Server readiness OK."
+fi
+
+# Register with Claude Code CLI at user and project scope for immediate discovery
+if command -v claude >/dev/null 2>&1; then
+  echo "==> Registering MCP server with Claude CLI"
+  # User scope
+  claude mcp add --transport http --scope user mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}" || true
+  # Project scope (run from target dir)
+  (cd "${TARGET_DIR}" && claude mcp add --transport http --scope project mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}") || true
 fi
 
 echo "==> Done. Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
