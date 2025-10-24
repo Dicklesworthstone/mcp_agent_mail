@@ -118,6 +118,7 @@ addopts = [
   "--cov=mcp_agent_mail",
   "--cov-report=term-missing",
 ]
+pythonpath = ["src"]
 
 [dependency-groups]
 dev = [
