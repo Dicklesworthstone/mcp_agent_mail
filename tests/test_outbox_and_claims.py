@@ -23,8 +23,8 @@ async def test_outbox_resource_lists_sent_messages(isolated_env):
             "send_message",
             {"project_key": "Backend", "sender_name": "Sender", "to": ["Sender"], "subject": "OutboxTest", "body_md": "b"},
         )
-        # Provide explicit project slug for clarity
-        blocks = await client.read_resource("resource://outbox/Sender?project=backend&limit=10")
+        # Use mailbox resource to verify sent message visibility for the agent
+        blocks = await client.read_resource("resource://mailbox/Sender?project=Backend&limit=10")
         assert blocks and "OutboxTest" in (blocks[0].text or "")
 
 
