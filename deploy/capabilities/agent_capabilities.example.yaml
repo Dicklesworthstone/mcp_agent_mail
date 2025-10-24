@@ -1,0 +1,30 @@
+# Example capability mapping for MCP agents.
+# Copy to deploy/capabilities/agent_capabilities.yaml and populate with real data.
+
+agents:
+  - name: BlueLake
+    project: /abs/path/backend
+    capabilities:
+      - messaging
+      - read
+      - ack
+  - name: GreenCastle
+    project: /abs/path/backend
+    capabilities:
+      - messaging
+      - write
+      - claims
+      - repository
+  - name: OpsBot
+    project: /abs/path/backend
+    capabilities:
+      - workflow
+      - contact
+      - messaging
+      - summmarization
+
+# Example: pass these capabilities to an MCP client (pseudo-code)
+#
+# allowed = lookup_capabilities(agent_name, project)
+# client = MCPClient(..., metadata={"allowed_capabilities": allowed})
+

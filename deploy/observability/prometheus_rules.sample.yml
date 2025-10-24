@@ -1,0 +1,18 @@
+groups:
+  - name: mcp-agent-mail
+    interval: 30s
+    rules:
+      - alert: MCPHighToolErrorRate
+        expr: |
+          sum by (tool) (rate(mcp_tool_errors_total[5m]))
+            /
+          sum by (tool) (rate(mcp_tool_calls_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tool {{ $labels.tool }} has an elevated error rate"
+          description: |
+            Over the last 5 minutes, tool {{ $labels.tool }} exceeded a 5% error ratio.
+            Investigate recent changes, review capability assignments, or consider surfacing a macro.

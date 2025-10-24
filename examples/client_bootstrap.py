@@ -14,6 +14,7 @@ so it can run directly against a locally launched `serve-http` instance.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from fastmcp import Client
@@ -27,9 +28,12 @@ def _select_cluster(directory_payload: dict[str, Any], cluster_name: str) -> dic
 
 
 async def main() -> None:
+    # Supply capability tokens for this agent (examples/capability template in
+    # deploy/capabilities/agent_capabilities.example.yaml). Most MCP client
+    # libraries accept metadata at connection time; refer to your client docs.
     async with Client("http://127.0.0.1:8765/mcp/") as client:
         directory_blocks = await client.read_resource("resource://tooling/directory")
-        directory_payload = directory_blocks[0].json()
+        directory_payload = json.loads(getattr(directory_blocks[0], "text", "{}"))
         print("==> Loaded tooling directory; clusters available:")
         for cluster in directory_payload.get("clusters", []):
             print(f" - {cluster['name']} ({len(cluster['tools'])} tools)")
@@ -61,7 +65,7 @@ async def main() -> None:
         # Optionally read metrics for dashboards
         metrics_blocks = await client.read_resource("resource://tooling/metrics")
         print("==> Current tool metrics snapshot:")
-        print(metrics_blocks[0].text)
+        print(getattr(metrics_blocks[0], "text", "{}"))
 
         # Finally run whatever workflow you need. As an example, call the macro
         # to bootstrap a session.
@@ -80,4 +84,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

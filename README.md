@@ -831,6 +831,8 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
 
 See `docs/observability.md` for a step-by-step cookbook (Loki/Prometheus example pipelines included), and `docs/GUIDE_TO_OPTIMAL_MCP_SERVER_DESIGN.md` for a comprehensive design guide covering tool curation, capability gating, security, and observability best practices.
 
+Operations teams can follow `docs/operations_alignment_checklist.md`, which links to the capability templates in `deploy/capabilities/` and the sample Prometheus alert rules in `deploy/observability/`.
+
 ## Roadmap (selected)
 
 See `TODO.md` for the in-progress task list, including:
