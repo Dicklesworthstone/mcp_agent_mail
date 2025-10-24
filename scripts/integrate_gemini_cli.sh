@@ -9,7 +9,11 @@ echo "  2) Auto-generate a bearer token if missing and embed it."
 echo "  3) Generate gemini.mcp.json (auto-backup existing)."
 echo "  4) Create scripts/run_server_with_token.sh to start the server with the token."
 echo
-read -r -p "Proceed? [y/N] " _ans
+if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+  _ans="y"
+else
+  read -r -p "Proceed? [y/N] " _ans
+fi
 if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
   echo "Aborted."
   exit 1
@@ -31,6 +35,9 @@ _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 _TOKEN=""
 if [[ -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
+fi
+if [[ -z "${_TOKEN}" && -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+  _TOKEN="${INTEGRATION_BEARER_TOKEN}"
 fi
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then

@@ -9,7 +9,11 @@ echo "  2) Create/update a project-local .claude/settings.json with MCP server c
 echo "  3) Auto-generate a bearer token if missing and embed it in the client config."
 echo "  4) Create scripts/run_server_with_token.sh that exports the token and starts the server."
 echo
-read -r -p "Proceed? [y/N] " _ans
+if [[ "${1:-}" == "--yes" || "${AUTO_YES:-}" == "1" ]]; then
+  _ans="y"
+else
+  read -r -p "Proceed? [y/N] " _ans
+fi
 if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
   echo "Aborted."
   exit 1

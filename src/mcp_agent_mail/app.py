@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import inspect
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -38,6 +39,9 @@ logger = logging.getLogger(__name__)
 
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
+TOOL_METADATA: dict[str, dict[str, Any]] = {}
+
+RECENT_TOOL_USAGE: deque[tuple[datetime, str, Optional[str], Optional[str]]] = deque(maxlen=4096)
 
 CLUSTER_SETUP = "infrastructure"
 CLUSTER_IDENTITY = "identity"
@@ -46,6 +50,24 @@ CLUSTER_CONTACT = "contact"
 CLUSTER_SEARCH = "search"
 CLUSTER_CLAIMS = "claims"
 CLUSTER_MACROS = "workflow_macros"
+
+
+class ToolExecutionError(Exception):
+    def __init__(self, error_type: str, message: str, *, recoverable: bool = True, data: Optional[dict[str, Any]] = None):
+        super().__init__(message)
+        self.error_type = error_type
+        self.recoverable = recoverable
+        self.data = data or {}
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "error": {
+                "type": self.error_type,
+                "message": str(self),
+                "recoverable": self.recoverable,
+                "data": self.data,
+            }
+        }
 
 
 def _record_tool_error(tool_name: str, exc: Exception) -> None:
@@ -59,20 +81,97 @@ def _record_tool_error(tool_name: str, exc: Exception) -> None:
     )
 
 
-def _instrument_tool(tool_name: str, *, cluster: str):
-    TOOL_CLUSTER_MAP[tool_name] = cluster
+def _register_tool(name: str, metadata: dict[str, Any]) -> None:
+    TOOL_CLUSTER_MAP[name] = metadata["cluster"]
+    TOOL_METADATA[name] = metadata
+
+
+def _bind_arguments(signature: inspect.Signature, args: tuple[Any, ...], kwargs: dict[str, Any]) -> inspect.BoundArguments:
+    try:
+        return signature.bind_partial(*args, **kwargs)
+    except TypeError:
+        return signature.bind(*args, **kwargs)
+
+
+def _extract_argument(bound: inspect.BoundArguments, name: Optional[str]) -> Optional[str]:
+    if not name:
+        return None
+    value = bound.arguments.get(name)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _enforce_capabilities(ctx: Context, required: set[str], tool_name: str) -> None:
+    if not required:
+        return
+    metadata = getattr(ctx, "metadata", {}) or {}
+    allowed = metadata.get("allowed_capabilities")
+    if allowed is None:
+        return
+    allowed_set = {str(item) for item in allowed}
+    if allowed_set and not required.issubset(allowed_set):
+        missing = sorted(required - allowed_set)
+        raise ToolExecutionError(
+            "CAPABILITY_DENIED",
+            f"Tool '{tool_name}' requires capabilities {missing} (allowed={sorted(allowed_set)}).",
+            recoverable=False,
+            data={"required": missing, "allowed": sorted(allowed_set)},
+        )
+
+
+def _record_recent(tool_name: str, project: Optional[str], agent: Optional[str]) -> None:
+    RECENT_TOOL_USAGE.append((datetime.now(timezone.utc), tool_name, project, agent))
+
+
+def _instrument_tool(
+    tool_name: str,
+    *,
+    cluster: str,
+    capabilities: Optional[set[str]] = None,
+    complexity: str = "medium",
+    agent_arg: Optional[str] = None,
+    project_arg: Optional[str] = None,
+):
+    meta = {
+        "cluster": cluster,
+        "capabilities": sorted(capabilities or {cluster}),
+        "complexity": complexity,
+        "agent_arg": agent_arg,
+        "project_arg": project_arg,
+    }
+    _register_tool(tool_name, meta)
 
     def decorator(func):
+        signature = inspect.signature(func)
+
         @wraps(func)
         async def wrapper(*args, **kwargs):
             metrics = TOOL_METRICS[tool_name]
             metrics["calls"] += 1
+            bound = _bind_arguments(signature, args, kwargs)
+            ctx = bound.arguments.get("ctx")
+            if isinstance(ctx, Context) and capabilities:
+                _enforce_capabilities(ctx, set(meta["capabilities"]), tool_name)
+            project_value = _extract_argument(bound, project_arg)
+            agent_value = _extract_argument(bound, agent_arg)
             try:
                 result = await func(*args, **kwargs)
-            except Exception as exc:
+            except ToolExecutionError as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
                 raise
+            except Exception as exc:
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                raise ToolExecutionError(
+                    "UNHANDLED_EXCEPTION",
+                    "Server encountered an unexpected error while executing tool.",
+                    recoverable=False,
+                    data={"tool": tool_name, "original_error": type(exc).__name__},
+                ) from exc
+            finally:
+                _record_recent(tool_name, project_value, agent_value)
             return result
 
         return wrapper
@@ -1020,7 +1119,7 @@ def build_mcp_server() -> FastMCP:
         return payload
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
-    @_instrument_tool("health_check", cluster=CLUSTER_SETUP)
+    @_instrument_tool("health_check", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, complexity="low")
     async def health_check(ctx: Context) -> dict[str, Any]:
         """
         Quick readiness probe for agents and orchestrators.
@@ -1069,7 +1168,7 @@ def build_mcp_server() -> FastMCP:
         }
 
     @mcp.tool(name="ensure_project")
-    @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP)
+    @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "storage"}, complexity="low", project_arg="human_key")
     async def ensure_project(ctx: Context, human_key: str) -> dict[str, Any]:
         """
         Idempotently create or ensure a project exists for the given human key.
@@ -1125,7 +1224,7 @@ def build_mcp_server() -> FastMCP:
         return _project_to_dict(project)
 
     @mcp.tool(name="register_agent")
-    @_instrument_tool("register_agent", cluster=CLUSTER_IDENTITY)
+    @_instrument_tool("register_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name", project_arg="project_key")
     async def register_agent(
         ctx: Context,
         project_key: str,
@@ -1221,7 +1320,7 @@ def build_mcp_server() -> FastMCP:
         return _agent_to_dict(agent)
 
     @mcp.tool(name="whois")
-    @_instrument_tool("whois", cluster=CLUSTER_IDENTITY)
+    @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
     async def whois(
         ctx: Context,
         project_key: str,
@@ -1273,7 +1372,7 @@ def build_mcp_server() -> FastMCP:
         return profile
 
     @mcp.tool(name="create_agent_identity")
-    @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY)
+    @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name_hint", project_arg="project_key")
     async def create_agent_identity(
         ctx: Context,
         project_key: str,
@@ -1341,7 +1440,13 @@ def build_mcp_server() -> FastMCP:
         return _agent_to_dict(agent)
 
     @mcp.tool(name="send_message")
-    @_instrument_tool("send_message", cluster=CLUSTER_MESSAGING)
+    @_instrument_tool(
+        "send_message",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "write"},
+        project_arg="project_key",
+        agent_arg="sender_name",
+    )
     async def send_message(
         ctx: Context,
         project_key: str,
@@ -1717,7 +1822,13 @@ def build_mcp_server() -> FastMCP:
         return {"deliveries": deliveries, "count": len(deliveries)}
 
     @mcp.tool(name="reply_message")
-    @_instrument_tool("reply_message", cluster=CLUSTER_MESSAGING)
+    @_instrument_tool(
+        "reply_message",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "write"},
+        project_arg="project_key",
+        agent_arg="sender_name",
+    )
     async def reply_message(
         ctx: Context,
         project_key: str,
@@ -1822,7 +1933,13 @@ def build_mcp_server() -> FastMCP:
         return payload
 
     @mcp.tool(name="request_contact")
-    @_instrument_tool("request_contact", cluster=CLUSTER_CONTACT)
+    @_instrument_tool(
+        "request_contact",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact"},
+        project_arg="project_key",
+        agent_arg="from_agent",
+    )
     async def request_contact(
         ctx: Context,
         project_key: str,
@@ -1907,7 +2024,13 @@ def build_mcp_server() -> FastMCP:
         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
     @mcp.tool(name="respond_contact")
-    @_instrument_tool("respond_contact", cluster=CLUSTER_CONTACT)
+    @_instrument_tool(
+        "respond_contact",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact"},
+        project_arg="project_key",
+        agent_arg="to_agent",
+    )
     async def respond_contact(
         ctx: Context,
         project_key: str,
@@ -1961,7 +2084,13 @@ def build_mcp_server() -> FastMCP:
         return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
 
     @mcp.tool(name="list_contacts")
-    @_instrument_tool("list_contacts", cluster=CLUSTER_CONTACT)
+    @_instrument_tool(
+        "list_contacts",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact", "audit"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
         """List contact links for an agent in a project."""
         project = await _get_project_by_identifier(project_key)
@@ -1984,7 +2113,13 @@ def build_mcp_server() -> FastMCP:
         return out
 
     @mcp.tool(name="set_contact_policy")
-    @_instrument_tool("set_contact_policy", cluster=CLUSTER_CONTACT)
+    @_instrument_tool(
+        "set_contact_policy",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact", "configure"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
     async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
         project = await _get_project_by_identifier(project_key)
