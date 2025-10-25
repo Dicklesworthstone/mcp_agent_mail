@@ -60,7 +60,7 @@ PY
 fi
 
 OUT_JSON="${TARGET_DIR}/codex.mcp.json"
-if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
+backup_file "$OUT_JSON"
 log_step "Writing ${OUT_JSON}"
 if [[ -n "${_TOKEN}" ]]; then
   AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"
@@ -106,7 +106,7 @@ log_step "Registering MCP server in Codex CLI config"
 CODEX_DIR="${HOME}/.codex"
 mkdir -p "$CODEX_DIR"
 USER_TOML="${CODEX_DIR}/config.toml"
-if [[ -f "$USER_TOML" ]]; then cp "$USER_TOML" "${USER_TOML}.bak.$(date +%s)"; fi
+backup_file "$USER_TOML"
 if ! grep -q "^\[mcp_servers.mcp_agent_mail\]" "$USER_TOML" 2>/dev/null; then
   {
     echo ""
@@ -122,7 +122,7 @@ fi
 LOCAL_CODEX_DIR="${TARGET_DIR}/.codex"
 mkdir -p "$LOCAL_CODEX_DIR"
 LOCAL_TOML="${LOCAL_CODEX_DIR}/config.toml"
-if [[ -f "$LOCAL_TOML" ]]; then cp "$LOCAL_TOML" "${LOCAL_TOML}.bak.$(date +%s)"; fi
+backup_file "$LOCAL_TOML"
 cat > "$LOCAL_TOML" <<TOML
 # Project-local Codex MCP configuration
 [mcp_servers.mcp_agent_mail]

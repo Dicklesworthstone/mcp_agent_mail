@@ -57,7 +57,7 @@ PY
 fi
 AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
 OUT_JSON="${TARGET_DIR}/cursor.mcp.json"
-if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
+backup_file "$OUT_JSON"
 write_atomic "$OUT_JSON" <<JSON
 {
   "mcpServers": {
@@ -89,7 +89,7 @@ echo "==> Installing user-level Cursor MCP config (best-effort)"
 HOME_CURSOR_DIR="${HOME}/.cursor"
 mkdir -p "$HOME_CURSOR_DIR"
 HOME_CURSOR_JSON="${HOME_CURSOR_DIR}/mcp.json"
-if [[ -f "$HOME_CURSOR_JSON" ]]; then cp "$HOME_CURSOR_JSON" "${HOME_CURSOR_JSON}.bak.$(date +%s)"; fi
+backup_file "$HOME_CURSOR_JSON"
 cat > "$HOME_CURSOR_JSON" <<JSON
 {
   "mcpServers": {

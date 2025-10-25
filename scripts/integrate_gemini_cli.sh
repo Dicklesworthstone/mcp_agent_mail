@@ -57,7 +57,7 @@ PY
 fi
 
 OUT_JSON="${TARGET_DIR}/gemini.mcp.json"
-if [[ -f "$OUT_JSON" ]]; then cp "$OUT_JSON" "${OUT_JSON}.bak.$(date +%s)"; fi
+backup_file "$OUT_JSON"
 if [[ -n "${_TOKEN}" ]]; then
   AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
 else
@@ -94,7 +94,7 @@ echo "==> Installing user-level Gemini MCP config (best-effort)"
 HOME_GEMINI_DIR="${HOME}/.gemini"
 mkdir -p "$HOME_GEMINI_DIR"
 HOME_GEMINI_JSON="${HOME_GEMINI_DIR}/mcp.json"
-if [[ -f "$HOME_GEMINI_JSON" ]]; then cp "$HOME_GEMINI_JSON" "${HOME_GEMINI_JSON}.bak.$(date +%s)"; fi
+backup_file "$HOME_GEMINI_JSON"
 cat > "$HOME_GEMINI_JSON" <<JSON
 {
   "mcpServers": {

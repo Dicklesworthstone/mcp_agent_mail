@@ -60,7 +60,7 @@
 
     <!-- View Options -->
     <div class="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
-      <button @click="viewMode = 'split'; selectMessage(selectedMessage)"
+      <button @click="switchToSplitView()"
               :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
               class="p-2 rounded transition-colors"
               title="Split view (Gmail style)">
@@ -175,7 +175,7 @@
           <input type="checkbox"
                  @change="toggleSelectAll()"
                  :checked="selectedMessages.length > 0 && selectedMessages.length === filteredMessages.length"
-                 x-init="$watch('selectedMessages', () => { $el.indeterminate = selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length; })"
+                 x-init="$watch(['selectedMessages', 'filteredMessages'], () => { $el.indeterminate = selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length; })"
                  class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
                  title="Select all">
           <template x-if="selectedMessages.length > 0">
@@ -696,6 +696,18 @@ function unifiedInboxManager() {
         hasThread: ''
       };
       this.filterMessages();
+    },
+
+    // View Mode
+    switchToSplitView() {
+      this.viewMode = 'split';
+      // Auto-select first message if nothing selected
+      if (!this.selectedMessage && this.filteredMessages.length > 0) {
+        this.selectMessage(this.filteredMessages[0]);
+      } else if (this.selectedMessage) {
+        // Re-render the selected message to ensure it displays
+        this.selectMessage(this.selectedMessage);
+      }
     },
 
     // Selection

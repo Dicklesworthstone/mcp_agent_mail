@@ -119,12 +119,41 @@ run_cmd() {
   "$@"
 }
 
+# Backup a file to backup_config_files/ with timestamp before .bak extension
+# Usage: backup_file "/path/to/file"
+backup_file() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    return 0  # Nothing to backup
+  fi
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] backup ${file}"
+    return 0
+  fi
+
+  # Create backup directory at project root
+  local backup_dir="backup_config_files"
+  mkdir -p "$backup_dir"
+
+  # Get just the filename (not the path)
+  local basename
+  basename=$(basename "$file")
+
+  # Create backup with timestamp BEFORE .bak extension
+  local timestamp
+  timestamp=$(date +%Y%m%d_%H%M%S)
+  local backup_path="${backup_dir}/${basename}.${timestamp}.bak"
+
+  cp "$file" "$backup_path"
+  _print "Backed up ${file} to ${backup_path}"
+}
+
 # Update or append env var in .env atomically (backup first)
 update_env_var() {
   local key="$1"; local value="$2"; local env_file=".env"
   if [[ "${DRY_RUN}" == "1" ]]; then _print "[dry-run] set ${key} in .env"; return 0; fi
   if [[ -f "$env_file" ]]; then
-    cp "$env_file" "${env_file}.bak.$(date +%s)"
+    backup_file "$env_file"
     if grep -q "^${key}=" "$env_file"; then
       sed -E -i "s/^${key}=.*/${key}=${value}/" "$env_file"
     else
