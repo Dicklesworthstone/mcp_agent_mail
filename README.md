@@ -239,7 +239,7 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 ### Implementation and dependencies
 
 - Templates live in `src/mcp_agent_mail/templates/` and are rendered by Jinja2.
-- Markdown is converted with `markdown2` on the server where possible; HTML is sanitized with Bleach.
+- Markdown is converted with `markdown2` on the server where possible; HTML is sanitized with Bleach (with CSS sanitizer when available).
 - Tailwind CSS, Lucide icons, Alpine.js, Marked, and Prism are loaded via CDN in `base.html` for a modern look without a frontend build step.
 - All rendering is server‑side; there’s no SPA router. Pages degrade cleanly without JavaScript.
 
@@ -404,8 +404,8 @@ sequenceDiagram
 | Tool | Purpose |
 | :-- | :-- |
 | `register_agent(...)` | Register a new agent identity and write `profile.json` in Git |
-| `whois(project_key, agent_name)` | Fetch a profile for one agent |
-| `whois(project_key, agent_name)` | Enriched profile details including recent commits |
+| `whois(project_key, agent_name)` | Enriched profile for one agent (optionally includes recent commits) |
+| `create_agent_identity(project_key, program, model, name_hint?, task_description?, attachments_policy?)` | Always creates a new unique agent and writes `profile.json` |
 | `send_message(...)` | Create canonical + inbox/outbox markdown artifacts and commit |
 | `reply_message(...)` | Reply to an existing message and continue the thread |
 | `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` | Request permission to message another agent |
@@ -459,7 +459,9 @@ When two repos represent the same underlying project (e.g., `frontend` and `back
 
 Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is on by default (CONTACT_ENFORCEMENT_ENABLED=true) but is designed to be non-blocking in obvious collaboration contexts.
 
-| `check_my_messages(...)` | Pull recent messages for an agent |
+| Tool | Purpose |
+| :-- | :-- |
+| `fetch_inbox(...)` | Pull recent messages for an agent |
 | `acknowledge_message(...)` | Mark a message as acknowledged by agent |
 | `claim_paths(...)` | Request advisory leases on files/globs |
 | `release_claims(...)` | Release existing leases |
@@ -479,8 +481,9 @@ Expose common reads as resources that clients can fetch:
 - `resource://views/urgent-unread/{agent}{?project,limit}`
 - `resource://views/ack-required/{agent}{?project,limit}`
 - `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}`: ack-required messages older than TTL without acknowledgements
-- `resource://mailbox-with-commits/{agent}{?project,limit}`: inbox items enriched with per-message commit metadata and diff summaries (recommended)
+- `resource://mailbox-with-commits/{agent}{?project,limit}`: mailbox items enriched with per-message commit metadata and diff summaries (recommended)
 - `resource://mailbox/{agent}{?project,limit}`: recent inbox items with a basic/heuristic commit reference (legacy/simple)
+- `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}`: messages sent by the agent (optionally include bodies)
 
 Example (conceptual) resource read:
 
@@ -495,7 +498,7 @@ Example (conceptual) resource read:
 
 - `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
   - `project`: disambiguate if the same agent name exists in multiple projects; if omitted, the server auto-resolves only when the agent name uniquely maps to a single project. Otherwise, pass `project` explicitly.
-  - `since_ts`: epoch seconds filter (defaults to 0)
+  - `since_ts`: ISO-8601 timestamp string; only messages newer than this are returned
   - `urgent_only`: when true, only `importance in ('high','urgent')`
   - `include_bodies`: include markdown bodies in results
   - `limit`: max results (default 20)
@@ -552,6 +555,7 @@ decouple_config = DecoupleConfig(RepositoryEnv(".env"))
 STORAGE_ROOT = decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo")
 HTTP_HOST = decouple_config("HTTP_HOST", default="127.0.0.1")
 HTTP_PORT = int(decouple_config("HTTP_PORT", default=8765))
+HTTP_PATH = decouple_config("HTTP_PATH", default="/mcp/")
 ```
 
 Common variables you may set:
@@ -586,7 +590,8 @@ Common variables you may set:
 | `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
 | `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
 | `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
-| `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
+| `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
+| `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
 | `LOG_LEVEL` | `info` | Future: server log level |
 | `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
@@ -596,7 +601,7 @@ Common variables you may set:
 | `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
 
 | `CLAIMS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting claims |
-| `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning |
+| `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
 | `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
 | `ACK_ESCALATION_ENABLED` | `false` | Enable escalation for overdue ACKs |
@@ -633,7 +638,7 @@ uv run python -m mcp_agent_mail.cli serve-http
 uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
-Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port.
+Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
 
 ### Quick onboarding for agents
 
@@ -698,12 +703,12 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 
 ## HTTP usage examples (JSON-RPC over Streamable HTTP)
 
-Assuming the server is running at `http://127.0.0.1:8765/mcp/`.
+Assuming the server is running at `http://127.0.0.1:8765/mcp/` (trailing slash optional).
 
 Call a tool:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8765/mcp/ \
+curl -sS -X POST http://127.0.0.1:8765/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -724,7 +729,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
 Read a resource:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:8765/mcp/ \
+curl -sS -X POST http://127.0.0.1:8765/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
@@ -742,11 +747,11 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
 - Phrase search: `"build plan"`
 - Prefix search: `mig*`
 - Boolean operators: `plan AND users NOT legacy`
-- Field boosting is not enabled by default; subject and body are indexed. Keep queries concise.
+- Field boosting is not enabled by default; subject and body are indexed. Keep queries concise. When FTS is unavailable, the UI/API automatically falls back to SQL LIKE on subject/body.
 
 ## Design choices and rationale
 
-- **HTTP-only FastMCP**: Streamable HTTP is the modern remote transport; SSE is legacy; STDIO is not exposed here by design
+- **HTTP-only FastMCP**: Streamable HTTP is the modern remote transport; STDIO is not exposed here by design
 - **Git + Markdown**: Human-auditable, diffable artifacts that fit developer workflows (inbox/outbox mental model)
 - **SQLite + FTS5**: Efficient indexing/search with minimal ops footprint
 - **Advisory file reservations**: Make intent explicit and reviewable; optional guard enforces reservations at commit time
@@ -842,7 +847,7 @@ Reserve a surface for editing:
     }
     ```
 - Backups and retention
-  - The Git repos and SQLite DB live under `MCP_MAIL_STORE`; back them up together for consistency
+  - The Git repos and SQLite DB live under `STORAGE_ROOT`; back them up together for consistency
 - Observability
   - Add logging and metrics at the ASGI layer returned by `mcp.http_app()` (Prometheus, OpenTelemetry)
 - Concurrency
@@ -924,8 +929,9 @@ if __name__ == "__main__":
 | :-- | :-- | :-- | :-- |
 | `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
 | `ensure_project` | `ensure_project(human_key: str)` | `{id, slug, human_key, created_at}` | Idempotently creates/ensures project |
-| `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
-| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str)` | Message dict | Writes canonical + inbox/outbox, converts images |
+| `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
+| `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
+| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | Message dict | Writes canonical + inbox/outbox, converts images |
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | Message dict | Preserves/creates thread, inherits flags |
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
@@ -959,6 +965,7 @@ if __name__ == "__main__":
 | `resource://mailbox-with-commits/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing enriched with commit metadata |
 | `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}` | listed | `{project, agent, count, messages[]}` | Messages sent by the agent |
 | `resource://views/acks-stale/{agent}{?project,ttl_seconds,limit}` | listed | `{project, agent, ttl_seconds, count, messages[]}` | Ack-required older than TTL without ack |
+| `resource://views/ack-required/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | Pending acknowledgements for an agent |
 
 ### Client Integration Guide
 

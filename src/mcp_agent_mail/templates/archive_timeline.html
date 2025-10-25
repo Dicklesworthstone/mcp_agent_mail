@@ -72,12 +72,20 @@
 document.addEventListener('DOMContentLoaded', async () => {
   const commits = {{ commits|tojson }};
 
+  // Helper to sanitize strings for Mermaid
+  function sanitizeForMermaid(str) {
+    if (!str) return '';
+    // Remove or escape characters that could break Mermaid syntax
+    return str.replace(/[\"\\]/g, ' ').replace(/[\n\r]/g, ' ').substring(0, 20);
+  }
+
   // Build Mermaid gitgraph
   let mermaidCode = 'gitGraph LR:\n';
 
   commits.forEach((commit, idx) => {
     const id = commit.short_sha;
-    const tag = commit.sender ? `${commit.sender.substring(0, 10)}` : commit.author.substring(0, 10);
+    const rawTag = commit.sender || commit.author || 'Unknown';
+    const tag = sanitizeForMermaid(rawTag);
     mermaidCode += `  commit id: "${id}" tag: "${tag}"\n`;
   });
 

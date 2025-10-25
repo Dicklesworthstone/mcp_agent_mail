@@ -91,6 +91,13 @@ function browserManager() {
     project: '{{ project }}',
     path: '{{ path }}',
 
+    // Helper to escape HTML to prevent XSS
+    escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    },
+
     async selectEntry(entry) {
       this.selected = entry;
 
@@ -109,10 +116,10 @@ function browserManager() {
             const formatted = JSON.stringify(JSON.parse(content), null, 2);
             container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
           } catch {
-            container.innerHTML = `<pre>${content}</pre>`;
+            container.innerHTML = `<pre>${this.escapeHtml(content)}</pre>`;
           }
         } else {
-          container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${content}</pre>`;
+          container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
         }
 
         lucide.createIcons();

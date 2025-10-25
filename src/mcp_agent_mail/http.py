@@ -1411,6 +1411,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         # ========== Archive Visualization Routes ==========
 
+        def _validate_project_slug(slug: str) -> bool:
+            """Validate project slug format to prevent path traversal."""
+            import re
+            # Slugs should only contain lowercase letters, numbers, hyphens, underscores
+            # No path separators or relative path components
+            if not slug:
+                return False
+            if slug in (".", "..", "/", "\\"):
+                return False
+            if "/" in slug or "\\" in slug or ".." in slug:
+                return False
+            # Should match safe slug pattern
+            return bool(re.match(r"^[a-z0-9_-]+$", slug, re.IGNORECASE))
+
         @fastapi_app.get("/mail/archive/guide", response_class=HTMLResponse)
         async def archive_guide() -> HTMLResponse:
             """Display the archive access guide and overview."""
@@ -1425,18 +1439,42 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if (repo_root / ".git").exists():
                 try:
                     repo = GitRepo(str(repo_root))
-                    total_commits = sum(1 for _ in repo.iter_commits())
-                    last_commit = next(repo.iter_commits(), None)
+                    # Use efficient commit counting with limit to prevent DoS
+                    commit_count = sum(1 for _ in repo.iter_commits(max_count=10000))
+                    if commit_count == 10000:
+                        total_commits = "10,000+"  # Hit limit, indicate there are more
+                    else:
+                        total_commits = f"{commit_count:,}"  # Format with commas
+                    last_commit = next(repo.iter_commits(max_count=1), None)
                     last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
 
-                    # Count projects
+                    # Count projects (with limit for performance)
                     projects_dir = repo_root / "projects"
-                    project_count = len([p for p in projects_dir.iterdir() if p.is_dir()]) if projects_dir.exists() else 0
+                    if projects_dir.exists():
+                        # Use islice to avoid loading all dirs into memory
+                        from itertools import islice
+                        project_count = sum(
+                            1 for p in islice(projects_dir.iterdir(), 100) if p.is_dir()
+                        )
+                    else:
+                        project_count = 0
 
-                    # Estimate size
+                    # Estimate size with timeout
                     import subprocess
-                    result = subprocess.run(["du", "-sh", str(repo_root)], capture_output=True, text=True)
-                    repo_size = result.stdout.split()[0] if result.returncode == 0 else "Unknown"
+                    try:
+                        result = subprocess.run(
+                            ["du", "-sh", str(repo_root)],
+                            capture_output=True,
+                            text=True,
+                            timeout=5.0  # 5 second timeout
+                        )
+                        repo_size = result.stdout.split()[0] if result.returncode == 0 else "Unknown"
+                    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
+                        # du not available, took too long, or other OS error
+                        repo_size = "Unknown"
+                    except Exception:
+                        # Catch-all for unexpected errors
+                        repo_size = "Unknown"
                 except Exception:
                     total_commits = 0
                     project_count = 0
@@ -1488,8 +1526,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 repo = GitRepo(str(repo_root))
                 commit = await get_commit_detail(repo, sha)
                 return await _render("archive_commit.html", commit=commit)
-            except Exception as e:
-                return await _render("error.html", message=f"Commit not found: {str(e)}")
+            except ValueError:
+                # Validation errors (bad SHA, etc.)
+                return await _render("error.html", message="Invalid commit identifier")
+            except Exception:
+                # Don't leak error details
+                return await _render("error.html", message="Commit not found")
 
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
@@ -1539,14 +1581,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/browser/{project}/file")
         async def archive_browser_file(project: str, path: str) -> JSONResponse:
             """Get file content from archive."""
-            settings = get_settings()
-            archive = await ensure_archive(settings, project)
-            content = await get_file_content(archive, path)
+            try:
+                settings = get_settings()
+                archive = await ensure_archive(settings, project)
+                content = await get_file_content(archive, path)
 
-            if content is None:
+                if content is None:
+                    raise HTTPException(status_code=404, detail="File not found")
+
+                return JSONResponse(content=content)
+            except ValueError:
+                # Path validation errors
+                raise HTTPException(status_code=400, detail="Invalid file path")
+            except Exception:
                 raise HTTPException(status_code=404, detail="File not found")
-
-            return JSONResponse(content=content)
 
         @fastapi_app.get("/mail/archive/network", response_class=HTMLResponse)
         async def archive_network(project: str | None = None) -> HTMLResponse:
