@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block title %}Communication Timeline — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Projects</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Archive</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Timeline</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="page-transition">
+  <div class="mb-8">
+    <div class="flex items-center gap-4 mb-4">
+      <div class="w-16 h-16 bg-gradient-to-br from-violet-600 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg">
+        <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-1">Communication Timeline</h1>
+        <p class="text-slate-600 dark:text-slate-400">Visual message flow for {{ project_name }}</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+    <div class="p-8">
+      <div id="timeline-container" class="min-h-[600px] flex items-center justify-center">
+        <div class="text-center">
+          <div class="animate-spin w-12 h-12 border-4 border-primary-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+          <p class="text-slate-600 dark:text-slate-400">Generating timeline...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mt-6 bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-6">
+    <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+      <i data-lucide="list" class="w-5 h-5 text-primary-600"></i>
+      Timeline Events
+    </h3>
+    <div class="space-y-2">
+      {% for commit in commits %}
+        <a href="/mail/archive/commit/{{ commit.sha }}" class="block p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all group">
+          <div class="flex items-start gap-3">
+            <code class="text-xs font-mono text-slate-600 dark:text-slate-400 mt-1">{{ commit.short_sha }}</code>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1">{{ commit.subject }}</div>
+              <div class="text-xs text-slate-600 dark:text-slate-400 mt-1">
+                {% if commit.sender %}
+                  <span class="font-medium">{{ commit.sender }}</span>
+                  {% if commit.recipients %}
+                    → {{ commit.recipients|join(', ') }}
+                  {% endif %}
+                {% else %}
+                  {{ commit.author }}
+                {% endif %}
+              </div>
+            </div>
+            <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{{ commit.date[:10] }}</span>
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+  const commits = {{ commits|tojson }};
+
+  // Build Mermaid gitgraph
+  let mermaidCode = 'gitGraph LR:\n';
+
+  commits.forEach((commit, idx) => {
+    const id = commit.short_sha;
+    const tag = commit.sender ? `${commit.sender.substring(0, 10)}` : commit.author.substring(0, 10);
+    mermaidCode += `  commit id: "${id}" tag: "${tag}"\n`;
+  });
+
+  const container = document.getElementById('timeline-container');
+  container.innerHTML = `<pre class="mermaid">${mermaidCode}</pre>`;
+
+  try {
+    await window.mermaid.run();
+  } catch (e) {
+    container.innerHTML = '<div class="text-center text-red-600 dark:text-red-400"><p>Error rendering timeline</p></div>';
+    console.error(e);
+  }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+
+{% block title %}Time Travel — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Projects</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Archive</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Time Travel</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="page-transition" x-data="timeTravelManager()">
+  <div class="mb-8">
+    <div class="flex items-center gap-4">
+      <div class="w-16 h-16 bg-gradient-to-br from-pink-600 to-rose-600 rounded-2xl flex items-center justify-center shadow-lg">
+        <i data-lucide="clock" class="w-8 h-8 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-1">Time Travel</h1>
+        <p class="text-slate-600 dark:text-slate-400">View historical snapshots of agent inboxes</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-8 mb-6">
+    <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-6 flex items-center gap-2">
+      <i data-lucide="settings" class="w-5 h-5 text-primary-600"></i>
+      Time Travel Settings
+    </h3>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Project</label>
+        <select x-model="selectedProject" class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">Select project...</option>
+          {% for proj in projects %}
+            <option value="{{ proj }}">{{ proj }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Agent</label>
+        <select x-model="selectedAgent" :disabled="!selectedProject" class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50">
+          <option value="">Select agent...</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Date & Time</label>
+        <input type="datetime-local" x-model="selectedTime" class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+      </div>
+    </div>
+
+    <div class="mt-6">
+      <button @click="timeTravel()" :disabled="!selectedProject || !selectedAgent || !selectedTime" class="w-full px-6 py-4 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white font-bold rounded-xl transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3">
+        <i data-lucide="zap" class="w-5 h-5"></i>
+        Travel to This Moment
+      </button>
+    </div>
+  </div>
+
+  <template x-if="snapshot">
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="bg-gradient-to-r from-pink-500 to-rose-600 p-6">
+        <div class="flex items-center justify-between text-white">
+          <div>
+            <h3 class="text-2xl font-bold mb-1">Historical Snapshot</h3>
+            <p class="text-white/90">
+              <span x-text="selectedAgent"></span> inbox as of <span x-text="selectedTime"></span>
+            </p>
+          </div>
+          <div class="text-right">
+            <div class="text-3xl font-bold" x-text="snapshot.messages.length"></div>
+            <div class="text-sm text-white/80">Messages</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-6 space-y-3">
+        <template x-for="msg in snapshot.messages" :key="msg.id">
+          <div class="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
+            <div class="flex items-start justify-between gap-4 mb-2">
+              <h4 class="font-bold text-slate-900 dark:text-white flex-1" x-text="msg.subject"></h4>
+              <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" x-text="msg.date"></span>
+            </div>
+            <div class="text-sm text-slate-600 dark:text-slate-400">
+              From: <span class="font-medium" x-text="msg.from"></span>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="snapshot.messages.length === 0">
+          <div class="flex flex-col items-center justify-center py-12 text-slate-500 dark:text-slate-400">
+            <i data-lucide="inbox" class="w-16 h-16 mb-4"></i>
+            <p>Inbox was empty at this time</p>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+</div>
+
+<script>
+function timeTravelManager() {
+  return {
+    selectedProject: '',
+    selectedAgent: '',
+    selectedTime: '',
+    snapshot: null,
+
+    async timeTravel() {
+      const params = new URLSearchParams({
+        project: this.selectedProject,
+        agent: this.selectedAgent,
+        timestamp: this.selectedTime
+      });
+
+      const response = await fetch(`/mail/archive/time-travel/snapshot?${params}`);
+      this.snapshot = await response.json();
+      lucide.createIcons();
+    }
+  };
+}
+</script>
+{% endblock %}

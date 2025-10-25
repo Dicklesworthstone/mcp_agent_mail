@@ -51,11 +51,11 @@ flowchart LR
   G["Per-project Git repo: .mcp-mail/"]
   Q["SQLite + FTS5"]
 
-  A -- tools/resources (HTTP) --> S
-  S -- writes/reads --> G
-  S -- indexes/queries --> Q
+  A -->|tools/resources (HTTP)| S
+  S -->|writes/reads| G
+  S -->|indexes/queries| Q
 
-  subgraph GitTree[Git tree]
+  subgraph GitTree
     GI1["agents/<Agent>/profile.json"]
     GI2["agents/<Agent>/{inbox,outbox}/..."]
     GI3["messages/YYYY/MM/<msg-id>.md"]
@@ -338,7 +338,7 @@ sequenceDiagram
   Server->>Git: write outbox copy under agents/{from}/outbox/
   Server->>Git: write inbox copies under agents/{to}/inbox/
   Server->>Git: commit all paths with message summary
-  Server-->>Agent: { id, created, subject, recipients, attachments }
+  Server-->>Agent: result (id, created, subject, recipients)
 ```
 
 3) Check inbox
@@ -363,12 +363,12 @@ sequenceDiagram
   Server->>DB: expire old leases; check overlaps for each path
   DB-->>Server: conflicts/grants
   alt conflicts exist
-    Server-->>Agent: { conflicts: [...], granted: [], expires_ts }
+    Server-->>Agent: conflicts found (none granted)
   else no conflicts
     Server->>DB: insert claim rows (one per path)
-    Server->>Git: write claims/{sha1(path)}.json for each granted path
-    Server->>Git: commit "claim: {agent} exclusive/shared {n} path(s)"
-    Server-->>Agent: { granted: [..], conflicts: [], expires_ts }
+    Server->>Git: write claims/sha1(path).json for each granted path
+    Server->>Git: commit claim summary
+    Server-->>Agent: granted paths (no conflicts)
   end
 ```
 

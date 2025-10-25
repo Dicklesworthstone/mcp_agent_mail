@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block title %}Activity Feed — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Archive
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Activity Feed</span>
+</nav>
+{% endblock %}
+
+{% block header_actions %}
+<div class="flex items-center gap-2">
+  <button @click="$refs.filterDropdown.open = true"
+          class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-xl transition-all duration-200 flex items-center gap-2 font-medium shadow-sm">
+    <i data-lucide="filter" class="w-4 h-4"></i>
+    Filter
+  </button>
+  <button onclick="window.location.reload()"
+          class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-xl transition-all duration-200 flex items-center gap-2 font-medium shadow-md hover:shadow-lg">
+    <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+    Refresh
+  </button>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="page-transition" x-data="activityManager()">
+  <!-- Header with gradient -->
+  <div class="mb-8">
+    <div class="flex items-center gap-4 mb-4">
+      <div class="w-16 h-16 bg-gradient-to-br from-blue-600 to-indigo-600 rounded-2xl flex items-center justify-center shadow-lg">
+        <i data-lucide="activity" class="w-8 h-8 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-1">
+          Activity Feed
+        </h1>
+        <p class="text-slate-600 dark:text-slate-400">
+          Recent commits across all projects
+        </p>
+      </div>
+    </div>
+
+    <!-- Stats Bar -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border-2 border-slate-200 dark:border-slate-700 shadow-soft">
+        <div class="text-2xl font-bold text-slate-900 dark:text-white mb-1">{{ commits|length }}</div>
+        <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Commits</div>
+      </div>
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border-2 border-slate-200 dark:border-slate-700 shadow-soft">
+        <div class="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mb-1" x-text="totalInsertions()">0</div>
+        <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Insertions</div>
+      </div>
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border-2 border-slate-200 dark:border-slate-700 shadow-soft">
+        <div class="text-2xl font-bold text-red-600 dark:text-red-400 mb-1" x-text="totalDeletions()">0</div>
+        <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Deletions</div>
+      </div>
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-4 border-2 border-slate-200 dark:border-slate-700 shadow-soft">
+        <div class="text-2xl font-bold text-violet-600 dark:text-violet-400 mb-1" x-text="uniqueAuthors()">0</div>
+        <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Authors</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Commit Timeline -->
+  <div class="space-y-4">
+    <template x-for="(commit, index) in commits" :key="commit.sha">
+      <div class="relative" :style="`animation-delay: ${Math.min(index * 0.05, 1)}s`">
+        <!-- Timeline connector -->
+        <template x-if="index > 0">
+          <div class="absolute left-6 -top-4 w-0.5 h-4 bg-gradient-to-b from-slate-300 dark:from-slate-600 to-transparent"></div>
+        </template>
+
+        <!-- Commit Card -->
+        <div class="bg-white dark:bg-slate-800 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 shadow-soft hover:shadow-medium transition-all duration-300 overflow-hidden group">
+          <div class="p-6">
+            <div class="flex items-start gap-4">
+              <!-- Icon & Timeline Dot -->
+              <div class="relative flex-shrink-0">
+                <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+                  <i data-lucide="git-commit" class="w-6 h-6 text-white"></i>
+                </div>
+              </div>
+
+              <!-- Content -->
+              <div class="flex-1 min-w-0">
+                <!-- Header -->
+                <div class="flex items-start justify-between gap-4 mb-3">
+                  <div class="flex-1 min-w-0">
+                    <a :href="'/mail/archive/commit/' + commit.sha"
+                       class="text-lg font-bold text-slate-900 dark:text-white hover:text-primary-600 dark:hover:text-primary-400 transition-colors line-clamp-2 block"
+                       x-text="commit.subject"></a>
+                  </div>
+                  <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" x-text="commit.relative_date"></span>
+                </div>
+
+                <!-- Meta Information -->
+                <div class="flex items-center gap-4 flex-wrap text-sm text-slate-600 dark:text-slate-400 mb-3">
+                  <div class="flex items-center gap-2">
+                    <div class="w-6 h-6 bg-gradient-to-br from-slate-300 to-slate-400 dark:from-slate-600 dark:to-slate-700 rounded-full flex items-center justify-center">
+                      <span class="text-xs font-bold text-white" x-text="commit.author.charAt(0).toUpperCase()"></span>
+                    </div>
+                    <span class="font-medium" x-text="commit.author"></span>
+                  </div>
+                  <div class="flex items-center gap-1.5">
+                    <i data-lucide="hash" class="w-3.5 h-3.5"></i>
+                    <code class="font-mono text-xs" x-text="commit.short_sha"></code>
+                  </div>
+                </div>
+
+                <!-- Stats -->
+                <div class="flex items-center gap-3 flex-wrap">
+                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-700 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-300">
+                    <i data-lucide="file" class="w-3 h-3"></i>
+                    <span x-text="commit.files_changed + ' file' + (commit.files_changed !== 1 ? 's' : '')"></span>
+                  </span>
+                  <template x-if="commit.insertions > 0">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 rounded-lg text-xs font-semibold">
+                      <i data-lucide="plus" class="w-3 h-3"></i>
+                      <span x-text="commit.insertions"></span>
+                    </span>
+                  </template>
+                  <template x-if="commit.deletions > 0">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg text-xs font-semibold">
+                      <i data-lucide="minus" class="w-3 h-3"></i>
+                      <span x-text="commit.deletions"></span>
+                    </span>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Arrow -->
+              <div class="flex-shrink-0 flex items-center">
+                <a :href="'/mail/archive/commit/' + commit.sha"
+                   class="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+                  <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all"></i>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- Empty State -->
+  <template x-if="commits.length === 0">
+    <div class="flex flex-col items-center justify-center py-20 animate-fade-in">
+      <div class="w-24 h-24 bg-slate-200 dark:bg-slate-700 rounded-3xl flex items-center justify-center mb-6 shadow-lg">
+        <i data-lucide="git-commit" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+      </div>
+      <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-2">No commits yet</h3>
+      <p class="text-slate-600 dark:text-slate-400 text-center max-w-md">
+        Commits will appear here as agents send messages and perform actions.
+      </p>
+    </div>
+  </template>
+</div>
+
+<script>
+function activityManager() {
+  return {
+    commits: {{ commits|tojson }},
+
+    totalInsertions() {
+      return this.commits.reduce((sum, c) => sum + (c.insertions || 0), 0);
+    },
+
+    totalDeletions() {
+      return this.commits.reduce((sum, c) => sum + (c.deletions || 0), 0);
+    },
+
+    uniqueAuthors() {
+      const authors = new Set(this.commits.map(c => c.author));
+      return authors.size;
+    }
+  };
+}
+</script>
+{% endblock %}

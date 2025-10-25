@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+
+{% block title %}Commit {{ commit.short_sha }} — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Archive
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/activity" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Activity
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium font-mono">{{ commit.short_sha }}</span>
+</nav>
+{% endblock %}
+
+{% block header_actions %}
+<div class="flex items-center gap-2">
+  <button onclick="copyToClipboard('{{ commit.sha }}')"
+          class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-xl transition-all duration-200 flex items-center gap-2 font-medium shadow-sm">
+    <i data-lucide="copy" class="w-4 h-4"></i>
+    Copy SHA
+  </button>
+  <button onclick="window.history.back()"
+          class="px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-xl transition-all duration-200 flex items-center gap-2 font-medium shadow-md hover:shadow-lg">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i>
+    Back
+  </button>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+  <!-- Commit Header Card -->
+  <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+    <!-- Gradient Header -->
+    <div class="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 p-8">
+      <div class="flex items-start gap-4 mb-4">
+        <div class="w-16 h-16 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center shadow-xl">
+          <i data-lucide="git-commit" class="w-8 h-8 text-white"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <h1 class="text-3xl font-bold text-white mb-2 break-words">
+            {{ commit.subject }}
+          </h1>
+          <div class="flex items-center gap-4 flex-wrap text-white/90">
+            <div class="flex items-center gap-2">
+              <div class="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center">
+                <span class="text-sm font-bold">{{ commit.author[0].upper() }}</span>
+              </div>
+              <span class="font-medium">{{ commit.author }}</span>
+            </div>
+            <span>•</span>
+            <span>{{ commit.date[:10] }}</span>
+            <span>•</span>
+            <code class="px-2 py-1 bg-white/20 rounded-lg font-mono text-sm">{{ commit.short_sha }}</code>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stats Grid -->
+      <div class="grid grid-cols-3 gap-4">
+        <div class="bg-white/10 backdrop-blur-sm rounded-xl p-4 border border-white/20">
+          <div class="text-2xl font-bold text-white mb-1">{{ commit.stats.files }}</div>
+          <div class="text-xs text-white/80 font-medium uppercase tracking-wide">Files Changed</div>
+        </div>
+        <div class="bg-emerald-500/20 backdrop-blur-sm rounded-xl p-4 border border-emerald-300/30">
+          <div class="text-2xl font-bold text-white mb-1">+{{ commit.stats.insertions }}</div>
+          <div class="text-xs text-white/80 font-medium uppercase tracking-wide">Insertions</div>
+        </div>
+        <div class="bg-red-500/20 backdrop-blur-sm rounded-xl p-4 border border-red-300/30">
+          <div class="text-2xl font-bold text-white mb-1">-{{ commit.stats.deletions }}</div>
+          <div class="text-xs text-white/80 font-medium uppercase tracking-wide">Deletions</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Commit Details -->
+    <div class="p-8">
+      <!-- Body -->
+      {% if commit.body %}
+        <div class="mb-6">
+          <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+            <i data-lucide="file-text" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+            Commit Message
+          </h3>
+          <div class="p-4 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl">
+            <pre class="text-sm text-slate-900 dark:text-white whitespace-pre-wrap font-mono">{{ commit.body }}</pre>
+          </div>
+        </div>
+      {% endif %}
+
+      <!-- Trailers -->
+      {% if commit.trailers %}
+        <div class="mb-6">
+          <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+            <i data-lucide="tag" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+            Metadata
+          </h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {% for key, value in commit.trailers.items() %}
+              <div class="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg">
+                <span class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">{{ key }}:</span>
+                <span class="text-sm font-medium text-slate-900 dark:text-white">{{ value }}</span>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+
+      <!-- Files Changed -->
+      <div>
+        <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-3 flex items-center gap-2">
+          <i data-lucide="file-diff" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+          Files Changed
+        </h3>
+        <div class="space-y-2">
+          {% for file in commit.files_changed %}
+            <div class="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg hover:border-primary-400 dark:hover:border-primary-600 transition-colors">
+              <!-- Change type icon -->
+              {% if file.change_type == 'added' %}
+                <div class="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i data-lucide="plus" class="w-4 h-4 text-white"></i>
+                </div>
+              {% elif file.change_type == 'deleted' %}
+                <div class="w-8 h-8 bg-red-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i data-lucide="minus" class="w-4 h-4 text-white"></i>
+                </div>
+              {% elif file.change_type == 'renamed' %}
+                <div class="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i data-lucide="move" class="w-4 h-4 text-white"></i>
+                </div>
+              {% else %}
+                <div class="w-8 h-8 bg-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i data-lucide="edit" class="w-4 h-4 text-white"></i>
+                </div>
+              {% endif %}
+
+              <!-- File path -->
+              <div class="flex-1 min-w-0">
+                <code class="text-sm font-mono text-slate-900 dark:text-white break-all">{{ file.path }}</code>
+                {% if file.change_type == 'renamed' %}
+                  <div class="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                    From: <code class="font-mono">{{ file.a_path }}</code>
+                  </div>
+                {% endif %}
+              </div>
+
+              <!-- Change type badge -->
+              <span class="px-2.5 py-1 rounded-lg text-xs font-bold uppercase tracking-wide flex-shrink-0
+                {% if file.change_type == 'added' %}bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300
+                {% elif file.change_type == 'deleted' %}bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300
+                {% elif file.change_type == 'renamed' %}bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300
+                {% else %}bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300{% endif %}">
+                {{ file.change_type }}
+              </span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Diff Viewer -->
+  <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+    <div class="bg-slate-50 dark:bg-slate-900 px-8 py-4 border-b border-slate-200 dark:border-slate-700">
+      <h3 class="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+        <i data-lucide="code" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+        Unified Diff
+      </h3>
+    </div>
+
+    <div class="p-8">
+      <div id="diff-viewer" class="rounded-xl overflow-hidden border-2 border-slate-200 dark:border-slate-700"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('SHA copied to clipboard!', 'success');
+  }).catch(() => {
+    showToast('Failed to copy', 'error');
+  });
+}
+
+// Initialize Diff2Html
+document.addEventListener('DOMContentLoaded', () => {
+  const diffString = {{ commit.diff|tojson }};
+
+  if (diffString && diffString.trim()) {
+    const diffHtml = Diff2Html.html(diffString, {
+      drawFileList: true,
+      matching: 'lines',
+      outputFormat: 'side-by-side',
+      renderNothingWhenEmpty: false,
+    });
+
+    document.getElementById('diff-viewer').innerHTML = diffHtml;
+  } else {
+    document.getElementById('diff-viewer').innerHTML = `
+      <div class="flex flex-col items-center justify-center py-12 text-slate-500 dark:text-slate-400">
+        <i data-lucide="info" class="w-12 h-12 mb-4"></i>
+        <p class="text-center">No diff available for this commit</p>
+      </div>
+    `;
+    lucide.createIcons();
+  }
+});
+</script>
+
+<style>
+/* Diff2Html dark mode adjustments */
+.dark .d2h-wrapper {
+  background: #1e293b;
+  border-color: #334155;
+}
+
+.dark .d2h-file-header {
+  background: #0f172a;
+  border-color: #334155;
+}
+
+.dark .d2h-file-name {
+  color: #f1f5f9;
+}
+
+.dark .d2h-code-line {
+  background: #1e293b;
+  color: #cbd5e1;
+}
+
+.dark .d2h-code-line-ctn {
+  color: #cbd5e1;
+}
+
+.dark .d2h-ins {
+  background: #064e3b;
+  border-color: #065f46;
+}
+
+.dark .d2h-del {
+  background: #7f1d1d;
+  border-color: #991b1b;
+}
+
+.dark .d2h-info {
+  background: #1e293b;
+  color: #94a3b8;
+}
+
+.dark .d2h-code-line-prefix {
+  color: #94a3b8;
+}
+</style>
+{% endblock %}

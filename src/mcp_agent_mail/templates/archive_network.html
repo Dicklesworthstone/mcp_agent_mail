@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block title %}Network Graph — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Projects</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Archive</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Network Graph</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="page-transition">
+  <div class="mb-8">
+    <div class="flex items-center gap-4">
+      <div class="w-16 h-16 bg-gradient-to-br from-amber-600 to-orange-600 rounded-2xl flex items-center justify-center shadow-lg">
+        <i data-lucide="network" class="w-8 h-8 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-1">Agent Communication Network</h1>
+        <p class="text-slate-600 dark:text-slate-400">Interactive visualization for {{ project_name }}</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+    <div class="lg:col-span-3 bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="bg-slate-50 dark:bg-slate-900 px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+        <h3 class="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+          <i data-lucide="share-2" class="w-5 h-5 text-primary-600"></i>
+          Communication Patterns
+        </h3>
+      </div>
+      <div id="network-graph" style="height: 600px;" class="bg-white dark:bg-slate-900"></div>
+    </div>
+
+    <div class="lg:col-span-1 space-y-6">
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-6">
+        <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+          <i data-lucide="users" class="w-5 h-5 text-primary-600"></i>
+          Agents
+        </h3>
+        <div class="space-y-3">
+          {% for node in graph.nodes %}
+            <div class="p-3 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+              <div class="font-semibold text-slate-900 dark:text-white text-sm mb-1">{{ node.label }}</div>
+              <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                <span class="flex items-center gap-1"><i data-lucide="send" class="w-3 h-3"></i> {{ node.sent }}</span>
+                <span class="flex items-center gap-1"><i data-lucide="inbox" class="w-3 h-3"></i> {{ node.received }}</span>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-6">
+        <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+          <i data-lucide="info" class="w-5 h-5 text-primary-600"></i>
+          Legend
+        </h3>
+        <div class="space-y-2 text-sm text-slate-600 dark:text-slate-400">
+          <div class="flex items-center gap-2">
+            <div class="w-4 h-4 rounded-full bg-primary-500"></div>
+            <span>Agent node</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-8 h-0.5 bg-slate-400"></div>
+            <span>Message flow</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <div class="w-2 h-2 rounded-full bg-emerald-500"></div>
+            <span>Size = total messages</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const graphData = {{ graph|tojson }};
+
+  const nodes = new vis.DataSet(graphData.nodes.map(n => ({
+    id: n.id,
+    label: n.label,
+    value: n.total,
+    title: `${n.label}: ${n.sent} sent, ${n.received} received`,
+    color: {
+      background: '#6366f1',
+      border: '#4f46e5',
+      highlight: { background: '#818cf8', border: '#6366f1' },
+      hover: { background: '#818cf8', border: '#6366f1' }
+    },
+    font: { color: '#ffffff', size: 14, face: 'Inter' }
+  })));
+
+  const edges = new vis.DataSet(graphData.edges.map(e => ({
+    from: e.from,
+    to: e.to,
+    value: e.count,
+    title: `${e.count} message${e.count !== 1 ? 's' : ''}`,
+    arrows: 'to',
+    color: { color: '#94a3b8', highlight: '#6366f1', hover: '#6366f1' }
+  })));
+
+  const container = document.getElementById('network-graph');
+  const data = { nodes, edges };
+  const options = {
+    physics: {
+      enabled: true,
+      barnesHut: {
+        gravitationalConstant: -30000,
+        springLength: 200,
+        springConstant: 0.04
+      }
+    },
+    nodes: {
+      shape: 'dot',
+      scaling: {
+        min: 20,
+        max: 60,
+        label: { enabled: true, min: 14, max: 20 }
+      }
+    },
+    edges: {
+      smooth: { type: 'continuous' },
+      scaling: { min: 1, max: 10 }
+    },
+    interaction: {
+      hover: true,
+      tooltipDelay: 200
+    }
+  };
+
+  new vis.Network(container, data, options);
+  lucide.createIcons();
+});
+</script>
+{% endblock %}

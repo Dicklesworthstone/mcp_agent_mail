@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+
+{% block title %}Archive Browser — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Projects</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/archive/guide" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Archive</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Browser</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="page-transition" x-data="browserManager()">
+  <div class="mb-8">
+    <div class="flex items-center gap-4">
+      <div class="w-16 h-16 bg-gradient-to-br from-emerald-600 to-green-600 rounded-2xl flex items-center justify-center shadow-lg">
+        <i data-lucide="folder-tree" class="w-8 h-8 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-1">Archive Browser</h1>
+        <p class="text-slate-600 dark:text-slate-400">Navigate and explore Git archive structure</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="lg:col-span-1 bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-6">
+      <h3 class="text-lg font-bold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+        <i data-lucide="folder" class="w-5 h-5 text-primary-600"></i>
+        Directory Tree
+      </h3>
+      <div class="space-y-1">
+        <template x-for="entry in tree" :key="entry.path">
+          <button @click="selectEntry(entry)"
+                  :class="selected && selected.path === entry.path ? 'bg-primary-100 dark:bg-primary-900/30 border-primary-400' : 'bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-700 hover:border-primary-300'"
+                  class="w-full text-left p-3 rounded-lg border-2 transition-all flex items-center gap-3 group">
+            <i :data-lucide="entry.type === 'dir' ? 'folder' : 'file'" class="w-4 h-4 text-primary-600 dark:text-primary-400 flex-shrink-0"></i>
+            <span class="text-sm font-medium text-slate-900 dark:text-white flex-1 min-w-0 truncate" x-text="entry.name"></span>
+            <template x-if="entry.type === 'file'">
+              <span class="text-xs text-slate-500 dark:text-slate-400" x-text="formatSize(entry.size)"></span>
+            </template>
+          </button>
+        </template>
+      </div>
+    </div>
+
+    <div class="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 p-6">
+      <template x-if="!selected">
+        <div class="flex flex-col items-center justify-center py-20 text-slate-500 dark:text-slate-400">
+          <i data-lucide="mouse-pointer-click" class="w-16 h-16 mb-4"></i>
+          <p>Select a file to view its contents</p>
+        </div>
+      </template>
+
+      <template x-if="selected && selected.type === 'file'">
+        <div>
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <i data-lucide="file-text" class="w-5 h-5 text-primary-600"></i>
+              <span x-text="selected.name"></span>
+            </h3>
+            <button @click="downloadFile()" class="px-3 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors text-sm font-medium flex items-center gap-2">
+              <i data-lucide="download" class="w-4 h-4"></i>
+              Download
+            </button>
+          </div>
+          <div id="file-content" class="p-4 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl overflow-auto max-h-[600px]">
+            <div class="animate-pulse text-slate-500 dark:text-slate-400">Loading...</div>
+          </div>
+        </div>
+      </template>
+
+      <template x-if="selected && selected.type === 'dir'">
+        <div class="flex flex-col items-center justify-center py-20 text-slate-500 dark:text-slate-400">
+          <i data-lucide="folder-open" class="w-16 h-16 mb-4"></i>
+          <p>Directory selected - click a file to view its contents</p>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+
+<script>
+function browserManager() {
+  return {
+    tree: {{ tree|tojson }},
+    selected: null,
+    project: '{{ project }}',
+    path: '{{ path }}',
+
+    async selectEntry(entry) {
+      this.selected = entry;
+
+      if (entry.type === 'file') {
+        const response = await fetch(`/mail/archive/browser/${this.project}/file?path=${encodeURIComponent(entry.path)}`);
+        const content = await response.text();
+
+        const container = document.getElementById('file-content');
+        const isMarkdown = entry.name.endsWith('.md');
+        const isJSON = entry.name.endsWith('.json');
+
+        if (isMarkdown) {
+          container.innerHTML = marked.parse(content);
+        } else if (isJSON) {
+          try {
+            const formatted = JSON.stringify(JSON.parse(content), null, 2);
+            container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
+          } catch {
+            container.innerHTML = `<pre>${content}</pre>`;
+          }
+        } else {
+          container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${content}</pre>`;
+        }
+
+        lucide.createIcons();
+      }
+    },
+
+    formatSize(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    },
+
+    downloadFile() {
+      if (this.selected && this.selected.type === 'file') {
+        window.open(`/mail/archive/browser/${this.project}/download?path=${encodeURIComponent(this.selected.path)}`, '_blank');
+      }
+    }
+  };
+}
+</script>
+{% endblock %}
