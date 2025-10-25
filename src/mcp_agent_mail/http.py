@@ -863,7 +863,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     try:
         import bleach  # type: ignore
         import markdown2  # type: ignore
-        from bleach.sanitizer import CSSSanitizer  # type: ignore
+        from bleach.css_sanitizer import CSSSanitizer  # type: ignore
         from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(

@@ -393,8 +393,10 @@
         }
       }
 
-      /* Premium input focus effects */
-      input:focus, textarea:focus, select:focus {
+      /* Premium input focus effects - only apply when not using Tailwind focus utilities */
+      input:not([class*="focus:"]):focus,
+      textarea:not([class*="focus:"]):focus,
+      select:not([class*="focus:"]):focus {
         box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
       }
 
@@ -633,11 +635,8 @@
       };
 
       // Initialize Day.js plugins
-      if (typeof dayjs !== 'undefined') {
-        dayjs.extend(dayjs_plugin_relativeTime);
-        dayjs.extend(dayjs_plugin_calendar);
-        dayjs.extend(dayjs_plugin_advancedFormat);
-      }
+      // Note: Day.js plugins from CDN auto-register, so manual extension is not needed
+      // They're available immediately after script load
 
       // NProgress configuration
       if (typeof NProgress !== 'undefined') {
@@ -647,13 +646,27 @@
           minimum: 0.1
         });
 
-        // Show progress on page navigation
-        window.addEventListener('beforeunload', () => {
-          NProgress.start();
-        });
-
-        // Show progress on AJAX requests
+        // Initialize in DOMContentLoaded for consistency
         document.addEventListener('DOMContentLoaded', () => {
+          // Show progress on internal link clicks
+          document.addEventListener('click', (e) => {
+            const link = e.target.closest('a');
+            if (link && link.href && !link.target && !link.download) {
+              const url = new URL(link.href);
+              // Only for same-origin links that aren't hash-only
+              if (url.origin === window.location.origin && url.pathname !== window.location.pathname) {
+                NProgress.start();
+                // Fallback: complete after reasonable time if page doesn't load
+                setTimeout(() => NProgress.done(), 2000);
+              }
+            }
+          });
+
+          // Complete on page load
+          window.addEventListener('load', () => {
+            NProgress.done();
+          });
+
           // Intercept fetch requests
           const originalFetch = window.fetch;
           window.fetch = function(...args) {
@@ -667,24 +680,34 @@
       // Initialize Tippy.js tooltips
       document.addEventListener('DOMContentLoaded', () => {
         if (typeof tippy !== 'undefined') {
-          // Initialize tooltips on elements with data-tippy-content
-          tippy('[data-tippy-content]', {
-            theme: 'agent-mail',
-            animation: 'scale',
-            duration: [200, 150],
-            arrow: true,
-            placement: 'top'
-          });
+          let tippyInstances = new Set();
 
-          // Auto-initialize on new elements
-          const observer = new MutationObserver(() => {
-            tippy('[data-tippy-content]:not([data-tippy-initialized])', {
-              theme: 'agent-mail',
-              animation: 'scale',
-              duration: [200, 150],
-              arrow: true,
-              placement: 'top'
+          // Function to initialize tooltips
+          const initTooltips = () => {
+            const elements = document.querySelectorAll('[data-tippy-content]');
+            elements.forEach(el => {
+              // Skip if already has tippy instance
+              if (el._tippy) return;
+
+              const instance = tippy(el, {
+                theme: 'agent-mail',
+                animation: 'scale',
+                duration: [200, 150],
+                arrow: true,
+                placement: 'top'
+              });
+              tippyInstances.add(instance);
             });
+          };
+
+          // Initial initialization
+          initTooltips();
+
+          // Auto-initialize on new elements with debouncing
+          let tooltipTimeout;
+          const observer = new MutationObserver(() => {
+            clearTimeout(tooltipTimeout);
+            tooltipTimeout = setTimeout(initTooltips, 100);
           });
 
           observer.observe(document.body, {
@@ -709,8 +732,10 @@
           entries.forEach(entry => {
             if (entry.isIntersecting && !entry.target.dataset.animated) {
               const target = entry.target;
-              const finalValue = parseInt(target.textContent);
-              if (!isNaN(finalValue)) {
+              // Remove commas and other formatting before parsing
+              const cleanText = target.textContent.replace(/[,\s]/g, '');
+              const finalValue = parseInt(cleanText, 10);
+              if (!isNaN(finalValue) && finalValue > 0) {
                 animateValue(target, 0, finalValue, 1000);
                 target.dataset.animated = 'true';
               }
@@ -747,6 +772,12 @@
         let current = start;
 
         const timer = setInterval(() => {
+          // Check if element still exists in DOM
+          if (!document.body.contains(element)) {
+            clearInterval(timer);
+            return;
+          }
+
           current += increment;
           if ((increment > 0 && current >= end) || (increment < 0 && current <= end)) {
             current = end;
@@ -775,13 +806,40 @@
         }
       });
 
-      // Add visual feedback for copy actions
+      // Add visual feedback for copy actions with fallback
       window.copyToClipboard = async function(text, successMessage = 'Copied to clipboard!') {
+        // Modern clipboard API (requires HTTPS)
+        if (navigator.clipboard && window.isSecureContext) {
+          try {
+            await navigator.clipboard.writeText(text);
+            window.showToast(successMessage, 'success', 2000);
+            return true;
+          } catch (err) {
+            console.error('Clipboard API failed:', err);
+          }
+        }
+
+        // Fallback for HTTP or older browsers
         try {
-          await navigator.clipboard.writeText(text);
-          window.showToast(successMessage, 'success', 2000);
-          return true;
+          const textArea = document.createElement('textarea');
+          textArea.value = text;
+          textArea.style.position = 'fixed';
+          textArea.style.left = '-999999px';
+          textArea.style.top = '-999999px';
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+          const successful = document.execCommand('copy');
+          document.body.removeChild(textArea);
+
+          if (successful) {
+            window.showToast(successMessage, 'success', 2000);
+            return true;
+          } else {
+            throw new Error('execCommand failed');
+          }
         } catch (err) {
+          console.error('Fallback copy failed:', err);
           window.showToast('Failed to copy', 'error', 2000);
           return false;
         }
