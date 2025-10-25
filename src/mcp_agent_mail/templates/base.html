@@ -123,11 +123,20 @@
     <script src="https://unpkg.com/nprogress@0.2.0/nprogress.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/nprogress@0.2.0/nprogress.css" />
 
-    <!-- Future enhancements (uncomment when needed):
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Chart.js for data visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <!-- Anime.js for advanced animations -->
     <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
-    -->
+
+    <!-- SortableJS for drag and drop -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+
+    <!-- Fuse.js for fuzzy search -->
+    <script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+
+    <!-- Hotkeys.js for keyboard shortcuts -->
+    <script src="https://unpkg.com/hotkeys-js@3.13.7/dist/hotkeys.min.js"></script>
 
     <style>
       [x-cloak] { display: none !important; }
@@ -489,6 +498,750 @@
   </head>
 
   <body class="bg-gradient-to-br from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
+    <!-- Command Palette (Cmd/Ctrl+K) -->
+    <div x-data="commandPalette()"
+         @keydown.window.prevent.meta.k="toggle()"
+         @keydown.window.prevent.ctrl.k="toggle()"
+         @keydown.escape.window="close()"
+         x-show="isOpen"
+         x-cloak
+         class="fixed inset-0 z-[100] flex items-start justify-center pt-20 px-4"
+         style="display: none;">
+      <!-- Backdrop -->
+      <div @click="close()"
+           x-show="isOpen"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100"
+           x-transition:leave-end="opacity-0"
+           class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"></div>
+
+      <!-- Command Palette Panel -->
+      <div x-show="isOpen"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 transform scale-95 -translate-y-4"
+           x-transition:enter-end="opacity-100 transform scale-100 translate-y-0"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 transform scale-100"
+           x-transition:leave-end="opacity-0 transform scale-95"
+           class="relative w-full max-w-2xl glass rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+
+        <!-- Search Input -->
+        <div class="relative border-b border-slate-200 dark:border-slate-700">
+          <div class="absolute inset-y-0 left-0 pl-5 flex items-center pointer-events-none">
+            <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
+          </div>
+          <input x-ref="searchInput"
+                 x-model="query"
+                 @input="search()"
+                 @keydown.down.prevent="selectNext()"
+                 @keydown.up.prevent="selectPrevious()"
+                 @keydown.enter.prevent="executeSelected()"
+                 type="text"
+                 placeholder="Search commands, navigate, or type '?' for help..."
+                 class="w-full pl-14 pr-4 py-5 bg-transparent border-0 text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:outline-none text-lg"
+                 autocomplete="off" />
+        </div>
+
+        <!-- Results -->
+        <div class="max-h-96 overflow-y-auto">
+          <template x-if="filteredCommands.length === 0">
+            <div class="p-8 text-center text-slate-500 dark:text-slate-400">
+              <i data-lucide="inbox" class="w-12 h-12 mx-auto mb-3 opacity-50"></i>
+              <p>No commands found. Try different keywords.</p>
+            </div>
+          </template>
+
+          <template x-for="(command, index) in filteredCommands" :key="command.id">
+            <button @click="execute(command)"
+                    :class="selectedIndex === index ? 'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500' : 'border-l-4 border-l-transparent'"
+                    class="w-full px-6 py-4 flex items-center gap-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all duration-150 text-left group">
+              <div :class="command.iconColor || 'text-slate-400'"
+                   class="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                   :style="`background: ${command.iconBg || 'rgba(148, 163, 184, 0.1)'}`">
+                <i :data-lucide="command.icon" class="w-5 h-5"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors"
+                     x-text="command.title"></div>
+                <div class="text-sm text-slate-600 dark:text-slate-400 truncate"
+                     x-text="command.description" x-show="command.description"></div>
+              </div>
+              <div x-show="command.shortcut"
+                   class="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                <template x-for="key in (command.shortcut || '').split('+')" :key="key">
+                  <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 font-mono" x-text="key"></kbd>
+                </template>
+              </div>
+            </button>
+          </template>
+        </div>
+
+        <!-- Footer -->
+        <div class="px-6 py-3 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+          <div class="flex items-center gap-4">
+            <div class="flex items-center gap-1">
+              <kbd class="px-2 py-1 bg-white dark:bg-slate-800 rounded border border-slate-300 dark:border-slate-600">↑↓</kbd>
+              <span>Navigate</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd class="px-2 py-1 bg-white dark:bg-slate-800 rounded border border-slate-300 dark:border-slate-600">↵</kbd>
+              <span>Select</span>
+            </div>
+            <div class="flex items-center gap-1">
+              <kbd class="px-2 py-1 bg-white dark:bg-slate-800 rounded border border-slate-300 dark:border-slate-600">Esc</kbd>
+              <span>Close</span>
+            </div>
+          </div>
+          <div class="text-slate-500">
+            <span x-text="filteredCommands.length"></span> commands
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Interactive Tutorial / Onboarding -->
+    <div x-data="tutorialManager()"
+         x-init="init()"
+         x-show="isActive"
+         x-cloak
+         class="fixed inset-0 z-[200] flex items-center justify-center p-4"
+         style="display: none;">
+      <!-- Backdrop with blur -->
+      <div x-show="isActive"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100"
+           class="absolute inset-0 bg-slate-900/80 backdrop-blur-md"></div>
+
+      <!-- Tutorial Panel -->
+      <div x-show="isActive"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0 transform scale-95 translate-y-8"
+           x-transition:enter-end="opacity-100 transform scale-100 translate-y-0"
+           class="relative w-full max-w-3xl glass rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden max-h-[90vh] flex flex-col">
+
+        <!-- Progress Bar -->
+        <div class="h-1.5 bg-slate-200 dark:bg-slate-700">
+          <div class="h-full bg-gradient-to-r from-primary-500 via-purple-500 to-pink-500 transition-all duration-500 ease-out"
+               :style="`width: ${((currentStep + 1) / steps.length) * 100}%`"></div>
+        </div>
+
+        <!-- Header -->
+        <div class="px-8 py-6 bg-gradient-to-r from-primary-500 via-purple-600 to-pink-600 text-white">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-4">
+              <div class="w-14 h-14 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-sm float">
+                <i :data-lucide="steps[currentStep]?.icon || 'help-circle'" class="w-7 h-7"></i>
+              </div>
+              <div>
+                <div class="text-sm font-medium text-primary-100 mb-1">
+                  Step <span x-text="currentStep + 1"></span> of <span x-text="steps.length"></span>
+                </div>
+                <h2 class="text-2xl font-bold" x-text="steps[currentStep]?.title"></h2>
+              </div>
+            </div>
+            <button @click="skip()"
+                    class="w-10 h-10 bg-white/20 hover:bg-white/30 rounded-lg flex items-center justify-center transition-colors"
+                    data-tippy-content="Skip tutorial">
+              <i data-lucide="x" class="w-5 h-5"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- Content -->
+        <div class="flex-1 overflow-y-auto p-8">
+          <!-- Welcome Step -->
+          <template x-if="currentStep === 0">
+            <div class="space-y-6 animate-fade-in">
+              <div class="text-center mb-8">
+                <div class="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-primary-500 to-purple-600 rounded-3xl shadow-large mb-6 float">
+                  <i data-lucide="mail" class="w-12 h-12 text-white"></i>
+                </div>
+                <h3 class="text-3xl font-bold text-slate-900 dark:text-white mb-3">
+                  Welcome to Agent Mail! 👋
+                </h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto">
+                  Think of this as <strong>Slack for AI assistants</strong> working on your code. Let's take a quick tour!
+                </p>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="p-6 bg-gradient-to-br from-primary-50 to-purple-50 dark:from-primary-900/20 dark:to-purple-900/20 rounded-xl border border-primary-200 dark:border-primary-800">
+                  <div class="w-12 h-12 bg-primary-500 rounded-xl flex items-center justify-center mb-4">
+                    <i data-lucide="users" class="w-6 h-6 text-white"></i>
+                  </div>
+                  <h4 class="font-bold text-slate-900 dark:text-white mb-2">Multiple AI Assistants</h4>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    Run Claude, GPT, Gemini, or other AI assistants simultaneously on the same codebase.
+                  </p>
+                </div>
+
+                <div class="p-6 bg-gradient-to-br from-success-50 to-emerald-50 dark:from-success-900/20 dark:to-emerald-900/20 rounded-xl border border-success-200 dark:border-success-800">
+                  <div class="w-12 h-12 bg-success-500 rounded-xl flex items-center justify-center mb-4">
+                    <i data-lucide="message-square" class="w-6 h-6 text-white"></i>
+                  </div>
+                  <h4 class="font-bold text-slate-900 dark:text-white mb-2">Coordinate & Communicate</h4>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    Agents message each other, share context, and avoid stepping on each other's toes.
+                  </p>
+                </div>
+
+                <div class="p-6 bg-gradient-to-br from-warning-50 to-orange-50 dark:from-warning-900/20 dark:to-orange-900/20 rounded-xl border border-warning-200 dark:border-warning-800">
+                  <div class="w-12 h-12 bg-warning-500 rounded-xl flex items-center justify-center mb-4">
+                    <i data-lucide="shield-check" class="w-6 h-6 text-white"></i>
+                  </div>
+                  <h4 class="font-bold text-slate-900 dark:text-white mb-2">Prevent Conflicts</h4>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    Agents can "reserve" files they're editing, like putting a sticky note: "I'm working here!"
+                  </p>
+                </div>
+
+                <div class="p-6 bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-900/20 dark:to-rose-900/20 rounded-xl border border-pink-200 dark:border-pink-800">
+                  <div class="w-12 h-12 bg-pink-500 rounded-xl flex items-center justify-center mb-4">
+                    <i data-lucide="git-branch" class="w-6 h-6 text-white"></i>
+                  </div>
+                  <h4 class="font-bold text-slate-900 dark:text-white mb-2">Everything Tracked</h4>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    All messages and coordination saved in Git, so you can review what happened.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 1: Projects -->
+          <template x-if="currentStep === 1">
+            <div class="space-y-6 animate-fade-in">
+              <div class="aspect-video bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-900 rounded-xl border border-slate-300 dark:border-slate-700 p-8 flex items-center justify-center">
+                <div class="text-center">
+                  <i data-lucide="folder" class="w-20 h-20 text-primary-500 mx-auto mb-4"></i>
+                  <div class="text-lg font-semibold text-slate-700 dark:text-slate-300">Visual: Project List</div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">What's a Project?</h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                  A <strong>project</strong> is simply your <strong>code repository</strong> or workspace. Think of it as a folder where your AI assistants collaborate.
+                </p>
+
+                <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-4">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="lightbulb" class="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-blue-900 dark:text-blue-100">
+                      <strong>Example:</strong> You might have a "backend" project and a "frontend" project. Each has its own set of AI assistants working on it.
+                    </div>
+                  </div>
+                </div>
+
+                <p class="text-slate-600 dark:text-slate-400">
+                  Each project shows:
+                </p>
+                <ul class="space-y-2 text-slate-600 dark:text-slate-400">
+                  <li>✅ How many AI assistants are registered</li>
+                  <li>✅ How many messages have been exchanged</li>
+                  <li>✅ When it was created</li>
+                </ul>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 2: Agents -->
+          <template x-if="currentStep === 2">
+            <div class="space-y-6 animate-fade-in">
+              <div class="aspect-video bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-900 rounded-xl border border-slate-300 dark:border-slate-700 p-8 flex items-center justify-center">
+                <div class="flex items-center gap-8">
+                  <div class="text-center">
+                    <div class="w-20 h-20 bg-gradient-to-br from-success-500 to-success-700 rounded-2xl flex items-center justify-center mb-3">
+                      <i data-lucide="bot" class="w-10 h-10 text-white"></i>
+                    </div>
+                    <div class="text-sm font-semibold text-slate-700 dark:text-slate-300">Claude</div>
+                  </div>
+                  <i data-lucide="message-circle" class="w-8 h-8 text-slate-400"></i>
+                  <div class="text-center">
+                    <div class="w-20 h-20 bg-gradient-to-br from-purple-500 to-purple-700 rounded-2xl flex items-center justify-center mb-3">
+                      <i data-lucide="bot" class="w-10 h-10 text-white"></i>
+                    </div>
+                    <div class="text-sm font-semibold text-slate-700 dark:text-slate-300">GPT-4</div>
+                  </div>
+                  <i data-lucide="message-circle" class="w-8 h-8 text-slate-400"></i>
+                  <div class="text-center">
+                    <div class="w-20 h-20 bg-gradient-to-br from-blue-500 to-blue-700 rounded-2xl flex items-center justify-center mb-3">
+                      <i data-lucide="bot" class="w-10 h-10 text-white"></i>
+                    </div>
+                    <div class="text-sm font-semibold text-slate-700 dark:text-slate-300">Gemini</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">What are Agents?</h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                  <strong>Agents</strong> are just <strong>AI assistants</strong> (like Claude, GPT, Gemini) working on your code. Each one gets a unique, memorable name.
+                </p>
+
+                <div class="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg p-4 mb-4">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="sparkles" class="w-5 h-5 text-purple-600 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-purple-900 dark:text-purple-100">
+                      <strong>Fun fact:</strong> Agents get names like "BlueLake" or "GreenCastle" - much easier than "agent_7492_claude"!
+                    </div>
+                  </div>
+                </div>
+
+                <p class="text-slate-600 dark:text-slate-400">
+                  You can:
+                </p>
+                <ul class="space-y-2 text-slate-600 dark:text-slate-400">
+                  <li>📬 View each agent's inbox (messages sent to them)</li>
+                  <li>👤 See what program/model they're using (e.g., "claude-code" with "opus-4.1")</li>
+                  <li>📋 Copy their name to use in commands</li>
+                </ul>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 3: Messages -->
+          <template x-if="currentStep === 3">
+            <div class="space-y-6 animate-fade-in">
+              <div class="space-y-3">
+                <div class="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                  <div class="flex items-start gap-3 mb-2">
+                    <div class="w-10 h-10 bg-gradient-to-br from-success-500 to-success-700 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="user" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                      <div class="font-semibold text-slate-900 dark:text-white">BlueLake</div>
+                      <div class="text-sm text-slate-600 dark:text-slate-400">2 minutes ago</div>
+                    </div>
+                  </div>
+                  <div class="ml-13 bg-slate-50 dark:bg-slate-900 rounded-lg p-3 text-sm text-slate-700 dark:text-slate-300">
+                    Hey GreenCastle, I'm working on the authentication system. Can you handle the database migrations?
+                  </div>
+                </div>
+
+                <div class="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
+                  <div class="flex items-start gap-3 mb-2">
+                    <div class="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="user" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                      <div class="font-semibold text-slate-900 dark:text-white">GreenCastle</div>
+                      <div class="text-sm text-slate-600 dark:text-slate-400">1 minute ago</div>
+                    </div>
+                  </div>
+                  <div class="ml-13 bg-slate-50 dark:bg-slate-900 rounded-lg p-3 text-sm text-slate-700 dark:text-slate-300">
+                    Sure! I'll create the migration files. I'm reserving the db/migrations folder so we don't conflict.
+                  </div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">How Agents Communicate</h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                  Agents send <strong>messages</strong> to each other, just like email or Slack. They can:
+                </p>
+
+                <ul class="space-y-2 text-slate-600 dark:text-slate-400">
+                  <li>💬 Share what they're working on</li>
+                  <li>🤝 Coordinate who does what</li>
+                  <li>📝 Document decisions and changes</li>
+                  <li>⚠️ Flag urgent issues</li>
+                  <li>🔗 Continue conversations in threads</li>
+                </ul>
+
+                <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4 mt-4">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="check-circle" class="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-green-900 dark:text-green-100">
+                      <strong>Why this matters:</strong> Instead of agents silently stepping on each other's work, they communicate and coordinate like a team!
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 4: File Reservations -->
+          <template x-if="currentStep === 4">
+            <div class="space-y-6 animate-fade-in">
+              <div class="bg-gradient-to-br from-warning-50 to-orange-50 dark:from-warning-900/20 dark:to-orange-900/20 border border-warning-200 dark:border-warning-800 rounded-xl p-6">
+                <div class="flex items-start gap-4 mb-4">
+                  <div class="w-14 h-14 bg-warning-500 rounded-xl flex items-center justify-center flex-shrink-0">
+                    <i data-lucide="file-lock" class="w-7 h-7 text-white"></i>
+                  </div>
+                  <div>
+                    <h4 class="text-xl font-bold text-warning-900 dark:text-warning-100 mb-2">
+                      File Reservation (Previously "Claims")
+                    </h4>
+                    <p class="text-warning-800 dark:text-warning-200">
+                      Think of it like putting a sticky note on a file: "I'm working here - please wait!"
+                    </p>
+                  </div>
+                </div>
+
+                <div class="bg-white dark:bg-slate-800 rounded-lg p-4 space-y-3">
+                  <div class="flex items-center gap-3">
+                    <i data-lucide="file-text" class="w-5 h-5 text-slate-400"></i>
+                    <span class="flex-1 font-mono text-sm text-slate-700 dark:text-slate-300">src/auth/*.ts</span>
+                    <span class="px-3 py-1 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 text-xs font-bold rounded-full flex items-center gap-1.5">
+                      <i data-lucide="lock" class="w-3 h-3"></i>
+                      Reserved by BlueLake
+                    </span>
+                  </div>
+                  <div class="flex items-center gap-3">
+                    <i data-lucide="file-text" class="w-5 h-5 text-slate-400"></i>
+                    <span class="flex-1 font-mono text-sm text-slate-700 dark:text-slate-300">db/migrations/*</span>
+                    <span class="px-3 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-bold rounded-full flex items-center gap-1.5">
+                      <i data-lucide="lock" class="w-3 h-3"></i>
+                      Reserved by GreenCastle
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">Preventing Edit Conflicts</h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                  When an agent is editing files, they can <strong>"reserve" them temporarily</strong>. This tells other agents:
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 not-prose">
+                  <div class="bg-success-50 dark:bg-success-900/20 border border-success-200 dark:border-success-800 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-2">
+                      <i data-lucide="check" class="w-5 h-5 text-success-600"></i>
+                      <span class="font-bold text-success-900 dark:text-success-100">What it DOES:</span>
+                    </div>
+                    <ul class="text-sm text-success-800 dark:text-success-200 space-y-1 list-disc list-inside">
+                      <li>Signals "I'm editing this"</li>
+                      <li>Prevents accidental conflicts</li>
+                      <li>Auto-expires after set time</li>
+                      <li>Tracked in Git for transparency</li>
+                    </ul>
+                  </div>
+
+                  <div class="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-4">
+                    <div class="flex items-center gap-2 mb-2">
+                      <i data-lucide="info" class="w-5 h-5 text-slate-600"></i>
+                      <span class="font-bold text-slate-900 dark:text-slate-100">What it DOESN'T:</span>
+                    </div>
+                    <ul class="text-sm text-slate-600 dark:text-slate-400 space-y-1 list-disc list-inside">
+                      <li>Lock files permanently</li>
+                      <li>Block you from editing</li>
+                      <li>Require approval to use</li>
+                      <li>Cause merge conflicts</li>
+                    </ul>
+                  </div>
+                </div>
+
+                <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mt-4">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="lightbulb" class="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-blue-900 dark:text-blue-100">
+                      <strong>Think of it like:</strong> When you see a "Reserved" parking spot with someone's name on it. You <em>can</em> park there if needed, but the sign helps you know someone else might be using it soon!
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 5: Features -->
+          <template x-if="currentStep === 5">
+            <div class="space-y-6 animate-fade-in">
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">Powerful Features Built In</h3>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6">
+                  <div class="flex items-center gap-3 mb-3">
+                    <div class="w-10 h-10 bg-primary-100 dark:bg-primary-900/30 rounded-lg flex items-center justify-center">
+                      <i data-lucide="search" class="w-5 h-5 text-primary-600"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-900 dark:text-white">Search Everything</h4>
+                  </div>
+                  <p class="text-sm text-slate-600 dark:text-slate-400 mb-3">
+                    Find any message, conversation, or file reservation across all projects instantly.
+                  </p>
+                  <div class="flex items-center gap-2 text-xs text-slate-500">
+                    <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">⌘K</kbd>
+                    <span>or</span>
+                    <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">/</kbd>
+                  </div>
+                </div>
+
+                <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6">
+                  <div class="flex items-center gap-3 mb-3">
+                    <div class="w-10 h-10 bg-purple-100 dark:bg-purple-900/30 rounded-lg flex items-center justify-center">
+                      <i data-lucide="keyboard" class="w-5 h-5 text-purple-600"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-900 dark:text-white">Keyboard Shortcuts</h4>
+                  </div>
+                  <p class="text-sm text-slate-600 dark:text-slate-400 mb-3">
+                    Navigate at lightning speed with Gmail-style keyboard shortcuts.
+                  </p>
+                  <div class="flex items-center gap-2 text-xs text-slate-500">
+                    <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded">?</kbd>
+                    <span>to see all shortcuts</span>
+                  </div>
+                </div>
+
+                <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6">
+                  <div class="flex items-center gap-3 mb-3">
+                    <div class="w-10 h-10 bg-success-100 dark:bg-success-900/30 rounded-lg flex items-center justify-center">
+                      <i data-lucide="filter" class="w-5 h-5 text-success-600"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-900 dark:text-white">Smart Filtering</h4>
+                  </div>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    Filter by unread, urgent, sender, or search across all messages in an inbox.
+                  </p>
+                </div>
+
+                <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-6">
+                  <div class="flex items-center gap-3 mb-3">
+                    <div class="w-10 h-10 bg-warning-100 dark:bg-warning-900/30 rounded-lg flex items-center justify-center">
+                      <i data-lucide="git-branch" class="w-5 h-5 text-warning-600"></i>
+                    </div>
+                    <h4 class="font-bold text-slate-900 dark:text-white">Git-Backed</h4>
+                  </div>
+                  <p class="text-sm text-slate-600 dark:text-slate-400">
+                    Every message and reservation is saved in Git. Review the full history anytime.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Final Step -->
+          <template x-if="currentStep === 6">
+            <div class="space-y-6 animate-fade-in text-center">
+              <div class="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-success-500 to-emerald-600 rounded-3xl shadow-xl mb-4 float">
+                <i data-lucide="check-circle" class="w-12 h-12 text-white"></i>
+              </div>
+
+              <div>
+                <h3 class="text-3xl font-bold text-slate-900 dark:text-white mb-3">
+                  You're All Set! 🎉
+                </h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-8">
+                  You now understand how Agent Mail helps AI assistants work together smoothly. Remember:
+                </p>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 rounded-xl p-4">
+                  <div class="text-4xl mb-2">⌘K</div>
+                  <div class="font-semibold text-slate-900 dark:text-white">Command Palette</div>
+                  <div class="text-xs text-slate-600 dark:text-slate-400">Quick navigation</div>
+                </div>
+
+                <div class="bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-xl p-4">
+                  <div class="text-4xl mb-2">?</div>
+                  <div class="font-semibold text-slate-900 dark:text-white">Keyboard Help</div>
+                  <div class="text-xs text-slate-600 dark:text-slate-400">See all shortcuts</div>
+                </div>
+
+                <div class="bg-success-50 dark:bg-success-900/20 border border-success-200 dark:border-success-800 rounded-xl p-4">
+                  <div class="text-4xl mb-2">💡</div>
+                  <div class="font-semibold text-slate-900 dark:text-white">Tooltips Everywhere</div>
+                  <div class="text-xs text-slate-600 dark:text-slate-400">Hover for help</div>
+                </div>
+              </div>
+
+              <div class="bg-gradient-to-r from-primary-50 to-purple-50 dark:from-primary-900/20 dark:to-purple-900/20 border border-primary-200 dark:border-primary-800 rounded-xl p-6">
+                <div class="flex items-start gap-3 text-left">
+                  <i data-lucide="info" class="w-5 h-5 text-primary-600 mt-0.5 flex-shrink-0"></i>
+                  <div class="text-sm text-primary-900 dark:text-primary-100">
+                    <strong>Need help later?</strong> Click the <i data-lucide="help-circle" class="w-4 h-4 inline-block"></i> button in the header to access the Help Center, or press <kbd class="px-1.5 py-0.5 bg-white dark:bg-slate-700 rounded text-xs">?</kbd> for shortcuts!
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Footer with Navigation -->
+        <div class="px-8 py-6 bg-slate-50 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
+          <button @click="previous()"
+                  x-show="currentStep > 0"
+                  class="px-6 py-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-lg border border-slate-300 dark:border-slate-600 transition-all duration-200 flex items-center gap-2">
+            <i data-lucide="chevron-left" class="w-4 h-4"></i>
+            Back
+          </button>
+
+          <div class="flex items-center gap-2">
+            <template x-for="(step, index) in steps" :key="index">
+              <button @click="currentStep = index"
+                      :class="index === currentStep ? 'w-8 bg-primary-600' : 'w-2 bg-slate-300 dark:bg-slate-600 hover:bg-slate-400 dark:hover:bg-slate-500'"
+                      class="h-2 rounded-full transition-all duration-300"
+                      :aria-label="'Go to step ' + (index + 1)"></button>
+            </template>
+          </div>
+
+          <button @click="next()"
+                  class="px-6 py-3 bg-gradient-to-r from-primary-600 to-purple-600 hover:from-primary-700 hover:to-purple-700 text-white font-semibold rounded-lg shadow-md hover:shadow-lg transition-all duration-300 flex items-center gap-2 btn-ripple">
+            <span x-text="currentStep < steps.length - 1 ? 'Next' : 'Get Started'"></span>
+            <i data-lucide="chevron-right" class="w-4 h-4" x-show="currentStep < steps.length - 1"></i>
+            <i data-lucide="check" class="w-4 h-4" x-show="currentStep === steps.length - 1"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Keyboard Shortcuts Help Panel -->
+    <div x-data="{ showShortcuts: false }"
+         @keydown.window.prevent.shift.question="showShortcuts = !showShortcuts"
+         @keydown.escape.window="showShortcuts = false"
+         x-show="showShortcuts"
+         x-cloak
+         class="fixed inset-0 z-[100] flex items-center justify-center p-4"
+         style="display: none;">
+      <!-- Backdrop -->
+      <div @click="showShortcuts = false"
+           x-show="showShortcuts"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100"
+           x-transition:leave-end="opacity-0"
+           class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"></div>
+
+      <!-- Shortcuts Panel -->
+      <div x-show="showShortcuts"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 transform scale-95"
+           x-transition:enter-end="opacity-100 transform scale-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 transform scale-100"
+           x-transition:leave-end="opacity-0 transform scale-95"
+           class="relative w-full max-w-3xl glass rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden max-h-[80vh] flex flex-col">
+
+        <!-- Header -->
+        <div class="px-8 py-6 bg-gradient-to-r from-primary-500 to-primary-700 text-white flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center">
+              <i data-lucide="keyboard" class="w-6 h-6"></i>
+            </div>
+            <div>
+              <h2 class="text-2xl font-bold">Keyboard Shortcuts</h2>
+              <p class="text-primary-100 text-sm">Work faster with keyboard navigation</p>
+            </div>
+          </div>
+          <button @click="showShortcuts = false"
+                  class="w-10 h-10 bg-white/20 hover:bg-white/30 rounded-lg flex items-center justify-center transition-colors">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+        </div>
+
+        <!-- Shortcuts List -->
+        <div class="flex-1 overflow-y-auto p-8">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <!-- Global Shortcuts -->
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide mb-4 flex items-center gap-2">
+                <i data-lucide="globe" class="w-4 h-4 text-primary-600"></i>
+                Global
+              </h3>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Command palette</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">⌘K</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">This help panel</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">?</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Focus search</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">/</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Go to projects</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">G+P</kbd>
+                </div>
+              </div>
+            </div>
+
+            <!-- Navigation -->
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide mb-4 flex items-center gap-2">
+                <i data-lucide="compass" class="w-4 h-4 text-success-600"></i>
+                Navigation
+              </h3>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Next item</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">J</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Previous item</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">K</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Open item</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">Enter</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Go back</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">Esc</kbd>
+                </div>
+              </div>
+            </div>
+
+            <!-- Actions -->
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide mb-4 flex items-center gap-2">
+                <i data-lucide="zap" class="w-4 h-4 text-warning-600"></i>
+                Actions
+              </h3>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Refresh</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">R</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Copy to clipboard</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">⌘C</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Toggle dark mode</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">D</kbd>
+                </div>
+              </div>
+            </div>
+
+            <!-- Message Actions -->
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-white uppercase tracking-wide mb-4 flex items-center gap-2">
+                <i data-lucide="mail" class="w-4 h-4 text-danger-600"></i>
+                Messages
+              </h3>
+              <div class="space-y-3">
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Reply</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">Shift+R</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Forward</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">Shift+F</kbd>
+                </div>
+                <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800 rounded-lg">
+                  <span class="text-sm text-slate-700 dark:text-slate-300">Mark as read</span>
+                  <kbd class="px-2 py-1 bg-white dark:bg-slate-700 rounded border border-slate-300 dark:border-slate-600 text-xs">E</kbd>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Toast Notification Container -->
     <div x-data="toastManager()" @toast.window="show($event.detail)"
          class="fixed top-4 right-4 z-50 space-y-2">
@@ -556,9 +1309,22 @@
           <div class="flex items-center gap-3">
             {% block header_actions %}{% endblock %}
 
+            <!-- Help Button -->
+            <button onclick="window.restartTutorial()"
+                    class="p-2 rounded-lg hover:bg-primary-100 dark:hover:bg-primary-900/30 text-primary-600 dark:text-primary-400 transition-all duration-200 relative group"
+                    data-tippy-content="Show interactive tutorial"
+                    aria-label="Show help">
+              <i data-lucide="help-circle" class="w-5 h-5"></i>
+              <!-- Pulsing indicator for first-time users -->
+              <span class="absolute -top-1 -right-1 w-3 h-3 bg-success-500 rounded-full animate-pulse"
+                    style="display: none;"
+                    id="help-indicator"></span>
+            </button>
+
             <!-- Dark Mode Toggle -->
             <button @click="darkMode = !darkMode; localStorage.setItem('darkMode', darkMode)"
                     class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    data-tippy-content="Toggle dark/light mode"
                     aria-label="Toggle dark mode">
               <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600"></i>
               <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-yellow-400"></i>
@@ -589,6 +1355,261 @@
 
     <!-- Alpine.js Components -->
     <script>
+      // Tutorial Manager
+      function tutorialManager() {
+        return {
+          isActive: false,
+          currentStep: 0,
+          steps: [
+            { title: 'Welcome to Agent Mail', icon: 'mail' },
+            { title: 'What are Projects?', icon: 'folder' },
+            { title: 'What are Agents?', icon: 'bot' },
+            { title: 'How Agents Communicate', icon: 'message-square' },
+            { title: 'File Reservations', icon: 'file-lock' },
+            { title: 'Powerful Features', icon: 'sparkles' },
+            { title: 'You\'re All Set!', icon: 'check-circle' }
+          ],
+
+          init() {
+            // Check if user has seen tutorial
+            const hasSeenTutorial = localStorage.getItem('agentmail_tutorial_completed');
+            if (!hasSeenTutorial) {
+              // Show tutorial on first visit (with slight delay for page to render)
+              setTimeout(() => {
+                this.isActive = true;
+                this.$nextTick(() => lucide.createIcons());
+              }, 800);
+            }
+
+            // Listen for restart event
+            window.addEventListener('restart-tutorial', () => {
+              this.restart();
+            });
+          },
+
+          next() {
+            if (this.currentStep < this.steps.length - 1) {
+              this.currentStep++;
+              this.$nextTick(() => lucide.createIcons());
+            } else {
+              this.complete();
+            }
+          },
+
+          previous() {
+            if (this.currentStep > 0) {
+              this.currentStep--;
+              this.$nextTick(() => lucide.createIcons());
+            }
+          },
+
+          skip() {
+            this.complete();
+          },
+
+          complete() {
+            localStorage.setItem('agentmail_tutorial_completed', 'true');
+            this.isActive = false;
+            window.showToast('Tutorial completed! Press ? for keyboard shortcuts anytime.', 'success', 4000);
+          },
+
+          restart() {
+            this.currentStep = 0;
+            this.isActive = true;
+            this.$nextTick(() => lucide.createIcons());
+          }
+        };
+      }
+
+      // Make tutorial restart available globally
+      window.restartTutorial = function() {
+        window.dispatchEvent(new CustomEvent('restart-tutorial'));
+      };
+
+      // Command Palette
+      function commandPalette() {
+        return {
+          isOpen: false,
+          query: '',
+          selectedIndex: 0,
+          commands: [
+            // Navigation Commands
+            {
+              id: 'nav-projects',
+              title: 'Go to Projects',
+              description: 'View all projects',
+              icon: 'folder',
+              iconBg: 'rgba(99, 102, 241, 0.1)',
+              iconColor: 'text-primary-600',
+              shortcut: 'G+P',
+              action: () => window.location.href = '/mail',
+              keywords: 'projects home list'
+            },
+            {
+              id: 'nav-search',
+              title: 'Search Messages',
+              description: 'Find messages across projects',
+              icon: 'search',
+              iconBg: 'rgba(139, 92, 246, 0.1)',
+              iconColor: 'text-purple-600',
+              shortcut: '/',
+              action: () => {
+                const input = document.querySelector('input[type="search"], input[name="q"]');
+                if (input) { input.focus(); input.select(); }
+              },
+              keywords: 'search find query messages'
+            },
+            {
+              id: 'toggle-dark',
+              title: 'Toggle Dark Mode',
+              description: 'Switch between light and dark themes',
+              icon: 'moon',
+              iconBg: 'rgba(234, 179, 8, 0.1)',
+              iconColor: 'text-yellow-600',
+              shortcut: 'D',
+              action: () => {
+                const darkMode = localStorage.getItem('darkMode') === 'true';
+                localStorage.setItem('darkMode', !darkMode);
+                window.location.reload();
+              },
+              keywords: 'dark mode theme light toggle'
+            },
+            {
+              id: 'refresh',
+              title: 'Refresh Page',
+              description: 'Reload current page',
+              icon: 'refresh-cw',
+              iconBg: 'rgba(16, 185, 129, 0.1)',
+              iconColor: 'text-success-600',
+              shortcut: 'R',
+              action: () => window.location.reload(),
+              keywords: 'refresh reload update'
+            },
+            {
+              id: 'show-shortcuts',
+              title: 'Keyboard Shortcuts',
+              description: 'View all keyboard shortcuts',
+              icon: 'keyboard',
+              iconBg: 'rgba(236, 72, 153, 0.1)',
+              iconColor: 'text-pink-600',
+              shortcut: '?',
+              action: () => {
+                this.close();
+                // Trigger the shortcuts panel
+                window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', shiftKey: true }));
+              },
+              keywords: 'help shortcuts keyboard keys commands'
+            },
+            {
+              id: 'show-tutorial',
+              title: 'Interactive Tutorial',
+              description: 'Learn how Agent Mail works',
+              icon: 'graduation-cap',
+              iconBg: 'rgba(16, 185, 129, 0.1)',
+              iconColor: 'text-success-600',
+              action: () => {
+                this.close();
+                setTimeout(() => window.restartTutorial(), 200);
+              },
+              keywords: 'help tutorial guide learning onboarding walkthrough intro'
+            },
+            // Action Commands
+            {
+              id: 'copy-url',
+              title: 'Copy Page URL',
+              description: 'Copy current page URL to clipboard',
+              icon: 'link',
+              iconBg: 'rgba(59, 130, 246, 0.1)',
+              iconColor: 'text-blue-600',
+              action: () => {
+                navigator.clipboard.writeText(window.location.href);
+                window.showToast('URL copied to clipboard!', 'success', 2000);
+              },
+              keywords: 'copy url link clipboard share'
+            }
+          ],
+          filteredCommands: [],
+
+          init() {
+            this.filteredCommands = this.commands;
+
+            // Watch for open state changes
+            this.$watch('isOpen', (value) => {
+              if (value) {
+                // Focus search input when opened
+                this.$nextTick(() => {
+                  this.$refs.searchInput?.focus();
+                });
+              } else {
+                // Reset when closed
+                this.query = '';
+                this.selectedIndex = 0;
+                this.filteredCommands = this.commands;
+              }
+            });
+          },
+
+          toggle() {
+            this.isOpen = !this.isOpen;
+          },
+
+          close() {
+            this.isOpen = false;
+          },
+
+          search() {
+            if (!this.query.trim()) {
+              this.filteredCommands = this.commands;
+              this.selectedIndex = 0;
+              return;
+            }
+
+            // Use Fuse.js for fuzzy search if available
+            if (typeof Fuse !== 'undefined') {
+              const fuse = new Fuse(this.commands, {
+                keys: ['title', 'description', 'keywords'],
+                threshold: 0.4,
+                includeScore: true
+              });
+
+              const results = fuse.search(this.query);
+              this.filteredCommands = results.map(r => r.item);
+            } else {
+              // Fallback: simple string matching
+              const query = this.query.toLowerCase();
+              this.filteredCommands = this.commands.filter(cmd => {
+                return cmd.title.toLowerCase().includes(query) ||
+                       (cmd.description && cmd.description.toLowerCase().includes(query)) ||
+                       (cmd.keywords && cmd.keywords.toLowerCase().includes(query));
+              });
+            }
+
+            this.selectedIndex = 0;
+          },
+
+          selectNext() {
+            this.selectedIndex = Math.min(this.selectedIndex + 1, this.filteredCommands.length - 1);
+          },
+
+          selectPrevious() {
+            this.selectedIndex = Math.max(this.selectedIndex - 1, 0);
+          },
+
+          executeSelected() {
+            if (this.filteredCommands[this.selectedIndex]) {
+              this.execute(this.filteredCommands[this.selectedIndex]);
+            }
+          },
+
+          execute(command) {
+            if (command && command.action) {
+              command.action();
+              this.close();
+            }
+          }
+        };
+      }
+
       // Toast Manager
       function toastManager() {
         return {
@@ -667,6 +1688,8 @@
 
         // Initialize in DOMContentLoaded for consistency
         document.addEventListener('DOMContentLoaded', () => {
+          let progressTimeout; // Store timeout to prevent accumulation
+
           // Show progress on internal link clicks
           document.addEventListener('click', (e) => {
             const link = e.target.closest('a');
@@ -677,9 +1700,10 @@
                 if (url.origin === window.location.origin &&
                     url.pathname !== window.location.pathname &&
                     url.protocol !== 'javascript:') {
+                  clearTimeout(progressTimeout); // Clear any existing timeout
                   NProgress.start();
                   // Safety: complete after 3s if navigation doesn't complete
-                  setTimeout(() => NProgress.done(), 3000);
+                  progressTimeout = setTimeout(() => NProgress.done(), 3000);
                 }
               } catch (e) {
                 // Invalid URL, ignore
@@ -706,8 +1730,6 @@
       // Initialize Tippy.js tooltips
       document.addEventListener('DOMContentLoaded', () => {
         if (typeof tippy !== 'undefined') {
-          let tippyInstances = new Set();
-
           // Function to initialize tooltips
           const initTooltips = () => {
             const elements = document.querySelectorAll('[data-tippy-content]');
@@ -715,14 +1737,16 @@
               // Skip if already has tippy instance
               if (el._tippy) return;
 
-              const instance = tippy(el, {
+              tippy(el, {
                 theme: 'agent-mail',
                 animation: 'scale',
                 duration: [200, 150],
                 arrow: true,
-                placement: 'top'
+                placement: 'top',
+                allowHTML: true,  // Enable HTML in tooltips
+                interactive: el.getAttribute('data-tippy-interactive') === 'true',  // Allow hover for complex tooltips
+                maxWidth: el.getAttribute('data-tippy-max-width') || 350
               });
-              tippyInstances.add(instance);
             });
           };
 
@@ -766,19 +1790,19 @@
               if (!isNaN(finalValue) && finalValue > 0) {
                 target.dataset.animated = 'true';
 
-                // Only animate if element was initially hidden (part of stagger animation)
+                // Only animate if element is currently hidden to avoid flash
                 const computedStyle = window.getComputedStyle(target);
                 const isHidden = parseFloat(computedStyle.opacity) === 0 ||
                                 computedStyle.visibility === 'hidden';
 
-                if (isHidden || target.closest('.stagger-item')) {
-                  // Element was hidden, safe to animate from 0
+                if (isHidden) {
+                  // Element is hidden, safe to animate from 0
                   requestAnimationFrame(() => {
                     target.textContent = '0';
                     animateValue(target, 0, finalValue, 1000);
                   });
                 }
-                // Otherwise, element was visible - don't animate to avoid flash
+                // Otherwise, element is visible - don't animate to avoid flash
               }
             }
           });
@@ -828,10 +1852,34 @@
         }, 16);
       }
 
-      // Add keyboard shortcuts
+      // Enhanced keyboard shortcuts
       document.addEventListener('keydown', (e) => {
-        // Ctrl/Cmd + K for search
+        // Don't trigger shortcuts when typing in input fields (except for special cases)
+        const isTyping = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable;
+
+        // Ctrl/Cmd + K for command palette (handled by Alpine, but keep for legacy)
         if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+          e.preventDefault();
+          return;
+        }
+
+        // Shift + ? for keyboard shortcuts help
+        if (e.shiftKey && e.key === '?') {
+          e.preventDefault();
+          return;
+        }
+
+        // Escape to close modals/dropdowns
+        if (e.key === 'Escape') {
+          window.dispatchEvent(new CustomEvent('close-all-dropdowns'));
+          return;
+        }
+
+        // Skip other shortcuts when typing
+        if (isTyping) return;
+
+        // / for search
+        if (e.key === '/') {
           e.preventDefault();
           const searchInput = document.querySelector('input[type="search"], input[name="q"]');
           if (searchInput) {
@@ -840,10 +1888,48 @@
           }
         }
 
-        // Escape to close modals/dropdowns
-        if (e.key === 'Escape') {
-          // Close any open Alpine.js dropdowns
-          window.dispatchEvent(new CustomEvent('close-all-dropdowns'));
+        // R for refresh
+        if (e.key === 'r' || e.key === 'R') {
+          if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            e.preventDefault();
+            window.location.reload();
+          }
+        }
+
+        // D for dark mode toggle
+        if (e.key === 'd' || e.key === 'D') {
+          if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            e.preventDefault();
+            const darkMode = localStorage.getItem('darkMode') === 'true';
+            localStorage.setItem('darkMode', !darkMode);
+            window.location.reload();
+          }
+        }
+
+        // G then P for projects (Gmail-style)
+        if (e.key === 'g' || e.key === 'G') {
+          // Set a flag and wait for next key
+          window._lastKeyG = true;
+          setTimeout(() => { window._lastKeyG = false; }, 1000);
+        }
+
+        if ((e.key === 'p' || e.key === 'P') && window._lastKeyG) {
+          e.preventDefault();
+          window.location.href = '/mail';
+          window._lastKeyG = false;
+        }
+
+        // J/K navigation (Gmail-style)
+        if (e.key === 'j' || e.key === 'J') {
+          e.preventDefault();
+          // Navigate to next item (implement per-page)
+          window.dispatchEvent(new CustomEvent('navigate-next'));
+        }
+
+        if (e.key === 'k' || e.key === 'K') {
+          e.preventDefault();
+          // Navigate to previous item (implement per-page)
+          window.dispatchEvent(new CustomEvent('navigate-previous'));
         }
       });
 

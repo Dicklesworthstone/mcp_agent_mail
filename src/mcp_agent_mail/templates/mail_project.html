@@ -16,14 +16,18 @@
 {% block header_actions %}
 <div class="flex items-center gap-2">
   <a href="/mail/{{ project.slug }}/claims"
-     class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md"
-     data-tippy-content="View resource claims">
-    <i data-lucide="lock" class="w-4 h-4"></i>
-    <span>Claims</span>
+     class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md group"
+     data-tippy-content='<div class="text-left"><strong>File Reservations</strong><br/><span class="text-xs">See which files agents are currently editing to avoid conflicts</span></div>'>
+    <i data-lucide="file-lock" class="w-4 h-4 group-hover:text-warning-500 transition-colors"></i>
+    <span>File Reservations</span>
+    <div class="hidden sm:flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400 border-l border-slate-300 dark:border-slate-600 pl-2 ml-2">
+      <i data-lucide="info" class="w-3 h-3"></i>
+      <span>Edit locks</span>
+    </div>
   </a>
   <a href="/mail/{{ project.slug }}/attachments"
      class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md"
-     data-tippy-content="View attachments">
+     data-tippy-content='<div class="text-left"><strong>Attachments</strong><br/><span class="text-xs">Files shared between agents in messages</span></div>'>
     <i data-lucide="paperclip" class="w-4 h-4"></i>
     <span>Attachments</span>
   </a>

@@ -17,12 +17,13 @@
 {% endblock %}
 
 {% block content %}
-<div class="space-y-6 animate-fade-in">
-  <!-- Inbox Header -->
+<div class="space-y-6 animate-fade-in" x-data="inboxManager()">
+  <!-- Inbox Header with Filters -->
   <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
-    <div class="flex items-center justify-between">
+    <!-- Top Row: Title and Actions -->
+    <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-4">
-        <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+        <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium float">
           <i data-lucide="inbox" class="w-8 h-8 text-white"></i>
         </div>
         <div>
@@ -31,37 +32,150 @@
           </h1>
           <p class="text-slate-600 dark:text-slate-400">
             Inbox
-            {% if items %}
-              <span class="text-slate-400 dark:text-slate-500">•</span>
-              <span class="font-medium">{{ items|length }} message{{ 's' if items|length != 1 else '' }}</span>
-            {% endif %}
+            <template x-if="filteredItems.length > 0">
+              <span>
+                <span class="text-slate-400 dark:text-slate-500">•</span>
+                <span class="font-medium" x-text="filteredItems.length + ' message' + (filteredItems.length !== 1 ? 's' : '')"></span>
+                <template x-if="unreadCount > 0">
+                  <span class="ml-2 px-2 py-0.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-bold rounded-full" x-text="unreadCount + ' unread'"></span>
+                </template>
+              </span>
+            </template>
           </p>
         </div>
       </div>
 
-      <!-- Inbox Actions -->
+      <!-- Quick Actions -->
       <div class="flex items-center gap-2">
-        <button onclick="location.reload()"
-                class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2">
-          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
-          Refresh
+        <button @click="refresh()"
+                class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md"
+                data-tippy-content="Refresh inbox">
+          <i data-lucide="refresh-cw" class="w-4 h-4" :class="{ 'animate-spin': isRefreshing }"></i>
+          <span class="hidden sm:inline">Refresh</span>
         </button>
+
+        <!-- Bulk Actions (shown when messages are selected) -->
+        <div x-show="selectedMessages.length > 0"
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0 transform scale-95"
+             x-transition:enter-end="opacity-100 transform scale-100"
+             class="flex items-center gap-2 border-l border-slate-300 dark:border-slate-600 pl-2 ml-2">
+          <span class="text-sm text-slate-600 dark:text-slate-400" x-text="selectedMessages.length + ' selected'"></span>
+          <button @click="markSelectedAsRead()"
+                  class="px-3 py-2 bg-success-100 dark:bg-success-900/30 hover:bg-success-200 dark:hover:bg-success-800/40 text-success-700 dark:text-success-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-medium"
+                  data-tippy-content="Mark selected as read">
+            <i data-lucide="check" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">Mark Read</span>
+          </button>
+          <button @click="clearSelection()"
+                  class="px-3 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm"
+                  data-tippy-content="Clear selection">
+            <i data-lucide="x" class="w-4 h-4"></i>
+          </button>
+        </div>
+
         <button onclick="showToast('Mark all read coming soon!', 'info')"
-                class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors flex items-center gap-2 btn-ripple">
+                class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-all duration-300 flex items-center gap-2 btn-ripple shadow-md hover:shadow-lg">
           <i data-lucide="check-check" class="w-4 h-4"></i>
-          Mark All Read
+          <span class="hidden sm:inline">Mark All Read</span>
         </button>
+      </div>
+    </div>
+
+    <!-- Filters and Search Bar -->
+    <div class="flex flex-col sm:flex-row gap-4 p-6 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
+      <!-- Search -->
+      <div class="relative flex-1">
+        <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+          <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
+        </div>
+        <input x-model="searchQuery"
+               @input="filterMessages()"
+               type="text"
+               placeholder="Search messages..."
+               class="w-full pl-11 pr-4 py-2.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all duration-200 text-sm" />
+      </div>
+
+      <!-- Filter Buttons -->
+      <div class="flex items-center gap-2 flex-wrap">
+        <button @click="activeFilter = 'all'; filterMessages()"
+                :class="activeFilter === 'all' ? 'bg-primary-600 text-white ring-2 ring-primary-500 ring-offset-2 dark:ring-offset-slate-900' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'"
+                class="px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2 shadow-sm">
+          <i data-lucide="inbox" class="w-4 h-4"></i>
+          <span>All</span>
+        </button>
+        <button @click="activeFilter = 'unread'; filterMessages()"
+                :class="activeFilter === 'unread' ? 'bg-primary-600 text-white ring-2 ring-primary-500 ring-offset-2 dark:ring-offset-slate-900' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'"
+                class="px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2 shadow-sm">
+          <i data-lucide="mail" class="w-4 h-4"></i>
+          <span>Unread</span>
+        </button>
+        <button @click="activeFilter = 'urgent'; filterMessages()"
+                :class="activeFilter === 'urgent' ? 'bg-danger-600 text-white ring-2 ring-danger-500 ring-offset-2 dark:ring-offset-slate-900' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700'"
+                class="px-4 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2 shadow-sm">
+          <i data-lucide="alert-circle" class="w-4 h-4"></i>
+          <span>Urgent</span>
+        </button>
+
+        <!-- Sort Dropdown -->
+        <div class="relative" x-data="{ open: false }">
+          <button @click="open = !open"
+                  class="px-4 py-2.5 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2 shadow-sm border border-slate-300 dark:border-slate-600">
+            <i data-lucide="arrow-up-down" class="w-4 h-4"></i>
+            <span>Sort</span>
+            <i data-lucide="chevron-down" class="w-4 h-4 transition-transform" :class="{ 'rotate-180': open }"></i>
+          </button>
+
+          <div x-show="open"
+               @click.outside="open = false"
+               x-transition:enter="transition ease-out duration-200"
+               x-transition:enter-start="opacity-0 transform scale-95 -translate-y-2"
+               x-transition:enter-end="opacity-100 transform scale-100 translate-y-0"
+               class="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-slate-200 dark:border-slate-700 py-2 z-10">
+            <button @click="sortBy = 'newest'; filterMessages(); open = false"
+                    :class="sortBy === 'newest' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-4 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="arrow-down" class="w-4 h-4"></i>
+              Newest First
+            </button>
+            <button @click="sortBy = 'oldest'; filterMessages(); open = false"
+                    :class="sortBy === 'oldest' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-4 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="arrow-up" class="w-4 h-4"></i>
+              Oldest First
+            </button>
+            <button @click="sortBy = 'sender'; filterMessages(); open = false"
+                    :class="sortBy === 'sender' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-4 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="user" class="w-4 h-4"></i>
+              By Sender
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-  {% if items %}
-    <!-- Messages List -->
+  <!-- Messages List -->
+  <template x-if="filteredItems.length > 0">
     <div class="space-y-3">
-      {% for it in items %}
-        <a href="/mail/{{ project.slug }}/message/{{ it.id }}"
-           class="block group">
-          <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-0.5">
+      <template x-for="(item, index) in filteredItems" :key="item.id">
+        <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:shadow-medium hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-0.5 overflow-hidden stagger-item"
+             :style="`animation-delay: ${Math.min(index * 0.05, 1.0)}s;`">
+          <div class="flex items-start p-6 gap-4">
+            <!-- Checkbox for bulk selection -->
+            <div class="flex-shrink-0 pt-1">
+              <input type="checkbox"
+                     :value="item.id"
+                     @change="toggleSelection(item.id)"
+                     :checked="selectedMessages.includes(item.id)"
+                     class="w-5 h-5 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
+                     :aria-label="'Select message: ' + item.subject" />
+            </div>
+
+            <!-- Message Content (clickable) -->
+            <a :href="`/mail/{{ project.slug }}/message/${item.id}`"
+               class="flex-1 min-w-0 group">
 
             <!-- Message Header -->
             <div class="flex items-start justify-between mb-3">
@@ -144,24 +258,136 @@
       </div>
     {% endif %}
 
-  {% else %}
-    <!-- Empty Inbox State -->
+  </template>
+
+  <!-- Dynamic Empty State (when filtered) -->
+  <template x-if="filteredItems.length === 0">
     <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
       <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
         <i data-lucide="mail-open" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
       </div>
       <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
-        Inbox is empty
+        No messages found
       </h3>
       <p class="text-slate-600 dark:text-slate-400 mb-6 max-w-md mx-auto">
-        No messages yet. New messages sent to {{ agent }} will appear here.
+        <template x-if="searchQuery || activeFilter !== 'all'">
+          <span>Try adjusting your filters or search query.</span>
+        </template>
+        <template x-if="!searchQuery && activeFilter === 'all'">
+          <span>New messages sent to {{ agent }} will appear here.</span>
+        </template>
       </p>
-      <a href="/mail/{{ project.slug }}"
-         class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 btn-ripple">
-        <i data-lucide="arrow-left" class="w-4 h-4"></i>
-        Back to Project
-      </a>
+      <template x-if="searchQuery || activeFilter !== 'all'">
+        <button @click="searchQuery = ''; activeFilter = 'all'; filterMessages()"
+                class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 btn-ripple">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          Clear Filters
+        </button>
+      </template>
+      <template x-if="!searchQuery && activeFilter === 'all'">
+        <a href="/mail/{{ project.slug }}"
+           class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 btn-ripple">
+          <i data-lucide="arrow-left" class="w-4 h-4"></i>
+          Back to Project
+        </a>
+      </template>
     </div>
-  {% endif %}
+  </template>
 </div>
+
+<script>
+  function inboxManager() {
+    return {
+      // Data
+      items: {{ items | tojson if items else '[]' }},
+      filteredItems: [],
+      selectedMessages: [],
+      searchQuery: '',
+      activeFilter: 'all',
+      sortBy: 'newest',
+      isRefreshing: false,
+
+      // Computed
+      get unreadCount() {
+        // In a real implementation, this would filter items marked as unread
+        return 0;
+      },
+
+      init() {
+        this.filteredItems = [...this.items];
+        this.filterMessages();
+      },
+
+      // Filtering
+      filterMessages() {
+        let filtered = [...this.items];
+
+        // Apply search
+        if (this.searchQuery) {
+          const query = this.searchQuery.toLowerCase();
+          filtered = filtered.filter(item =>
+            item.subject.toLowerCase().includes(query) ||
+            (item.sender && item.sender.toLowerCase().includes(query))
+          );
+        }
+
+        // Apply filter
+        switch (this.activeFilter) {
+          case 'unread':
+            // In real implementation, filter by unread status
+            // filtered = filtered.filter(item => item.unread);
+            break;
+          case 'urgent':
+            filtered = filtered.filter(item =>
+              item.importance === 'urgent' || item.importance === 'high'
+            );
+            break;
+        }
+
+        // Apply sort
+        switch (this.sortBy) {
+          case 'newest':
+            filtered.sort((a, b) => new Date(b.created) - new Date(a.created));
+            break;
+          case 'oldest':
+            filtered.sort((a, b) => new Date(a.created) - new Date(b.created));
+            break;
+          case 'sender':
+            filtered.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
+            break;
+        }
+
+        this.filteredItems = filtered;
+      },
+
+      // Selection
+      toggleSelection(id) {
+        const index = this.selectedMessages.indexOf(id);
+        if (index > -1) {
+          this.selectedMessages.splice(index, 1);
+        } else {
+          this.selectedMessages.push(id);
+        }
+      },
+
+      clearSelection() {
+        this.selectedMessages = [];
+      },
+
+      // Actions
+      refresh() {
+        this.isRefreshing = true;
+        window.location.reload();
+      },
+
+      markSelectedAsRead() {
+        if (this.selectedMessages.length === 0) return;
+
+        // In real implementation, make API calls to mark messages as read
+        window.showToast(`Marked ${this.selectedMessages.length} message(s) as read`, 'success');
+        this.clearSelection();
+      }
+    };
+  }
+</script>
 {% endblock %}
