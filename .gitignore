@@ -208,3 +208,4 @@ data/baselines/*
 storage.sqlite3-shm
 storage.sqlite3-wal
 storage.sqlite3.old
+*.bak.*
