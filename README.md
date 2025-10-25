@@ -45,22 +45,22 @@ It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini C
 ## Architecture
 
 ```mermaid
-flowchart LR
-  A["Agents (CLIs: Claude Code, Codex, Gemini CLI, ...)"]
-  S["mcp-agent-mail (FastMCP, HTTP-only)"]
-  G["Per-project Git repo: .mcp-mail/"]
-  Q["SQLite + FTS5"]
+graph LR
+  A[Agents]
+  S[Server]
+  G[Git repo]
+  Q[SQLite FTS5]
 
-  A -->|tools/resources (HTTP)| S
+  A -->|HTTP tools/resources| S
   S -->|writes/reads| G
   S -->|indexes/queries| Q
 
-  subgraph GitTree
-    GI1["agents/<Agent>/profile.json"]
-    GI2["agents/<Agent>/{inbox,outbox}/..."]
-    GI3["messages/YYYY/MM/<msg-id>.md"]
-    GI4["claims/<sha1(path)>.json"]
-    GA["attachments/<xx>/<sha1>.webp"]
+  subgraph GitTree["Git tree"]
+    GI1[agents/profile.json]
+    GI2[agents/mailboxes/...]
+    GI3[messages/YYYY/MM/id.md]
+    GI4[claims/sha1.json]
+    GA[attachments/xx/sha1.webp]
   end
 
   G --- GI1

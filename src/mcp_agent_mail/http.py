@@ -33,7 +33,19 @@ from .app import (
 )
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
-from .storage import AsyncFileLock, ensure_archive, write_agent_profile, write_claim_record
+from .storage import (
+    AsyncFileLock,
+    ensure_archive,
+    get_agent_communication_graph,
+    get_archive_tree,
+    get_commit_detail,
+    get_file_content,
+    get_message_commit_sha,
+    get_recent_commits,
+    get_timeline_commits,
+    write_agent_profile,
+    write_claim_record,
+)
 
 
 async def _project_slug_from_id(pid: int | None) -> str | None:
@@ -1291,6 +1303,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             body_html = markdown2.markdown(mrow[2] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"]) if mrow[2] else ""
             if body_html:
                 body_html = _html_cleaner.clean(body_html)
+
+            # Get commit SHA for provenance badge
+            commit_sha = None
+            try:
+                settings = get_settings()
+                archive = await ensure_archive(settings, prow[1])
+                commit_sha = await get_message_commit_sha(archive, mid)
+            except Exception:
+                pass  # Commit SHA is optional
+
             return await _render(
                 "mail_message.html",
                 project={"slug": prow[1], "human_key": prow[2]},
@@ -1306,6 +1328,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 },
                 recipients=recipients,
                 thread_items=thread_items,
+                commit_sha=commit_sha,
             )
 
         # Full-text search UI across subject/body using LIKE fallback (SQLite FTS handled elsewhere)
@@ -1385,6 +1408,194 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
             return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
+
+        # ========== Archive Visualization Routes ==========
+
+        @fastapi_app.get("/mail/archive/guide", response_class=HTMLResponse)
+        async def archive_guide() -> HTMLResponse:
+            """Display the archive access guide and overview."""
+            settings = get_settings()
+            storage_root = str(Path(settings.storage.root).expanduser().resolve())
+
+            # Get basic stats
+            from pathlib import Path as P
+            from git import Repo as GitRepo
+
+            repo_root = P(storage_root)
+            if (repo_root / ".git").exists():
+                try:
+                    repo = GitRepo(str(repo_root))
+                    total_commits = sum(1 for _ in repo.iter_commits())
+                    last_commit = next(repo.iter_commits(), None)
+                    last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
+
+                    # Count projects
+                    projects_dir = repo_root / "projects"
+                    project_count = len([p for p in projects_dir.iterdir() if p.is_dir()]) if projects_dir.exists() else 0
+
+                    # Estimate size
+                    import subprocess
+                    result = subprocess.run(["du", "-sh", str(repo_root)], capture_output=True, text=True)
+                    repo_size = result.stdout.split()[0] if result.returncode == 0 else "Unknown"
+                except Exception:
+                    total_commits = 0
+                    project_count = 0
+                    repo_size = "Unknown"
+                    last_commit_time = "Unknown"
+            else:
+                total_commits = 0
+                project_count = 0
+                repo_size = "0 MB"
+                last_commit_time = "Never"
+
+            return await _render(
+                "archive_guide.html",
+                storage_root=storage_root,
+                total_commits=total_commits,
+                project_count=project_count,
+                repo_size=repo_size,
+                last_commit_time=last_commit_time,
+            )
+
+        @fastapi_app.get("/mail/archive/activity", response_class=HTMLResponse)
+        async def archive_activity(limit: int = 50) -> HTMLResponse:
+            """Display recent commits across all projects."""
+            settings = get_settings()
+            repo_root = Path(settings.storage.root).expanduser().resolve()
+
+            from git import Repo as GitRepo
+
+            if not (repo_root / ".git").exists():
+                return await _render("archive_activity.html", commits=[])
+
+            repo = GitRepo(str(repo_root))
+            commits = await get_recent_commits(repo, limit=limit)
+
+            return await _render("archive_activity.html", commits=commits)
+
+        @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
+        async def archive_commit(sha: str) -> HTMLResponse:
+            """Display detailed commit information with diffs."""
+            settings = get_settings()
+            repo_root = Path(settings.storage.root).expanduser().resolve()
+
+            from git import Repo as GitRepo
+
+            if not (repo_root / ".git").exists():
+                return await _render("error.html", message="Archive repository not found")
+
+            try:
+                repo = GitRepo(str(repo_root))
+                commit = await get_commit_detail(repo, sha)
+                return await _render("archive_commit.html", commit=commit)
+            except Exception as e:
+                return await _render("error.html", message=f"Commit not found: {str(e)}")
+
+        @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
+        async def archive_timeline(project: str | None = None) -> HTMLResponse:
+            """Display communication timeline with Mermaid.js visualization."""
+            settings = get_settings()
+            repo_root = Path(settings.storage.root).expanduser().resolve()
+
+            from git import Repo as GitRepo
+
+            if not (repo_root / ".git").exists():
+                return await _render("error.html", message="Archive repository not found")
+
+            # Default to first project if not specified
+            if not project:
+                async with get_session() as session:
+                    row = (await session.execute(text("SELECT slug, human_key FROM projects ORDER BY id LIMIT 1"))).fetchone()
+                    if row:
+                        project = row[0]
+                    else:
+                        return await _render("error.html", message="No projects found")
+
+            # Get project name
+            project_name = project
+            async with get_session() as session:
+                row = (await session.execute(text("SELECT human_key FROM projects WHERE slug = :s"), {"s": project})).fetchone()
+                if row:
+                    project_name = row[0]
+
+            repo = GitRepo(str(repo_root))
+            commits = await get_timeline_commits(repo, project, limit=100)
+
+            return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+
+        @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
+        async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
+            """Browse archive files and directories."""
+            if not project:
+                # Show project selector - requires project parameter
+                return await _render("error.html", message="Please select a project to browse")
+
+            settings = get_settings()
+            archive = await ensure_archive(settings, project)
+            tree = await get_archive_tree(archive, path)
+
+            return await _render("archive_browser.html", tree=tree, project=project, path=path)
+
+        @fastapi_app.get("/mail/archive/browser/{project}/file")
+        async def archive_browser_file(project: str, path: str) -> JSONResponse:
+            """Get file content from archive."""
+            settings = get_settings()
+            archive = await ensure_archive(settings, project)
+            content = await get_file_content(archive, path)
+
+            if content is None:
+                raise HTTPException(status_code=404, detail="File not found")
+
+            return JSONResponse(content=content)
+
+        @fastapi_app.get("/mail/archive/network", response_class=HTMLResponse)
+        async def archive_network(project: str | None = None) -> HTMLResponse:
+            """Display agent communication network graph."""
+            settings = get_settings()
+            repo_root = Path(settings.storage.root).expanduser().resolve()
+
+            from git import Repo as GitRepo
+
+            if not (repo_root / ".git").exists():
+                return await _render("error.html", message="Archive repository not found")
+
+            # Default to first project
+            if not project:
+                async with get_session() as session:
+                    row = (await session.execute(text("SELECT slug, human_key FROM projects ORDER BY id LIMIT 1"))).fetchone()
+                    if row:
+                        project = row[0]
+                    else:
+                        return await _render("error.html", message="No projects found")
+
+            # Get project name
+            project_name = project
+            async with get_session() as session:
+                row = (await session.execute(text("SELECT human_key FROM projects WHERE slug = :s"), {"s": project})).fetchone()
+                if row:
+                    project_name = row[0]
+
+            repo = GitRepo(str(repo_root))
+            graph = await get_agent_communication_graph(repo, project, limit=200)
+
+            return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+
+        @fastapi_app.get("/mail/archive/time-travel", response_class=HTMLResponse)
+        async def archive_time_travel() -> HTMLResponse:
+            """Display time-travel interface."""
+            # Get all projects
+            async with get_session() as session:
+                rows = await session.execute(text("SELECT slug FROM projects ORDER BY human_key"))
+                projects = [r[0] for r in rows.fetchall()]
+
+            return await _render("archive_time_travel.html", projects=projects)
+
+        @fastapi_app.get("/mail/archive/time-travel/snapshot")
+        async def archive_time_travel_snapshot(project: str, agent: str, timestamp: str) -> JSONResponse:
+            """Get historical inbox snapshot."""
+            # This is a simplified implementation - in production would parse git history at timestamp
+            return JSONResponse({"messages": [], "note": "Time travel feature requires enhanced git history parsing"})
+
     except Exception as exc:
         # templates/Jinja may be missing in some environments; UI remains optional
         with contextlib.suppress(Exception):
