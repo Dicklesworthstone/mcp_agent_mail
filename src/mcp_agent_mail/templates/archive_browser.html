@@ -103,37 +103,52 @@ function browserManager() {
 
       if (entry.type === 'file') {
         const projectSegment = encodeURIComponent(this.project);
-        const response = await fetch(`/mail/archive/browser/${projectSegment}/file?path=${encodeURIComponent(entry.path)}`);
-        const content = await response.text();
-
         const container = document.getElementById('file-content');
-        const isMarkdown = entry.name.endsWith('.md');
-        const isJSON = entry.name.endsWith('.json');
-
-        if (isMarkdown) {
-          try {
-            container.innerHTML = typeof marked !== 'undefined' ? marked.parse(content) : this.escapeHtml(content);
-          } catch (error) {
-            console.error('Markdown rendering failed:', error);
-            container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
+        try {
+          const response = await fetch(`/mail/archive/browser/${projectSegment}/file?path=${encodeURIComponent(entry.path)}`);
+          if (!response.ok) {
+            const errorMessage = `${response.status} ${response.statusText || ''}`.trim();
+            container.innerHTML = `<div class="p-4 bg-danger-50 dark:bg-danger-900/20 text-danger-700 dark:text-danger-300 rounded-lg">
+              Failed to load file: ${this.escapeHtml(errorMessage)}
+            </div>`;
+            return;
           }
-        } else if (isJSON) {
-          try {
-            const formatted = JSON.stringify(JSON.parse(content), null, 2);
-            if (typeof Prism !== 'undefined') {
-              container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
-            } else {
-              container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(formatted)}</pre>`;
+
+          const content = await response.text();
+
+          const isMarkdown = entry.name.endsWith('.md');
+          const isJSON = entry.name.endsWith('.json');
+
+          if (isMarkdown) {
+            try {
+              container.innerHTML = typeof marked !== 'undefined' ? marked.parse(content) : this.escapeHtml(content);
+            } catch (error) {
+              console.error('Markdown rendering failed:', error);
+              container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
             }
-          } catch {
+          } else if (isJSON) {
+            try {
+              const formatted = JSON.stringify(JSON.parse(content), null, 2);
+              if (typeof Prism !== 'undefined') {
+                container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
+              } else {
+                container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(formatted)}</pre>`;
+              }
+            } catch {
+              container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
+            }
+          } else {
             container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
           }
-        } else {
-          container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
-        }
 
-        if (typeof lucide !== 'undefined') {
-          lucide.createIcons();
+          if (typeof lucide !== 'undefined') {
+            lucide.createIcons();
+          }
+        } catch (error) {
+          console.error('Failed to load file contents:', error);
+          container.innerHTML = `<div class="p-4 bg-danger-50 dark:bg-danger-900/20 text-danger-700 dark:text-danger-300 rounded-lg">
+            Unable to load file contents. Please try again.
+          </div>`;
         }
       }
     },

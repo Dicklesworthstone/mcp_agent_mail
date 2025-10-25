@@ -584,7 +584,9 @@
       `;
 
       try {
-        const response = await fetch(`/api/projects/${projectId}/siblings/${otherId}`, {
+        const encodedProjectId = encodeURIComponent(projectId);
+        const encodedOtherId = encodeURIComponent(otherId);
+        const response = await fetch(`/api/projects/${encodedProjectId}/siblings/${encodedOtherId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action }),
