@@ -55,6 +55,8 @@ async def test_readiness_error_path_returns_503(isolated_env, monkeypatch):
 async def test_rbac_denies_when_tool_name_missing(isolated_env, monkeypatch):
     # Enable RBAC but no JWT; default role is reader -> missing tool name should require writer and be denied
     monkeypatch.setenv("HTTP_RBAC_ENABLED", "true")
+    # Disable localhost auto-authentication to properly test RBAC
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
     settings = _config.get_settings()

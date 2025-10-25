@@ -701,7 +701,9 @@ def call_tool(name: str, arguments: dict) -> dict:
     data = r.json()
     if "error" in data:
         raise RuntimeError(data["error"])  # surface MCP error
-    return data.get("result")
+    result = data.get("result", {})
+    # MCP returns structuredContent with the actual data
+    return result.get("structuredContent", result)
 
 def read_resource(uri: str) -> dict:
     payload = {"jsonrpc":"2.0","id":"2","method":"resources/read","params":{"uri": uri}}
@@ -710,7 +712,10 @@ def read_resource(uri: str) -> dict:
     data = r.json()
     if "error" in data:
         raise RuntimeError(data["error"])  # surface MCP error
-    return data.get("result")
+    result = data.get("result", {})
+    # MCP resource responses have contents array
+    contents = result.get("contents", [])
+    return contents[0] if contents else result
 
 if __name__ == "__main__":
     profile = call_tool("register_agent", {

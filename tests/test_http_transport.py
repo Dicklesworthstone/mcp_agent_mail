@@ -22,6 +22,8 @@ async def test_http_bearer_and_cors_preflight(isolated_env, monkeypatch):
     monkeypatch.setenv("HTTP_BEARER_TOKEN", "token123")
     monkeypatch.setenv("HTTP_CORS_ENABLED", "true")
     monkeypatch.setenv("HTTP_CORS_ORIGINS", "http://example.com")
+    # Disable localhost auto-authentication to properly test bearer auth
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
     settings = _config.get_settings()

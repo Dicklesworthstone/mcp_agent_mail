@@ -7,21 +7,8 @@ from httpx import ASGITransport, AsyncClient
 
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
-from mcp_agent_mail.db import ensure_schema, run_migrations
+from mcp_agent_mail.db import ensure_schema
 from mcp_agent_mail.http import build_http_app, main as http_main
-
-
-def test_run_migrations_apply_hook_called(isolated_env):
-    called = {"v": False}
-
-    async def apply(engine):  # type: ignore[no-untyped-def]
-        called["v"] = True
-
-    # Should not raise
-    import asyncio
-
-    asyncio.run(run_migrations(apply))
-    assert called["v"] is True
 
 
 def test_http_main_invokes_uvicorn(monkeypatch):

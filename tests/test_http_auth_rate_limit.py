@@ -25,6 +25,8 @@ async def test_http_jwt_rbac_and_rate_limit(monkeypatch):
     # Enable rate limiting with small threshold
     monkeypatch.setenv("HTTP_RATE_LIMIT_ENABLED", "true")
     monkeypatch.setenv("HTTP_RATE_LIMIT_TOOLS_PER_MINUTE", "1")
+    # Disable localhost auto-authentication to properly test RBAC
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
     settings = _config.get_settings()
@@ -47,7 +49,8 @@ async def test_http_jwt_rbac_and_rate_limit(monkeypatch):
         r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r.status_code == 200
         body = r.json()
-        assert body.get("result", {}).get("status") == "ok"
+        # Response is MCP JSON-RPC format with structuredContent
+        assert body.get("result", {}).get("structuredContent", {}).get("status") == "ok"
 
         # Reader cannot call write tool
         r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "A", "to": ["B"], "subject": "x", "body_md": "y"}}))
