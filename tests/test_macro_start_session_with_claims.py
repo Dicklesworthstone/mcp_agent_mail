@@ -28,7 +28,7 @@ async def test_macro_start_session_with_claim_paths(isolated_env):
                 "human_key": "/test/project",
                 "program": "claude-code",
                 "model": "sonnet-4.5",
-                "agent_name": "TestAgent",
+                "agent_name": "BlueLake",  # ← Must be adjective+noun format
                 "task_description": "Testing claims functionality",
                 "claim_paths": ["src/**/*.py", "tests/**/*.py"],  # ← This triggers the shadowing
                 "claim_reason": "Testing macro_start_session with claims",
@@ -46,7 +46,7 @@ async def test_macro_start_session_with_claim_paths(isolated_env):
 
         # Verify agent was registered
         assert "agent" in data
-        assert data["agent"]["name"] == "TestAgent"
+        assert data["agent"]["name"] == "BlueLake"
         assert data["agent"]["program"] == "claude-code"
         assert data["agent"]["model"] == "sonnet-4.5"
 
@@ -85,7 +85,7 @@ async def test_macro_start_session_without_claims_still_works(isolated_env):
                 "human_key": "/test/project2",
                 "program": "codex",
                 "model": "gpt-5",
-                "agent_name": "TestAgent2",
+                "agent_name": "RedStone",  # ← Must be adjective+noun format
                 "task_description": "No claims test",
                 # claim_paths intentionally omitted
                 "inbox_limit": 5,
@@ -96,7 +96,7 @@ async def test_macro_start_session_without_claims_still_works(isolated_env):
 
         # Verify basic functionality still works
         assert data["project"]["slug"] == "test-project2"
-        assert data["agent"]["name"] == "TestAgent2"
+        assert data["agent"]["name"] == "RedStone"
 
         # claims should be empty dict when not requested (not None - function returns {"granted": [], "conflicts": []})
         assert data["claims"] == {"granted": [], "conflicts": []}

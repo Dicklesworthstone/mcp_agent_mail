@@ -154,6 +154,42 @@
     <!-- Hotkeys.js for keyboard shortcuts -->
     <script src="https://unpkg.com/hotkeys-js@3.13.7/dist/hotkeys.min.js"></script>
 
+    <!-- Mermaid.js for git graphs and diagrams -->
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+      window.mermaid = mermaid;
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'base',
+        themeVariables: {
+          primaryColor: '#6366f1',
+          primaryTextColor: '#fff',
+          primaryBorderColor: '#4f46e5',
+          lineColor: '#6366f1',
+          secondaryColor: '#818cf8',
+          tertiaryColor: '#a5b4fc',
+          background: '#ffffff',
+          mainBkg: '#6366f1',
+          secondBkg: '#818cf8',
+          tertiaryBkg: '#a5b4fc'
+        },
+        gitGraph: {
+          rotateCommitLabel: false,
+          mainBranchName: 'main',
+          showBranches: true,
+          showCommitLabel: true
+        }
+      });
+    </script>
+
+    <!-- Diff2Html for beautiful git diffs -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html@3.4.47/bundles/css/diff2html.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/diff2html@3.4.47/bundles/js/diff2html-ui.min.js"></script>
+
+    <!-- Vis.js for network graphs -->
+    <script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+    <link href="https://unpkg.com/vis-network@9.1.9/dist/dist/vis-network.min.css" rel="stylesheet" type="text/css" />
+
     <style>
       [x-cloak] { display: none !important; }
 

@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+
+{% block title %}Archive Guide — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Archive Guide</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="animate-fade-in">
+  <!-- Hero Section -->
+  <div class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 p-12 mb-8 shadow-glow">
+    <div class="absolute inset-0 bg-black opacity-10"></div>
+    <div class="relative z-10">
+      <div class="flex items-center gap-4 mb-6">
+        <div class="w-20 h-20 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center shadow-xl">
+          <i data-lucide="git-branch" class="w-10 h-10 text-white"></i>
+        </div>
+        <div>
+          <h1 class="text-4xl md:text-5xl font-bold text-white mb-2">
+            Git Archive
+          </h1>
+          <p class="text-xl text-white/90 font-medium">
+            Your Complete Message History, Version-Controlled
+          </p>
+        </div>
+      </div>
+      <p class="text-lg text-white/80 max-w-3xl">
+        Every message, claim, and agent profile is automatically committed to a Git repository,
+        providing an immutable audit trail with cryptographic integrity. Access it via standard Git tools
+        or explore it right here in the UI.
+      </p>
+    </div>
+
+    <!-- Decorative elements -->
+    <div class="absolute -bottom-12 -right-12 w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
+    <div class="absolute -top-12 -left-12 w-48 h-48 bg-white/10 rounded-full blur-2xl"></div>
+  </div>
+
+  <!-- Quick Stats -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+    <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/30 rounded-2xl p-6 border-2 border-blue-200 dark:border-blue-800 shadow-soft hover:shadow-medium transition-shadow duration-300">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-blue-500 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="git-commit" class="w-7 h-7 text-white"></i>
+        </div>
+        <span class="text-3xl font-bold text-blue-900 dark:text-blue-100">{{ total_commits }}</span>
+      </div>
+      <h3 class="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide">Total Commits</h3>
+    </div>
+
+    <div class="bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-950/30 dark:to-emerald-900/30 rounded-2xl p-6 border-2 border-emerald-200 dark:border-emerald-800 shadow-soft hover:shadow-medium transition-shadow duration-300">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-emerald-500 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="folder" class="w-7 h-7 text-white"></i>
+        </div>
+        <span class="text-3xl font-bold text-emerald-900 dark:text-emerald-100">{{ project_count }}</span>
+      </div>
+      <h3 class="text-sm font-semibold text-emerald-700 dark:text-emerald-300 uppercase tracking-wide">Projects</h3>
+    </div>
+
+    <div class="bg-gradient-to-br from-violet-50 to-violet-100 dark:from-violet-950/30 dark:to-violet-900/30 rounded-2xl p-6 border-2 border-violet-200 dark:border-violet-800 shadow-soft hover:shadow-medium transition-shadow duration-300">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-violet-500 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="database" class="w-7 h-7 text-white"></i>
+        </div>
+        <span class="text-3xl font-bold text-violet-900 dark:text-violet-100">{{ repo_size }}</span>
+      </div>
+      <h3 class="text-sm font-semibold text-violet-700 dark:text-violet-300 uppercase tracking-wide">Archive Size</h3>
+    </div>
+
+    <div class="bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-950/30 dark:to-amber-900/30 rounded-2xl p-6 border-2 border-amber-200 dark:border-amber-800 shadow-soft hover:shadow-medium transition-shadow duration-300">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-amber-500 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="clock" class="w-7 h-7 text-white"></i>
+        </div>
+        <span class="text-3xl font-bold text-amber-900 dark:text-amber-100">{{ last_commit_time }}</span>
+      </div>
+      <h3 class="text-sm font-semibold text-amber-700 dark:text-amber-300 uppercase tracking-wide">Last Commit</h3>
+    </div>
+  </div>
+
+  <!-- Feature Sections Grid -->
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+
+    <!-- Local Access -->
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300">
+      <div class="bg-gradient-to-r from-indigo-500 to-purple-600 p-6">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
+            <i data-lucide="terminal" class="w-6 h-6 text-white"></i>
+          </div>
+          <h2 class="text-2xl font-bold text-white">Access Locally</h2>
+        </div>
+        <p class="text-white/90">Clone the archive and explore with your favorite Git tools</p>
+      </div>
+
+      <div class="p-6 space-y-6">
+        <!-- Repository Location -->
+        <div>
+          <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
+            Repository Location
+          </label>
+          <div class="flex items-center gap-2">
+            <code class="flex-1 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm font-mono text-slate-900 dark:text-white">{{ storage_root }}</code>
+            <button onclick="copyToClipboard('{{ storage_root }}')"
+                    class="px-4 py-3 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors shadow-md hover:shadow-lg flex items-center gap-2">
+              <i data-lucide="copy" class="w-4 h-4"></i>
+              Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Commands -->
+        <div>
+          <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">
+            Quick Commands
+          </label>
+          <div class="space-y-3">
+            <div class="relative group">
+              <div class="flex items-start gap-3 p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
+                <i data-lucide="list" class="w-5 h-5 text-primary-600 dark:text-primary-400 mt-0.5 flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">View recent commits</p>
+                  <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} log --oneline -20</code>
+                </div>
+                <button onclick="copyToClipboard('git -C {{ storage_root }} log --oneline -20')"
+                        class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
+                  <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="relative group">
+              <div class="flex items-start gap-3 p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
+                <i data-lucide="folder-tree" class="w-5 h-5 text-emerald-600 dark:text-emerald-400 mt-0.5 flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Browse project structure</p>
+                  <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">tree {{ storage_root }}/projects/</code>
+                </div>
+                <button onclick="copyToClipboard('tree {{ storage_root }}/projects/')"
+                        class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
+                  <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="relative group">
+              <div class="flex items-start gap-3 p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
+                <i data-lucide="search" class="w-5 h-5 text-violet-600 dark:text-violet-400 mt-0.5 flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Search commit messages</p>
+                  <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} log --all --grep="keyword"</code>
+                </div>
+                <button onclick="copyToClipboard('git -C {{ storage_root }} log --all --grep=&quot;keyword&quot;')"
+                        class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
+                  <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+                </button>
+              </div>
+            </div>
+
+            <div class="relative group">
+              <div class="flex items-start gap-3 p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
+                <i data-lucide="file-text" class="w-5 h-5 text-amber-600 dark:text-amber-400 mt-0.5 flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">View specific commit</p>
+                  <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} show &lt;commit-sha&gt;</code>
+                </div>
+                <button onclick="copyToClipboard('git -C {{ storage_root }} show &lt;commit-sha&gt;')"
+                        class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
+                  <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- UI Features -->
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300">
+      <div class="bg-gradient-to-r from-purple-500 to-pink-600 p-6">
+        <div class="flex items-center gap-3 mb-2">
+          <div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
+            <i data-lucide="layout-grid" class="w-6 h-6 text-white"></i>
+          </div>
+          <h2 class="text-2xl font-bold text-white">Explore in UI</h2>
+        </div>
+        <p class="text-white/90">Powerful visualization tools built right into the web interface</p>
+      </div>
+
+      <div class="p-6 space-y-4">
+        <a href="/mail/archive/activity"
+           class="flex items-center gap-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/30 dark:to-indigo-950/30 rounded-xl border-2 border-blue-200 dark:border-blue-800 hover:border-blue-400 dark:hover:border-blue-600 transition-all duration-300 group">
+          <div class="w-12 h-12 bg-blue-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+            <i data-lucide="activity" class="w-6 h-6 text-white"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+              Activity Feed
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">Recent commits across all projects</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-1 transition-all"></i>
+        </a>
+
+        <a href="/mail/archive/browser"
+           class="flex items-center gap-4 p-4 bg-gradient-to-r from-emerald-50 to-green-50 dark:from-emerald-950/30 dark:to-green-950/30 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 transition-all duration-300 group">
+          <div class="w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+            <i data-lucide="folder-tree" class="w-6 h-6 text-white"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
+              Archive Browser
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">Navigate files and view content</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 group-hover:translate-x-1 transition-all"></i>
+        </a>
+
+        <a href="/mail/archive/timeline"
+           class="flex items-center gap-4 p-4 bg-gradient-to-r from-violet-50 to-purple-50 dark:from-violet-950/30 dark:to-purple-950/30 rounded-xl border-2 border-violet-200 dark:border-violet-800 hover:border-violet-400 dark:hover:border-violet-600 transition-all duration-300 group">
+          <div class="w-12 h-12 bg-violet-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+            <i data-lucide="git-branch" class="w-6 h-6 text-white"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
+              Communication Timeline
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">Visual message flow over time</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-violet-600 dark:group-hover:text-violet-400 group-hover:translate-x-1 transition-all"></i>
+        </a>
+
+        <a href="/mail/archive/network"
+           class="flex items-center gap-4 p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/30 dark:to-orange-950/30 rounded-xl border-2 border-amber-200 dark:border-amber-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all duration-300 group">
+          <div class="w-12 h-12 bg-amber-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+            <i data-lucide="network" class="w-6 h-6 text-white"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors">
+              Network Graph
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">Agent communication patterns</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-amber-600 dark:group-hover:text-amber-400 group-hover:translate-x-1 transition-all"></i>
+        </a>
+
+        <a href="/mail/archive/time-travel"
+           class="flex items-center gap-4 p-4 bg-gradient-to-r from-pink-50 to-rose-50 dark:from-pink-950/30 dark:to-rose-950/30 rounded-xl border-2 border-pink-200 dark:border-pink-800 hover:border-pink-400 dark:hover:border-pink-600 transition-all duration-300 group">
+          <div class="w-12 h-12 bg-pink-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
+            <i data-lucide="clock" class="w-6 h-6 text-white"></i>
+          </div>
+          <div class="flex-1">
+            <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-pink-600 dark:group-hover:text-pink-400 transition-colors">
+              Time Travel
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">View history at any point in time</p>
+          </div>
+          <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-pink-600 dark:group-hover:text-pink-400 group-hover:translate-x-1 transition-all"></i>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Benefits Section -->
+  <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
+    <div class="p-8">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-14 h-14 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="shield-check" class="w-7 h-7 text-white"></i>
+        </div>
+        <div>
+          <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Why Git Archive?</h2>
+          <p class="text-slate-600 dark:text-slate-400">Unique benefits beyond the database</p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div class="p-6 bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-950/20 dark:to-indigo-950/20 rounded-xl border border-blue-200 dark:border-blue-800">
+          <div class="w-12 h-12 bg-blue-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="lock" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Cryptographic Integrity</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Every commit SHA is tamper-proof proof of authenticity</p>
+        </div>
+
+        <div class="p-6 bg-gradient-to-br from-emerald-50 to-green-50 dark:from-emerald-950/20 dark:to-green-950/20 rounded-xl border border-emerald-200 dark:border-emerald-800">
+          <div class="w-12 h-12 bg-emerald-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="history" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Complete History</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Never lose data - full timeline since inception</p>
+        </div>
+
+        <div class="p-6 bg-gradient-to-br from-violet-50 to-purple-50 dark:from-violet-950/20 dark:to-purple-950/20 rounded-xl border border-violet-200 dark:border-violet-800">
+          <div class="w-12 h-12 bg-violet-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="file-text" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Human Readable</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Markdown files browsable without special tools</p>
+        </div>
+
+        <div class="p-6 bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-950/20 dark:to-orange-950/20 rounded-xl border border-amber-200 dark:border-amber-800">
+          <div class="w-12 h-12 bg-amber-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="cloud" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Distributed</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Clone, backup, mirror - standard Git workflows</p>
+        </div>
+
+        <div class="p-6 bg-gradient-to-br from-pink-50 to-rose-50 dark:from-pink-950/20 dark:to-rose-950/20 rounded-xl border border-pink-200 dark:border-pink-800">
+          <div class="w-12 h-12 bg-pink-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="search" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Forensic Analysis</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Deep pattern analysis over weeks and months</p>
+        </div>
+
+        <div class="p-6 bg-gradient-to-br from-cyan-50 to-teal-50 dark:from-cyan-950/20 dark:to-teal-950/20 rounded-xl border border-cyan-200 dark:border-cyan-800">
+          <div class="w-12 h-12 bg-cyan-500 rounded-lg flex items-center justify-center mb-4 shadow-md">
+            <i data-lucide="shield" class="w-6 h-6 text-white"></i>
+          </div>
+          <h3 class="font-bold text-slate-900 dark:text-white mb-2">Compliance Ready</h3>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Immutable records for regulated environments</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    showToast('Copied to clipboard!', 'success');
+  }).catch(() => {
+    showToast('Failed to copy', 'error');
+  });
+}
+</script>
+{% endblock %}

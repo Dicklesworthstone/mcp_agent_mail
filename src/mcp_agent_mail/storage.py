@@ -533,3 +533,477 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             repo.index.commit(final_message, author=actor, committer=actor)
 
     await _to_thread(_perform_commit)
+
+
+# ==================================================================================
+# Git Archive Visualization & Analysis Helpers
+# ==================================================================================
+
+
+async def get_recent_commits(
+    repo: Repo,
+    limit: int = 50,
+    project_slug: str | None = None,
+    path_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Get recent commits from the Git repository.
+
+    Args:
+        repo: GitPython Repo object
+        limit: Maximum number of commits to return
+        project_slug: Optional slug to filter commits for specific project
+        path_filter: Optional path pattern to filter commits
+
+    Returns:
+        List of commit dicts with keys: sha, short_sha, author, email, date,
+        relative_date, subject, body, files_changed, insertions, deletions
+    """
+    def _get_commits() -> list[dict[str, Any]]:
+        commits = []
+        path_spec = None
+
+        if project_slug:
+            path_spec = f"projects/{project_slug}"
+        elif path_filter:
+            path_spec = path_filter
+
+        # Get commits, optionally filtered by path
+        iter_args = {"max_count": limit}
+        if path_spec:
+            iter_args["paths"] = path_spec
+
+        for commit in repo.iter_commits(**iter_args):
+            # Parse commit stats
+            files_changed = len(commit.stats.files)
+            insertions = commit.stats.total["insertions"]
+            deletions = commit.stats.total["deletions"]
+
+            # Calculate relative date
+            commit_time = datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = now - commit_time
+
+            if delta.days > 30:
+                relative_date = commit_time.strftime("%b %d, %Y")
+            elif delta.days > 0:
+                relative_date = f"{delta.days} day{'s' if delta.days != 1 else ''} ago"
+            elif delta.seconds > 3600:
+                hours = delta.seconds // 3600
+                relative_date = f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif delta.seconds > 60:
+                minutes = delta.seconds // 60
+                relative_date = f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                relative_date = "just now"
+
+            commits.append({
+                "sha": commit.hexsha,
+                "short_sha": commit.hexsha[:8],
+                "author": commit.author.name,
+                "email": commit.author.email,
+                "date": commit_time.isoformat(),
+                "relative_date": relative_date,
+                "subject": commit.message.split("\n")[0],
+                "body": commit.message,
+                "files_changed": files_changed,
+                "insertions": insertions,
+                "deletions": deletions,
+            })
+
+        return commits
+
+    return await _to_thread(_get_commits)
+
+
+async def get_commit_detail(repo: Repo, sha: str) -> dict[str, Any]:
+    """
+    Get detailed information about a specific commit including full diff.
+
+    Args:
+        repo: GitPython Repo object
+        sha: Commit SHA (full or abbreviated)
+
+    Returns:
+        Dict with commit metadata and diff information
+    """
+    def _get_detail() -> dict[str, Any]:
+        commit = repo.commit(sha)
+
+        # Get parent for diff (use empty tree if initial commit)
+        if commit.parents:
+            parent = commit.parents[0]
+            diffs = parent.diff(commit, create_patch=True)
+        else:
+            # Initial commit - diff against empty tree
+            diffs = commit.diff(None, create_patch=True)
+
+        # Build unified diff string
+        diff_text = ""
+        changed_files = []
+
+        for diff in diffs:
+            # File metadata
+            a_path = diff.a_path or "/dev/null"
+            b_path = diff.b_path or "/dev/null"
+
+            # Change type
+            if diff.new_file:
+                change_type = "added"
+            elif diff.deleted_file:
+                change_type = "deleted"
+            elif diff.renamed_file:
+                change_type = "renamed"
+            else:
+                change_type = "modified"
+
+            changed_files.append({
+                "path": b_path if b_path != "/dev/null" else a_path,
+                "change_type": change_type,
+                "a_path": a_path,
+                "b_path": b_path,
+            })
+
+            # Get diff text
+            if diff.diff:
+                diff_text += diff.diff.decode("utf-8", errors="replace")
+
+        # Parse commit body into message and trailers
+        lines = commit.message.split("\n")
+        subject = lines[0] if lines else ""
+
+        # Find where trailers start (after blank line + key: value pattern)
+        body_lines = []
+        trailer_lines = []
+        in_trailers = False
+
+        for line in lines[1:]:
+            if not line.strip():
+                if not in_trailers:
+                    body_lines.append(line)
+                continue
+
+            # Check if this looks like a trailer (Key: Value)
+            if ": " in line and not in_trailers:
+                in_trailers = True
+
+            if in_trailers:
+                trailer_lines.append(line)
+            else:
+                body_lines.append(line)
+
+        body = "\n".join(body_lines).strip()
+
+        # Parse trailers into dict
+        trailers = {}
+        for line in trailer_lines:
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                trailers[key.strip()] = value.strip()
+
+        commit_time = datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)
+
+        return {
+            "sha": commit.hexsha,
+            "short_sha": commit.hexsha[:8],
+            "author": commit.author.name,
+            "email": commit.author.email,
+            "date": commit_time.isoformat(),
+            "subject": subject,
+            "body": body,
+            "trailers": trailers,
+            "files_changed": changed_files,
+            "diff": diff_text,
+            "stats": {
+                "files": len(commit.stats.files),
+                "insertions": commit.stats.total["insertions"],
+                "deletions": commit.stats.total["deletions"],
+            },
+        }
+
+    return await _to_thread(_get_detail)
+
+
+async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> str | None:
+    """
+    Find the commit SHA that created a specific message.
+
+    Args:
+        archive: ProjectArchive instance
+        message_id: Message ID to look up
+
+    Returns:
+        Commit SHA string or None if not found
+    """
+    def _find_commit() -> str | None:
+        # Find message file in archive
+        messages_dir = archive.root / "messages"
+
+        # Search for file ending with _{message_id}.md
+        pattern = f"__{message_id}.md"
+
+        for md_file in messages_dir.rglob("*.md"):
+            if md_file.name.endswith(pattern):
+                # Get relative path from repo root
+                rel_path = md_file.relative_to(archive.repo_root)
+
+                # Get commits that touched this file
+                commits = list(archive.repo.iter_commits(paths=str(rel_path), max_count=1))
+
+                if commits:
+                    return commits[0].hexsha
+
+        return None
+
+    return await _to_thread(_find_commit)
+
+
+async def get_archive_tree(
+    archive: ProjectArchive,
+    path: str = "",
+    commit_sha: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Get directory tree structure from the Git archive.
+
+    Args:
+        archive: ProjectArchive instance
+        path: Relative path within the project archive (e.g., "messages/2025")
+        commit_sha: Optional commit SHA to view historical tree
+
+    Returns:
+        List of tree entries with keys: name, path, type (file/dir), size, mode
+    """
+    def _get_tree() -> list[dict[str, Any]]:
+        # Get commit (HEAD if not specified)
+        if commit_sha:
+            commit = archive.repo.commit(commit_sha)
+        else:
+            commit = archive.repo.head.commit
+
+        # Navigate to the requested path within project root
+        project_rel = f"projects/{archive.slug}"
+        if path:
+            tree_path = f"{project_rel}/{path}"
+        else:
+            tree_path = project_rel
+
+        # Get tree object at path
+        try:
+            tree = commit.tree / tree_path
+        except KeyError:
+            # Path doesn't exist
+            return []
+
+        entries = []
+        for item in tree:
+            entry_type = "dir" if item.type == "tree" else "file"
+            size = item.size if hasattr(item, "size") else 0
+
+            entries.append({
+                "name": item.name,
+                "path": f"{path}/{item.name}" if path else item.name,
+                "type": entry_type,
+                "size": size,
+                "mode": item.mode,
+            })
+
+        # Sort: directories first, then files, both alphabetically
+        entries.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
+
+        return entries
+
+    return await _to_thread(_get_tree)
+
+
+async def get_file_content(
+    archive: ProjectArchive,
+    path: str,
+    commit_sha: str | None = None,
+) -> str | None:
+    """
+    Get file content from the Git archive.
+
+    Args:
+        archive: ProjectArchive instance
+        path: Relative path within the project archive
+        commit_sha: Optional commit SHA to view historical content
+
+    Returns:
+        File content as string, or None if not found
+    """
+    def _get_content() -> str | None:
+        if commit_sha:
+            commit = archive.repo.commit(commit_sha)
+        else:
+            commit = archive.repo.head.commit
+
+        project_rel = f"projects/{archive.slug}/{path}"
+
+        try:
+            blob = commit.tree / project_rel
+            return blob.data_stream.read().decode("utf-8", errors="replace")
+        except KeyError:
+            return None
+
+    return await _to_thread(_get_content)
+
+
+async def get_agent_communication_graph(
+    repo: Repo,
+    project_slug: str,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """
+    Analyze commit history to build an agent communication network graph.
+
+    Args:
+        repo: GitPython Repo object
+        project_slug: Project slug to analyze
+        limit: Maximum number of commits to analyze
+
+    Returns:
+        Dict with keys: nodes (list of agent dicts), edges (list of connection dicts)
+    """
+    def _analyze_graph() -> dict[str, Any]:
+        path_spec = f"projects/{project_slug}/messages"
+
+        # Track agent message counts and connections
+        agent_stats: dict[str, dict[str, Any]] = {}
+        connections: dict[tuple[str, str], int] = {}
+
+        for commit in repo.iter_commits(paths=path_spec, max_count=limit):
+            # Parse commit message to extract sender and recipients
+            # Format: "mail: Sender -> Recipient1, Recipient2 | Subject"
+            subject = commit.message.split("\n")[0]
+
+            if not subject.startswith("mail: "):
+                continue
+
+            # Extract sender and recipients
+            try:
+                rest = subject[len("mail: "):]
+                sender_part, _ = rest.split(" | ", 1) if " | " in rest else (rest, "")
+
+                if " -> " not in sender_part:
+                    continue
+
+                sender, recipients_str = sender_part.split(" -> ", 1)
+                sender = sender.strip()
+                recipients = [r.strip() for r in recipients_str.split(",")]
+
+                # Update sender stats
+                if sender not in agent_stats:
+                    agent_stats[sender] = {"sent": 0, "received": 0}
+                agent_stats[sender]["sent"] += 1
+
+                # Update recipient stats and connections
+                for recipient in recipients:
+                    if not recipient:
+                        continue
+
+                    if recipient not in agent_stats:
+                        agent_stats[recipient] = {"sent": 0, "received": 0}
+                    agent_stats[recipient]["received"] += 1
+
+                    # Track connection
+                    conn_key = (sender, recipient)
+                    connections[conn_key] = connections.get(conn_key, 0) + 1
+
+            except Exception:
+                # Skip malformed commit messages
+                continue
+
+        # Build nodes list
+        nodes = []
+        for agent_name, stats in agent_stats.items():
+            total = stats["sent"] + stats["received"]
+            nodes.append({
+                "id": agent_name,
+                "label": agent_name,
+                "sent": stats["sent"],
+                "received": stats["received"],
+                "total": total,
+            })
+
+        # Build edges list
+        edges = []
+        for (sender, recipient), count in connections.items():
+            edges.append({
+                "from": sender,
+                "to": recipient,
+                "count": count,
+            })
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+        }
+
+    return await _to_thread(_analyze_graph)
+
+
+async def get_timeline_commits(
+    repo: Repo,
+    project_slug: str,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """
+    Get commits formatted for timeline visualization with Mermaid.js.
+
+    Args:
+        repo: GitPython Repo object
+        project_slug: Project slug to analyze
+        limit: Maximum number of commits
+
+    Returns:
+        List of commit dicts with timeline-specific metadata
+    """
+    def _get_timeline() -> list[dict[str, Any]]:
+        path_spec = f"projects/{project_slug}"
+
+        timeline = []
+        for commit in repo.iter_commits(paths=path_spec, max_count=limit):
+            subject = commit.message.split("\n")[0]
+            commit_time = datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)
+
+            # Classify commit type
+            commit_type = "other"
+            sender = None
+            recipients = []
+
+            if subject.startswith("mail: "):
+                commit_type = "message"
+                # Parse sender and recipients
+                try:
+                    rest = subject[len("mail: "):]
+                    sender_part, _ = rest.split(" | ", 1) if " | " in rest else (rest, "")
+                    if " -> " in sender_part:
+                        sender, recipients_str = sender_part.split(" -> ", 1)
+                        sender = sender.strip()
+                        recipients = [r.strip() for r in recipients_str.split(",")]
+                except Exception:
+                    pass
+            elif subject.startswith("claim: "):
+                commit_type = "claim"
+            elif subject.startswith("chore: "):
+                commit_type = "chore"
+
+            timeline.append({
+                "sha": commit.hexsha,
+                "short_sha": commit.hexsha[:8],
+                "date": commit_time.isoformat(),
+                "timestamp": commit.authored_date,
+                "subject": subject,
+                "type": commit_type,
+                "sender": sender,
+                "recipients": recipients,
+                "author": commit.author.name,
+            })
+
+        # Sort by timestamp (oldest first for timeline)
+        timeline.sort(key=lambda x: x["timestamp"])
+
+        return timeline
+
+    return await _to_thread(_get_timeline)
