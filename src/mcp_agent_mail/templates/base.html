@@ -394,11 +394,6 @@
           opacity: 1 !important;
           transform: none !important;
         }
-
-        /* Keep essential transitions for interactivity */
-        button, a, input, select, textarea {
-          transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease !important;
-        }
       }
 
       /* Smooth page transitions */
@@ -773,7 +768,7 @@
 
                 // Only animate if element was initially hidden (part of stagger animation)
                 const computedStyle = window.getComputedStyle(target);
-                const isHidden = computedStyle.opacity === '0' ||
+                const isHidden = parseFloat(computedStyle.opacity) === 0 ||
                                 computedStyle.visibility === 'hidden';
 
                 if (isHidden || target.closest('.stagger-item')) {
