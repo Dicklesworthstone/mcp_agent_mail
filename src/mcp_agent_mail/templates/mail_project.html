@@ -216,7 +216,7 @@
           {% for r in results %}
             <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
                class="block group bg-slate-50 dark:bg-slate-900 hover:bg-white dark:hover:bg-slate-800 rounded-xl p-5 border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 shadow-sm hover:shadow-md stagger-item"
-               style="animation-delay: {{ loop.index0 * 0.05 }}s;">
+               style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
               <div class="flex items-start justify-between mb-3">
                 <h4 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1">
                   {{ r.subject }}
@@ -289,7 +289,7 @@
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {% for a in agents %}
           <div class="group relative bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-success-400 dark:hover:border-success-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
-               style="animation-delay: {{ loop.index0 * 0.05 }}s;">
+               style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
 
             <!-- Decorative gradient blob -->
             <div class="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-success-500/10 to-emerald-500/10 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
