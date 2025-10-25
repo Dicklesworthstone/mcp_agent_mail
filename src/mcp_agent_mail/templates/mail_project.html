@@ -81,10 +81,9 @@
       </div>
       <button @click="isExpanded = !isExpanded"
               class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 flex items-center gap-2"
-              data-tippy-content="Toggle search options"
-              x-ref="toggleButton">
-        <i x-show="!isExpanded" data-lucide="chevron-down" class="w-4 h-4" x-ref="iconDown"></i>
-        <i x-show="isExpanded" data-lucide="chevron-up" class="w-4 h-4" x-cloak x-ref="iconUp"></i>
+              data-tippy-content="Toggle search options">
+        <i x-show="!isExpanded" data-lucide="chevron-down" class="w-4 h-4" x-cloak></i>
+        <i x-show="isExpanded" data-lucide="chevron-up" class="w-4 h-4" x-cloak></i>
         <span x-text="isExpanded ? 'Hide Options' : 'Show Options'" class="text-sm font-medium"></span>
       </button>
     </div>
@@ -359,11 +358,16 @@
 
 <script>
   document.addEventListener('DOMContentLoaded', () => {
-    // Update keyboard shortcut display based on platform
-    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+    // Update keyboard shortcut display based on platform (with modern API fallback)
     const shortcutKey = document.querySelector('.shortcut-key');
-    if (shortcutKey && !isMac) {
-      shortcutKey.textContent = 'Ctrl';
+    if (shortcutKey) {
+      // Use modern API if available, fall back to userAgent
+      const isMac = navigator.userAgentData?.platform?.toLowerCase().includes('mac') ||
+                    /Mac|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+
+      if (!isMac) {
+        shortcutKey.textContent = 'Ctrl';
+      }
     }
 
     // Debounced search - disabled by default to avoid too many requests

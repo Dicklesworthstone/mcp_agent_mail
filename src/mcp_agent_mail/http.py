@@ -863,7 +863,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     try:
         import bleach  # type: ignore
         import markdown2  # type: ignore
-        from bleach.css_sanitizer import CSSSanitizer  # type: ignore
+        try:
+            from bleach.css_sanitizer import CSSSanitizer  # type: ignore
+        except Exception:  # tinycss2 may be missing; degrade gracefully
+            CSSSanitizer = None  # type: ignore
         from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(
@@ -872,9 +875,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             enable_async=True,
         )
         # HTML sanitizer (allow safe images and limited CSS)
-        _css_sanitizer = CSSSanitizer(allowed_css_properties=[
-            "color", "background-color", "text-align", "text-decoration", "font-weight"
-        ])
+        _css_sanitizer = (
+            CSSSanitizer(allowed_css_properties=[
+                "color", "background-color", "text-align", "text-decoration", "font-weight"
+            ]) if CSSSanitizer else None
+        )
         _html_cleaner = bleach.Cleaner(
             tags=[
                 "a","abbr","acronym","b","blockquote","code","em","i","li","ol","ul","p","pre","strong",
@@ -1174,8 +1179,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
             return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
-    except Exception:
+    except Exception as exc:
         # templates/Jinja may be missing in some environments; UI remains optional
+        with contextlib.suppress(Exception):
+            structlog.get_logger("ui").error("ui_init_failed", error=str(exc))
         pass
 
     return fastapi_app

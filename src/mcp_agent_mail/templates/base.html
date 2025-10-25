@@ -107,17 +107,10 @@
     <!-- Marked.js for markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked@11/marked.min.js"></script>
 
-    <!-- Chart.js for data visualization -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-
-    <!-- Day.js for date formatting -->
+    <!-- Day.js for date formatting (lightweight utility) -->
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/relativeTime.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/calendar.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/advancedFormat.min.js"></script>
-
-    <!-- Anime.js for advanced animations -->
-    <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"></script>
 
     <!-- Tippy.js for beautiful tooltips -->
     <script src="https://unpkg.com/@popperjs/core@2"></script>
@@ -130,8 +123,11 @@
     <script src="https://unpkg.com/nprogress@0.2.0/nprogress.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/nprogress@0.2.0/nprogress.css" />
 
-    <!-- Sortable.js for drag and drop -->
+    <!-- Future enhancements (uncomment when needed):
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+    -->
 
     <style>
       [x-cloak] { display: none !important; }
@@ -374,6 +370,34 @@
         to {
           opacity: 1;
           transform: translateY(0);
+        }
+      }
+
+      /* Respect user's reduced motion preference */
+      @media (prefers-reduced-motion: reduce) {
+        /* Disable decorative animations */
+        .stagger-item,
+        .float,
+        .badge-pulse,
+        *[class*="animate-"] {
+          animation: none !important;
+        }
+
+        /* Disable transform-based transitions but keep opacity/color for UX */
+        .card-hover {
+          transform: none !important;
+          transition: opacity 0.15s ease, box-shadow 0.15s ease !important;
+        }
+
+        /* Immediately show stagger items */
+        .stagger-item {
+          opacity: 1 !important;
+          transform: none !important;
+        }
+
+        /* Keep essential transitions for interactivity */
+        button, a, input, select, textarea {
+          transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease !important;
         }
       }
 
@@ -652,12 +676,19 @@
           document.addEventListener('click', (e) => {
             const link = e.target.closest('a');
             if (link && link.href && !link.target && !link.download) {
-              const url = new URL(link.href);
-              // Only for same-origin links that aren't hash-only
-              if (url.origin === window.location.origin && url.pathname !== window.location.pathname) {
-                NProgress.start();
-                // Fallback: complete after reasonable time if page doesn't load
-                setTimeout(() => NProgress.done(), 2000);
+              try {
+                const url = new URL(link.href);
+                // Only for same-origin links that aren't hash-only or javascript:
+                if (url.origin === window.location.origin &&
+                    url.pathname !== window.location.pathname &&
+                    url.protocol !== 'javascript:') {
+                  NProgress.start();
+                  // Safety: complete after 3s if navigation doesn't complete
+                  setTimeout(() => NProgress.done(), 3000);
+                }
+              } catch (e) {
+                // Invalid URL, ignore
+                console.debug('Invalid URL for NProgress:', link.href);
               }
             }
           });
@@ -716,10 +747,10 @@
           });
         }
 
-        // Stagger animation for list items
-        const staggerElements = document.querySelectorAll('.stagger-item');
+        // Stagger animation for list items - only for items without inline delays
+        const staggerElements = document.querySelectorAll('.stagger-item:not([style*="animation-delay"])');
         staggerElements.forEach((el, index) => {
-          el.style.animationDelay = `${index * 0.05}s`;
+          el.style.animationDelay = `${Math.min(index * 0.05, 1.0)}s`;
         });
 
         // Animate stat numbers on scroll
@@ -735,9 +766,24 @@
               // Remove commas and other formatting before parsing
               const cleanText = target.textContent.replace(/[,\s]/g, '');
               const finalValue = parseInt(cleanText, 10);
+
+              // Only animate if valid number and element is part of animated content
               if (!isNaN(finalValue) && finalValue > 0) {
-                animateValue(target, 0, finalValue, 1000);
                 target.dataset.animated = 'true';
+
+                // Only animate if element was initially hidden (part of stagger animation)
+                const computedStyle = window.getComputedStyle(target);
+                const isHidden = computedStyle.opacity === '0' ||
+                                computedStyle.visibility === 'hidden';
+
+                if (isHidden || target.closest('.stagger-item')) {
+                  // Element was hidden, safe to animate from 0
+                  requestAnimationFrame(() => {
+                    target.textContent = '0';
+                    animateValue(target, 0, finalValue, 1000);
+                  });
+                }
+                // Otherwise, element was visible - don't animate to avoid flash
               }
             }
           });
@@ -848,13 +894,25 @@
       // Relative time formatting helper
       window.formatRelativeTime = function(dateString) {
         if (typeof dayjs === 'undefined') return dateString;
-        return dayjs(dateString).fromNow();
+        try {
+          const result = dayjs(dateString).fromNow();
+          return result || dateString;
+        } catch (e) {
+          console.error('formatRelativeTime error:', e);
+          return dateString;
+        }
       };
 
       // Calendar time formatting helper
       window.formatCalendarTime = function(dateString) {
         if (typeof dayjs === 'undefined') return dateString;
-        return dayjs(dateString).calendar();
+        try {
+          const result = dayjs(dateString).calendar();
+          return result || dateString;
+        } catch (e) {
+          console.error('formatCalendarTime error:', e);
+          return dateString;
+        }
       };
     </script>
 
