@@ -42,6 +42,7 @@ class ToolCallContext:
     error: Optional[Exception] = None
     success: bool = True
     _created_at: datetime = field(default_factory=datetime.now)  # Capture at creation time
+    rendered_panel: Optional[str] = None
 
     @property
     def duration_ms(self) -> float:
@@ -232,27 +233,36 @@ def log_tool_call_start(ctx: ToolCallContext) -> None:
     console.print(main_panel)
 
 
-def log_tool_call_end(ctx: ToolCallContext) -> None:
+def log_tool_call_end(ctx: ToolCallContext) -> Optional[str]:
     """Log the end of a tool call with results."""
-    # Update end time if not set
     if not ctx.end_time:
         ctx.end_time = time.perf_counter()
 
-    # Create components
+    panel = _build_tool_call_end_panel(ctx)
+    console.print(panel)
+    console.print()
+    try:
+        ctx.rendered_panel = _render_panel_to_text(panel)
+    except Exception:
+        ctx.rendered_panel = None
+    return ctx.rendered_panel
+
+
+def render_tool_call_panel(ctx: ToolCallContext) -> str:
+    """Render the completion panel for a tool call to plain text without printing."""
+    return _render_panel_to_text(_build_tool_call_end_panel(ctx))
+
+
+def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
+    """Construct the Rich panel summarizing a completed tool call."""
     components = []
 
-    # Summary table
     summary = _create_tool_call_summary_table(ctx)
     components.append(summary)
 
-    # Result or error display
     result_panel = _create_result_display(ctx)
     components.append(result_panel)
 
-    # Create main panel
-    group = Group(*components)
-
-    # Choose panel style based on success/failure
     if ctx.success:
         title = "[bold white on green]✓ MCP TOOL CALL COMPLETED [/bold white on green]"
         border_style = "bright_green"
@@ -260,7 +270,8 @@ def log_tool_call_end(ctx: ToolCallContext) -> None:
         title = "[bold white on red]✗ MCP TOOL CALL FAILED [/bold white on red]"
         border_style = "bright_red"
 
-    main_panel = Panel(
+    group = Group(*components)
+    return Panel(
         group,
         title=title,
         border_style=border_style,
@@ -268,8 +279,19 @@ def log_tool_call_end(ctx: ToolCallContext) -> None:
         padding=(1, 2),
     )
 
-    console.print(main_panel)
-    console.print()
+
+def _render_panel_to_text(panel: Panel) -> str:
+    """Render a Rich panel to plain text (no ANSI color codes)."""
+    capture_console = Console(
+        stderr=True,
+        force_terminal=True,
+        width=120,
+        record=True,
+        color_system=None,
+    )
+    capture_console.print(panel)
+    capture_console.print()
+    return capture_console.export_text(clear=True)
 
 
 def log_tool_call_complete(

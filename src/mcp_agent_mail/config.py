@@ -109,17 +109,17 @@ class Settings:
     cors: CorsSettings
     llm: LlmSettings
     # Background maintenance toggles
-    claims_cleanup_enabled: bool
-    claims_cleanup_interval_seconds: int
+    file_reservations_cleanup_enabled: bool
+    file_reservations_cleanup_interval_seconds: int
     # Server-side enforcement
-    claims_enforcement_enabled: bool
+    file_reservations_enforcement_enabled: bool
     # Ack TTL warnings
     ack_ttl_enabled: bool
     ack_ttl_seconds: int
     ack_ttl_scan_interval_seconds: int
     # Ack escalation
     ack_escalation_enabled: bool
-    ack_escalation_mode: str  # "log" | "claim"
+    ack_escalation_mode: str  # "log" | "file_reservation"
     ack_escalation_claim_ttl_seconds: int
     ack_escalation_claim_exclusive: bool
     ack_escalation_claim_holder_name: str
@@ -256,9 +256,9 @@ def get_settings() -> Settings:
         storage=storage_settings,
         cors=cors_settings,
         llm=llm_settings,
-        claims_cleanup_enabled=_bool(_decouple_config("CLAIMS_CLEANUP_ENABLED", default="false"), default=False),
-        claims_cleanup_interval_seconds=_int(_decouple_config("CLAIMS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
-        claims_enforcement_enabled=_bool(_decouple_config("CLAIMS_ENFORCEMENT_ENABLED", default="true"), default=True),
+        file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
+        file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
+        file_reservations_enforcement_enabled=_bool(_decouple_config("FILE_RESERVATIONS_ENFORCEMENT_ENABLED", default="true"), default=True),
         ack_ttl_enabled=_bool(_decouple_config("ACK_TTL_ENABLED", default="false"), default=False),
         ack_ttl_seconds=_int(_decouple_config("ACK_TTL_SECONDS", default="1800"), default=1800),
         ack_ttl_scan_interval_seconds=_int(_decouple_config("ACK_TTL_SCAN_INTERVAL_SECONDS", default="60"), default=60),

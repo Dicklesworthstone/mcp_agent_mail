@@ -29,13 +29,13 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
-from .models import Agent, AgentLink, Claim, Message, MessageRecipient, Project, ProjectSiblingSuggestion
+from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, Project, ProjectSiblingSuggestion
 from .storage import (
     AsyncFileLock,
     ensure_archive,
     process_attachments,
     write_agent_profile,
-    write_claim_record,
+    write_file_reservation_record,
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
@@ -53,7 +53,7 @@ CLUSTER_IDENTITY = "identity"
 CLUSTER_MESSAGING = "messaging"
 CLUSTER_CONTACT = "contact"
 CLUSTER_SEARCH = "search"
-CLUSTER_CLAIMS = "claims"
+CLUSTER_FILE_RESERVATIONS = "file_reservations"
 CLUSTER_MACROS = "workflow_macros"
 
 
@@ -394,6 +394,37 @@ def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
         Console().print(JSON.from_data({"title": title, **payload}))
     except Exception:
         return
+
+
+def _render_commit_panel(
+    tool_name: str,
+    project_label: str,
+    agent_name: str,
+    start_monotonic: float,
+    end_monotonic: float,
+    result_payload: dict[str, Any],
+    created_iso: Optional[str],
+) -> str | None:
+    """Create the Rich panel text used for Git commit messages."""
+    try:
+        panel_ctx = rich_logger.ToolCallContext(
+            tool_name=tool_name,
+            args=[],
+            kwargs={},
+            project=project_label,
+            agent=agent_name,
+        )
+        panel_ctx.start_time = start_monotonic
+        panel_ctx.end_time = end_monotonic
+        panel_ctx.success = True
+        panel_ctx.result = result_payload
+        if created_iso:
+            parsed = _parse_iso(created_iso)
+            if parsed:
+                panel_ctx._created_at = parsed
+        return rich_logger.render_tool_call_panel(panel_ctx)
+    except Exception:
+        return None
 
 def _project_to_dict(project: Project) -> dict[str, Any]:
     return {
@@ -1019,20 +1050,20 @@ async def _create_message(
     return message
 
 
-async def _create_claim(
+async def _create_file_reservation(
     project: Project,
     agent: Agent,
     path: str,
     exclusive: bool,
     reason: str,
     ttl_seconds: int,
-) -> Claim:
+) -> FileReservation:
     if project.id is None or agent.id is None:
-        raise ValueError("Project and agent must have ids before creating claims.")
+        raise ValueError("Project and agent must have ids before creating file_reservations.")
     expires = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
     await ensure_schema()
     async with get_session() as session:
-        claim = Claim(
+        file_reservation = FileReservation(
             project_id=project.id,
             agent_id=agent.id,
             path_pattern=path,
@@ -1040,28 +1071,28 @@ async def _create_claim(
             reason=reason,
             expires_ts=expires,
         )
-        session.add(claim)
+        session.add(file_reservation)
         await session.commit()
-        await session.refresh(claim)
-    return claim
+        await session.refresh(file_reservation)
+    return file_reservation
 
 
-async def _expire_stale_claims(project_id: int) -> None:
+async def _expire_stale_file_reservations(project_id: int) -> None:
     now = datetime.now(timezone.utc)
     async with get_session() as session:
         await session.execute(
-            update(Claim)
+            update(FileReservation)
             .where(
-                Claim.project_id == project_id,
-                cast(Any, Claim.released_ts).is_(None),
-                Claim.expires_ts < now,
+                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.released_ts).is_(None),
+                FileReservation.expires_ts < now,
             )
             .values(released_ts=now)
         )
         await session.commit()
 
 
-def _claims_conflict(existing: Claim, candidate_path: str, candidate_exclusive: bool, candidate_agent: Agent) -> bool:
+def _file_reservations_conflict(existing: FileReservation, candidate_path: str, candidate_exclusive: bool, candidate_agent: Agent) -> bool:
     if existing.released_ts is not None:
         return False
     if existing.agent_id == candidate_agent.id:
@@ -1099,7 +1130,7 @@ def _patterns_overlap(a: str, b: str) -> bool:
     )
 
 
-def _claims_patterns_overlap(paths_a: Sequence[str], paths_b: Sequence[str]) -> bool:
+def _file_reservations_patterns_overlap(paths_a: Sequence[str], paths_b: Sequence[str]) -> bool:
     for pa in paths_a:
         for pb in paths_b:
             if _patterns_overlap(pa, pb):
@@ -1523,6 +1554,7 @@ def build_mcp_server() -> FastMCP:
 
     async def _deliver_message(
         ctx: Context,
+        tool_name: str,
         project: Project,
         sender: Agent,
         to_names: Sequence[str],
@@ -1538,6 +1570,7 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         # Re-fetch settings at call time so tests that mutate env + clear cache take effect
         settings = get_settings()
+        call_start = time.perf_counter()
         if not to_names and not cc_names and not bcc_names:
             raise ValueError("At least one recipient must be specified.")
         def _unique(items: Sequence[str]) -> list[str]:
@@ -1563,9 +1596,9 @@ def build_mcp_server() -> FastMCP:
         convert_markdown = (
             convert_images_override if convert_images_override is not None else settings.storage.convert_images
         )
-        # Server-side claims enforcement: block if conflicting active exclusive claim exists
-        if settings.claims_enforcement_enabled:
-            await _expire_stale_claims(project.id or 0)
+        # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
+        if settings.file_reservations_enforcement_enabled:
+            await _expire_stale_file_reservations(project.id or 0)
             now_ts = datetime.now(timezone.utc)
             y_dir = now_ts.strftime("%Y")
             m_dir = now_ts.strftime("%m")
@@ -1576,33 +1609,33 @@ def build_mcp_server() -> FastMCP:
 
             async with get_session() as session:
                 rows = await session.execute(
-                    select(Claim, Agent.name)
-                    .join(Agent, Claim.agent_id == Agent.id)
+                    select(FileReservation, Agent.name)
+                    .join(Agent, FileReservation.agent_id == Agent.id)
                     .where(
-                        Claim.project_id == project.id,
-                        cast(Any, Claim.released_ts).is_(None),
-                        Claim.expires_ts > now_ts,
+                        FileReservation.project_id == project.id,
+                        cast(Any, FileReservation.released_ts).is_(None),
+                        FileReservation.expires_ts > now_ts,
                     )
                 )
-                active_claims = rows.all()
+                active_file_reservations = rows.all()
 
             conflicts: list[dict[str, Any]] = []
             for surface in candidate_surfaces:
-                for claim_record, holder_name in active_claims:
-                    if _claims_conflict(claim_record, surface, True, sender):
+                for file_reservation_record, holder_name in active_file_reservations:
+                    if _file_reservations_conflict(file_reservation_record, surface, True, sender):
                         conflicts.append({
                             "surface": surface,
                             "holder": holder_name,
-                            "path_pattern": claim_record.path_pattern,
-                            "exclusive": claim_record.exclusive,
-                            "expires_ts": _iso(claim_record.expires_ts),
+                            "path_pattern": file_reservation_record.path_pattern,
+                            "exclusive": file_reservation_record.exclusive,
+                            "expires_ts": _iso(file_reservation_record.expires_ts),
                         })
             if conflicts:
                 # Return a structured error payload that clients can surface directly
                 return {
                     "error": {
-                        "type": "CLAIM_CONFLICT",
-                        "message": "Conflicting active claims prevent message write.",
+                        "type": "FILE_RESERVATION_CONFLICT",
+                        "message": "Conflicting active file_reservations prevent message write.",
                         "conflicts": conflicts,
                     }
                 }
@@ -1612,6 +1645,8 @@ def build_mcp_server() -> FastMCP:
         if getattr(sender, "attachments_policy", None) in {"inline", "file"}:
             convert_markdown = True
             embed_policy = sender.attachments_policy
+
+        payload: dict[str, Any] | None = None
 
         async with AsyncFileLock(archive.lock_path):
             processed_body, attachments_meta, attachment_files = await process_attachments(
@@ -1645,6 +1680,35 @@ def build_mcp_server() -> FastMCP:
                 attachments_meta,
             )
             recipients_for_archive = [agent.name for agent in to_agents + cc_agents + bcc_agents]
+            payload = _message_to_dict(message)
+            payload.update(
+                {
+                    "from": sender.name,
+                    "to": [agent.name for agent in to_agents],
+                    "cc": [agent.name for agent in cc_agents],
+                    "bcc": [agent.name for agent in bcc_agents],
+                    "attachments": attachments_meta,
+                }
+            )
+            result_snapshot: dict[str, Any] = {
+                "deliveries": [
+                    {
+                        "project": project.human_key,
+                        "payload": payload,
+                    }
+                ],
+                "count": 1,
+            }
+            panel_end = time.perf_counter()
+            commit_panel_text = _render_commit_panel(
+                tool_name,
+                project.human_key,
+                sender.name,
+                call_start,
+                panel_end,
+                result_snapshot,
+                frontmatter.get("created"),
+            )
             await write_message_bundle(
                 archive,
                 frontmatter,
@@ -1652,20 +1716,13 @@ def build_mcp_server() -> FastMCP:
                 sender.name,
                 recipients_for_archive,
                 attachment_files,
+                commit_panel_text,
             )
         await ctx.info(
             f"Message {message.id} created by {sender.name} (to {', '.join(recipients_for_archive)})"
         )
-        payload = _message_to_dict(message)
-        payload.update(
-            {
-                "from": sender.name,
-                "to": [agent.name for agent in to_agents],
-                "cc": [agent.name for agent in cc_agents],
-                "bcc": [agent.name for agent in bcc_agents],
-                "attachments": attachments_meta,
-            }
-        )
+        if payload is None:
+            raise RuntimeError("Message payload was not generated.")
         return payload
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
@@ -1734,7 +1791,7 @@ def build_mcp_server() -> FastMCP:
         - Computes a stable slug from `human_key` (lowercased, safe characters) so
           multiple agents can refer to the same project consistently.
         - Ensures DB row exists and that the on-disk archive is initialized
-          (e.g., `messages/`, `agents/`, `claims/` directories).
+          (e.g., `messages/`, `agents/`, `file_reservations/` directories).
 
         CRITICAL: Project Identity Rules
         ---------------------------------
@@ -2240,26 +2297,26 @@ def build_mcp_server() -> FastMCP:
                     auto_ok_names.update(participants)
                 except Exception:
                     pass
-            # allow recent overlapping claims contact (shared surfaces) by default
-            # best-effort: if both agents hold any claim currently active, auto allow
+            # allow recent overlapping file_reservations contact (shared surfaces) by default
+            # best-effort: if both agents hold any file_reservation currently active, auto allow
             now_utc = datetime.now(timezone.utc)
             try:
                 async with get_session() as s2:
-                    claim_rows = await s2.execute(
-                        select(Claim, Agent.name)
-                        .join(Agent, Claim.agent_id == Agent.id)
-                        .where(Claim.project_id == project.id, cast(Any, Claim.released_ts).is_(None), Claim.expires_ts > now_utc)
+                    file_reservation_rows = await s2.execute(
+                        select(FileReservation, Agent.name)
+                        .join(Agent, FileReservation.agent_id == Agent.id)
+                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), FileReservation.expires_ts > now_utc)
                     )
-                    name_to_claims: dict[str, list[str]] = {}
-                    for c, nm in claim_rows.all():
-                        name_to_claims.setdefault(nm, []).append(c.path_pattern)
-                sender_claims = name_to_claims.get(sender.name, [])
+                    name_to_file_reservations: dict[str, list[str]] = {}
+                    for c, nm in file_reservation_rows.all():
+                        name_to_file_reservations.setdefault(nm, []).append(c.path_pattern)
+                sender_file_reservations = name_to_file_reservations.get(sender.name, [])
                 for nm in to + (cc or []) + (bcc or []):
                     # Always allow self-messages
                     if nm == sender.name:
                         continue
-                    their = name_to_claims.get(nm, [])
-                    if sender_claims and their and _claims_patterns_overlap(sender_claims, their):
+                    their = name_to_file_reservations.get(nm, [])
+                    if sender_file_reservations and their and _file_reservations_patterns_overlap(sender_file_reservations, their):
                         auto_ok_names.add(nm)
             except Exception:
                 pass
@@ -2606,12 +2663,35 @@ def build_mcp_server() -> FastMCP:
         # Local deliver if any
         if local_to or local_cc or local_bcc:
             payload_local = await _deliver_message(
+                ctx,
+                "send_message",
+                project,
+                sender,
+                local_to,
+                local_cc,
+                local_bcc,
+                subject,
+                body_md,
+                attachment_paths,
+                convert_images,
+                importance,
+                ack_required,
+                thread_id,
+            )
+            deliveries.append({"project": project.human_key, "payload": payload_local})
+        # External per-target project deliver (requires aliasing sender in target project)
+        for _pid, group in external.items():
+            p: Project = group["project"]
+            try:
+                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
+                payload_ext = await _deliver_message(
                     ctx,
-                    project,
-                    sender,
-                    local_to,
-                    local_cc,
-                    local_bcc,
+                    "send_message",
+                    p,
+                    alias,
+                    group.get("to", []),
+                    group.get("cc", []),
+                    group.get("bcc", []),
                     subject,
                     body_md,
                     attachment_paths,
@@ -2620,27 +2700,6 @@ def build_mcp_server() -> FastMCP:
                     ack_required,
                     thread_id,
                 )
-            deliveries.append({"project": project.human_key, "payload": payload_local})
-        # External per-target project deliver (requires aliasing sender in target project)
-        for _pid, group in external.items():
-            p: Project = group["project"]
-            try:
-                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
-                payload_ext = await _deliver_message(
-                        ctx,
-                        p,
-                        alias,
-                        group.get("to", []),
-                        group.get("cc", []),
-                        group.get("bcc", []),
-                        subject,
-                        body_md,
-                        attachment_paths,
-                        convert_images,
-                        importance,
-                        ack_required,
-                        thread_id,
-                    )
                 deliveries.append({"project": p.human_key, "payload": payload_ext})
             except Exception:
                 continue
@@ -2842,20 +2901,21 @@ def build_mcp_server() -> FastMCP:
         deliveries: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
             payload_local = await _deliver_message(
-            ctx,
-            project,
-            sender,
+                ctx,
+                "reply_message",
+                project,
+                sender,
                 local_to,
                 local_cc,
                 local_bcc,
-            reply_subject,
-            body_md,
-            None,
-            None,
-            importance=original.importance,
-            ack_required=original.ack_required,
-            thread_id=thread_key,
-        )
+                reply_subject,
+                body_md,
+                None,
+                None,
+                importance=original.importance,
+                ack_required=original.ack_required,
+                thread_id=thread_key,
+            )
             deliveries.append({"project": project.human_key, "payload": payload_local})
 
         for _pid, group in external.items():
@@ -2871,6 +2931,7 @@ def build_mcp_server() -> FastMCP:
                 )
                 payload_ext = await _deliver_message(
                     ctx,
+                    "reply_message",
                     target_project,
                     alias,
                     group.get("to", []),
@@ -3004,6 +3065,7 @@ def build_mcp_server() -> FastMCP:
         body = reason or f"{a.name} requests permission to contact {b.name}."
         await _deliver_message(
             ctx,
+            "request_contact",
             target_project,
             a,
             [b.name],
@@ -3350,7 +3412,7 @@ def build_mcp_server() -> FastMCP:
     @_instrument_tool(
         "macro_start_session",
         cluster=CLUSTER_MACROS,
-        capabilities={"workflow", "messaging", "claims", "identity"},
+        capabilities={"workflow", "messaging", "file_reservations", "identity"},
         project_arg="human_key",
         agent_arg="agent_name",
     )
@@ -3361,33 +3423,33 @@ def build_mcp_server() -> FastMCP:
         model: str,
         task_description: str = "",
         agent_name: Optional[str] = None,
-        claim_paths: Optional[list[str]] = None,
-        claim_reason: str = "macro-session",
-        claim_ttl_seconds: int = 3600,
+        file_reservation_paths: Optional[list[str]] = None,
+        file_reservation_reason: str = "macro-session",
+        file_reservation_ttl_seconds: int = 3600,
         inbox_limit: int = 10,
     ) -> dict[str, Any]:
         """
         Macro helper that boots a project session: ensure project, register agent,
-        optionally claim paths, and fetch the latest inbox snapshot.
+        optionally file_reservation paths, and fetch the latest inbox snapshot.
         """
         settings = get_settings()
         project = await _ensure_project(human_key)
         agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
 
-        claims_result: Optional[dict[str, Any]] = None
-        if claim_paths:
-            # Use MCP tool registry to avoid param shadowing (claim_paths param shadows claim_paths function)
+        file_reservations_result: Optional[dict[str, Any]] = None
+        if file_reservation_paths:
+            # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
             from fastmcp.tools.tool import FunctionTool
-            _claim_tool = cast(FunctionTool, await mcp.get_tool("claim_paths"))
-            _claim_run = await _claim_tool.run({
+            _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
+            _file_reservation_run = await _file_reservation_tool.run({
                 "project_key": project.human_key,
                 "agent_name": agent.name,
-                "paths": claim_paths,
-                "ttl_seconds": claim_ttl_seconds,
+                "paths": file_reservation_paths,
+                "ttl_seconds": file_reservation_ttl_seconds,
                 "exclusive": True,
-                "reason": claim_reason,
+                "reason": file_reservation_reason,
             })
-            claims_result = cast(dict[str, Any], _claim_run.structured_content or {})
+            file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
 
         inbox_items = await _list_inbox(
             project,
@@ -3399,12 +3461,12 @@ def build_mcp_server() -> FastMCP:
         )
         await ctx.info(
             f"macro_start_session prepared agent '{agent.name}' on project '{project.human_key}' "
-            f"(claims={len(claims_result['granted']) if claims_result else 0})."
+            f"(file_reservations={len(file_reservations_result['granted']) if file_reservations_result else 0})."
         )
         return {
             "project": _project_to_dict(project),
             "agent": _agent_to_dict(agent),
-            "claims": claims_result or {"granted": [], "conflicts": []},
+            "file_reservations": file_reservations_result or {"granted": [], "conflicts": []},
             "inbox": inbox_items,
         }
 
@@ -3470,30 +3532,30 @@ def build_mcp_server() -> FastMCP:
             "inbox": inbox_items,
         }
 
-    @mcp.tool(name="macro_claim_cycle")
+    @mcp.tool(name="macro_file_reservation_cycle")
     @_instrument_tool(
-        "macro_claim_cycle",
+        "macro_file_reservation_cycle",
         cluster=CLUSTER_MACROS,
-        capabilities={"workflow", "claims", "repository"},
+        capabilities={"workflow", "file_reservations", "repository"},
         project_arg="project_key",
         agent_arg="agent_name",
     )
-    async def macro_claim_cycle(
+    async def macro_file_reservation_cycle(
         ctx: Context,
         project_key: str,
         agent_name: str,
         paths: list[str],
         ttl_seconds: int = 3600,
         exclusive: bool = True,
-        reason: str = "macro-claim",
+        reason: str = "macro-file_reservation",
         auto_release: bool = False,
     ) -> dict[str, Any]:
         """Reserve a set of file paths and optionally release them at the end of the workflow."""
 
         # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
         from fastmcp.tools.tool import FunctionTool
-        claims_tool = cast(FunctionTool, cast(Any, claim_paths))
-        claims_tool_result = await claims_tool.run({
+        file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
+        file_reservations_tool_result = await file_reservations_tool.run({
             "project_key": project_key,
             "agent_name": agent_name,
             "paths": paths,
@@ -3501,11 +3563,11 @@ def build_mcp_server() -> FastMCP:
             "exclusive": exclusive,
             "reason": reason,
         })
-        claims_result = cast(dict[str, Any], claims_tool_result.structured_content or {})
+        file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
 
         release_result = None
         if auto_release:
-            release_tool = cast(FunctionTool, cast(Any, release_claims_tool))
+            release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
             release_tool_result = await release_tool.run({
                 "project_key": project_key,
                 "agent_name": agent_name,
@@ -3514,11 +3576,11 @@ def build_mcp_server() -> FastMCP:
             release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
 
         await ctx.info(
-            f"macro_claim_cycle issued {len(claims_result['granted'])} claim(s) for '{agent_name}' on '{project_key}'" +
+            f"macro_file_reservation_cycle issued {len(file_reservations_result['granted'])} file_reservation(s) for '{agent_name}' on '{project_key}'" +
             (" and released them immediately." if auto_release else ".")
         )
         return {
-            "claims": claims_result,
+            "file_reservations": file_reservations_result,
             "released": release_result,
         }
 
@@ -3950,9 +4012,9 @@ def build_mcp_server() -> FastMCP:
             await ctx.info(f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
         return {"removed": removed}
 
-    @mcp.tool(name="claim_paths")
-    @_instrument_tool("claim_paths", cluster=CLUSTER_CLAIMS, capabilities={"claims", "repository"}, project_arg="project_key", agent_arg="agent_name")
-    async def claim_paths(
+    @mcp.tool(name="file_reservation_paths")
+    @_instrument_tool("file_reservation_paths", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations", "repository"}, project_arg="project_key", agent_arg="agent_name")
+    async def file_reservation_paths(
         ctx: Context,
         project_key: str,
         agent_name: str,
@@ -3968,7 +4030,7 @@ def build_mcp_server() -> FastMCP:
         ---------
         - Conflicts are reported if an overlapping active exclusive reservation exists held by another agent
         - Glob matching is symmetric (`fnmatchcase(a,b)` or `fnmatchcase(b,a)`), including exact matches
-        - When granted, a JSON artifact is written under `claims/<sha1(path)>.json` and the DB is updated
+        - When granted, a JSON artifact is written under `file_reservations/<sha1(path)>.json` and the DB is updated
         - TTL must be >= 60 seconds (enforced by the server settings/policy)
 
         Do / Don't
@@ -3976,7 +4038,7 @@ def build_mcp_server() -> FastMCP:
         Do:
         - Reserve files before starting edits to signal intent to other agents.
         - Use specific, minimal patterns (e.g., `app/api/*.py`) instead of broad globs.
-        - Set a realistic TTL and renew with `renew_claims` if you need more time.
+        - Set a realistic TTL and renew with `renew_file_reservations` if you need more time.
 
         Don't:
         - Reserve the entire repository or very broad patterns (e.g., `**/*`) unless absolutely necessary.
@@ -3990,7 +4052,7 @@ def build_mcp_server() -> FastMCP:
         paths : list[str]
             File paths or glob patterns relative to the project workspace (e.g., "app/api/*.py").
         ttl_seconds : int
-            Time to live for the claim; expired claims are auto-released.
+            Time to live for the file_reservation; expired file_reservations are auto-released.
         exclusive : bool
             If true, exclusive intent; otherwise shared/observe-only.
         reason : str
@@ -4004,7 +4066,7 @@ def build_mcp_server() -> FastMCP:
         Example
         -------
         ```json
-        {"jsonrpc":"2.0","id":"12","method":"tools/call","params":{"name":"claim_paths","arguments":{
+        {"jsonrpc":"2.0","id":"12","method":"tools/call","params":{"name":"file_reservation_paths","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],
           "ttl_seconds":7200,"exclusive":true,"reason":"migrations"
         }}}
@@ -4019,22 +4081,22 @@ def build_mcp_server() -> FastMCP:
                 Console = _rc.Console
                 Panel = _rp.Panel
                 c = Console()
-                c.print(Panel("\n".join(paths), title=f"tool: claim_paths — agent={agent_name} ttl={ttl_seconds}s", border_style="green"))
+                c.print(Panel("\n".join(paths), title=f"tool: file_reservation_paths — agent={agent_name} ttl={ttl_seconds}s", border_style="green"))
             except Exception:
                 pass
         agent = await _get_agent(project, agent_name)
         if project.id is None:
-            raise ValueError("Project must have an id before claiming paths.")
-        await _expire_stale_claims(project.id)
+            raise ValueError("Project must have an id before reserving file paths.")
+        await _expire_stale_file_reservations(project.id)
         project_id = project.id
         async with get_session() as session:
             existing_rows = await session.execute(
-                select(Claim, Agent.name)
-                .join(Agent, Claim.agent_id == Agent.id)
+                select(FileReservation, Agent.name)
+                .join(Agent, FileReservation.agent_id == Agent.id)
                 .where(
-                    Claim.project_id == project_id,
-                    cast(Any, Claim.released_ts).is_(None),
-                    Claim.expires_ts > datetime.now(timezone.utc),
+                    FileReservation.project_id == project_id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                    FileReservation.expires_ts > datetime.now(timezone.utc),
                 )
             )
             existing_claims = existing_rows.all()
@@ -4045,59 +4107,59 @@ def build_mcp_server() -> FastMCP:
         async with AsyncFileLock(archive.lock_path):
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
-                for claim_record, holder_name in existing_claims:
-                    if _claims_conflict(claim_record, path, exclusive, agent):
+                for file_reservation_record, holder_name in existing_claims:
+                    if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
                         conflicting_holders.append(
                             {
                                 "agent": holder_name,
-                                "path_pattern": claim_record.path_pattern,
-                                "exclusive": claim_record.exclusive,
-                                "expires_ts": _iso(claim_record.expires_ts),
+                                "path_pattern": file_reservation_record.path_pattern,
+                                "exclusive": file_reservation_record.exclusive,
+                                "expires_ts": _iso(file_reservation_record.expires_ts),
                             }
                         )
                 if conflicting_holders:
-                    # Advisory model: still grant the claim but surface conflicts
+                    # Advisory model: still grant the file_reservation but surface conflicts
                     conflicts.append({"path": path, "holders": conflicting_holders})
-                claim = await _create_claim(project, agent, path, exclusive, reason, ttl_seconds)
-                claim_payload = {
-                    "id": claim.id,
+                file_reservation = await _create_file_reservation(project, agent, path, exclusive, reason, ttl_seconds)
+                file_reservation_payload = {
+                    "id": file_reservation.id,
                     "project": project.human_key,
                     "agent": agent.name,
-                    "path_pattern": claim.path_pattern,
-                    "exclusive": claim.exclusive,
-                    "reason": claim.reason,
-                    "created_ts": _iso(claim.created_ts),
-                    "expires_ts": _iso(claim.expires_ts),
+                    "path_pattern": file_reservation.path_pattern,
+                    "exclusive": file_reservation.exclusive,
+                    "reason": file_reservation.reason,
+                    "created_ts": _iso(file_reservation.created_ts),
+                    "expires_ts": _iso(file_reservation.expires_ts),
                 }
-                await write_claim_record(archive, claim_payload)
+                await write_claim_record(archive, file_reservation_payload)
                 granted.append(
                     {
-                        "id": claim.id,
-                        "path_pattern": claim.path_pattern,
-                        "exclusive": claim.exclusive,
-                        "reason": claim.reason,
-                        "expires_ts": _iso(claim.expires_ts),
+                        "id": file_reservation.id,
+                        "path_pattern": file_reservation.path_pattern,
+                        "exclusive": file_reservation.exclusive,
+                        "reason": file_reservation.reason,
+                        "expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
-                existing_claims.append((claim, agent.name))
-        await ctx.info(f"Issued {len(granted)} claims for '{agent.name}'. Conflicts: {len(conflicts)}")
+                existing_claims.append((file_reservation, agent.name))
+        await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
-    @mcp.tool(name="release_claims")
-    @_instrument_tool("release_claims", cluster=CLUSTER_CLAIMS, capabilities={"claims"}, project_arg="project_key", agent_arg="agent_name")
-    async def release_claims_tool(
+    @mcp.tool(name="release_file_reservations")
+    @_instrument_tool("release_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
+    async def release_file_reservations_tool(
         ctx: Context,
         project_key: str,
         agent_name: str,
         paths: Optional[list[str]] = None,
-        claim_ids: Optional[list[int]] = None,
+        file_reservation_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """
         Release active file reservations held by an agent.
 
         Behavior
         --------
-        - If both `paths` and `claim_ids` are omitted, all active reservations for the agent are released
+        - If both `paths` and `file_reservation_ids` are omitted, all active reservations for the agent are released
         - Otherwise, restricts release to matching ids and/or path patterns
         - JSON artifacts stay in Git for audit; DB records get `released_ts`
 
@@ -4114,15 +4176,15 @@ def build_mcp_server() -> FastMCP:
         --------
         Release all active reservations for agent:
         ```json
-        {"jsonrpc":"2.0","id":"13","method":"tools/call","params":{"name":"release_claims","arguments":{
+        {"jsonrpc":"2.0","id":"13","method":"tools/call","params":{"name":"release_file_reservations","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle"
         }}}
         ```
 
         Release by ids:
         ```json
-        {"jsonrpc":"2.0","id":"14","method":"tools/call","params":{"name":"release_claims","arguments":{
-          "project_key":"/abs/path/backend","agent_name":"GreenCastle","claim_ids":[101,102]
+        {"jsonrpc":"2.0","id":"14","method":"tools/call","params":{"name":"release_file_reservations","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"GreenCastle","file_reservation_ids":[101,102]
         }}}
         ```
         """
@@ -4135,7 +4197,7 @@ def build_mcp_server() -> FastMCP:
                     f"project={project_key}",
                     f"agent={agent_name}",
                     f"paths={len(paths or [])}",
-                    f"ids={len(claim_ids or [])}",
+                    f"ids={len(file_reservation_ids or [])}",
                 ]
                 Console().print(Panel.fit("\n".join(details), title="tool: release_claims", border_style="green"))
             except Exception:
@@ -4144,27 +4206,27 @@ def build_mcp_server() -> FastMCP:
             project = await _get_project_by_identifier(project_key)
             agent = await _get_agent(project, agent_name)
             if project.id is None or agent.id is None:
-                raise ValueError("Project and agent must have ids before releasing claims.")
+                raise ValueError("Project and agent must have ids before releasing file_reservations.")
             await ensure_schema()
             now = datetime.now(timezone.utc)
             async with get_session() as session:
                 stmt = (
-                    update(Claim)
+                    update(FileReservation)
                     .where(
-                        Claim.project_id == project.id,
-                        Claim.agent_id == agent.id,
-                        cast(Any, Claim.released_ts).is_(None),
+                        FileReservation.project_id == project.id,
+                        FileReservation.agent_id == agent.id,
+                        cast(Any, FileReservation.released_ts).is_(None),
                     )
                     .values(released_ts=now)
                 )
-                if claim_ids:
-                    stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+                if file_reservation_ids:
+                    stmt = stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
                 if paths:
-                    stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+                    stmt = stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
                 result = await session.execute(stmt)
                 await session.commit()
             affected = int(result.rowcount or 0)
-            await ctx.info(f"Released {affected} claims for '{agent.name}'.")
+            await ctx.info(f"Released {affected} file_reservations for '{agent.name}'.")
             return {"released": affected, "released_at": _iso(now)}
         except Exception as exc:
             if get_settings().tools_log_enabled:
@@ -4179,15 +4241,15 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
-    @mcp.tool(name="renew_claims")
-    @_instrument_tool("renew_claims", cluster=CLUSTER_CLAIMS, capabilities={"claims"}, project_arg="project_key", agent_arg="agent_name")
-    async def renew_claims(
+    @mcp.tool(name="renew_file_reservations")
+    @_instrument_tool("renew_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
+    async def renew_file_reservations(
         ctx: Context,
         project_key: str,
         agent_name: str,
         extend_seconds: int = 1800,
         paths: Optional[list[str]] = None,
-        claim_ids: Optional[list[int]] = None,
+        file_reservation_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """
         Extend expiry for active file reservations held by an agent without reissuing them.
@@ -4202,13 +4264,13 @@ def build_mcp_server() -> FastMCP:
             Seconds to extend from the later of now or current expiry (min 60s).
         paths : Optional[list[str]]
             Restrict renewals to matching path patterns.
-        claim_ids : Optional[list[int]]
+        file_reservation_ids : Optional[list[int]]
             Restrict renewals to matching reservation ids.
 
         Returns
         -------
         dict
-            { renewed: int, claims: [{id, path_pattern, old_expires_ts, new_expires_ts}] }
+            { renewed: int, file_reservations: [{id, path_pattern, old_expires_ts, new_expires_ts}] }
         """
         if get_settings().tools_log_enabled:
             try:
@@ -4220,77 +4282,77 @@ def build_mcp_server() -> FastMCP:
                     f"agent={agent_name}",
                     f"extend={extend_seconds}s",
                     f"paths={len(paths or [])}",
-                    f"ids={len(claim_ids or [])}",
+                    f"ids={len(file_reservation_ids or [])}",
                 ]
-                Console().print(Panel.fit("\n".join(meta), title="tool: renew_claims", border_style="green"))
+                Console().print(Panel.fit("\n".join(meta), title="tool: renew_file_reservations", border_style="green"))
             except Exception:
                 pass
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
         if project.id is None or agent.id is None:
-            raise ValueError("Project and agent must have ids before renewing claims.")
+            raise ValueError("Project and agent must have ids before renewing file_reservations.")
         await ensure_schema()
         now = datetime.now(timezone.utc)
         bump = max(60, int(extend_seconds))
 
         async with get_session() as session:
             stmt = (
-                select(Claim)
+                select(FileReservation)
                 .where(
-                    Claim.project_id == project.id,
-                    Claim.agent_id == agent.id,
-                    cast(Any, Claim.released_ts).is_(None),
+                    FileReservation.project_id == project.id,
+                    FileReservation.agent_id == agent.id,
+                    cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .order_by(asc(Claim.expires_ts))
+                .order_by(asc(FileReservation.expires_ts))
             )
-            if claim_ids:
-                stmt = stmt.where(cast(Any, Claim.id).in_(claim_ids))
+            if file_reservation_ids:
+                stmt = stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
             if paths:
-                stmt = stmt.where(cast(Any, Claim.path_pattern).in_(paths))
+                stmt = stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
             result = await session.execute(stmt)
-            claims: list[Claim] = list(result.scalars().all())
+            file_reservations: list[FileReservation] = list(result.scalars().all())
 
-        if not claims:
-            await ctx.info(f"No active claims to renew for '{agent.name}'.")
-            return {"renewed": 0, "claims": []}
+        if not file_reservations:
+            await ctx.info(f"No active file_reservations to renew for '{agent.name}'.")
+            return {"renewed": 0, "file_reservations": []}
 
         updated: list[dict[str, Any]] = []
         async with get_session() as session:
-            for claim in claims:
-                old_exp = claim.expires_ts
+            for file_reservation in file_reservations:
+                old_exp = file_reservation.expires_ts
                 if getattr(old_exp, "tzinfo", None) is None:
                     from datetime import timezone as _tz
                     old_exp = old_exp.replace(tzinfo=_tz.utc)
                 base = old_exp if old_exp > now else now
-                claim.expires_ts = base + timedelta(seconds=bump)
-                session.add(claim)
+                file_reservation.expires_ts = base + timedelta(seconds=bump)
+                session.add(file_reservation)
                 updated.append(
                     {
-                        "id": claim.id,
-                        "path_pattern": claim.path_pattern,
+                        "id": file_reservation.id,
+                        "path_pattern": file_reservation.path_pattern,
                         "old_expires_ts": _iso(old_exp),
-                        "new_expires_ts": _iso(claim.expires_ts),
+                        "new_expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
             await session.commit()
 
-        # Update Git artifacts for the renewed claims
+        # Update Git artifacts for the renewed file_reservations
         archive = await ensure_archive(settings, project.slug)
         async with AsyncFileLock(archive.lock_path):
-            for claim_info in updated:
+            for file_reservation_info in updated:
                 payload = {
-                    "id": claim_info["id"],
+                    "id": file_reservation_info["id"],
                     "project": project.human_key,
                     "agent": agent.name,
-                    "path_pattern": claim_info["path_pattern"],
+                    "path_pattern": file_reservation_info["path_pattern"],
                     "exclusive": True,
                     "reason": "renew",
                     "created_ts": _iso(now),
-                    "expires_ts": claim_info["new_expires_ts"],
+                    "expires_ts": file_reservation_info["new_expires_ts"],
                 }
                 await write_claim_record(archive, payload)
-        await ctx.info(f"Renewed {len(updated)} claim(s) for '{agent.name}'.")
-        return {"renewed": len(updated), "claims": updated}
+        await ctx.info(f"Renewed {len(updated)} file_reservation(s) for '{agent.name}'.")
+        return {"renewed": len(updated), "file_reservations": updated}
 
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
@@ -4359,16 +4421,16 @@ def build_mcp_server() -> FastMCP:
                         "name": "ensure_project",
                         "summary": "Ensure project slug, schema, and archive exist for a shared repo identifier.",
                         "use_when": "First call against a repo or when switching projects.",
-                        "related": ["register_agent", "claim_paths"],
+                        "related": ["register_agent", "file_reservation_paths"],
                         "expected_frequency": "Whenever a new repo/path is encountered.",
                         "required_capabilities": ["infrastructure", "storage"],
                         "usage_examples": [{"hint": "First action", "sample": "ensure_project(human_key='/abs/path/backend')"}],
                     },
                     {
                         "name": "install_precommit_guard",
-                        "summary": "Install Git pre-commit hook that enforces advisory claims locally.",
+                        "summary": "Install Git pre-commit hook that enforces advisory file_reservations locally.",
                         "use_when": "Onboarding a repository into coordinated mode.",
-                        "related": ["claim_paths", "uninstall_precommit_guard"],
+                        "related": ["file_reservation_paths", "uninstall_precommit_guard"],
                         "expected_frequency": "Infrequent—per repository setup.",
                         "required_capabilities": ["repository", "filesystem"],
                         "usage_examples": [{"hint": "Onboard", "sample": "install_precommit_guard(project_key='backend', code_repo_path='~/repo')"}],
@@ -4544,35 +4606,35 @@ def build_mcp_server() -> FastMCP:
                 ],
             },
             {
-                "name": "Claims & Workspace Guardrails",
+                "name": "File Reservations & Workspace Guardrails",
                 "purpose": "Coordinate file/glob ownership to avoid overwriting concurrent work.",
                 "tools": [
                     {
-                        "name": "claim_paths",
-                        "summary": "Issue advisory claims with overlap detection and Git artifacts.",
+                        "name": "file_reservation_paths",
+                        "summary": "Issue advisory file_reservations with overlap detection and Git artifacts.",
                         "use_when": "Before touching high-traffic surfaces or long-lived refactors.",
-                        "related": ["release_claims", "renew_claims"],
+                        "related": ["release_file_reservations", "renew_file_reservations"],
                         "expected_frequency": "Whenever starting work on contested surfaces.",
-                        "required_capabilities": ["claims", "repository"],
-                        "usage_examples": [{"hint": "Lock file", "sample": "claim_paths(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], ttl_seconds=7200)"}],
+                        "required_capabilities": ["file_reservations", "repository"],
+                        "usage_examples": [{"hint": "Lock file", "sample": "file_reservation_paths(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], ttl_seconds=7200)"}],
                     },
                     {
-                        "name": "release_claims",
-                        "summary": "Release active claims (fully or by subset) and stamp released_ts.",
+                        "name": "release_file_reservations",
+                        "summary": "Release active file_reservations (fully or by subset) and stamp released_ts.",
                         "use_when": "Finishing work so surfaces become available again.",
-                        "related": ["claim_paths", "renew_claims"],
+                        "related": ["file_reservation_paths", "renew_file_reservations"],
                         "expected_frequency": "Each time work on a surface completes.",
-                        "required_capabilities": ["claims"],
+                        "required_capabilities": ["file_reservations"],
                         "usage_examples": [{"hint": "Unlock", "sample": "release_claims(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
                     },
                     {
-                        "name": "renew_claims",
-                        "summary": "Extend claim expiry windows without allocating new claim IDs.",
+                        "name": "renew_file_reservations",
+                        "summary": "Extend file_reservation expiry windows without allocating new file_reservation IDs.",
                         "use_when": "Long-running work needs more time but should retain ownership.",
-                        "related": ["claim_paths", "release_claims"],
+                        "related": ["file_reservation_paths", "release_file_reservations"],
                         "expected_frequency": "Periodically during multi-hour work items.",
-                        "required_capabilities": ["claims"],
-                        "usage_examples": [{"hint": "Extend", "sample": "renew_claims(project_key='backend', agent_name='BlueLake', extend_seconds=1800)"}],
+                        "required_capabilities": ["file_reservations"],
+                        "usage_examples": [{"hint": "Extend", "sample": "renew_file_reservations(project_key='backend', agent_name='BlueLake', extend_seconds=1800)"}],
                     },
                 ],
             },
@@ -4582,12 +4644,12 @@ def build_mcp_server() -> FastMCP:
                 "tools": [
                     {
                         "name": "macro_start_session",
-                        "summary": "Ensure project, register/update agent, optionally claim surfaces, and return inbox context.",
+                        "summary": "Ensure project, register/update agent, optionally file_reservation surfaces, and return inbox context.",
                         "use_when": "Kickstarting a focused work session with one call.",
-                        "related": ["ensure_project", "register_agent", "claim_paths", "fetch_inbox"],
+                        "related": ["ensure_project", "register_agent", "file_reservation_paths", "fetch_inbox"],
                         "expected_frequency": "At the beginning of each autonomous session.",
-                        "required_capabilities": ["workflow", "messaging", "claims", "identity"],
-                        "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', claim_paths=['src/api/*.py'])"}],
+                        "required_capabilities": ["workflow", "messaging", "file_reservations", "identity"],
+                        "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', file_reservation_paths=['src/api/*.py'])"}],
                     },
                     {
                         "name": "macro_prepare_thread",
@@ -4599,13 +4661,13 @@ def build_mcp_server() -> FastMCP:
                         "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
                     },
                     {
-                        "name": "macro_claim_cycle",
-                        "summary": "Claim a set of paths and optionally release them once work is complete.",
+                        "name": "macro_file_reservation_cycle",
+                        "summary": "FileReservation a set of paths and optionally release them once work is complete.",
                         "use_when": "Wrapping a focused edit cycle that needs advisory locks.",
-                        "related": ["claim_paths", "release_claims", "renew_claims"],
+                        "related": ["file_reservation_paths", "release_file_reservations", "renew_file_reservations"],
                         "expected_frequency": "Per guarded work block.",
-                        "required_capabilities": ["workflow", "claims", "repository"],
-                        "usage_examples": [{"hint": "Claim & release", "sample": "macro_claim_cycle(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], auto_release=true)"}],
+                        "required_capabilities": ["workflow", "file_reservations", "repository"],
+                        "usage_examples": [{"hint": "FileReservation & release", "sample": "macro_file_reservation_cycle(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], auto_release=true)"}],
                     },
                     {
                         "name": "macro_contact_handshake",
@@ -4642,7 +4704,7 @@ def build_mcp_server() -> FastMCP:
             },
             {
                 "workflow": "Start focused refactor",
-                "sequence": ["ensure_project", "claim_paths", "send_message", "fetch_inbox", "acknowledge_message"],
+                "sequence": ["ensure_project", "file_reservation_paths", "send_message", "fetch_inbox", "acknowledge_message"],
             },
             {
                 "workflow": "Join existing discussion",
@@ -4927,14 +4989,14 @@ def build_mcp_server() -> FastMCP:
             "agents": agent_data,
         }
 
-    @mcp.resource("resource://claims/{slug}", mime_type="application/json")
-    async def claims_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
+    @mcp.resource("resource://file_reservations/{slug}", mime_type="application/json")
+    async def file_reservations_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
         """
-        List claims for a project, optionally filtering to active-only.
+        List file_reservations for a project, optionally filtering to active-only.
 
         Why this exists
         ---------------
-        - Claims communicate edit intent and reduce collisions across agents.
+        - File reservations communicate edit intent and reduce collisions across agents.
         - Surfacing them helps humans review ongoing work and resolve contention.
 
         Parameters
@@ -4942,47 +5004,47 @@ def build_mcp_server() -> FastMCP:
         slug : str
             Project slug or human key.
         active_only : bool
-            If true (default), only returns claims with no `released_ts`.
+            If true (default), only returns file_reservations with no `released_ts`.
 
         Returns
         -------
         list[dict]
-            Each claim with { id, agent, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts }
+            Each file_reservation with { id, agent, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts }
 
         Example
         -------
         ```json
-        {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://claims/backend-abc123?active_only=true"}}
+        {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=true"}}
         ```
 
-        Also see all historical (including released) claims:
+        Also see all historical (including released) file_reservations:
         ```json
-        {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://claims/backend-abc123?active_only=false"}}
+        {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=false"}}
         ```
         """
         project = await _get_project_by_identifier(slug)
         await ensure_schema()
         if project.id is None:
-            raise ValueError("Project must have an id before listing claims.")
-        await _expire_stale_claims(project.id)
+            raise ValueError("Project must have an id before listing file_reservations.")
+        await _expire_stale_file_reservations(project.id)
         async with get_session() as session:
-            stmt = select(Claim, Agent.name).join(Agent, Claim.agent_id == Agent.id).where(Claim.project_id == project.id)
+            stmt = select(FileReservation, Agent.name).join(Agent, FileReservation.agent_id == Agent.id).where(FileReservation.project_id == project.id)
             if active_only:
-                stmt = stmt.where(cast(Any, Claim.released_ts).is_(None))
+                stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
             result = await session.execute(stmt)
             rows = result.all()
         return [
             {
-                "id": claim.id,
+                "id": file_reservation.id,
                 "agent": holder,
-                "path_pattern": claim.path_pattern,
-                "exclusive": claim.exclusive,
-                "reason": claim.reason,
-                "created_ts": _iso(claim.created_ts),
-                "expires_ts": _iso(claim.expires_ts),
-                "released_ts": _iso(claim.released_ts) if claim.released_ts else None,
+                "path_pattern": file_reservation.path_pattern,
+                "exclusive": file_reservation.exclusive,
+                "reason": file_reservation.reason,
+                "created_ts": _iso(file_reservation.created_ts),
+                "expires_ts": _iso(file_reservation.expires_ts),
+                "released_ts": _iso(file_reservation.released_ts) if file_reservation.released_ts else None,
             }
-            for claim, holder in rows
+            for file_reservation, holder in rows
         ]
 
     @mcp.resource("resource://message/{message_id}", mime_type="application/json")

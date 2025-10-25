@@ -175,6 +175,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
 
     Falls back to litellm.completion if Router isn't available.
     """
+    global _router
     await _ensure_initialized()
     settings = get_settings()
     use_model = model or settings.llm.default_model
@@ -187,8 +188,8 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         {"role": "user", "content": user},
     ]
 
-    def _call_router():
-        return _router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+    def _call_router(router: Any):
+        return router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
     def _call_direct():
         return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
@@ -196,12 +197,12 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
     resp: Any
     try:
         if _router is not None:
-            resp = await asyncio.to_thread(_call_router)
+            current_router = _router
+            resp = await asyncio.to_thread(lambda: _call_router(current_router))
         else:
             resp = await asyncio.to_thread(_call_direct)
     except Exception as err:
         # Fallback to direct completion if Router path fails (e.g., no deployments)
-        global _router
         _router = None
         _logger.debug("litellm.router.disabled_after_failure")
         try:
@@ -213,7 +214,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
                 use_model = alt_model
                 resp = await asyncio.to_thread(lambda: litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
             else:
-                raise err
+                raise err from None
 
     # Normalize content across potential shapes
     content: str

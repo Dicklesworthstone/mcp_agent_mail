@@ -4,25 +4,50 @@
 
 {% block content %}
 <div class="page-transition">
-  <!-- Hero Header Section -->
+  <!-- Enhanced Hero Header Section -->
   <div class="mb-12 text-center relative overflow-hidden">
-    <!-- Decorative gradient background -->
+    <!-- Animated gradient background -->
     <div class="absolute inset-0 gradient-mesh opacity-30 pointer-events-none"></div>
+    <div class="absolute inset-0 bg-gradient-to-b from-primary-500/5 via-purple-500/5 to-transparent pointer-events-none"></div>
+
+    <!-- Floating particles effect -->
+    <div class="absolute inset-0 overflow-hidden pointer-events-none">
+      <div class="absolute top-10 left-10 w-2 h-2 bg-primary-500 rounded-full opacity-40 animate-pulse"></div>
+      <div class="absolute top-20 right-20 w-3 h-3 bg-purple-500 rounded-full opacity-30 animate-pulse" style="animation-delay: 0.5s;"></div>
+      <div class="absolute bottom-20 left-1/4 w-2 h-2 bg-pink-500 rounded-full opacity-40 animate-pulse" style="animation-delay: 1s;"></div>
+    </div>
 
     <div class="relative z-10 py-8">
-      <div class="inline-flex items-center gap-2 px-4 py-2 bg-primary-100 dark:bg-primary-900/30 rounded-full text-primary-700 dark:text-primary-300 text-sm font-medium mb-4 animate-slide-down">
-        <i data-lucide="sparkles" class="w-4 h-4"></i>
+      <div class="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-primary-100 via-purple-100 to-pink-100 dark:from-primary-900/30 dark:via-purple-900/30 dark:to-pink-900/30 rounded-full text-primary-700 dark:text-primary-300 text-sm font-medium mb-4 animate-slide-down shadow-sm border border-primary-200 dark:border-primary-800">
+        <i data-lucide="sparkles" class="w-4 h-4 animate-pulse"></i>
         <span>Multi-Agent Collaboration Platform</span>
+        <div class="w-2 h-2 bg-primary-500 rounded-full animate-pulse"></div>
       </div>
 
-      <h1 class="text-5xl md:text-6xl font-bold text-slate-900 dark:text-white mb-4 animate-fade-in">
-        Your <span class="bg-gradient-to-r from-primary-600 via-purple-600 to-pink-600 bg-clip-text text-transparent text-shimmer">Projects</span>
+      <h1 class="text-5xl md:text-6xl font-bold text-slate-900 dark:text-white mb-4 animate-fade-in" data-splitting>
+        Your <span class="bg-gradient-to-r from-primary-600 via-purple-600 to-pink-600 bg-clip-text text-transparent animate-gradient-x inline-block">Projects</span>
       </h1>
 
-      <p class="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto animate-slide-up">
+      <p class="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto animate-slide-up leading-relaxed">
         Orchestrate, coordinate, and empower AI agents to collaborate seamlessly
       </p>
 
+      <!-- Quick action buttons -->
+      <div class="flex items-center justify-center gap-4 mt-8 animate-fade-in" style="animation-delay: 0.3s;">
+        <button onclick="document.querySelector('input[name=q]')?.focus()"
+                class="inline-flex items-center gap-2 px-6 py-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md transition-all duration-200 btn-magnetic"
+                data-tippy-content="Quick search across all projects">
+          <i data-lucide="search" class="w-4 h-4"></i>
+          <span class="font-medium">Search</span>
+          <kbd class="px-2 py-1 bg-slate-100 dark:bg-slate-700 rounded text-xs border border-slate-300 dark:border-slate-600">/</kbd>
+        </button>
+        <button onclick="window.restartTutorial()"
+                class="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-primary-600 to-purple-600 hover:from-primary-700 hover:to-purple-700 text-white rounded-xl shadow-md hover:shadow-lg transition-all duration-200 btn-magnetic"
+                data-tippy-content="Learn how Agent Mail works">
+          <i data-lucide="play-circle" class="w-4 h-4"></i>
+          <span class="font-medium">Take a Tour</span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -80,34 +105,63 @@
   </div>
 
   {% if projects %}
-    <!-- Projects Section Header -->
-    <div class="flex items-center justify-between mb-6">
-      <div class="flex items-center gap-3">
-        <div class="w-1 h-8 bg-gradient-to-b from-primary-600 to-primary-800 rounded-full"></div>
-        <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Active Projects</h2>
+    <!-- Enhanced Projects Section Header with Search -->
+    <div class="mb-8" x-data="{ searchQuery: '', view: 'grid' }">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+        <div class="flex items-center gap-3">
+          <div class="w-1 h-10 bg-gradient-to-b from-primary-600 to-primary-800 rounded-full"></div>
+          <div>
+            <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Active Projects</h2>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mt-0.5">{{ projects|length }} project{{ 's' if projects|length != 1 else '' }} in total</p>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <!-- Search input -->
+          <div class="relative search-spotlight">
+            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+              <i data-lucide="search" class="w-4 h-4 text-slate-400"></i>
+            </div>
+            <input
+              type="text"
+              x-model="searchQuery"
+              placeholder="Filter projects..."
+              class="pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border-2 border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-sm text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 w-full md:w-64"
+              aria-label="Filter projects"
+            />
+          </div>
+
+          <!-- View Toggle -->
+          <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+            <button @click="view = 'grid'"
+                    :class="view === 'grid' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                    class="p-2 rounded-md transition-all duration-200"
+                    data-tippy-content="Grid view"
+                    aria-label="Grid view">
+              <i data-lucide="grid-3x3" class="w-4 h-4"></i>
+            </button>
+            <button @click="view = 'list'"
+                    :class="view === 'list' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                    class="p-2 rounded-md transition-all duration-200"
+                    data-tippy-content="List view"
+                    aria-label="List view">
+              <i data-lucide="list" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
       </div>
 
-      <!-- View Toggle -->
-      <div class="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg" x-data="{ view: 'grid' }">
-        <button @click="view = 'grid'"
-                :class="view === 'grid' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
-                class="px-3 py-2 rounded-md transition-all duration-200"
-                data-tippy-content="Grid view">
-          <i data-lucide="grid-3x3" class="w-4 h-4"></i>
-        </button>
-        <button @click="view = 'list'"
-                :class="view === 'list' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
-                class="px-3 py-2 rounded-md transition-all duration-200"
-                data-tippy-content="List view">
-          <i data-lucide="list" class="w-4 h-4"></i>
-        </button>
-      </div>
-    </div>
-
-    <!-- Projects Grid -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-      {% for p in projects %}
+      <!-- Projects Grid with filtering -->
+      <div :class="view === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6' : 'space-y-4'">
+        {% for p in projects %}
         <a href="/mail/{{ p.slug }}"
+           x-show="!searchQuery || '{{ p.human_key }}'.toLowerCase().includes(searchQuery.toLowerCase()) || '{{ p.slug }}'.toLowerCase().includes(searchQuery.toLowerCase())"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 transform scale-95"
+           x-transition:enter-end="opacity-100 transform scale-100"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 transform scale-100"
+           x-transition:leave-end="opacity-0 transform scale-95"
            class="group relative bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
            style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;"
            data-project-card="true"
@@ -286,7 +340,26 @@
           </div>
           {% endif %}
         </a>
-      {% endfor %}
+        {% endfor %}
+      </div>
+
+      <!-- No results state -->
+      <div x-show="searchQuery && !Array.from(document.querySelectorAll('[data-project-card]')).some(card => card.style.display !== 'none')"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 transform scale-95"
+           x-transition:enter-end="opacity-100 transform scale-100"
+           class="text-center py-16 bg-white dark:bg-slate-800 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700">
+        <div class="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
+          <i data-lucide="search-x" class="w-8 h-8 text-slate-400"></i>
+        </div>
+        <h3 class="text-xl font-bold text-slate-900 dark:text-white mb-2">No projects found</h3>
+        <p class="text-slate-600 dark:text-slate-400 mb-4">Try adjusting your search terms</p>
+        <button @click="searchQuery = ''"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors">
+          <i data-lucide="x" class="w-4 h-4"></i>
+          <span>Clear search</span>
+        </button>
+      </div>
     </div>
 
   {% else %}

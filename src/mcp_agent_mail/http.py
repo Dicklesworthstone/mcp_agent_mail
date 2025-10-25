@@ -177,7 +177,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 self._redis = None
 
     async def _decode_jwt(self, token: str) -> dict | None:
-        """Validate and decode JWT, returning claims or None on failure."""
+        """Validate and decode JWT, returning file_reservations or None on failure."""
         with contextlib.suppress(Exception):
             jose_mod = importlib.import_module("authlib.jose")
             JsonWebKey = jose_mod.JsonWebKey
@@ -208,13 +208,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             if key is None:
                 return None
             with contextlib.suppress(Exception):
-                claims = jwt.decode(token, key)
+                file_reservations = jwt.decode(token, key)
                 if audience:
-                    claims.validate_aud(audience)
-                if issuer and str(claims.get("iss") or "") != issuer:
+                    file_reservations.validate_aud(audience)
+                if issuer and str(file_reservations.get("iss") or "") != issuer:
                     return None
-                claims.validate()
-                return dict(claims)
+                file_reservations.validate()
+                return dict(file_reservations)
         return None
 
     @staticmethod
@@ -324,9 +324,9 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             claims_dict = await self._decode_jwt(token)
             if claims_dict is None:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
-            claims = cast(dict[str, Any], claims_dict)
-            request.state.jwt_claims = claims
-            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])
+            file_reservations = cast(dict[str, Any], claims_dict)
+            request.state.jwt_claims = file_reservations
+            roles_raw = file_reservations.get(self.settings.http.jwt_role_claim, [])
             if isinstance(roles_raw, str):
                 roles = {roles_raw}
             elif isinstance(roles_raw, (list, tuple)):
@@ -417,7 +417,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
         if not (
-            settings.claims_cleanup_enabled
+            settings.file_reservations_cleanup_enabled
             or settings.ack_ttl_enabled
             or settings.retention_report_enabled
             or settings.quota_enabled
@@ -431,7 +431,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 try:
                     await ensure_schema()
                     async with get_session() as session:
-                        rows = await session.execute(text("SELECT DISTINCT project_id FROM claims"))
+                        rows = await session.execute(text("SELECT DISTINCT project_id FROM file_reservations"))
                         pids = [r[0] for r in rows.fetchall() if r[0] is not None]
                     for pid in pids:
                         with contextlib.suppress(Exception):
@@ -442,15 +442,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         Console = rich_console.Console
                         Panel = rich_panel.Panel
                         Console().print(
-                            Panel.fit(f"projects_scanned={len(pids)}", title="Claims Cleanup", border_style="cyan")
+                            Panel.fit(f"projects_scanned={len(pids)}", title="File Reservations Cleanup", border_style="cyan")
                         )
                     except Exception:
                         pass
                     with contextlib.suppress(Exception):
-                        structlog.get_logger("tasks").info("claims_cleanup", projects_scanned=len(pids))
+                        structlog.get_logger("tasks").info("file_reservations_cleanup", projects_scanned=len(pids))
                 except Exception:
                     pass
-                await asyncio.sleep(settings.claims_cleanup_interval_seconds)
+                await asyncio.sleep(settings.file_reservations_cleanup_interval_seconds)
 
         async def _worker_ack_ttl() -> None:
             import datetime as _dt
@@ -520,7 +520,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 )
                             if settings.ack_escalation_enabled:
                                 mode = (settings.ack_escalation_mode or "log").lower()
-                                if mode == "claim":
+                                if mode == "file_reservation":
                                     try:
                                         y_dir = created_ts.strftime("%Y")
                                         m_dir = created_ts.strftime("%m")
@@ -604,7 +604,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                             await s2.execute(
                                                 text(
                                                     """
-                                                INSERT INTO claims(project_id, agent_id, path_pattern, exclusive, reason, created_ts, expires_ts)
+                                                INSERT INTO file_reservations(project_id, agent_id, path_pattern, exclusive, reason, created_ts, expires_ts)
                                                 VALUES (:pid, :holder, :pattern, :exclusive, :reason, :cts, :ets)
                                                 """
                                                 ),
@@ -736,7 +736,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 await asyncio.sleep(max(60, settings.retention_report_interval_seconds))
 
         tasks = []
-        if settings.claims_cleanup_enabled:
+        if settings.file_reservations_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
         if settings.ack_ttl_enabled:
             tasks.append(asyncio.create_task(_worker_ack_ttl()))
@@ -1626,8 +1626,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 boost=bool(boost),
             )
 
-        # Claims and attachments views
-        @fastapi_app.get("/mail/{project}/claims", response_class=HTMLResponse)
+        # File reservations and attachments views
+        @fastapi_app.get("/mail/{project}/file_reservations", response_class=HTMLResponse)
         async def mail_claims(project: str) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
@@ -1642,11 +1642,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 pid = int(prow[0])
                 rows = await session.execute(
                     text(
-                        "SELECT c.id, a.name, c.path_pattern, c.exclusive, c.created_ts, c.expires_ts, c.released_ts FROM claims c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = :pid ORDER BY c.created_ts DESC"
+                        "SELECT c.id, a.name, c.path_pattern, c.exclusive, c.created_ts, c.expires_ts, c.released_ts FROM file_reservations c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = :pid ORDER BY c.created_ts DESC"
                     ),
                     {"pid": pid},
                 )
-                claims = [
+                file_reservations = [
                     {
                         "id": r[0],
                         "agent": r[1],
@@ -1658,7 +1658,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     }
                     for r in rows.fetchall()
                 ]
-            return await _render("mail_claims.html", project={"slug": prow[1], "human_key": prow[2]}, claims=claims)
+            return await _render("mail_claims.html", project={"slug": prow[1], "human_key": prow[2]}, file_reservations=file_reservations)
 
         @fastapi_app.get("/mail/{project}/attachments", response_class=HTMLResponse)
         async def mail_attachments(project: str) -> HTMLResponse:
@@ -1722,10 +1722,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     repo = GitRepo(str(repo_root))
                     # Use efficient commit counting with limit to prevent DoS
                     commit_count = sum(1 for _ in repo.iter_commits(max_count=10000))
-                    if commit_count == 10000:
-                        total_commits = "10,000+"  # Hit limit, indicate there are more
-                    else:
-                        total_commits = f"{commit_count:,}"  # Format with commas
+                    total_commits = "10,000+" if commit_count == 10000 else f"{commit_count:,}"
                     last_commit = next(repo.iter_commits(max_count=1), None)
                     last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
 
@@ -1739,21 +1736,21 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     else:
                         project_count = 0
 
-                    # Estimate size with timeout
-                    import subprocess
-
+                    # Estimate size with timeout (run blocking 'du' in a worker thread)
+                    import asyncio as _asyncio
+                    import subprocess as _subprocess
                     try:
-                        result = subprocess.run(
-                            ["du", "-sh", str(repo_root)],
-                            capture_output=True,
-                            text=True,
-                            timeout=5.0,  # 5 second timeout
-                        )
-                        if result.returncode == 0 and result.stdout.strip():
-                            repo_size = result.stdout.split()[0]
-                        else:
-                            repo_size = "Unknown"
-                    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError, IndexError):
+                        def _run_du():
+                            return _subprocess.run(
+                                ["du", "-sh", str(repo_root)],
+                                capture_output=True,
+                                text=True,
+                                timeout=5.0,
+                            )
+
+                        result = await _asyncio.to_thread(_run_du)
+                        repo_size = result.stdout.split()[0] if getattr(result, "returncode", 1) == 0 else "Unknown"
+                    except (_subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
                         # du not available, took too long, or other OS error
                         repo_size = "Unknown"
                     except Exception:
@@ -1893,11 +1890,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     raise HTTPException(status_code=404, detail="File not found")
 
                 return JSONResponse(content=content)
-            except ValueError:
+            except ValueError as err:
                 # Path validation errors
-                raise HTTPException(status_code=400, detail="Invalid file path")
-            except Exception:
-                raise HTTPException(status_code=404, detail="File not found")
+                raise HTTPException(status_code=400, detail="Invalid file path") from err
+            except Exception as err:
+                raise HTTPException(status_code=404, detail="File not found") from err
 
         @fastapi_app.get("/mail/archive/network", response_class=HTMLResponse)
         async def archive_network(project: str | None = None) -> HTMLResponse:

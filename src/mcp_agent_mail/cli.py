@@ -20,7 +20,7 @@ from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
-from .models import Agent, Claim, Message, MessageRecipient, Project
+from .models import Agent, FileReservation, Message, MessageRecipient, Project
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
@@ -30,11 +30,11 @@ console = Console()
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
 
 guard_app = typer.Typer(help="Install or remove the Git pre-commit guard")
-claims_app = typer.Typer(help="Inspect advisory claims")
+file_reservations_app = typer.Typer(help="Inspect advisory file_reservations")
 acks_app = typer.Typer(help="Review acknowledgement status")
 
 app.add_typer(guard_app, name="guard")
-app.add_typer(claims_app, name="claims")
+app.add_typer(file_reservations_app, name="file_reservations")
 app.add_typer(acks_app, name="acks")
 
 
@@ -110,7 +110,7 @@ def serve_http(
                 "CORS": "ENABLED" if settings.cors.enabled else "disabled",
                 "OTEL": "ENABLED" if settings.http.otel_enabled else "disabled",
                 "LLM": "ENABLED" if settings.llm.enabled else "disabled",
-                "Claims Cleanup": "ENABLED" if settings.claims_cleanup_enabled else "disabled",
+                "File Reservations Cleanup": "ENABLED" if settings.file_reservations_cleanup_enabled else "disabled",
             },
         }
         panel = rich_logger.create_startup_panel(config_dict)
@@ -267,25 +267,25 @@ def guard_uninstall(
         console.print(f"[yellow]No guard found at {hook_path}.")
 
 
-@claims_app.command("list")
-def claims_list(
+@file_reservations_app.command("list")
+def file_reservations_list(
     project: str = typer.Argument(..., help="Project slug or human key"),
-    active_only: bool = typer.Option(True, help="Show only active claims"),
+    active_only: bool = typer.Option(True, help="Show only active file_reservations"),
 ) -> None:
-    """Display advisory claims for a project."""
+    """Display advisory file_reservations for a project."""
 
-    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+    async def _run() -> tuple[Project, list[tuple[FileReservation, str]]]:
         project_record = await _get_project_record(project)
         if project_record.id is None:
             raise ValueError("Project must have an id")
         await ensure_schema()
         async with get_session() as session:
-            stmt = select(Claim, Agent.name).join(Agent, Claim.agent_id == Agent.id).where(
-                Claim.project_id == project_record.id
+            stmt = select(FileReservation, Agent.name).join(Agent, FileReservation.agent_id == Agent.id).where(
+                FileReservation.project_id == project_record.id
             )
             if active_only:
-                stmt = stmt.where(cast(Any, Claim.released_ts).is_(None))
-            stmt = stmt.order_by(asc(Claim.expires_ts))
+                stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
+            stmt = stmt.order_by(asc(FileReservation.expires_ts))
             rows = (await session.execute(stmt)).all()
         return project_record, rows
 
@@ -294,43 +294,43 @@ def claims_list(
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
-    table = Table(title=f"Claims for {project_record.human_key}", show_lines=False)
+    table = Table(title=f"File Reservations for {project_record.human_key}", show_lines=False)
     table.add_column("ID")
     table.add_column("Agent")
     table.add_column("Pattern")
     table.add_column("Exclusive")
     table.add_column("Expires")
     table.add_column("Released")
-    for claim, agent_name in rows:
+    for file_reservation, agent_name in rows:
         table.add_row(
-            str(claim.id),
+            str(file_reservation.id),
             agent_name,
-            claim.path_pattern,
-            "yes" if claim.exclusive else "no",
-            _iso(claim.expires_ts),
-            _iso(claim.released_ts) if claim.released_ts else "",
+            file_reservation.path_pattern,
+            "yes" if file_reservation.exclusive else "no",
+            _iso(file_reservation.expires_ts),
+            _iso(file_reservation.released_ts) if file_reservation.released_ts else "",
         )
     console.print(table)
 
 
-@claims_app.command("active")
-def claims_active(
+@file_reservations_app.command("active")
+def file_reservations_active(
     project: str = typer.Argument(..., help="Project slug or human key"),
-    limit: int = typer.Option(100, help="Max claims to display"),
+    limit: int = typer.Option(100, help="Max file_reservations to display"),
 ) -> None:
-    """List active claims with expiry countdowns."""
+    """List active file_reservations with expiry countdowns."""
 
-    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+    async def _run() -> tuple[Project, list[tuple[FileReservation, str]]]:
         project_record = await _get_project_record(project)
         if project_record.id is None:
             raise ValueError("Project must have an id")
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(Claim, Agent.name)
-                .join(Agent, Claim.agent_id == Agent.id)
-                .where(Claim.project_id == project_record.id, cast(Any, Claim.released_ts).is_(None))
-                .order_by(asc(Claim.expires_ts))
+                select(FileReservation, Agent.name)
+                .join(Agent, FileReservation.agent_id == Agent.id)
+                .where(FileReservation.project_id == project_record.id, cast(Any, FileReservation.released_ts).is_(None))
+                .order_by(asc(FileReservation.expires_ts))
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).all()
@@ -352,7 +352,7 @@ def claims_active(
         m, s = divmod(r, 60)
         return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
-    table = Table(title=f"Active Claims — {project_record.human_key}")
+    table = Table(title=f"Active File Reservations — {project_record.human_key}")
     table.add_column("ID")
     table.add_column("Agent")
     table.add_column("Pattern")
@@ -360,39 +360,39 @@ def claims_active(
     table.add_column("Expires")
     table.add_column("In")
 
-    for claim, agent_name in rows:
+    for file_reservation, agent_name in rows:
         table.add_row(
-            str(claim.id),
+            str(file_reservation.id),
             agent_name,
-            claim.path_pattern,
-            "yes" if claim.exclusive else "no",
-            _iso(claim.expires_ts),
-            _fmt_delta(claim.expires_ts),
+            file_reservation.path_pattern,
+            "yes" if file_reservation.exclusive else "no",
+            _iso(file_reservation.expires_ts),
+            _fmt_delta(file_reservation.expires_ts),
         )
     console.print(table)
 
 
-@claims_app.command("soon")
-def claims_soon(
+@file_reservations_app.command("soon")
+def file_reservations_soon(
     project: str = typer.Argument(..., help="Project slug or human key"),
-    minutes: int = typer.Option(30, min=1, help="Show claims expiring within N minutes"),
+    minutes: int = typer.Option(30, min=1, help="Show file_reservations expiring within N minutes"),
 ) -> None:
-    """Show claims expiring soon to prompt renewals or coordination."""
+    """Show file_reservations expiring soon to prompt renewals or coordination."""
 
-    async def _run() -> tuple[Project, list[tuple[Claim, str]]]:
+    async def _run() -> tuple[Project, list[tuple[FileReservation, str]]]:
         project_record = await _get_project_record(project)
         if project_record.id is None:
             raise ValueError("Project must have an id")
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(Claim, Agent.name)
-                .join(Agent, Claim.agent_id == Agent.id)
+                select(FileReservation, Agent.name)
+                .join(Agent, FileReservation.agent_id == Agent.id)
                 .where(
-                    Claim.project_id == project_record.id,
-                    cast(Any, Claim.released_ts).is_(None),
+                    FileReservation.project_id == project_record.id,
+                    cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .order_by(asc(Claim.expires_ts))
+                .order_by(asc(FileReservation.expires_ts))
             )
             rows = (await session.execute(stmt)).all()
         return project_record, rows
@@ -406,7 +406,7 @@ def claims_soon(
     cutoff = now + timedelta(minutes=minutes)
     soon = [(c, a) for (c, a) in rows if c.expires_ts <= cutoff]
 
-    table = Table(title=f"Claims expiring within {minutes}m — {project_record.human_key}", show_lines=False)
+    table = Table(title=f"File Reservations expiring within {minutes}m — {project_record.human_key}", show_lines=False)
     table.add_column("ID")
     table.add_column("Agent")
     table.add_column("Pattern")
@@ -423,14 +423,14 @@ def claims_soon(
         m, s = divmod(r, 60)
         return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
-    for claim, agent_name in soon:
+    for file_reservation, agent_name in soon:
         table.add_row(
-            str(claim.id),
+            str(file_reservation.id),
             agent_name,
-            claim.path_pattern,
-            "yes" if claim.exclusive else "no",
-            _iso(claim.expires_ts),
-            _fmt_delta(claim.expires_ts),
+            file_reservation.path_pattern,
+            "yes" if file_reservation.exclusive else "no",
+            _iso(file_reservation.expires_ts),
+            _fmt_delta(file_reservation.expires_ts),
         )
     console.print(table)
 

@@ -59,7 +59,7 @@ graph LR
     GI1[agents/profile.json]
     GI2[agents/mailboxes/...]
     GI3[messages/YYYY/MM/id.md]
-    GI4[claims/sha1.json]
+    GI4[file reservations/sha1.json]
     GA[attachments/xx/sha1.webp]
   end
 
@@ -79,10 +79,10 @@ Coding Agents (various CLIs)
         | writes/reads                             indexes/queries
         v                                          v
 Global Git archive (STORAGE_ROOT)           SQLite (FTS5)
-  ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/claims
+  ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/file reservations
   ├─ agents/<AgentName>/profile.json
   ├─ messages/YYYY/MM/<msg-id>.md (canonical)
-  └─ claims/<sha1-of-path>.json
+  └─ file reservations/<sha1-of-path>.json
 ```
 
 ## Web UI (human-facing mail viewer)
@@ -143,7 +143,7 @@ Auth notes:
 - `/mail/{project}/search?q=...` (Dedicated search page)
   - Same query syntax as the project overview search, with a token “pill” UI for assembling/removing filters.
 
-- `/mail/{project}/claims` (File Reservations list)
+- `/mail/{project}/file reservations` (File Reservations list)
   - Displays active and historical file reservations (exclusive/shared, path pattern, timestamps, released/expired state).
 
 - `/mail/{project}/attachments` (Messages with attachments)
@@ -266,7 +266,7 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
   agents/<AgentName>/outbox/YYYY/MM/<msg-id>.md
   messages/YYYY/MM/<msg-id>.md
   messages/threads/<thread-id>.md  # optional human digest maintained by the server
-  claims/<sha1-of-path>.json
+  file reservations/<sha1-of-path>.json
   attachments/<xx>/<sha1>.webp
 ```
 
@@ -301,10 +301,12 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 ### Data model (SQLite)
 
 - `projects(id, human_key, slug, created_at)`
-- `agents(id, project_id, name, program, model, inception_ts, task, last_active_ts)`
+- `agents(id, project_id, name, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy)`
 - `messages(id, project_id, sender_id, thread_id, subject, body_md, created_ts, importance, ack_required, attachments)`
-- `message_recipients(message_id, agent_name, kind, read_ts, ack_ts)`
-- `claims(id, project_id, agent_name, path, exclusive, reason, created_ts, expires_ts, released_ts)`
+- `message_recipients(message_id, agent_id, kind, read_ts, ack_ts)`
+- `file_reservations(id, project_id, agent_id, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts)`
+- `agent_links(id, a_project_id, a_agent_id, b_project_id, b_agent_id, status, reason, created_ts, updated_ts, expires_ts)`
+- `project_sibling_suggestions(id, project_a_id, project_b_id, score, status, rationale, created_ts, evaluated_ts, confirmed_ts, dismissed_ts)`
 - `fts_messages(message_id UNINDEXED, subject, body)` + triggers for incremental updates
 
 ### Concurrency and lifecycle
@@ -350,8 +352,8 @@ sequenceDiagram
 
 4) Avoid conflicts with file reservations (leases)
 
-- `claim_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON reservation artifacts in Git; conflicts are reported if overlapping active exclusives exist.
-- `release_claims(project_key, agent_name, paths[])` releases active leases. JSON artifacts remain for audit history.
+- `file_reservation_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON reservation artifacts in Git; conflicts are reported if overlapping active exclusives exist.
+- `release_file_reservations(project_key, agent_name, paths[])` releases active leases. JSON artifacts remain for audit history.
 - Optional: install a pre-commit hook in your code repo that blocks commits conflicting with other agents' active exclusive file reservations.
 
 ```mermaid
@@ -361,14 +363,14 @@ sequenceDiagram
   participant DB
   participant Git
 
-  Agent->>Server: call claim_paths
+  Agent->>Server: call file_reservation_paths
   Server->>DB: expire old leases and check overlaps
   DB-->>Server: conflicts or grants
   alt conflicts exist
     Server-->>Agent: conflicts only
   else no conflicts
-    Server->>DB: insert claim rows
-    Server->>Git: write claim JSON files
+    Server->>DB: insert file reservation rows
+    Server->>Git: write file reservation JSON files
     Server->>Git: commit
     Server-->>Agent: granted paths
   end
@@ -468,13 +470,13 @@ Important: You can also create reciprocal links or set `open` policy for trusted
 | `fetch_inbox(...)` | Pull recent messages for an agent |
 | `mark_message_read(project_key, agent_name, message_id)` | Mark a specific message as read for the given agent |
 | `acknowledge_message(...)` | Mark a message as acknowledged by agent |
-| `macro_start_session(...)` | Orchestrates ensure→register→optional claim→inbox fetch for session startup |
+| `macro_start_session(...)` | Orchestrates ensure→register→optional file reservation→inbox fetch for session startup |
 | `macro_prepare_thread(...)` | Bundles registration, thread summary, and inbox context |
-| `macro_claim_cycle(...)` | Claim + optionally release surfaces around a focused edit block |
+| `macro_file_reservation_cycle(...)` | File Reservation + optionally release surfaces around a focused edit block |
 | `macro_contact_handshake(...)` | Automates contact request/approval and optional welcome ping |
-| `claim_paths(...)` | Request advisory leases on files/globs |
-| `release_claims(...)` | Release existing leases |
-| `renew_claims(...)` | Extend TTL of existing claims without reissuing them |
+| `file_reservation_paths(...)` | Request advisory leases on files/globs |
+| `release_file_reservations(...)` | Release existing leases |
+| `renew_file_reservations(...)` | Extend TTL of existing file reservations without reissuing them |
 | `search_messages(...)` | FTS5 search over subject/body |
 | `summarize_thread(...)` | Extract summary/action items across a thread |
 | `summarize_threads(...)` | Digest across multiple threads (optional LLM refinement) |
@@ -534,7 +536,7 @@ sequenceDiagram
 
 Exclusive file reservations are advisory but visible and auditable:
 
-- A reservation JSON is written to `claims/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
+- A reservation JSON is written to `file reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
 - The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
 - Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who “owns” the commit
 
@@ -584,7 +586,7 @@ Common variables you may set:
 | `HTTP_JWT_ALGORITHMS` | `HS256` | CSV of allowed algs |
 | `HTTP_JWT_AUDIENCE` |  | Expected `aud` (optional) |
 | `HTTP_JWT_ISSUER` |  | Expected `iss` (optional) |
-| `HTTP_JWT_ROLE_CLAIM` | `role` | Claim name containing role(s) |
+| `HTTP_JWT_ROLE_CLAIM` | `role` | File Reservation name containing role(s) |
 | `HTTP_RBAC_ENABLED` | `true` | Enforce read-only vs tools RBAC |
 | `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
 | `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
@@ -628,17 +630,17 @@ Common variables you may set:
 | `LLM_CACHE_REDIS_URL` |  | Redis URL for LLM cache (if backend=redis) |
 | `LLM_COST_LOGGING_ENABLED` | `true` | Log LLM API costs and token usage |
 
-| `CLAIMS_CLEANUP_ENABLED` | `false` | Enable background cleanup of expired claims |
-| `CLAIMS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for claims cleanup task |
-| `CLAIMS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting claims |
+| `FILE_RESERVATIONS_CLEANUP_ENABLED` | `false` | Enable background cleanup of expired file reservations |
+| `FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for file reservations cleanup task |
+| `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
 | `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
 | `ACK_ESCALATION_ENABLED` | `false` | Enable escalation for overdue ACKs |
-| `ACK_ESCALATION_MODE` | `log` | `log` or `claim` escalation mode |
-| `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation claims |
-| `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation claim exclusive |
-| `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation claims |
+| `ACK_ESCALATION_MODE` | `log` | `log` or `file reservation` escalation mode |
+| `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation file reservations |
+| `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
+| `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
 | `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for auto-approved contacts (1 day) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
@@ -696,7 +698,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 2) Reserve edit surface (optional)
 
 ```json
-{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","paths":["app/api/*.py"],"ttl_seconds":3600,"exclusive":true}}}
+{"method":"tools/call","params":{"name":"file_reservation_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","paths":["app/api/*.py"],"ttl_seconds":3600,"exclusive":true}}}
 ```
 
 3) Send and acknowledge messages
@@ -718,7 +720,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 2. Backend agent reserves `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
 
 ```json
-{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
+{"method":"tools/call","params":{"name":"file_reservation_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
 ```
 
 3. Backend agent sends a design doc with an embedded diagram image:
@@ -850,7 +852,7 @@ Reserve a surface for editing:
 {
   "method": "tools/call",
   "params": {
-    "name": "claim_paths",
+    "name": "file_reservation_paths",
     "arguments": {
       "project_key": "/abs/path/backend",
       "agent_name": "GreenCastle",
@@ -878,7 +880,7 @@ Reserve a surface for editing:
   - Optional JWT (HS*/JWKS) via HTTP middleware; enable with `HTTP_JWT_ENABLED=true`
   - Static Bearer token is supported only when JWT is disabled
   - When JWKS is configured (`HTTP_JWT_JWKS_URL`), incoming JWTs must include a matching `kid` header; tokens without `kid` or with unknown `kid` are rejected
-  - Starter RBAC (reader vs writer) using role claim; see `HTTP_RBAC_*` settings
+  - Starter RBAC (reader vs writer) using role file reservation; see `HTTP_RBAC_*` settings
 - Reverse proxy + TLS (minimal example)
   - NGINX location block:
     ```nginx
@@ -986,15 +988,18 @@ if __name__ == "__main__":
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
-| `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, claim_paths?: list[str], claim_reason?: str, claim_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, claims, inbox}` | Orchestrates ensure→register→optional claim→inbox fetch |
+| `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, file_reservation_paths?: list[str], file_reservation_reason?: str, file_reservation_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, file reservations, inbox}` | Orchestrates ensure→register→optional file reservation→inbox fetch |
 | `macro_prepare_thread` | `macro_prepare_thread(project_key: str, thread_id: str, program: str, model: str, agent_name?: str, task_description?: str, register_if_missing?: bool, include_examples?: bool, inbox_limit?: int, include_inbox_bodies?: bool, llm_mode?: bool, llm_model?: str)` | `{project, agent, thread, inbox}` | Bundles registration, thread summary, and inbox context |
-| `macro_claim_cycle` | `macro_claim_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{claims, released}` | Claim + optionally release surfaces around a focused edit block |
+| `macro_file_reservation_cycle` | `macro_file_reservation_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{file reservations, released}` | File Reservation + optionally release surfaces around a focused edit block |
 | `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester: str, target: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
-| `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
-| `claim_paths` | `claim_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
-| `release_claims` | `release_claims(project_key: str, agent_name: str, paths?: list[str], claim_ids?: list[int])` | `{released, released_at}` | Releases agent’s active claims |
-| `renew_claims` | `renew_claims(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], claim_ids?: list[int])` | `{renewed, claims[]}` | Extend TTL of existing claims |
+| `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool, llm_mode?: bool, llm_model?: str)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
+| `summarize_threads` | `summarize_threads(project_key: str, thread_ids: list[str], llm_mode?: bool, llm_model?: str, per_thread_limit?: int)` | `{threads[], aggregate}` | Digest across multiple threads (optional LLM refinement) |
+| `install_precommit_guard` | `install_precommit_guard(project_key: str, code_repo_path: str)` | `{success, hook_path}` | Install a Git pre-commit guard in a target repo |
+| `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{success}` | Remove the guard from a repo |
+| `file_reservation_paths` | `file_reservation_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
+| `release_file_reservations` | `release_file_reservations(project_key: str, agent_name: str, paths?: list[str], file_reservation_ids?: list[int])` | `{released, released_at}` | Releases agent’s active file reservations |
+| `renew_file_reservations` | `renew_file_reservations(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], file_reservation_ids?: list[int])` | `{renewed, file reservations[]}` | Extend TTL of existing file reservations |
 
 ### Resources
 
@@ -1008,7 +1013,7 @@ if __name__ == "__main__":
 | `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
-| `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | File reservations for a project |
+| `resource://file reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations for a project |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
@@ -1026,7 +1031,7 @@ if __name__ == "__main__":
 1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
 2. **Scope tools per workflow.** When the agent enters a new phase (e.g., “Messaging Lifecycle”), remount only the cluster’s tools in your MCP client. This mirrors the workflow macros already provided and prevents “tool overload.”
 3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
-4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
+4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
 5. **Show recent actions.** Read `resource://tooling/recent` to display the last few successful tool invocations relevant to the agent/project when building UI hints.
 
 See `examples/client_bootstrap.py` for a runnable reference implementation that applies the guidance above.
@@ -1053,7 +1058,7 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
   "event": "tool_metrics_snapshot",
   "tools": [
     {"name": "send_message", "cluster": "messaging", "calls": 42, "errors": 1},
-    {"name": "claim_paths", "cluster": "claims", "calls": 11, "errors": 0}
+    {"name": "file_reservation_paths", "cluster": "file reservations", "calls": 11, "errors": 0}
   ]
 }
 ```
@@ -1155,7 +1160,12 @@ The project exposes a developer CLI for common operations:
 - `list-projects [--include-agents]`: enumerate projects
 - `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
-- `list-acks --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
+- `acks pending --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
+- `acks remind --project <key> --agent <name> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold
+- `acks overdue --project <key> --agent <name> [--ttl-minutes N] [--limit N]`: list overdue ACKs beyond TTL
+- `file reservations list <project> [--active-only/--no-active-only]`: list file reservations
+- `file reservations active <project> [--limit N]`: list active file reservations
+- `file reservations soon <project> [--minutes N]`: show file reservations expiring soon
 
 Examples:
 
@@ -1164,7 +1174,7 @@ Examples:
 uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/backend
 
 # List pending acknowledgements for an agent
-uv run python -m mcp_agent_mail.cli list-acks --project /abs/path/backend --agent BlueLake --limit 10
+uv run python -m mcp_agent_mail.cli acks pending --project /abs/path/backend --agent BlueLake --limit 10
 ```
 
 ## Continuous Integration
@@ -1205,9 +1215,9 @@ Example JSON-RPC payload (abbreviated):
 
 3) Reserve a path for focused work (optional but recommended)
 
-- Use `claim_paths` to create an exclusive reservation on your working surface.
-- Renew with `renew_claims` before expiry.
-- Release with `release_claims` when done.
+- Use `file_reservation_paths` to create an exclusive reservation on your working surface.
+- Renew with `renew_file_reservations` before expiry.
+- Release with `release_file_reservations` when done.
 
 4) Send a message
 
@@ -1220,7 +1230,7 @@ Use `acknowledge_message` to record receipt; overdue ACKs may be surfaced by bac
 See also:
 - `resource://inbox/{agent}` for inbox browsing
 - `cli acks pending`/`overdue` for reminder views
-- `cli claims active/soon` for active claims
+- `cli file reservations active/soon` for active file reservations
 
 ## Claude Code Integration (HTTP MCP + Hooks)
 
@@ -1239,15 +1249,15 @@ Example `.claude/settings.json`:
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project backend" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations active --project backend" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project backend --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations soon --project backend --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project backend --agent $USER --limit 10" } ] },
-      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project backend" } ] }
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 10" } ] },
+      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations list --project backend" } ] }
     ]
   }
 }

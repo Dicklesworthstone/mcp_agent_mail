@@ -18,7 +18,7 @@
 
 {% block content %}
 <div class="space-y-6 animate-fade-in">
-  <!-- Claims Header -->
+  <!-- File Reservations Header -->
   <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
@@ -29,9 +29,9 @@
           <h1 class="text-3xl font-bold text-slate-900 dark:text-white">File Reservations</h1>
           <p class="text-slate-600 dark:text-slate-400">
             Resource coordination and locking
-            {% if claims %}
+            {% if file reservations %}
               <span class="text-slate-400 dark:text-slate-500">•</span>
-              <span class="font-medium">{{ claims|length }} reservation{{ 's' if claims|length != 1 else '' }}</span>
+              <span class="font-medium">{{ file reservations|length }} reservation{{ 's' if file reservations|length != 1 else '' }}</span>
             {% endif %}
           </p>
         </div>
@@ -39,8 +39,8 @@
     </div>
   </div>
 
-  {% if claims %}
-    <!-- Claims Table -->
+  {% if file reservations %}
+    <!-- File Reservations Table -->
     <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border border-slate-200 dark:border-slate-700 overflow-hidden">
       <div class="overflow-x-auto">
         <table class="w-full">
@@ -70,7 +70,7 @@
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
-            {% for c in claims %}
+            {% for c in file reservations %}
               <tr class="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
                 <td class="px-6 py-4 whitespace-nowrap">
                   <span class="text-sm font-mono font-medium text-slate-900 dark:text-white">

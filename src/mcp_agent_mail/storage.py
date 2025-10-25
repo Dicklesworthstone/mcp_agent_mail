@@ -113,22 +113,22 @@ async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object])
     await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [rel])
 
 
-async def write_claim_record(archive: ProjectArchive, claim: dict[str, object]) -> None:
-    path_pattern = str(claim.get("path_pattern") or claim.get("path") or "").strip()
+async def write_file_reservation_record(archive: ProjectArchive, file_reservation: dict[str, object]) -> None:
+    path_pattern = str(file_reservation.get("path_pattern") or file_reservation.get("path") or "").strip()
     if not path_pattern:
-        raise ValueError("Claim record must include 'path_pattern'.")
-    normalized_claim = dict(claim)
-    normalized_claim["path_pattern"] = path_pattern
-    normalized_claim.pop("path", None)
+        raise ValueError("File reservation record must include 'path_pattern'.")
+    normalized_file_reservation = dict(file_reservation)
+    normalized_file_reservation["path_pattern"] = path_pattern
+    normalized_file_reservation.pop("path", None)
     digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
-    claim_path = archive.root / "claims" / f"{digest}.json"
-    await _write_json(claim_path, normalized_claim)
-    agent_name = str(normalized_claim.get("agent", "unknown"))
+    file_reservation_path = archive.root / "file_reservations" / f"{digest}.json"
+    await _write_json(file_reservation_path, normalized_file_reservation)
+    agent_name = str(normalized_file_reservation.get("agent", "unknown"))
     await _commit(
         archive.repo,
         archive.settings,
-        f"claim: {agent_name} {path_pattern}",
-        [claim_path.relative_to(archive.repo_root).as_posix()],
+        f"file_reservation: {agent_name} {path_pattern}",
+        [file_reservation_path.relative_to(archive.repo_root).as_posix()],
     )
 
 
@@ -139,6 +139,7 @@ async def write_message_bundle(
     sender: str,
     recipients: Sequence[str],
     extra_paths: Sequence[str] | None = None,
+    commit_text: str | None = None,
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
     timestamp_str = timestamp_obj if isinstance(timestamp_obj, str) else datetime.now(timezone.utc).isoformat()
@@ -205,17 +206,20 @@ async def write_message_bundle(
     if extra_paths:
         rel_paths.extend(extra_paths)
     thread_key = message.get("thread_id") or message.get("id")
-    commit_subject = f"mail: {sender} -> {', '.join(recipients)} | {message.get('subject', '')}"
-    # Enriched commit body mirroring console logs
-    commit_body_lines = [
-        "TOOL: send_message",
-        f"Agent: {sender}",
-        f"Project: {message.get('project', '')}",
-        f"Started: {timestamp_str}",
-        "Status: SUCCESS",
-        f"Thread: {thread_key}",
-    ]
-    commit_message = commit_subject + "\n\n" + "\n".join(commit_body_lines) + "\n"
+    if commit_text:
+        commit_message = commit_text if commit_text.endswith("\n") else f"{commit_text}\n"
+    else:
+        commit_subject = f"mail: {sender} -> {', '.join(recipients)} | {message.get('subject', '')}"
+        # Enriched commit body mirroring console logs
+        commit_body_lines = [
+            "TOOL: send_message",
+            f"Agent: {sender}",
+            f"Project: {message.get('project', '')}",
+            f"Started: {timestamp_str}",
+            "Status: SUCCESS",
+            f"Thread: {thread_key}",
+        ]
+        commit_message = commit_subject + "\n\n" + "\n".join(commit_body_lines) + "\n"
     await _commit(archive.repo, archive.settings, commit_message, rel_paths)
 
 
@@ -510,7 +514,7 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             # Extract simple Agent/Thread heuristics from the message subject line
             # Expected message formats include:
             #   mail: <Agent> -> ... | <Subject>
-            #   claim: <Agent> ...
+            #   file_reservation: <Agent> ...
             try:
                 # Avoid duplicating trailers if already embedded
                 lower_msg = message.lower()
@@ -520,8 +524,8 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
                     agent_part = head.split("->", 1)[0].strip()
                     if agent_part:
                         trailers.append(f"Agent: {agent_part}")
-                elif message.startswith("claim: ") and not have_agent_line:
-                    head = message[len("claim: ") :]
+                elif message.startswith("file_reservation: ") and not have_agent_line:
+                    head = message[len("file_reservation: ") :]
                     agent_part = head.split(" ", 1)[0].strip()
                     if agent_part:
                         trailers.append(f"Agent: {agent_part}")
@@ -568,13 +572,13 @@ async def get_recent_commits(
         elif path_filter:
             path_spec = path_filter
 
-        # Get commits, optionally filtered by path
-        iter_args = {"max_count": limit}
+        # Get commits, optionally filtered by path (explicit kwargs for better typing)
         if path_spec:
-            # GitPython expects paths as a list/sequence
-            iter_args["paths"] = [path_spec]
+            iterator = repo.iter_commits(paths=[path_spec], max_count=limit)
+        else:
+            iterator = repo.iter_commits(max_count=limit)
 
-        for commit in repo.iter_commits(**iter_args):
+        for commit in iterator:
             # Parse commit stats
             files_changed = len(commit.stats.files)
             insertions = commit.stats.total["insertions"]
@@ -692,23 +696,48 @@ async def get_commit_detail(
         rest_lines = lines[1:] if len(lines) > 1 else []
         if not rest_lines:
             body = ""
+            body_lines = []
+            trailer_lines = []
         else:
             # Find trailer block by scanning from end
-            trailer_start_idx = len(rest_lines)
-            for i in range(len(rest_lines) - 1, -1, -1):
+            # Git trailers must be consecutive lines at the end
+            # First, skip trailing blank lines to find last content
+            end_idx = len(rest_lines) - 1
+            while end_idx >= 0 and not rest_lines[end_idx].strip():
+                end_idx -= 1
+
+            # Now scan backwards collecting consecutive trailer-looking lines
+            trailer_start_idx = end_idx + 1  # Default: no trailers
+            for i in range(end_idx, -1, -1):
                 line = rest_lines[i]
-                # Trailers have format "Key: Value" or "Key-With-Dash: Value"
+                # Trailers have format "Key: Value" with specific pattern
                 if line.strip() and ": " in line and not line.startswith(" "):
-                    # This looks like a trailer, keep scanning backwards
+                    # This looks like a trailer, keep going
                     trailer_start_idx = i
-                elif line.strip():
-                    # Non-trailer content found, stop here
+                else:
+                    # Not a trailer (blank or other content), stop
                     break
-                # Empty lines within trailer block are ok
+
+            # Git spec: trailers must be separated from body by blank line
+            # If we found trailers, verify there's a blank line before them
+            if trailer_start_idx <= end_idx:  # We found some trailers
+                if trailer_start_idx > 0:
+                    # Check if line before trailers is blank
+                    if rest_lines[trailer_start_idx - 1].strip():
+                        # No blank line separator - these aren't trailers!
+                        trailer_start_idx = end_idx + 1
+                        trailer_lines = []
+                    else:
+                        # Valid trailers with blank separator
+                        trailer_lines = rest_lines[trailer_start_idx:end_idx + 1]
+                else:
+                    # Trailers start at beginning (no body) - this is valid
+                    trailer_lines = rest_lines[trailer_start_idx:end_idx + 1]
+            else:
+                trailer_lines = []
 
             # Split body and trailers
             body_lines = rest_lines[:trailer_start_idx]
-            trailer_lines = rest_lines[trailer_start_idx:]
 
         body = "\n".join(body_lines).strip()
 
@@ -949,7 +978,7 @@ async def get_agent_communication_graph(
         path_spec = f"projects/{project_slug}/messages"
 
         # Track agent message counts and connections
-        agent_stats: dict[str, dict[str, Any]] = {}
+        agent_stats: dict[str, dict[str, int]] = {}
         connections: dict[tuple[str, str], int] = {}
 
         for commit in repo.iter_commits(paths=[path_spec], max_count=limit):
@@ -969,26 +998,27 @@ async def get_agent_communication_graph(
                     continue
 
                 sender, recipients_str = sender_part.split(" -> ", 1)
-                sender = sender.strip()
+                sender = str(sender).strip()
                 recipients = [r.strip() for r in recipients_str.split(",")]
 
                 # Update sender stats
                 if sender not in agent_stats:
                     agent_stats[sender] = {"sent": 0, "received": 0}
-                agent_stats[sender]["sent"] += 1
+                agent_stats[sender]["sent"] = agent_stats[sender].get("sent", 0) + 1
 
                 # Update recipient stats and connections
                 for recipient in recipients:
                     if not recipient:
                         continue
 
+                    recipient = str(recipient)
                     if recipient not in agent_stats:
                         agent_stats[recipient] = {"sent": 0, "received": 0}
-                    agent_stats[recipient]["received"] += 1
+                    agent_stats[recipient]["received"] = agent_stats[recipient].get("received", 0) + 1
 
                     # Track connection
-                    conn_key = (sender, recipient)
-                    connections[conn_key] = connections.get(conn_key, 0) + 1
+                    conn_key: tuple[str, str] = (sender, recipient)
+                    connections[conn_key] = int(connections.get(conn_key, 0)) + 1
 
             except Exception:
                 # Skip malformed commit messages
@@ -1064,8 +1094,8 @@ async def get_timeline_commits(
                         recipients = [r.strip() for r in recipients_str.split(",")]
                 except Exception:
                     pass
-            elif subject.startswith("claim: "):
-                commit_type = "claim"
+            elif subject.startswith("file_reservation: "):
+                commit_type = "file_reservation"
             elif subject.startswith("chore: "):
                 commit_type = "chore"
 

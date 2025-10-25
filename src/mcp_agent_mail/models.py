@@ -1,4 +1,4 @@
-"""SQLModel data models representing agents, messages, projects, and claims."""
+"""SQLModel data models representing agents, messages, projects, and file reservations."""
 
 from __future__ import annotations
 
@@ -63,8 +63,8 @@ class Message(SQLModel, table=True):
     )
 
 
-class Claim(SQLModel, table=True):
-    __tablename__ = "claims"
+class FileReservation(SQLModel, table=True):
+    __tablename__ = "file_reservations"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.id", index=True)
