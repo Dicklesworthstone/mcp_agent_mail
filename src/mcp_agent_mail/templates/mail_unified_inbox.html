@@ -557,7 +557,7 @@ function unifiedInboxManager() {
           });
         }
       });
-      return [...recipients].sort();
+      return [...recipients].sort((a, b) => a.localeCompare(b));
     },
 
     get filtersActive() {
@@ -634,11 +634,11 @@ function unifiedInboxManager() {
       if (this.searchQuery) {
         const query = this.searchQuery.toLowerCase();
         filtered = filtered.filter(msg => {
-          const subject = (msg.subject || '').toLowerCase();
-          const sender = (msg.sender || '').toLowerCase();
-          const recipients = (msg.recipients || '').toLowerCase();
-          const excerpt = (msg.excerpt || '').toLowerCase();
-          const projectName = (msg.project_name || '').toLowerCase();
+          const subject = (msg.subject ?? '').toString().toLowerCase();
+          const sender = (msg.sender ?? '').toString().toLowerCase();
+          const recipients = (msg.recipients ?? '').toString().toLowerCase();
+          const excerpt = (msg.excerpt ?? '').toString().toLowerCase();
+          const projectName = (msg.project_name ?? '').toString().toLowerCase();
           return (
             subject.includes(query) ||
             sender.includes(query) ||
@@ -651,12 +651,14 @@ function unifiedInboxManager() {
 
       // Project filter
       if (this.filters.project) {
-        filtered = filtered.filter(msg => msg.project_name === this.filters.project);
+        const targetProject = this.filters.project;
+        filtered = filtered.filter(msg => (msg.project_name || '').trim() === targetProject);
       }
 
       // Sender filter
       if (this.filters.sender) {
-        filtered = filtered.filter(msg => msg.sender === this.filters.sender);
+        const targetSender = this.filters.sender;
+        filtered = filtered.filter(msg => (msg.sender || '').trim() === targetSender);
       }
 
       // Recipient filter
@@ -664,7 +666,10 @@ function unifiedInboxManager() {
         filtered = filtered.filter(msg => {
           if (!msg.recipients) return false;
           // Split and trim to match how we build uniqueRecipients
-          const recipientList = msg.recipients.split(',').map(r => r.trim());
+          const recipientList = String(msg.recipients)
+            .split(',')
+            .map(r => r.trim())
+            .filter(Boolean);
           return recipientList.includes(this.filters.recipient);
         });
       }
@@ -683,14 +688,28 @@ function unifiedInboxManager() {
 
       // Sort
       switch (this.sortBy) {
-        case 'newest':
-          filtered.sort((a, b) => new Date(b.created_ts) - new Date(a.created_ts));
+        case 'newest': {
+          filtered.sort((a, b) => {
+            const parsedA = Date.parse(a.created_ts || '') || 0;
+            const parsedB = Date.parse(b.created_ts || '') || 0;
+            return parsedB - parsedA;
+          });
           break;
-        case 'oldest':
-          filtered.sort((a, b) => new Date(a.created_ts) - new Date(b.created_ts));
+        }
+        case 'oldest': {
+          filtered.sort((a, b) => {
+            const parsedA = Date.parse(a.created_ts || '') || 0;
+            const parsedB = Date.parse(b.created_ts || '') || 0;
+            return parsedA - parsedB;
+          });
           break;
+        }
         case 'sender':
-          filtered.sort((a, b) => a.sender.localeCompare(b.sender));
+          filtered.sort((a, b) => {
+            const senderA = (a.sender || '').toString().toLowerCase();
+            const senderB = (b.sender || '').toString().toLowerCase();
+            return senderA.localeCompare(senderB);
+          });
           break;
       }
 
@@ -754,12 +773,10 @@ function unifiedInboxManager() {
 
       // Scroll message into view in left pane (for keyboard navigation)
       this.$nextTick(() => {
-        const messageElements = document.querySelectorAll('[data-message-id]');
-        messageElements.forEach(el => {
-          if (el.getAttribute('data-message-id') === String(msg.id)) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          }
-        });
+        const el = document.querySelector(`[data-message-id="${msg.id}"]`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       });
 
       // Render markdown body
@@ -790,7 +807,11 @@ function unifiedInboxManager() {
           // Highlight code blocks
           if (typeof Prism !== 'undefined') {
             bodyEl.querySelectorAll('pre code').forEach((block) => {
-              Prism.highlightElement(block);
+              try {
+                Prism.highlightElement(block);
+              } catch (error) {
+                console.warn('Syntax highlighting failed for code block:', error);
+              }
             });
           }
 

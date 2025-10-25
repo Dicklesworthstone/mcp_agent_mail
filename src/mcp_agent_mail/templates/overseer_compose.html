@@ -12,141 +12,393 @@
     {{ project.human_key }}
   </a>
   <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
-  <span class="text-slate-900 dark:text-white font-medium">Send Message (Human Overseer)</span>
+  <span class="text-slate-900 dark:text-white font-medium">Human Overseer</span>
 </nav>
 {% endblock %}
 
 {% block content %}
-<div class="space-y-6 animate-fade-in" x-data="overseerComposer()">
-  <!-- Header -->
-  <div class="relative overflow-hidden bg-gradient-to-br from-white via-amber-50/30 to-orange-50/30 dark:from-slate-800 dark:via-slate-800/90 dark:to-slate-800 rounded-3xl p-10 shadow-large border border-slate-200/50 dark:border-slate-700/50">
-    <!-- Decorative gradient blobs -->
-    <div class="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-amber-500/20 to-orange-500/20 rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute bottom-0 left-0 w-48 h-48 bg-gradient-to-tr from-red-500/10 to-yellow-500/10 rounded-full blur-3xl pointer-events-none"></div>
+<div class="space-y-6 page-transition" x-data="overseerComposer()" x-init="init()" @keydown.ctrl.enter="sendMessage()" @keydown.meta.enter="sendMessage()">
 
-    <div class="relative flex items-start gap-6">
-      <div class="w-20 h-20 bg-gradient-to-br from-amber-500 to-orange-600 rounded-2xl flex items-center justify-center shadow-large float">
-        <i data-lucide="shield-alert" class="w-10 h-10 text-white"></i>
-      </div>
-      <div class="flex-1">
-        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-3">
-          Send Message as Human Overseer
-        </h1>
-        <p class="text-lg text-slate-700 dark:text-slate-300 mb-4">
-          Messages sent from this interface will be delivered to agents with <strong>high priority</strong> and include a preamble
-          instructing them to prioritize your request over their current tasks.
-        </p>
-        <div class="flex items-start gap-2 p-4 bg-amber-100 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl text-sm">
-          <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-700 dark:text-amber-400 flex-shrink-0 mt-0.5"></i>
-          <div class="text-amber-900 dark:text-amber-100">
-            <strong>Important:</strong> Human overseer messages bypass normal contact policies and are automatically marked as high importance.
-            Agents are instructed to pause current work, complete your request, then resume their original plans.
+  <!-- Spectacular Hero Section -->
+  <div class="relative overflow-hidden bg-gradient-to-br from-amber-500 via-orange-500 to-red-500 rounded-3xl shadow-2xl border border-amber-200/20">
+    <!-- Animated background patterns -->
+    <div class="absolute inset-0 opacity-10">
+      <div class="absolute top-0 right-0 w-96 h-96 bg-white rounded-full blur-3xl animate-pulse"></div>
+      <div class="absolute bottom-0 left-0 w-72 h-72 bg-yellow-200 rounded-full blur-3xl animate-pulse" style="animation-delay: 1s;"></div>
+    </div>
+
+    <!-- Floating particles -->
+    <div class="absolute inset-0 overflow-hidden pointer-events-none">
+      <div class="absolute top-10 left-10 w-2 h-2 bg-white rounded-full opacity-60 animate-pulse"></div>
+      <div class="absolute top-20 right-20 w-3 h-3 bg-yellow-200 rounded-full opacity-40 float" style="animation-delay: 0.5s;"></div>
+      <div class="absolute bottom-20 left-1/4 w-2 h-2 bg-white rounded-full opacity-50 float" style="animation-delay: 1s;"></div>
+      <div class="absolute bottom-10 right-1/3 w-3 h-3 bg-orange-200 rounded-full opacity-40 animate-pulse" style="animation-delay: 1.5s;"></div>
+    </div>
+
+    <div class="relative p-10 md:p-12">
+      <div class="flex items-start gap-6">
+        <!-- Icon with glow effect -->
+        <div class="relative flex-shrink-0">
+          <div class="absolute inset-0 bg-white rounded-2xl blur-xl opacity-40 animate-pulse"></div>
+          <div class="relative w-20 h-20 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center shadow-2xl float border border-white/30">
+            <i data-lucide="shield-alert" class="w-10 h-10 text-white"></i>
           </div>
+        </div>
+
+        <div class="flex-1">
+          <div class="inline-flex items-center gap-2 px-3 py-1 bg-white/20 backdrop-blur-sm rounded-full text-white text-xs font-bold mb-3 border border-white/30">
+            <i data-lucide="sparkles" class="w-3 h-3"></i>
+            <span>HIGH PRIORITY MESSAGING</span>
+          </div>
+
+          <h1 class="text-4xl md:text-5xl font-bold text-white mb-4 leading-tight">
+            Send Message as <span class="inline-block bg-white/20 px-3 py-1 rounded-lg backdrop-blur-sm">Human Overseer</span>
+          </h1>
+
+          <p class="text-xl text-amber-50 mb-6 leading-relaxed max-w-3xl">
+            Messages sent from this interface reach agents with <strong class="text-white">maximum priority</strong>. Agents will pause their current work to address your request immediately.
+          </p>
+
+          <!-- Key features badges -->
+          <div class="flex flex-wrap gap-3">
+            <div class="inline-flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl text-white text-sm border border-white/20">
+              <i data-lucide="zap" class="w-4 h-4"></i>
+              <span>Instant Priority</span>
+            </div>
+            <div class="inline-flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl text-white text-sm border border-white/20">
+              <i data-lucide="check-circle" class="w-4 h-4"></i>
+              <span>Policy Bypass</span>
+            </div>
+            <div class="inline-flex items-center gap-2 px-4 py-2 bg-white/10 backdrop-blur-sm rounded-xl text-white text-sm border border-white/20">
+              <i data-lucide="git-commit" class="w-4 h-4"></i>
+              <span>Git Tracked</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Help button -->
+      <button @click="showHelp = !showHelp"
+              class="absolute top-4 right-4 w-10 h-10 bg-white/20 hover:bg-white/30 backdrop-blur-sm rounded-lg flex items-center justify-center transition-all duration-200 border border-white/30 group"
+              data-tippy-content="Learn how Human Overseer works">
+        <i data-lucide="help-circle" class="w-5 h-5 text-white group-hover:scale-110 transition-transform"></i>
+      </button>
+    </div>
+
+    <!-- Help panel (collapsible) -->
+    <div x-show="showHelp"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="opacity-0 transform -translate-y-4"
+         x-transition:enter-end="opacity-100 transform translate-y-0"
+         class="border-t border-white/20 bg-white/10 backdrop-blur-sm p-6">
+      <div class="flex items-start gap-3 text-white">
+        <i data-lucide="info" class="w-5 h-5 flex-shrink-0 mt-0.5"></i>
+        <div class="text-sm space-y-2">
+          <p class="font-semibold">How it works:</p>
+          <ul class="space-y-1 text-amber-50">
+            <li>• Agents receive your message with a special preamble indicating human guidance</li>
+            <li>• Messages are marked as "high importance" automatically</li>
+            <li>• Agents are instructed to pause current work and prioritize your request</li>
+            <li>• After completing your request, agents resume their original tasks</li>
+          </ul>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Message Composer Form -->
+  <!-- Main Composer Form -->
   <form @submit.prevent="sendMessage()" class="space-y-6">
-    <!-- Recipients Selection -->
-    <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
-      <div class="flex items-center gap-3 mb-6">
-        <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
-          <i data-lucide="users" class="w-6 h-6 text-white"></i>
-        </div>
-        <div>
-          <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Recipients</h2>
-          <p class="text-sm text-slate-600 dark:text-slate-400">Select which agents should receive this message</p>
-        </div>
-      </div>
 
-      <!-- Select All / None -->
-      <div class="flex items-center justify-between mb-4 pb-4 border-b border-slate-200 dark:border-slate-700">
-        <span class="text-sm font-medium text-slate-700 dark:text-slate-300">
-          <span x-text="selectedRecipients.length"></span> of {{ agents|length }} agent{{ 's' if agents|length != 1 else '' }} selected
-        </span>
-        <div class="flex items-center gap-2">
-          <button type="button" @click="selectAll()"
-                  class="px-4 py-2 text-sm font-medium text-primary-700 dark:text-primary-400 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-colors">
-            Select All
-          </button>
-          <button type="button" @click="selectNone()"
-                  class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
-            Clear
-          </button>
-        </div>
-      </div>
+    <!-- Recipients Section -->
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 overflow-hidden transition-all duration-300 hover:shadow-xl"
+         :class="{'ring-2 ring-primary-500': focusedSection === 'recipients'}">
 
-      {% if agents %}
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {% for agent in agents %}
-            <label class="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 cursor-pointer transition-all duration-200 group">
-              <input type="checkbox"
-                     value="{{ agent.name }}"
-                     x-model="selectedRecipients"
-                     class="w-5 h-5 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer" />
-              <div class="flex items-center gap-2 flex-1 min-w-0">
-                <div class="w-8 h-8 bg-gradient-to-br from-success-500 to-success-700 rounded-lg flex items-center justify-center flex-shrink-0">
-                  <i data-lucide="bot" class="w-4 h-4 text-white"></i>
-                </div>
-                <span class="text-sm font-medium text-slate-900 dark:text-white truncate">{{ agent.name }}</span>
-              </div>
-            </label>
-          {% endfor %}
-        </div>
-      {% else %}
-        <div class="text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
-          <div class="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
-            <i data-lucide="user-x" class="w-8 h-8 text-slate-400"></i>
+      <!-- Section Header -->
+      <div class="px-8 py-6 bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+              <i data-lucide="users" class="w-6 h-6 text-white"></i>
+            </div>
+            <div>
+              <h2 class="text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                Recipients
+                <span class="text-sm font-normal px-2 py-0.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400 rounded-full">
+                  <span x-text="selectedRecipients.length"></span> selected
+                </span>
+              </h2>
+              <p class="text-sm text-slate-600 dark:text-slate-400">Select which agents should receive this message</p>
+            </div>
           </div>
-          <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2">No Agents Registered</h3>
-          <p class="text-sm text-slate-600 dark:text-slate-400">
-            No agents are currently registered in this project. Agents must register before they can receive messages.
-          </p>
+
+          <!-- Quick actions -->
+          <div class="flex items-center gap-2">
+            <button type="button" @click="selectAll()"
+                    class="px-4 py-2 text-sm font-medium text-primary-700 dark:text-primary-400 hover:bg-primary-50 dark:hover:bg-primary-900/20 rounded-lg transition-all duration-200 flex items-center gap-2 group">
+              <i data-lucide="check-square" class="w-4 h-4 group-hover:scale-110 transition-transform"></i>
+              <span>Select All</span>
+            </button>
+            <button type="button" @click="selectNone()"
+                    class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-all duration-200 flex items-center gap-2 group">
+              <i data-lucide="square" class="w-4 h-4 group-hover:scale-110 transition-transform"></i>
+              <span>Clear</span>
+            </button>
+          </div>
         </div>
-      {% endif %}
+
+        <!-- Search bar for recipients (if many agents) -->
+        <div x-show="{{ agents|length }} > 6" class="mt-4">
+          <div class="relative">
+            <i data-lucide="search" class="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400"></i>
+            <input type="text" x-model="recipientSearch" @focus="focusedSection = 'recipients'" @blur="focusedSection = null"
+                   placeholder="Search agents..."
+                   class="w-full pl-10 pr-4 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200">
+          </div>
+        </div>
+      </div>
+
+      <!-- Recipients Grid -->
+      <div class="p-8">
+        {% if agents %}
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {% for agent in agents %}
+              <label x-show="!recipientSearch || {{ agent.name | tojson }}.toLowerCase().includes(recipientSearch.toLowerCase())"
+                     class="group relative flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-900/50 hover:bg-gradient-to-br hover:from-primary-50 hover:to-purple-50 dark:hover:from-primary-900/20 dark:hover:to-purple-900/20 rounded-xl border-2 transition-all duration-300 cursor-pointer overflow-hidden"
+                     :class="selectedRecipients.includes({{ agent.name | tojson }}) ? 'border-primary-500 bg-gradient-to-br from-primary-50 to-purple-50 dark:from-primary-900/30 dark:to-purple-900/30 shadow-md' : 'border-slate-200 dark:border-slate-700 hover:border-primary-300 dark:hover:border-primary-700'">
+
+                <!-- Animated background gradient on hover -->
+                <div class="absolute inset-0 bg-gradient-to-r from-primary-500/0 via-primary-500/5 to-purple-500/0 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+
+                <div class="relative flex items-center gap-3 flex-1 min-w-0">
+                  <!-- Custom checkbox -->
+                  <div class="relative">
+                    <input type="checkbox"
+                           value="{{ agent.name }}"
+                           x-model="selectedRecipients"
+                           class="peer w-5 h-5 text-primary-600 bg-white dark:bg-slate-700 border-2 border-slate-300 dark:border-slate-600 rounded-md focus:ring-2 focus:ring-primary-500 focus:ring-offset-0 transition-all duration-200 cursor-pointer" />
+                    <div class="absolute inset-0 bg-primary-500 rounded-md scale-0 peer-checked:scale-100 transition-transform duration-200 pointer-events-none flex items-center justify-center">
+                      <i data-lucide="check" class="w-3 h-3 text-white"></i>
+                    </div>
+                  </div>
+
+                  <!-- Agent icon -->
+                  <div class="w-10 h-10 bg-gradient-to-br from-success-500 to-success-700 rounded-lg flex items-center justify-center flex-shrink-0 shadow-sm group-hover:scale-110 transition-transform duration-300">
+                    <i data-lucide="bot" class="w-5 h-5 text-white"></i>
+                  </div>
+
+                  <!-- Agent name with truncation -->
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-slate-900 dark:text-white truncate group-hover:text-primary-700 dark:group-hover:text-primary-400 transition-colors">
+                      {{ agent.name }}
+                    </div>
+                  </div>
+
+                  <!-- Selection indicator -->
+                  <div x-show="selectedRecipients.includes({{ agent.name | tojson }})"
+                       x-transition:enter="transition ease-out duration-200"
+                       x-transition:enter-start="opacity-0 scale-0"
+                       x-transition:enter-end="opacity-100 scale-100"
+                       class="w-6 h-6 bg-primary-500 rounded-full flex items-center justify-center shadow-sm">
+                    <i data-lucide="check" class="w-4 h-4 text-white"></i>
+                  </div>
+                </div>
+              </label>
+            {% endfor %}
+          </div>
+
+          <!-- No search results -->
+          <div x-show="recipientSearch && filteredRecipientsCount() === 0"
+               x-transition
+               class="text-center py-12">
+            <i data-lucide="search-x" class="w-16 h-16 text-slate-300 dark:text-slate-600 mx-auto mb-4"></i>
+            <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2">No agents found</h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400">Try a different search term</p>
+          </div>
+
+        {% else %}
+          <!-- No agents empty state -->
+          <div class="text-center py-16">
+            <div class="relative inline-block mb-6">
+              <div class="absolute inset-0 bg-slate-200 dark:bg-slate-700 rounded-full blur-xl opacity-50"></div>
+              <div class="relative w-20 h-20 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center">
+                <i data-lucide="user-x" class="w-10 h-10 text-slate-400"></i>
+              </div>
+            </div>
+            <h3 class="text-xl font-bold text-slate-900 dark:text-white mb-2">No Agents Registered</h3>
+            <p class="text-slate-600 dark:text-slate-400 mb-6 max-w-md mx-auto">
+              No agents are currently registered in this project. Agents must register before they can receive messages.
+            </p>
+            <a href="/mail/{{ project.slug }}"
+               class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white rounded-lg shadow-sm hover:shadow-md transition-all duration-200">
+              <i data-lucide="arrow-left" class="w-4 h-4"></i>
+              <span>Back to Project</span>
+            </a>
+          </div>
+        {% endif %}
+      </div>
     </div>
 
-    <!-- Message Details -->
-    <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
-      <div class="flex items-center gap-3 mb-6">
-        <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-purple-700 rounded-xl flex items-center justify-center shadow-medium">
-          <i data-lucide="file-text" class="w-6 h-6 text-white"></i>
+    <!-- Message Composer Section -->
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700 overflow-hidden transition-all duration-300 hover:shadow-xl"
+         :class="{'ring-2 ring-purple-500': focusedSection === 'composer'}">
+
+      <!-- Section Header -->
+      <div class="px-8 py-6 bg-gradient-to-r from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 bg-gradient-to-br from-purple-500 to-purple-700 rounded-xl flex items-center justify-center shadow-medium">
+              <i data-lucide="file-text" class="w-6 h-6 text-white"></i>
+            </div>
+            <div>
+              <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Message Content</h2>
+              <p class="text-sm text-slate-600 dark:text-slate-400">Compose your message in GitHub-flavored Markdown</p>
+            </div>
+          </div>
+
+          <!-- View mode toggle -->
+          <div class="flex items-center gap-1 p-1 bg-slate-200 dark:bg-slate-700 rounded-lg">
+            <button type="button" @click="viewMode = 'write'"
+                    :class="viewMode === 'write' ? 'bg-white dark:bg-slate-600 shadow-sm' : 'hover:bg-slate-100 dark:hover:bg-slate-600'"
+                    class="px-4 py-2 text-sm font-medium rounded-md transition-all duration-200 flex items-center gap-2"
+                    :class="viewMode === 'write' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+            <i data-lucide="edit-3" class="w-4 h-4"></i>
+              <span>Write</span>
+            </button>
+            <button type="button" @click="viewMode = 'preview'"
+                    :class="viewMode === 'preview' ? 'bg-white dark:bg-slate-600 shadow-sm' : 'hover:bg-slate-100 dark:hover:bg-slate-600'"
+                    class="px-4 py-2 text-sm font-medium rounded-md transition-all duration-200 flex items-center gap-2"
+                    :class="viewMode === 'preview' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+              <i data-lucide="eye" class="w-4 h-4"></i>
+              <span>Preview</span>
+            </button>
+            <button type="button" @click="viewMode = 'split'"
+                    :class="viewMode === 'split' ? 'bg-white dark:bg-slate-600 shadow-sm' : 'hover:bg-slate-100 dark:hover:bg-slate-600'"
+                    class="px-4 py-2 text-sm font-medium rounded-md transition-all duration-200 flex items-center gap-2"
+                    :class="viewMode === 'split' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+              <i data-lucide="columns" class="w-4 h-4"></i>
+              <span>Split</span>
+            </button>
+          </div>
         </div>
+      </div>
+
+      <div class="p-8 space-y-6">
+        <!-- Subject Line -->
         <div>
-          <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Message Content</h2>
-          <p class="text-sm text-slate-600 dark:text-slate-400">Compose your message in GitHub-flavored Markdown</p>
+          <label for="subject" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
+            <span class="flex items-center gap-2">
+              Subject Line
+              <span class="text-danger-500">*</span>
+            </span>
+            <span class="text-xs font-normal" :class="subject.length > 200 ? 'text-danger-500' : 'text-slate-500'">
+              <span x-text="subject.length"></span> / 200
+            </span>
+          </label>
+          <div class="relative">
+            <input type="text"
+                   id="subject"
+                   x-model="subject"
+                   @focus="focusedSection = 'composer'"
+                   @blur="focusedSection = null"
+                   required
+                   maxlength="200"
+                   placeholder="e.g., Urgent: Pause current work and review security vulnerability"
+                   class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 rounded-xl text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 transition-all duration-200 font-medium"
+                   :class="subject.length > 200 ? 'border-danger-500 focus:ring-danger-500' : 'border-slate-200 dark:border-slate-700 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20'" />
+            <div x-show="subject.length > 0"
+                 x-transition
+                 class="absolute right-3 top-1/2 transform -translate-y-1/2">
+              <i :data-lucide="subject.length <= 200 ? 'check-circle' : 'alert-circle'"
+                 :class="subject.length <= 200 ? 'text-success-500' : 'text-danger-500'"
+                 class="w-5 h-5"></i>
+            </div>
+          </div>
+          <p class="mt-2 text-xs text-slate-500 dark:text-slate-500 flex items-center gap-1">
+            <i data-lucide="lightbulb" class="w-3 h-3"></i>
+            <span>Keep it concise but descriptive. This will be visible in agent inboxes.</span>
+          </p>
         </div>
-      </div>
 
-      <!-- Subject -->
-      <div class="mb-6">
-        <label for="subject" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-          Subject Line <span class="text-danger-500">*</span>
-        </label>
-        <input type="text"
-               id="subject"
-               x-model="subject"
-               required
-               placeholder="e.g., Urgent: Pause current work and review security vulnerability"
-               class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 font-medium"
-               maxlength="200" />
-        <p class="mt-2 text-xs text-slate-500 dark:text-slate-500">
-          Keep it concise but descriptive. This will be visible in agent inboxes.
-        </p>
-      </div>
+        <!-- Message Body with Markdown Toolbar -->
+        <div x-show="viewMode === 'write' || viewMode === 'split'" x-transition>
+          <label for="body" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center justify-between">
+            <span class="flex items-center gap-2">
+              Message Body
+              <span class="text-danger-500">*</span>
+            </span>
+            <span class="text-xs font-normal" :class="body.length > 50000 ? 'text-danger-500' : 'text-slate-500'">
+              <span x-text="body.length.toLocaleString()"></span> / 50,000
+            </span>
+          </label>
 
-      <!-- Body -->
-      <div class="mb-6">
-        <label for="body" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-          Message Body <span class="text-danger-500">*</span>
-        </label>
-        <textarea id="body"
-                  x-model="body"
-                  required
-                  rows="12"
-                  placeholder="Write your message here using Markdown...
+          <!-- Markdown Toolbar -->
+          <div class="flex flex-wrap items-center gap-1 p-2 bg-slate-100 dark:bg-slate-900 rounded-t-xl border-2 border-b-0 border-slate-200 dark:border-slate-700">
+            <button type="button" @click="insertMarkdown('**', '**', 'bold text')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Bold">
+              <i data-lucide="bold" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('*', '*', 'italic text')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Italic">
+              <i data-lucide="italic" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('`', '`', 'code')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Inline Code">
+              <i data-lucide="code" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <div class="w-px h-6 bg-slate-300 dark:bg-slate-600 mx-1"></div>
+            <button type="button" @click="insertMarkdown('## ', '', 'Heading')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Heading">
+              <i data-lucide="heading" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertList('- ', 'List item')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Bullet List">
+              <i data-lucide="list" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertList('1. ', 'Numbered item')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Numbered List">
+              <i data-lucide="list-ordered" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('[', '](url)', 'link text')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Link">
+              <i data-lucide="link" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <div class="w-px h-6 bg-slate-300 dark:bg-slate-600 mx-1"></div>
+            <button type="button" @click="insertMarkdown('> ', '', 'quote')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Quote">
+              <i data-lucide="quote" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('```\n', '\n```', 'code block')"
+                    class="p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors"
+                    data-tippy-content="Code Block">
+              <i data-lucide="file-code" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+
+            <!-- Keyboard shortcut hint -->
+            <div class="flex-1"></div>
+            <div class="text-xs text-slate-500 dark:text-slate-400 flex items-center gap-2">
+              <i data-lucide="keyboard" class="w-3 h-3"></i>
+              <span><kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 rounded text-xs">Ctrl</kbd> + <kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 rounded text-xs">Enter</kbd> to send</span>
+            </div>
+          </div>
+
+          <textarea id="body"
+                    x-ref="bodyTextarea"
+                    x-model="body"
+                    @focus="focusedSection = 'composer'"
+                    @blur="focusedSection = null"
+                    @input="updatePreview()"
+                    required
+                    maxlength="50000"
+                    rows="16"
+                    placeholder="Write your message here using Markdown...
 
 Example:
 # Action Required
@@ -160,76 +412,119 @@ Please investigate the following issue:
 **Deadline:** End of day today
 
 Let me know if you need any clarification."
-                  class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 font-mono text-sm"></textarea>
-        <p class="mt-2 text-xs text-slate-500 dark:text-slate-500">
-          Supports GitHub-flavored Markdown: **bold**, *italic*, `code`, lists, links, etc.
-        </p>
-      </div>
+                    class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-t-0 rounded-b-xl text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 font-mono text-sm transition-all duration-200 resize-none"
+                    :class="body.length > 50000 ? 'border-danger-500 focus:ring-danger-500' : 'border-slate-200 dark:border-slate-700 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20'"></textarea>
 
-      <!-- Thread ID (Optional) -->
-      <div class="mb-6">
-        <label for="threadId" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">
-          Thread ID <span class="text-slate-500 dark:text-slate-500 font-normal">(Optional)</span>
-        </label>
-        <input type="text"
-               id="threadId"
-               x-model="threadId"
-               placeholder="e.g., 42 or custom-thread-id"
-               class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 font-mono" />
-        <p class="mt-2 text-xs text-slate-500 dark:text-slate-500">
-          Leave blank to start a new conversation. Provide an ID to continue an existing thread.
-        </p>
-      </div>
+          <p class="mt-2 text-xs text-slate-500 dark:text-slate-500 flex items-center gap-1">
+            <i data-lucide="info" class="w-3 h-3"></i>
+            <span>Supports GitHub-flavored Markdown: <strong>**bold**</strong>, <em>*italic*</em>, <code>`code`</code>, lists, links, etc.</span>
+          </p>
+        </div>
 
-      <!-- Preamble Preview -->
-      <div class="bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/10 dark:to-orange-900/10 rounded-xl p-6 border-2 border-amber-300 dark:border-amber-700">
-        <div class="flex items-start gap-3 mb-4">
-          <i data-lucide="eye" class="w-5 h-5 text-amber-700 dark:text-amber-400 flex-shrink-0 mt-1"></i>
-          <div>
-            <h3 class="font-bold text-amber-900 dark:text-amber-100 mb-2">Automatic Preamble Preview</h3>
-            <p class="text-sm text-amber-800 dark:text-amber-200">
-              This preamble will be automatically added to the beginning of your message:
-            </p>
+        <!-- Live Preview -->
+        <div x-show="viewMode === 'preview' || viewMode === 'split'" x-transition>
+          <div class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-2">
+            <i data-lucide="eye" class="w-4 h-4"></i>
+            <span>Live Preview</span>
+          </div>
+          <div class="p-6 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl min-h-[400px] max-h-[600px] overflow-y-auto">
+            <div x-html="renderedPreview" class="prose dark:prose-invert max-w-none"></div>
+            <div x-show="!body" class="flex items-center justify-center h-64 text-slate-400">
+              <div class="text-center">
+                <i data-lucide="file-text" class="w-16 h-16 mx-auto mb-4 opacity-20"></i>
+                <p>Your message preview will appear here</p>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="bg-white dark:bg-slate-800 rounded-lg p-4 border border-amber-200 dark:border-amber-800">
-          <div class="prose prose-sm dark:prose-invert max-w-none">
-            <div class="text-amber-900 dark:text-amber-100 font-medium text-center mb-3 pb-3 border-b-2 border-amber-300 dark:border-amber-700">
+
+        <!-- Thread ID (Optional) -->
+        <div>
+          <label for="threadId" class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-2">
+            <span>Thread ID</span>
+            <span class="text-xs font-normal text-slate-500 dark:text-slate-500">(Optional)</span>
+            <button type="button"
+                    data-tippy-content="<div class='text-left'><strong>What's a Thread ID?</strong><br/>Use this to continue an existing conversation. Leave blank to start a new thread.</div>"
+                    class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors">
+              <i data-lucide="help-circle" class="w-4 h-4"></i>
+            </button>
+          </label>
+          <input type="text"
+                 id="threadId"
+                 x-model="threadId"
+                 placeholder="e.g., 42 or custom-thread-id"
+                 class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 rounded-xl text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 font-mono transition-all duration-200" />
+          <p class="mt-2 text-xs text-slate-500 dark:text-slate-500">
+            Leave blank to start a new conversation. Provide an ID to continue an existing thread.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preamble Preview -->
+    <div class="bg-gradient-to-br from-amber-50 via-orange-50 to-red-50 dark:from-amber-900/10 dark:via-orange-900/10 dark:to-red-900/10 rounded-2xl p-8 border-2 border-amber-200 dark:border-amber-800/50 shadow-lg">
+      <div class="flex items-start gap-4 mb-6">
+        <div class="w-12 h-12 bg-gradient-to-br from-amber-500 to-orange-600 rounded-xl flex items-center justify-center shadow-md flex-shrink-0">
+          <i data-lucide="eye" class="w-6 h-6 text-white"></i>
+        </div>
+        <div class="flex-1">
+          <h3 class="text-xl font-bold text-amber-900 dark:text-amber-100 mb-2 flex items-center gap-2">
+            Automatic Preamble Preview
+            <span class="px-2 py-0.5 bg-amber-200 dark:bg-amber-800 text-amber-900 dark:text-amber-100 text-xs rounded-full">Auto-added</span>
+          </h3>
+          <p class="text-sm text-amber-800 dark:text-amber-200">
+            This preamble will be automatically prepended to your message:
+          </p>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 border-2 border-amber-300 dark:border-amber-700 shadow-inner">
+        <div class="prose dark:prose-invert max-w-none">
+          <div class="text-center mb-4 pb-4 border-b-2 border-amber-300 dark:border-amber-700">
+            <div class="text-2xl font-bold text-amber-900 dark:text-amber-100 mb-2">
               🚨 MESSAGE FROM HUMAN OVERSEER 🚨
             </div>
-            <p class="text-slate-700 dark:text-slate-300 text-sm leading-relaxed">
-              This message is from a human operator overseeing this project. <strong>Please prioritize the instructions below over your current tasks.</strong>
+          </div>
+          <div class="space-y-3 text-sm text-slate-700 dark:text-slate-300">
+            <p class="leading-relaxed">
+              <strong>This message is from a human operator overseeing this project.</strong> Please prioritize the instructions below over your current tasks.
             </p>
-            <p class="text-slate-700 dark:text-slate-300 text-sm leading-relaxed">
-              You should:
-            </p>
-            <ol class="text-slate-700 dark:text-slate-300 text-sm">
+            <p class="font-semibold">You should:</p>
+            <ol class="space-y-1">
               <li>Temporarily pause your current work</li>
               <li>Complete the request described below</li>
               <li>Resume your original plans afterward (unless modified by these instructions)</li>
             </ol>
-            <p class="text-slate-700 dark:text-slate-300 text-sm leading-relaxed">
-              <strong>The human's guidance supersedes all other priorities.</strong>
+            <p class="font-bold text-amber-900 dark:text-amber-100">
+              The human's guidance supersedes all other priorities.
             </p>
-            <hr class="my-3 border-amber-300 dark:border-amber-700">
           </div>
         </div>
       </div>
     </div>
 
     <!-- Actions -->
-    <div class="flex items-center justify-between gap-4">
+    <div class="flex items-center justify-between gap-4 sticky bottom-6 z-10">
       <a href="/mail/{{ project.slug }}"
-         class="px-6 py-3 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors flex items-center gap-2 font-medium">
-        <i data-lucide="arrow-left" class="w-4 h-4"></i>
-        Cancel
+         class="inline-flex items-center gap-2 px-6 py-3 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-xl transition-all duration-200 font-medium group">
+        <i data-lucide="arrow-left" class="w-4 h-4 group-hover:-translate-x-1 transition-transform"></i>
+        <span>Cancel</span>
       </a>
 
       <button type="submit"
               :disabled="!canSend()"
-              class="px-8 py-4 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-3 btn-ripple">
-        <i data-lucide="send" class="w-5 h-5"></i>
-        <span x-text="sending ? 'Sending...' : 'Send Message to ' + selectedRecipients.length + ' Agent' + (selectedRecipients.length !== 1 ? 's' : '')">Send Message</span>
+              class="relative inline-flex items-center gap-3 px-8 py-4 bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 hover:from-amber-600 hover:via-orange-600 hover:to-red-600 text-white font-bold rounded-xl shadow-xl hover:shadow-2xl transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-xl overflow-hidden group"
+              :class="sending ? 'cursor-wait' : ''">
+        <!-- Animated background -->
+        <div class="absolute inset-0 bg-gradient-to-r from-yellow-400 via-orange-400 to-red-400 opacity-0 group-hover:opacity-100 transition-opacity duration-300"></div>
+
+        <!-- Shimmer effect -->
+        <div class="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000"></div>
+
+        <div class="relative flex items-center gap-3">
+          <i :data-lucide="sending ? 'loader' : 'send'" class="w-5 h-5" :class="sending ? 'animate-spin' : ''"></i>
+          <span x-text="sending ? 'Sending...' : 'Send Message to ' + selectedRecipients.length + ' Agent' + (selectedRecipients.length !== 1 ? 's' : '')">Send Message</span>
+        </div>
       </button>
     </div>
   </form>
@@ -237,19 +532,91 @@ Let me know if you need any clarification."
   <!-- Success/Error Toast -->
   <template x-if="showToast">
     <div x-transition:enter="transition ease-out duration-300"
-         x-transition:enter-start="opacity-0 transform translate-y-2"
-         x-transition:enter-end="opacity-100 transform translate-y-0"
-         class="fixed bottom-6 right-6 z-50 max-w-md">
-      <div :class="toastType === 'success' ? 'bg-success-600' : 'bg-danger-600'"
-           class="rounded-xl p-4 shadow-2xl text-white flex items-start gap-3">
-        <i :data-lucide="toastType === 'success' ? 'check-circle' : 'alert-circle'" class="w-6 h-6 flex-shrink-0"></i>
-        <div class="flex-1">
-          <h4 class="font-bold mb-1" x-text="toastTitle"></h4>
+         x-transition:enter-start="opacity-0 transform translate-y-4 scale-95"
+         x-transition:enter-end="opacity-100 transform translate-y-0 scale-100"
+         class="fixed bottom-6 right-6 z-[100] max-w-md">
+      <div :class="toastType === 'success' ? 'bg-gradient-to-r from-success-600 to-emerald-600' : 'bg-gradient-to-r from-danger-600 to-red-600'"
+           class="rounded-2xl p-5 shadow-2xl text-white flex items-start gap-4 border-2 border-white/20">
+        <div class="flex-shrink-0">
+          <i :data-lucide="toastType === 'success' ? 'check-circle' : 'alert-circle'" class="w-8 h-8"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <h4 class="font-bold text-lg mb-1" x-text="toastTitle"></h4>
           <p class="text-sm opacity-90" x-text="toastMessage"></p>
         </div>
-        <button @click="showToast = false" class="text-white/80 hover:text-white">
+        <button @click="showToast = false" class="flex-shrink-0 text-white/80 hover:text-white transition-colors">
           <i data-lucide="x" class="w-5 h-5"></i>
         </button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Send Confirmation Modal -->
+  <template x-if="showConfirmModal">
+    <div class="fixed inset-0 z-[150] flex items-center justify-center p-4"
+         @click.self="showConfirmModal = false">
+      <!-- Backdrop -->
+      <div x-show="showConfirmModal"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0"
+           x-transition:enter-end="opacity-100"
+           class="absolute inset-0 bg-slate-900/80 backdrop-blur-sm"></div>
+
+      <!-- Modal -->
+      <div x-show="showConfirmModal"
+           x-transition:enter="transition ease-out duration-300"
+           x-transition:enter-start="opacity-0 transform scale-95"
+           x-transition:enter-end="opacity-100 transform scale-100"
+           class="relative w-full max-w-lg bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+
+        <!-- Header with gradient -->
+        <div class="px-6 py-5 bg-gradient-to-r from-amber-500 to-orange-600 text-white">
+          <div class="flex items-center gap-3">
+            <div class="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center backdrop-blur-sm">
+              <i data-lucide="alert-triangle" class="w-6 h-6"></i>
+            </div>
+            <div>
+              <h3 class="text-xl font-bold">Confirm Send</h3>
+              <p class="text-sm text-amber-50">Review your message before sending</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Content -->
+        <div class="p-6 space-y-4">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-slate-600 dark:text-slate-400">Recipients:</span>
+              <span class="font-semibold text-slate-900 dark:text-white" x-text="selectedRecipients.length + ' agent' + (selectedRecipients.length !== 1 ? 's' : '')"></span>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-slate-600 dark:text-slate-400">Subject:</span>
+              <span class="font-semibold text-slate-900 dark:text-white truncate max-w-xs" x-text="subject"></span>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+              <span class="text-slate-600 dark:text-slate-400">Priority:</span>
+              <span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-bold rounded-full">HIGH</span>
+            </div>
+          </div>
+
+          <div class="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-800">
+            <p class="text-sm text-amber-900 dark:text-amber-100">
+              <strong>⚠️ Important:</strong> This message will be marked as high priority and agents will pause their current work to address it.
+            </p>
+          </div>
+        </div>
+
+        <!-- Actions -->
+        <div class="px-6 py-4 bg-slate-50 dark:bg-slate-900 flex items-center justify-end gap-3">
+          <button @click="showConfirmModal = false" type="button"
+                  class="px-6 py-2.5 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors font-medium">
+            Cancel
+          </button>
+          <button @click="confirmSend()" type="button"
+                  class="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all duration-200 font-bold">
+            Confirm & Send
+          </button>
+        </div>
       </div>
     </div>
   </template>
@@ -262,11 +629,29 @@ function overseerComposer() {
     subject: '',
     body: '',
     threadId: '',
+    recipientSearch: '',
+    viewMode: 'write', // 'write', 'preview', 'split'
+    focusedSection: null, // 'recipients', 'composer'
+    renderedPreview: '',
     sending: false,
     showToast: false,
+    showHelp: false,
+    showConfirmModal: false,
     toastType: 'success',
     toastTitle: '',
     toastMessage: '',
+
+    init() {
+      // Update preview on initialization
+      this.updatePreview();
+
+      // Render icons
+      this.$nextTick(() => {
+        if (typeof lucide !== 'undefined') {
+          lucide.createIcons();
+        }
+      });
+    },
 
     selectAll() {
       this.selectedRecipients = [{% for agent in agents %}{{ agent.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}];
@@ -276,13 +661,80 @@ function overseerComposer() {
       this.selectedRecipients = [];
     },
 
+    filteredRecipientsCount() {
+      if (!this.recipientSearch) return {{ agents|length }};
+      const search = this.recipientSearch.toLowerCase();
+      return [{% for agent in agents %}{{ agent.name | tojson }}{% if not loop.last %}, {% endif %}{% endfor %}]
+        .filter(name => name.toLowerCase().includes(search)).length;
+    },
+
     canSend() {
-      return this.selectedRecipients.length > 0 && this.subject.trim() && this.body.trim() && !this.sending;
+      return this.selectedRecipients.length > 0 &&
+             this.subject.trim() &&
+             this.subject.length <= 200 &&
+             this.body.trim() &&
+             this.body.length <= 50000 &&
+             !this.sending;
+    },
+
+    insertMarkdown(before, after, placeholder) {
+      const textarea = this.$refs.bodyTextarea;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const selectedText = this.body.substring(start, end);
+      const replacement = selectedText || placeholder;
+
+      this.body = this.body.substring(0, start) + before + replacement + after + this.body.substring(end);
+
+      // Set cursor position
+      this.$nextTick(() => {
+        const newCursorPos = start + before.length + replacement.length;
+        textarea.focus();
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+        this.updatePreview();
+      });
+    },
+
+    insertList(prefix, placeholder) {
+      const textarea = this.$refs.bodyTextarea;
+      const start = textarea.selectionStart;
+      const lineStart = this.body.lastIndexOf('\n', start - 1) + 1;
+
+      this.body = this.body.substring(0, lineStart) + prefix + (placeholder || '') + this.body.substring(start);
+
+      this.$nextTick(() => {
+        const newCursorPos = lineStart + prefix.length + (placeholder || '').length;
+        textarea.focus();
+        textarea.setSelectionRange(newCursorPos, newCursorPos);
+        this.updatePreview();
+      });
+    },
+
+    updatePreview() {
+      if (typeof marked !== 'undefined') {
+        try {
+          this.renderedPreview = marked.parse(this.body || '_No content yet..._');
+          this.$nextTick(() => {
+            // Highlight code blocks if Prism is available
+            if (typeof Prism !== 'undefined') {
+              Prism.highlightAll();
+            }
+          });
+        } catch (e) {
+          this.renderedPreview = '<p class="text-danger-500">Error rendering markdown preview</p>';
+        }
+      }
     },
 
     async sendMessage() {
       if (!this.canSend()) return;
 
+      // Show confirmation modal first
+      this.showConfirmModal = true;
+    },
+
+    async confirmSend() {
+      this.showConfirmModal = false;
       this.sending = true;
 
       try {
@@ -306,10 +758,10 @@ function overseerComposer() {
 
         const result = await response.json();
 
-        // Show success toast
+        // Show success toast with celebration animation
         this.toastType = 'success';
-        this.toastTitle = 'Message Sent!';
-        this.toastMessage = `Successfully sent to ${this.selectedRecipients.length} agent${this.selectedRecipients.length !== 1 ? 's' : ''}`;
+        this.toastTitle = 'Message Sent Successfully! 🎉';
+        this.toastMessage = `Delivered to ${this.selectedRecipients.length} agent${this.selectedRecipients.length !== 1 ? 's' : ''}`;
         this.showToast = true;
 
         // Redirect after 2 seconds
@@ -322,18 +774,18 @@ function overseerComposer() {
 
         // Show error toast
         this.toastType = 'error';
-        this.toastTitle = 'Failed to Send';
-        this.toastMessage = error.message || 'An unexpected error occurred';
+        this.toastTitle = 'Failed to Send Message';
+        this.toastMessage = error.message || 'An unexpected error occurred. Please try again.';
         this.showToast = true;
 
         this.sending = false;
 
-        // Auto-hide error toast after 5 seconds
+        // Auto-hide error toast after 6 seconds
         setTimeout(() => {
           this.showToast = false;
-        }, 5000);
+        }, 6000);
       } finally {
-        // Re-render lucide icons for toast (defensive check for lucide availability)
+        // Re-render lucide icons (defensive check)
         if (typeof lucide !== 'undefined') {
           try {
             lucide.createIcons();

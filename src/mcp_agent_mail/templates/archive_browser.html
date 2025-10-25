@@ -102,7 +102,8 @@ function browserManager() {
       this.selected = entry;
 
       if (entry.type === 'file') {
-        const response = await fetch(`/mail/archive/browser/${this.project}/file?path=${encodeURIComponent(entry.path)}`);
+        const projectSegment = encodeURIComponent(this.project);
+        const response = await fetch(`/mail/archive/browser/${projectSegment}/file?path=${encodeURIComponent(entry.path)}`);
         const content = await response.text();
 
         const container = document.getElementById('file-content');
@@ -110,19 +111,30 @@ function browserManager() {
         const isJSON = entry.name.endsWith('.json');
 
         if (isMarkdown) {
-          container.innerHTML = marked.parse(content);
+          try {
+            container.innerHTML = typeof marked !== 'undefined' ? marked.parse(content) : this.escapeHtml(content);
+          } catch (error) {
+            console.error('Markdown rendering failed:', error);
+            container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
+          }
         } else if (isJSON) {
           try {
             const formatted = JSON.stringify(JSON.parse(content), null, 2);
-            container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
+            if (typeof Prism !== 'undefined') {
+              container.innerHTML = `<pre class="language-json"><code>${Prism.highlight(formatted, Prism.languages.json, 'json')}</code></pre>`;
+            } else {
+              container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(formatted)}</pre>`;
+            }
           } catch {
-            container.innerHTML = `<pre>${this.escapeHtml(content)}</pre>`;
+            container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
           }
         } else {
           container.innerHTML = `<pre class="whitespace-pre-wrap break-words text-sm font-mono">${this.escapeHtml(content)}</pre>`;
         }
 
-        lucide.createIcons();
+        if (typeof lucide !== 'undefined') {
+          lucide.createIcons();
+        }
       }
     },
 
@@ -134,7 +146,8 @@ function browserManager() {
 
     downloadFile() {
       if (this.selected && this.selected.type === 'file') {
-        window.open(`/mail/archive/browser/${this.project}/download?path=${encodeURIComponent(this.selected.path)}`, '_blank');
+        const projectSegment = encodeURIComponent(this.project);
+        window.open(`/mail/archive/browser/${projectSegment}/download?path=${encodeURIComponent(this.selected.path)}`, '_blank');
       }
     }
   };

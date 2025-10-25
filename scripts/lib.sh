@@ -52,6 +52,7 @@ parse_common_flags() {
     esac
   done
   export AUTO_YES DRY_RUN QUIET DEBUG REGENERATE_TOKEN SHOW_TOKEN PROJECT_DIR
+  if [[ "${DEBUG}" == "1" ]]; then set -x; fi
 }
 
 # Traps and diagnostics
@@ -88,7 +89,11 @@ json_validate() {
   if command -v jq >/dev/null 2>&1; then
     jq empty "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
   else
-    python -c 'import json,sys; json.load(open(sys.argv[1],"r",encoding="utf-8"))' "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
+    if command -v python >/dev/null 2>&1; then
+      python -c 'import json,sys; json.load(open(sys.argv[1],"r",encoding="utf-8"))' "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
+    else
+      uv run python -c 'import json,sys; json.load(open(sys.argv[1],"r",encoding="utf-8"))' "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
+    fi
   fi
 }
 

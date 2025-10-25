@@ -134,23 +134,32 @@
             const markdownContent = {{ message.body_md | tojson }};
             const bodyEl = document.getElementById('message-body');
 
-            // Configure marked for better rendering
-            marked.setOptions({
-              breaks: true,
-              gfm: true,
-              headerIds: true,
-              mangle: false
-            });
+            try {
+              marked.setOptions({
+                breaks: true,
+                gfm: true,
+                headerIds: true,
+                mangle: false
+              });
+              bodyEl.innerHTML = marked.parse(markdownContent);
+            } catch (error) {
+              console.error('Markdown parsing failed:', error);
+              bodyEl.textContent = markdownContent;
+            }
 
-            bodyEl.innerHTML = marked.parse(markdownContent);
+            // Highlight code blocks when Prism is available
+            if (typeof Prism !== 'undefined') {
+              bodyEl.querySelectorAll('pre code').forEach((block) => {
+                Prism.highlightElement(block);
+              });
+            }
 
-            // Highlight code blocks
-            bodyEl.querySelectorAll('pre code').forEach((block) => {
-              Prism.highlightElement(block);
-            });
-
-            // Add copy buttons to code blocks
+            // Add copy buttons to code blocks with graceful fallbacks
             bodyEl.querySelectorAll('pre').forEach((pre) => {
+              if (pre.parentNode.classList.contains('relative')) {
+                return; // Button already attached
+              }
+
               const wrapper = document.createElement('div');
               wrapper.className = 'relative group';
               pre.parentNode.insertBefore(wrapper, pre);
@@ -159,17 +168,34 @@
               const button = document.createElement('button');
               button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
               button.className = 'absolute top-2 right-2 p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity';
-              button.onclick = () => {
-                navigator.clipboard.writeText(pre.textContent);
-                button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
-                showToast('Code copied!', 'success');
-                setTimeout(() => {
-                  button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
-                  lucide.createIcons();
-                }, 2000);
+              button.onclick = async () => {
+                try {
+                  if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(pre.textContent);
+                    button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
+                    if (typeof showToast === 'function') {
+                      showToast('Code copied!', 'success');
+                    }
+                    setTimeout(() => {
+                      button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+                      if (typeof lucide !== 'undefined') {
+                        lucide.createIcons();
+                      }
+                    }, 2000);
+                  } else {
+                    throw new Error('Clipboard API not available');
+                  }
+                } catch (err) {
+                  console.error('Copy failed:', err);
+                  if (typeof showToast === 'function') {
+                    showToast('Failed to copy code', 'error');
+                  }
+                }
               };
               wrapper.appendChild(button);
-              lucide.createIcons();
+              if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+              }
             });
           });
         </script>
