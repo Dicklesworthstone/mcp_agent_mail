@@ -51,17 +51,17 @@ PY
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 echo "Detected MCP HTTP endpoint: ${_URL}"
 
-# Determine or generate bearer token (prefer .env if present)
-# Reuse existing token if possible (run helper > .env > env var)
+# Determine or generate bearer token (prefer session token provided by orchestrator)
+# Reuse existing token if possible (INTEGRATION_BEARER_TOKEN > .env > run helper)
 _TOKEN=""
-if [[ -f scripts/run_server_with_token.sh ]]; then
-  _TOKEN=$(grep -E 'export HTTP_BEARER_TOKEN="' scripts/run_server_with_token.sh | sed -E 's/.*HTTP_BEARER_TOKEN="([^"]+)".*/\1/') || true
+if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+  _TOKEN="${INTEGRATION_BEARER_TOKEN}"
 fi
 if [[ -z "${_TOKEN}" && -f .env ]]; then
   _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
-if [[ -z "${_TOKEN}" && -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
-  _TOKEN="${INTEGRATION_BEARER_TOKEN}"
+if [[ -z "${_TOKEN}" && -f scripts/run_server_with_token.sh ]]; then
+  _TOKEN=$(grep -E 'export HTTP_BEARER_TOKEN="' scripts/run_server_with_token.sh | sed -E 's/.*HTTP_BEARER_TOKEN="([^"]+)".*/\1/') || true
 fi
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then

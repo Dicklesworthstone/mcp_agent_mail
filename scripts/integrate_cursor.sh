@@ -48,11 +48,11 @@ PY
 
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 _TOKEN=""
-if [[ -f .env ]]; then
-  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
-fi
-if [[ -z "${_TOKEN}" && -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
   _TOKEN="${INTEGRATION_BEARER_TOKEN}"
+fi
+if [[ -z "${_TOKEN}" && -f .env ]]; then
+  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
 fi
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then

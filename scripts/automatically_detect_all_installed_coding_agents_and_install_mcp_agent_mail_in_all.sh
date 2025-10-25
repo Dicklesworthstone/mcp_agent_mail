@@ -44,6 +44,21 @@ PY
   fi
 fi
 
+# Persist token to .env for consistency across tools (non-destructive)
+if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+  if [[ -f .env ]]; then
+    if grep -q '^HTTP_BEARER_TOKEN=' .env; then
+      # Update in place
+      cp .env .env.bak.$(date +%s)
+      sed -E -i "s/^HTTP_BEARER_TOKEN=.*/HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}/" .env
+    else
+      echo "HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}" >> .env
+    fi
+  else
+    echo "HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}" > .env
+  fi
+fi
+
 echo "==> Detecting installed agents and applying integrations"
 
 # Parse optional --project-dir to tell integrators where to write client configs
