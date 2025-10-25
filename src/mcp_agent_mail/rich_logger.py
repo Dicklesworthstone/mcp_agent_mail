@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from rich import box
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -40,6 +41,7 @@ class ToolCallContext:
     result: Any = None
     error: Optional[Exception] = None
     success: bool = True
+    _created_at: datetime = field(default_factory=datetime.now)  # Capture at creation time
 
     @property
     def duration_ms(self) -> float:
@@ -49,8 +51,8 @@ class ToolCallContext:
 
     @property
     def timestamp(self) -> str:
-        """Get formatted timestamp."""
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        """Get formatted timestamp (captured at creation)."""
+        return self._created_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def _safe_json_format(data: Any, max_length: int = 2000) -> str:
@@ -91,15 +93,15 @@ def _create_info_table(ctx: ToolCallContext) -> Table:
     table.add_column("Key", style="bold yellow", width=20)
     table.add_column("Value", style="white")
 
-    # Add rows
-    table.add_row("Tool Name", f"[bold green]{ctx.tool_name}[/bold green]")
+    # Add rows - escape strings to prevent markup injection
+    table.add_row("Tool Name", f"[bold green]{escape(ctx.tool_name)}[/bold green]")
     table.add_row("Timestamp", ctx.timestamp)
 
     if ctx.project:
-        table.add_row("Project", f"[cyan]{ctx.project}[/cyan]")
+        table.add_row("Project", f"[cyan]{escape(ctx.project)}[/cyan]")
 
     if ctx.agent:
-        table.add_row("Agent", f"[magenta]{ctx.agent}[/magenta]")
+        table.add_row("Agent", f"[magenta]{escape(ctx.agent)}[/magenta]")
 
     # Duration and status
     if ctx.end_time:
@@ -182,14 +184,14 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
     table.add_column("Field", style="bold cyan", width=15)
     table.add_column("Value", style="white", overflow="fold")
 
-    # Tool name
-    table.add_row("Tool", f"[bold green]{ctx.tool_name}[/bold green]")
+    # Tool name - escape to prevent markup injection
+    table.add_row("Tool", f"[bold green]{escape(ctx.tool_name)}[/bold green]")
 
-    # Context info
+    # Context info - escape to prevent markup injection
     if ctx.agent:
-        table.add_row("Agent", f"[magenta]{ctx.agent}[/magenta]")
+        table.add_row("Agent", f"[magenta]{escape(ctx.agent)}[/magenta]")
     if ctx.project:
-        table.add_row("Project", f"[cyan]{ctx.project}[/cyan]")
+        table.add_row("Project", f"[cyan]{escape(ctx.project)}[/cyan]")
 
     # Timing
     table.add_row("Started", ctx.timestamp)
@@ -204,7 +206,7 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
         else:
             error_msg = str(ctx.error) if ctx.error else "Unknown error"
             table.add_row("Status", "[bold red]✗ FAILED[/bold red]")
-            table.add_row("Error", f"[red]{error_msg[:100]}[/red]")
+            table.add_row("Error", f"[red]{escape(error_msg[:100])}[/red]")
 
     return table
 
@@ -400,19 +402,19 @@ def create_startup_panel(config: dict[str, Any]) -> Panel:
     """Create a beautiful startup panel showing configuration."""
     tree = Tree("🚀 [bold bright_white]MCP Agent Mail Server[/bold bright_white]")
 
-    # Add configuration branches
+    # Add configuration branches - escape all user-provided strings to prevent markup injection
     for section, values in config.items():
-        section_branch = tree.add(f"[bold cyan]{section}[/bold cyan]")
+        section_branch = tree.add(f"[bold cyan]{escape(str(section))}[/bold cyan]")
         if isinstance(values, dict):
             for key, value in values.items():
                 # Mask sensitive values
                 if "token" in key.lower() or "secret" in key.lower() or "password" in key.lower():
                     display_value = "***" if value else "[dim]not set[/dim]"
                 else:
-                    display_value = str(value)
-                section_branch.add(f"[yellow]{key}[/yellow]: [white]{display_value}[/white]")
+                    display_value = escape(str(value))  # Escape to prevent markup injection
+                section_branch.add(f"[yellow]{escape(str(key))}[/yellow]: [white]{display_value}[/white]")
         else:
-            section_branch.add(f"[white]{values}[/white]")
+            section_branch.add(f"[white]{escape(str(values))}[/white]")
 
     return Panel(
         tree,

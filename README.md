@@ -228,7 +228,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 - `projects(id, human_key, slug, created_ts, meta)`
 - `agents(id, project_id, name, program, model, inception_ts, task, last_active_ts)`
-- `messages(id, project_id, thread_id, subject, body_md, from_agent, created_ts, importance, ack_required, attachments_json)`
+- `messages(id, project_id, sender_id, thread_id, subject, body_md, created_ts, importance, ack_required, attachments)`
 - `message_recipients(message_id, agent_name, kind, read_ts, ack_ts)`
 - `claims(id, project_id, agent_name, path, exclusive, reason, created_ts, expires_ts, released_ts)`
 - `fts_messages(subject, body_md)` + triggers for incremental updates
@@ -248,7 +248,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 2) Send a message
 
-- `send_message(project_key, from_agent, to[], subject, body_md, cc?, bcc?, importance?, ack_required?, thread_id?, convert_images?)`
+- `send_message(project_key, sender_name, to[], subject, body_md, cc?, bcc?, importance?, ack_required?, thread_id?, convert_images?)`
 - Writes a canonical message under `messages/YYYY/MM/`, an outbox copy for the sender, and inbox copies for each recipient; commits all artifacts.
 - Optionally converts images (local paths or data URIs) to WebP and embeds small ones inline.
 
@@ -259,7 +259,7 @@ sequenceDiagram
   participant DB as SQLite (messages, recipients, FTS)
   participant Git as Git Repo (.mcp-mail/)
 
-  Agent->>Server: tools/call send_message(project_key, from_agent, to[], subject, body_md, ...)
+  Agent->>Server: tools/call send_message(project_key, sender_name, to[], subject, body_md, ...)
   Server->>DB: validate sender, insert into messages, recipients
   DB-->>Server: OK (message id, timestamps)
   Server->>Git: write canonical markdown under messages/YYYY/MM/<id>.md
@@ -304,7 +304,7 @@ sequenceDiagram
 
 - `search_messages(project_key, query, limit?)` uses FTS5 over subject and body.
 - `summarize_thread(project_key, thread_id, include_examples?)` extracts key points, actions, and participants from the thread.
-- `reply_message(project_key, from_agent, reply_to_message_id, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
+- `reply_message(project_key, sender_name, reply_to_message_id, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
 
 ### Semantics & invariants
 
@@ -609,7 +609,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 3. Backend agent sends a design doc with an embedded diagram image:
 
 ```json
-{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","from_agent":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true,"image_embed_policy":"auto","inline_max_bytes":32768}}}
+{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true,"image_embed_policy":"auto","inline_max_bytes":32768}}}
 ```
 
 4. Frontend agent checks inbox and replies in-thread with questions; reply inherits/sets `thread_id`:

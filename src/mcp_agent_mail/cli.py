@@ -117,7 +117,7 @@ def serve_http(
             console.print()
             rich_logger.log_info("🚀 Verbose logging is ENABLED - all MCP tool calls will be displayed in detail")
             console.print()
-        except ImportError:
+        except Exception:
             # Fallback to basic panel if rich_logger is not available
             from rich.panel import Panel
             from rich.table import Table

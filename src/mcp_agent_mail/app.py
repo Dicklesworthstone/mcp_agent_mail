@@ -174,11 +174,11 @@ def _instrument_tool(
             log_ctx = None  # Initialize to prevent undefined variable errors
 
             if RICH_LOGGER_AVAILABLE:
-                settings = get_settings()
-                log_enabled = settings.tools_log_enabled
+                try:
+                    settings = get_settings()
+                    log_enabled = settings.tools_log_enabled
 
-                if log_enabled:
-                    try:
+                    if log_enabled:
                         # Create a clean kwargs dict without the context
                         clean_kwargs = {k: v for k, v in bound.arguments.items() if k != "ctx"}
                         log_ctx = rich_logger.ToolCallContext(
@@ -190,10 +190,11 @@ def _instrument_tool(
                             start_time=start_time,
                         )
                         rich_logger.log_tool_call_start(log_ctx)
-                    except Exception:
-                        # Logging should never break functionality - silently disable logging
-                        # Don't use logger.warning() here as it could also raise exceptions
-                        log_ctx = None  # Disable logging for this call if start failed
+                except Exception:
+                    # Logging should never break functionality - silently disable logging
+                    # This catches: get_settings() errors, attribute access errors, and logging errors
+                    log_enabled = False
+                    log_ctx = None
 
             result = None
             error = None
@@ -1627,6 +1628,7 @@ def build_mcp_server() -> FastMCP:
         importance: str = "normal",
         ack_required: bool = False,
         thread_id: Optional[str] = None,
+        auto_contact_if_blocked: bool = False,
     ) -> dict[str, Any]:
         """
         Send a Markdown message to one or more recipients and persist canonical and mailbox copies to Git.
@@ -1724,6 +1726,47 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        # Normalize cc/bcc inputs and validate types for friendlier UX
+        if isinstance(cc, str):
+            cc = [cc]
+        if isinstance(bcc, str):
+            bcc = [bcc]
+        if cc is not None and not isinstance(cc, list):
+            await ctx.error("INVALID_ARGUMENT: cc must be a list of strings or a single string.")
+            return {
+                "error": {
+                    "type": "INVALID_ARGUMENT",
+                    "message": "cc must be a list of strings or a single string.",
+                    "data": {"argument": "cc"},
+                }
+            }
+        if bcc is not None and not isinstance(bcc, list):
+            await ctx.error("INVALID_ARGUMENT: bcc must be a list of strings or a single string.")
+            return {
+                "error": {
+                    "type": "INVALID_ARGUMENT",
+                    "message": "bcc must be a list of strings or a single string.",
+                    "data": {"argument": "bcc"},
+                }
+            }
+        if cc is not None and any(not isinstance(x, str) for x in cc):
+            await ctx.error("INVALID_ARGUMENT: cc items must be strings (agent names).")
+            return {
+                "error": {
+                    "type": "INVALID_ARGUMENT",
+                    "message": "cc items must be strings (agent names).",
+                    "data": {"argument": "cc"},
+                }
+            }
+        if bcc is not None and any(not isinstance(x, str) for x in bcc):
+            await ctx.error("INVALID_ARGUMENT: bcc items must be strings (agent names).")
+            return {
+                "error": {
+                    "type": "INVALID_ARGUMENT",
+                    "message": "bcc items must be strings (agent names).",
+                    "data": {"argument": "bcc"},
+                }
+            }
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -1798,6 +1841,7 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
             # For each recipient, require link unless policy/open or in auto_ok
+            blocked_recipients: list[str] = []
             async with get_session() as s3:
                 for nm in to + (cc or []) + (bcc or []):
                     if nm in auto_ok_names:
@@ -1861,8 +1905,43 @@ def build_mcp_server() -> FastMCP:
                     # If message requires acknowledgement and recipient is local, allow to proceed without a link
                     if ack_required:
                         continue
-                    await ctx.error("CONTACT_REQUIRED: Recipient requires contact approval or recent context.")
-                    return {"error": {"type": "CONTACT_REQUIRED", "message": "Recipient requires contact approval or recent context."}}
+                    blocked_recipients.append(rec.name)
+
+            if blocked_recipients:
+                remedies = [
+                    "Call request_contact(project_key, from_agent, to_agent) to request approval",
+                    "Call macro_contact_handshake(project_key, requester, target, auto_accept=true) to automate",
+                ]
+                attempted: list[str] = []
+                if auto_contact_if_blocked:
+                    try:
+                        from fastmcp.tools.tool import FunctionTool  # type: ignore
+                        req_tool = cast(FunctionTool, cast(Any, request_contact))
+                        for nm in blocked_recipients:
+                            try:
+                                await req_tool.run({
+                                    "project_key": project.human_key,
+                                    "from_agent": sender.name,
+                                    "to_agent": nm,
+                                    "reason": "auto-request by send_message",
+                                    "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                })
+                                attempted.append(nm)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+                payload = {
+                    "type": "CONTACT_REQUIRED",
+                    "message": "Recipient requires contact approval or recent context.",
+                    "data": {
+                        "recipients_blocked": sorted(set(blocked_recipients)),
+                        "remedies": remedies,
+                        "auto_contact_attempted": attempted,
+                    },
+                }
+                await ctx.error(f"CONTACT_REQUIRED: {payload['message']}")
+                return {"error": payload}
         # Split recipients into local vs external (approved links)
         local_to: list[str] = []
         local_cc: list[str] = []
@@ -2988,22 +3067,36 @@ def build_mcp_server() -> FastMCP:
     async def macro_contact_handshake(
         ctx: Context,
         project_key: str,
-        requester: str,
-        target: str,
+        requester: Optional[str] = None,
+        target: Optional[str] = None,
         reason: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
         auto_accept: bool = False,
         welcome_subject: Optional[str] = None,
         welcome_body: Optional[str] = None,
+        # Aliases for compatibility
+        agent_name: Optional[str] = None,
+        to_agent: Optional[str] = None,
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
+
+        # Resolve aliases
+        real_requester = (requester or agent_name or "").strip()
+        real_target = (target or to_agent or "").strip()
+        if not real_requester or not real_target:
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "macro_contact_handshake requires requester/agent_name and target/to_agent",
+                recoverable=True,
+                data={"requester": requester, "agent_name": agent_name, "target": target, "to_agent": to_agent},
+            )
 
         from fastmcp.tools.tool import FunctionTool
         request_tool = cast(FunctionTool, cast(Any, request_contact))
         request_tool_result = await request_tool.run({
             "project_key": project_key,
-            "from_agent": requester,
-            "to_agent": target,
+            "from_agent": real_requester,
+            "to_agent": real_target,
             "reason": reason,
             "ttl_seconds": ttl_seconds,
         })
@@ -3014,8 +3107,8 @@ def build_mcp_server() -> FastMCP:
             respond_tool = cast(FunctionTool, cast(Any, respond_contact))
             respond_tool_result = await respond_tool.run({
                 "project_key": project_key,
-                "to_agent": target,
-                "from_agent": requester,
+                "to_agent": real_target,
+                "from_agent": real_requester,
                 "accept": True,
                 "ttl_seconds": ttl_seconds,
             })
@@ -3027,8 +3120,8 @@ def build_mcp_server() -> FastMCP:
                 send_tool = cast(FunctionTool, cast(Any, send_message))
                 send_tool_result = await send_tool.run({
                     "project_key": project_key,
-                    "sender_name": requester,
-                    "to": [target],
+                    "sender_name": real_requester,
+                    "to": [real_target],
                     "subject": welcome_subject,
                     "body_md": welcome_body,
                 })
@@ -4100,6 +4193,38 @@ def build_mcp_server() -> FastMCP:
             "metrics_uri": "resource://tooling/metrics",
             "clusters": clusters,
             "playbooks": playbooks,
+        }
+
+    @mcp.resource("resource://tooling/schemas", mime_type="application/json")
+    def tooling_schemas_resource() -> dict[str, Any]:
+        """Expose JSON-like parameter schemas for tools/macros to prevent drift.
+
+        This is a lightweight, hand-maintained view focusing on the most error-prone
+        parameters and accepted aliases to guide clients.
+        """
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "tools": {
+                "send_message": {
+                    "required": ["project_key", "sender_name", "to", "subject", "body_md"],
+                    "optional": ["cc", "bcc", "attachment_paths", "convert_images", "importance", "ack_required", "thread_id", "auto_contact_if_blocked"],
+                    "shapes": {
+                        "to": "list[str]",
+                        "cc": "list[str] | str",
+                        "bcc": "list[str] | str",
+                        "importance": "low|normal|high|urgent",
+                        "auto_contact_if_blocked": "bool",
+                    },
+                },
+                "macro_contact_handshake": {
+                    "required": ["project_key", "requester|agent_name", "target|to_agent"],
+                    "optional": ["reason", "ttl_seconds", "auto_accept", "welcome_subject", "welcome_body"],
+                    "aliases": {
+                        "requester": ["agent_name"],
+                        "target": ["to_agent"],
+                    },
+                },
+            },
         }
 
     @mcp.resource("resource://tooling/metrics", mime_type="application/json")
