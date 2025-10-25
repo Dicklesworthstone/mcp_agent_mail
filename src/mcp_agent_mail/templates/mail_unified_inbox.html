@@ -175,7 +175,7 @@
           <input type="checkbox"
                  @change="toggleSelectAll()"
                  :checked="selectedMessages.length > 0 && selectedMessages.length === filteredMessages.length"
-                 :indeterminate="selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length"
+                 x-init="$watch('selectedMessages', () => { $el.indeterminate = selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length; })"
                  class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
                  title="Select all">
           <template x-if="selectedMessages.length > 0">
@@ -236,8 +236,8 @@
           <div>
             <template x-for="(msg, index) in filteredMessages" :key="msg.id">
               <!-- Gmail-style Message Item -->
-              <div @click="selectMessage(msg); if (viewMode === 'list') { window.location.href = `/mail/${msg.project_slug}/message/${msg.id}`; }"
-                   @keydown.enter="selectMessage(msg)"
+              <div @click="handleMessageClick(msg)"
+                   @keydown.enter="handleMessageClick(msg)"
                    :class="{
                      'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500': selectedMessage && selectedMessage.id === msg.id,
                      'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900': !selectedMessage || selectedMessage.id !== msg.id,
@@ -673,6 +673,16 @@ function unifiedInboxManager() {
     },
 
     // Selection
+    handleMessageClick(msg) {
+      if (this.viewMode === 'list') {
+        // Navigate to dedicated message page in list view
+        window.location.href = `/mail/${msg.project_slug}/message/${msg.id}`;
+      } else {
+        // Select and display in split view
+        this.selectMessage(msg);
+      }
+    },
+
     selectMessage(msg) {
       this.selectedMessage = msg;
 

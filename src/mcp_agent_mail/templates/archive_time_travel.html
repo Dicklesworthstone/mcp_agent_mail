@@ -160,6 +160,11 @@ function timeTravelManager() {
 
         if (newProject) {
           await this.loadAgents(newProject);
+        } else {
+          // User deselected - clear the last loaded project marker
+          // to prevent stale fetches from populating agents
+          this._lastProjectLoaded = null;
+          this.loadingAgents = false;
         }
       });
     },
