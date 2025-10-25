@@ -88,8 +88,8 @@ function browserManager() {
   return {
     tree: {{ tree|tojson }},
     selected: null,
-    project: '{{ project }}',
-    path: '{{ path }}',
+    project: {{ project|tojson }},
+    path: {{ path|tojson }},
 
     // Helper to escape HTML to prevent XSS
     escapeHtml(str) {

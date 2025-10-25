@@ -137,3 +137,27 @@ echo "Client configs written in project root (e.g., *.mcp.json) and .claude/sett
 echo "All done."
 
 
+# Optional auto-restart: kill any process on configured port and start fresh server, then poll
+log_step "Ensuring server is running on configured endpoint"
+eval "$(uv run python - <<'PY'
+from mcp_agent_mail.config import get_settings
+s = get_settings()
+print(f"export _HTTP_HOST='{s.http.host}'")
+print(f"export _HTTP_PORT='{s.http.port}'")
+print(f"export _HTTP_PATH='{s.http.path}'")
+PY
+)"
+
+_pids_str=$(find_listening_pids_for_port "${_HTTP_PORT}")
+if [[ -n "${_pids_str// /}" ]]; then
+  _print "Found existing listeners on port ${_HTTP_PORT}: ${_pids_str}"
+  kill_pids_graceful 5 ${_pids_str}
+fi
+
+start_server_background
+
+if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 10 0.5; then
+  log_ok "Server is READY at http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
+else
+  log_warn "Server did not report ready within timeout; check logs/ directory."
+fi

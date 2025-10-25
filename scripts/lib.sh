@@ -121,6 +121,10 @@ run_cmd() {
 
 # Backup a file to backup_config_files/ with timestamp before .bak extension
 # Usage: backup_file "/path/to/file"
+#
+# Creates distinguishable backup names for files from different locations:
+#   - HOME files: home_.claude_settings.json.TIMESTAMP.bak
+#   - Project files: local_claude_settings.json.TIMESTAMP.bak
 backup_file() {
   local file="$1"
   if [[ ! -f "$file" ]]; then
@@ -135,16 +139,35 @@ backup_file() {
   local backup_dir="backup_config_files"
   mkdir -p "$backup_dir"
 
-  # Get just the filename (not the path)
-  local basename
-  basename=$(basename "$file")
+  # Create unique backup name that encodes path information
+  local backup_name
+  if [[ "$file" == "$HOME"* ]]; then
+    # HOME directory file - use relative path from HOME
+    local rel_path="${file#$HOME/}"
+    rel_path="${rel_path//\//_}"  # Replace / with _
+    backup_name="home_${rel_path}"
+  else
+    # Non-HOME path (project-local or absolute)
+    local sanitized="${file//\//_}"  # Replace / with _
+    # Remove leading dots and underscores
+    while [[ "$sanitized" == .* ]] || [[ "$sanitized" == _* ]]; do
+      sanitized="${sanitized#.}"
+      sanitized="${sanitized#_}"
+    done
+    backup_name="local_${sanitized}"
+  fi
 
   # Create backup with timestamp BEFORE .bak extension
   local timestamp
   timestamp=$(date +%Y%m%d_%H%M%S)
-  local backup_path="${backup_dir}/${basename}.${timestamp}.bak"
+  local backup_path="${backup_dir}/${backup_name}.${timestamp}.bak"
 
-  cp "$file" "$backup_path"
+  # Copy with error handling
+  if ! cp "$file" "$backup_path"; then
+    echo "ERROR: Failed to backup ${file}" >&2
+    return 1
+  fi
+
   _print "Backed up ${file} to ${backup_path}"
 }
 
@@ -173,6 +196,78 @@ confirm() {
   if [[ ! -t 0 ]]; then return 1; fi
   read -r -p "${msg} [y/N] " _ans || return 1
   [[ "${_ans}" == "y" || "${_ans}" == "Y" ]]
+}
+
+# Return a space-separated list of PIDs listening on a TCP port (best-effort)
+find_listening_pids_for_port() {
+  local port="$1"
+  local pids=""
+  if command -v lsof >/dev/null 2>&1; then
+    pids=$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' ')
+  elif command -v fuser >/dev/null 2>&1; then
+    # fuser prints like: 8765/tcp: 1234 2345
+    pids=$(fuser -n tcp "${port}" 2>/dev/null | sed -E 's/.*: *//' | tr ' ' '\n' | tr '\n' ' ')
+  elif command -v ss >/dev/null 2>&1; then
+    # ss -ltnp output includes users:(("python",pid=1234,fd=...))
+    pids=$(ss -ltnp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $0}' | sed -nE 's/.*pid=([0-9]+).*/\1/p' | tr '\n' ' ')
+  fi
+  echo "${pids}" | xargs -n1 echo | awk 'NF' | sort -u | tr '\n' ' '
+}
+
+# Gracefully kill a list of PIDs owned by current user; escalate to KILL after timeout
+kill_pids_graceful() {
+  local timeout_s="${1:-5}"; shift || true
+  local pids=("$@")
+  [[ ${#pids[@]} -eq 0 ]] && return 0
+  local me; me=$(id -un)
+  local to_kill=()
+  local pid
+  for pid in "${pids[@]}"; do
+    [[ -z "$pid" ]] && continue
+    local owner
+    owner=$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}')
+    if [[ "$owner" == "$me" ]]; then
+      to_kill+=("$pid")
+    else
+      log_warn "Skipping PID $pid owned by $owner"
+    fi
+  done
+  [[ ${#to_kill[@]} -eq 0 ]] && return 0
+  if [[ "${DRY_RUN}" == "1" ]]; then _print "[dry-run] kill -TERM ${to_kill[*]}"; return 0; fi
+  kill -TERM "${to_kill[@]}" 2>/dev/null || true
+  local end=$(( $(date +%s) + timeout_s ))
+  while :; do
+    local alive=()
+    for pid in "${to_kill[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then alive+=("$pid"); fi
+    done
+    [[ ${#alive[@]} -eq 0 ]] && break
+    if (( $(date +%s) >= end )); then
+      log_warn "Escalating to SIGKILL for: ${alive[*]}"
+      kill -KILL "${alive[@]}" 2>/dev/null || true
+      break
+    fi
+    sleep 0.2
+  done
+}
+
+# Start server in background using run helper; log to logs directory
+start_server_background() {
+  local helper="scripts/run_server_with_token.sh"
+  local stamp
+  stamp=$(date +%Y%m%d_%H%M%S)
+  mkdir -p logs
+  local log_file="logs/server_${stamp}.log"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] ${helper} > ${log_file} 2>&1 &"
+    return 0
+  fi
+  if [[ -x "$helper" ]]; then
+    nohup "$helper" >"$log_file" 2>&1 &
+  else
+    nohup uv run python -m mcp_agent_mail.cli serve-http >"$log_file" 2>&1 &
+  fi
+  _print "Server starting (logs: ${log_file})"
 }
 
 

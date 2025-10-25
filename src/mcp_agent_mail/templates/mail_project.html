@@ -15,6 +15,16 @@
 
 {% block header_actions %}
 <div class="flex items-center gap-2">
+  <a href="/mail/{{ project.slug }}/overseer/compose"
+     class="px-4 py-2 text-sm font-medium text-white bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-md hover:shadow-lg btn-ripple group"
+     data-tippy-content='<div class="text-left"><strong>Send Message as Human Overseer</strong><br/><span class="text-xs">Send high-priority messages to agents with human guidance</span></div>'>
+    <i data-lucide="send" class="w-4 h-4"></i>
+    <span class="font-semibold">Send Message</span>
+    <div class="hidden sm:flex items-center gap-1 text-xs text-white/90 border-l border-white/30 pl-2 ml-2">
+      <i data-lucide="shield-alert" class="w-3 h-3"></i>
+      <span>Overseer</span>
+    </div>
+  </a>
   <a href="/mail/{{ project.slug }}/file_reservations"
      class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md group"
      data-tippy-content='<div class="text-left"><strong>File Reservations</strong><br/><span class="text-xs">Agents signal which files they intend to edit (advisory signals, not hard locks)</span></div>'>
@@ -71,7 +81,7 @@
 
   <!-- Enhanced Search Section -->
   <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700"
-       x-data="{ scope: '{{ scope or '' }}', order: '{{ order or 'relevance' }}', query: '{{ q or '' }}', isExpanded: {{ 'true' if q else 'false' }} }">
+       x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ 'true' if q else 'false' }} }">
 
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-3">
@@ -380,9 +390,10 @@
     // Update keyboard shortcut display based on platform (with modern API fallback)
     const shortcutKey = document.querySelector('.shortcut-key');
     if (shortcutKey) {
-      // Use modern API if available, fall back to userAgent
-      const isMac = navigator.userAgentData?.platform?.toLowerCase().includes('mac') ||
-                    /Mac|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+      // Use modern API if available, fall back to legacy navigator.platform / userAgent
+      const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+      const ua = navigator.userAgent || '';
+      const isMac = /mac/i.test(platform) || /mac|iphone|ipad|ipod/i.test(ua);
 
       if (!isMac) {
         shortcutKey.textContent = 'Ctrl';

@@ -132,9 +132,18 @@ if command -v gemini >/dev/null 2>&1; then
   set +e
   gemini mcp remove -s user mcp-agent-mail >/dev/null 2>&1
   set -e
-  _HDR_ARGS=()
-  if [[ -n "${_TOKEN}" ]]; then _HDR_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-  gemini mcp add -s user -t http "${_HDR_ARGS[@]}" mcp-agent-mail "${_URL}" || true
+  _add_rc=1
+  if [[ -n "${_TOKEN}" ]]; then
+    # Prefer placing required positionals first; some yargs parsers are strict about ordering
+    if gemini mcp add -s user -t http mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}"; then
+      _add_rc=0
+    else
+      log_warn "Gemini MCP add with header failed; retrying without header (server may allow anonymous)."
+    fi
+  fi
+  if [[ ${_add_rc} -ne 0 ]]; then
+    gemini mcp add -s user -t http mcp-agent-mail "${_URL}" || true
+  fi
   log_ok "Gemini MCP registration attempted for mcp-agent-mail -> ${_URL}."
 else
   log_warn "Gemini CLI not found in PATH; skipped automatic registration."; _print "Run: gemini mcp add -s user -t http mcp-agent-mail ${_URL}"

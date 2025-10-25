@@ -155,7 +155,7 @@
       <div :class="view === 'grid' ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6' : 'space-y-4'">
         {% for p in projects %}
         <a href="/mail/{{ p.slug }}"
-           x-show="!searchQuery || '{{ p.human_key }}'.toLowerCase().includes(searchQuery.toLowerCase()) || '{{ p.slug }}'.toLowerCase().includes(searchQuery.toLowerCase())"
+           x-show="!searchQuery || $el.dataset.projectSearch.includes((searchQuery || '').toLowerCase())"
            x-transition:enter="transition ease-out duration-200"
            x-transition:enter-start="opacity-0 transform scale-95"
            x-transition:enter-end="opacity-100 transform scale-100"
@@ -165,7 +165,8 @@
            class="group relative bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
            style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;"
            data-project-card="true"
-           data-project-id="{{ p.id }}">
+           data-project-id="{{ p.id }}"
+           data-project-search="{{ (p.human_key ~ ' ' ~ p.slug)|lower }}">
 
           <!-- Decorative gradient blob -->
           <div class="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-primary-500/10 to-purple-500/10 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>

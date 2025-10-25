@@ -1175,7 +1175,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         now = datetime.now(timezone.utc)
                         delta = now - created_dt
 
-                        if delta.days > 365:
+                        # Handle future dates (clock skew, testing, etc.)
+                        if delta.days < 0 or (delta.days == 0 and delta.seconds < 0):
+                            created_relative = "Just now"  # Treat future dates as current
+                        elif delta.days > 365:
                             created_relative = f"{delta.days // 365}y ago"
                         elif delta.days > 30:
                             created_relative = f"{delta.days // 30}mo ago"
@@ -1785,6 +1788,274 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
             return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
+
+        # ========== Human Overseer Routes ==========
+
+        @fastapi_app.get("/mail/{project}/overseer/compose", response_class=HTMLResponse)
+        async def overseer_compose(project: str) -> HTMLResponse:
+            """Display Human Overseer message composer."""
+            await ensure_schema()
+            async with get_session() as session:
+                # Get project
+                prow = (
+                    await session.execute(
+                        text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                        {"k": project},
+                    )
+                ).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+
+                # Get all agents for this project
+                pid = int(prow[0])
+                agent_rows = await session.execute(
+                    text("SELECT name FROM agents WHERE project_id = :pid ORDER BY name"),
+                    {"pid": pid}
+                )
+                agents = [{"name": r[0]} for r in agent_rows.fetchall()]
+
+            return await _render(
+                "overseer_compose.html",
+                project={"slug": prow[1], "human_key": prow[2]},
+                agents=agents
+            )
+
+        @fastapi_app.post("/mail/{project}/overseer/send")
+        async def overseer_send(project: str, request: Request) -> JSONResponse:
+            """Send message from Human Overseer to selected agents."""
+            await ensure_schema()
+
+            try:
+                # Parse request body
+                request_body = await request.json()
+                recipients: list[str] = request_body.get("recipients", [])
+                subject: str = request_body.get("subject", "").strip()
+                body_md: str = request_body.get("body_md", "").strip()
+                thread_id: str | None = request_body.get("thread_id")
+
+                # Comprehensive validation
+                if not recipients:
+                    raise HTTPException(status_code=400, detail="At least one recipient is required")
+                if len(recipients) > 100:
+                    raise HTTPException(status_code=400, detail="Too many recipients (maximum 100 agents)")
+                if not subject:
+                    raise HTTPException(status_code=400, detail="Subject is required")
+                if len(subject) > 200:
+                    raise HTTPException(status_code=400, detail="Subject too long (maximum 200 characters)")
+                if not body_md:
+                    raise HTTPException(status_code=400, detail="Message body is required")
+                if len(body_md) > 50000:
+                    raise HTTPException(status_code=400, detail="Message body too long (maximum 50,000 characters)")
+
+                # Remove duplicate recipients while preserving order
+                recipients = list(dict.fromkeys(recipients))
+
+                # Add Human Overseer preamble
+                preamble = """---
+
+<div align="center" style="background: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%); padding: 20px; border-radius: 12px; margin: 20px 0;">
+
+# 🚨 MESSAGE FROM HUMAN OVERSEER 🚨
+
+</div>
+
+**This message is from a human operator overseeing this project.** Please prioritize the instructions below over your current tasks.
+
+You should:
+1. **Temporarily pause** your current work
+2. **Complete the request** described below
+3. **Resume your original plans** afterward (unless modified by these instructions)
+
+**The human's guidance supersedes all other priorities.**
+
+---
+
+"""
+                full_body = preamble + body_md
+
+                # Get project
+                async with get_session() as session:
+                    prow = (
+                        await session.execute(
+                            text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                            {"k": project},
+                        )
+                    ).fetchone()
+                    if not prow:
+                        raise HTTPException(status_code=404, detail="Project not found")
+
+                    # Extract project info consistently
+                    project_id = int(prow[0])
+                    project_slug = prow[1]
+                    project_human_key = prow[2]
+
+                    # Get or create "HumanOverseer" agent (with race condition protection)
+                    overseer_name = "HumanOverseer"
+                    overseer_row = (
+                        await session.execute(
+                            text("SELECT id, name FROM agents WHERE project_id = :pid AND name = :name"),
+                            {"pid": project_id, "name": overseer_name}
+                        )
+                    ).fetchone()
+
+                    if not overseer_row:
+                        # Create HumanOverseer agent (use INSERT OR IGNORE to handle race conditions)
+                        from datetime import datetime, timezone
+                        try:
+                            await session.execute(
+                                text("""
+                                    INSERT OR IGNORE INTO agents (project_id, name, program, model, task_description, contact_policy, created_ts, last_active_ts)
+                                    VALUES (:pid, :name, :program, :model, :task, :policy, :ts, :ts)
+                                """),
+                                {
+                                    "pid": project_id,
+                                    "name": overseer_name,
+                                    "program": "WebUI",
+                                    "model": "Human",
+                                    "task": "Human operator providing guidance and oversight to agents",
+                                    "policy": "open",
+                                    "ts": datetime.now(timezone.utc)
+                                }
+                            )
+                            await session.commit()
+                        except Exception:
+                            # Another request might have created it concurrently
+                            await session.rollback()
+
+                        # Fetch the agent (whether we just created it or another request did)
+                        overseer_row = (
+                            await session.execute(
+                                text("SELECT id, name FROM agents WHERE project_id = :pid AND name = :name"),
+                                {"pid": project_id, "name": overseer_name}
+                            )
+                        ).fetchone()
+
+                        if not overseer_row:
+                            raise HTTPException(status_code=500, detail="Failed to create HumanOverseer agent")
+
+                # Extract overseer_id for use later
+                overseer_id = overseer_row[0]
+
+                # Create message in database (in a new session)
+                from datetime import datetime, timezone
+
+                async with get_session() as session:
+                    # Insert message into database
+                    message_id = None
+                    now = datetime.now(timezone.utc)
+
+                    result = await session.execute(
+                        text("""
+                            INSERT INTO messages (project_id, sender_id, subject, body_md, importance, thread_id, created_ts, ack_required)
+                            VALUES (:pid, :sid, :subj, :body, :imp, :tid, :ts, :ack)
+                            RETURNING id
+                        """),
+                        {
+                            "pid": project_id,
+                            "sid": overseer_id,
+                            "subj": subject,
+                            "body": full_body,
+                            "imp": "high",  # Always high importance for overseer
+                            "tid": thread_id,
+                            "ts": now,
+                            "ack": False
+                        }
+                    )
+                    message_row = result.fetchone()
+                    if not message_row:
+                        raise HTTPException(status_code=500, detail="Failed to create message")
+                    message_id = message_row[0]
+
+                    # Insert recipients
+                    valid_recipients = []
+                    for recipient_name in recipients:
+                        # Get recipient agent ID
+                        recipient_row = (
+                            await session.execute(
+                                text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                                {"pid": project_id, "name": recipient_name}
+                            )
+                        ).fetchone()
+
+                        if recipient_row:
+                            await session.execute(
+                                text("""
+                                    INSERT INTO message_recipients (message_id, agent_id, kind)
+                                    VALUES (:mid, :aid, :kind)
+                                """),
+                                {
+                                    "mid": message_id,
+                                    "aid": recipient_row[0],
+                                    "kind": "to"
+                                }
+                            )
+                            valid_recipients.append(recipient_name)
+
+                    # If no valid recipients found, rollback and error
+                    if not valid_recipients:
+                        await session.rollback()
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"None of the specified recipients exist in this project. Available agents can be seen at /mail/{project_slug}"
+                        )
+
+                    # Write to Git archive BEFORE committing to database (for transaction consistency)
+                    from .storage import ensure_archive, write_message_bundle
+                    settings = get_settings()
+                    archive = await ensure_archive(settings, project_slug)
+
+                    # Build message dict for Git
+                    message_dict = {
+                        "id": message_id,
+                        "thread_id": thread_id,
+                        "project": project_human_key,
+                        "project_slug": project_slug,
+                        "from": overseer_name,
+                        "to": valid_recipients,
+                        "cc": [],
+                        "bcc": [],
+                        "subject": subject,
+                        "importance": "high",
+                        "ack_required": False,
+                        "created": now.isoformat(),
+                        "attachments": []
+                    }
+
+                    try:
+                        # Write message bundle (canonical + outbox + inboxes) to Git
+                        await write_message_bundle(
+                            archive,
+                            message_dict,
+                            full_body,
+                            overseer_name,
+                            valid_recipients,
+                            extra_paths=None,
+                            commit_text=f"Human Overseer message: {subject}"
+                        )
+                    except Exception as git_error:
+                        # Rollback database transaction if Git write fails
+                        await session.rollback()
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to write message to Git archive: {str(git_error)}"
+                        )
+
+                    # Only commit to database if Git write succeeded
+                    await session.commit()
+
+                return JSONResponse({
+                    "success": True,
+                    "message_id": message_id,
+                    "recipients": valid_recipients,
+                    "sent_at": now.isoformat()
+                })
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
 
         # ========== Archive Visualization Routes ==========
 

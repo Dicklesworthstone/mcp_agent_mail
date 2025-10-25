@@ -175,7 +175,14 @@
           <input type="checkbox"
                  @change="toggleSelectAll()"
                  :checked="selectedMessages.length > 0 && selectedMessages.length === filteredMessages.length"
-                 x-init="$watch(['selectedMessages', 'filteredMessages'], () => { $el.indeterminate = selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length; })"
+                 x-init="
+                   const updateIndeterminate = () => {
+                     $el.indeterminate = selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length;
+                   };
+                   $watch('selectedMessages', updateIndeterminate);
+                   $watch('filteredMessages', updateIndeterminate);
+                   updateIndeterminate();
+                 "
                  class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
                  title="Select all">
           <template x-if="selectedMessages.length > 0">
@@ -238,6 +245,7 @@
               <!-- Gmail-style Message Item -->
               <div @click="handleMessageClick(msg)"
                    @keydown.enter="handleMessageClick(msg)"
+                   :data-message-id="msg.id"
                    :class="{
                      'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500': selectedMessage && selectedMessage.id === msg.id,
                      'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900': !selectedMessage || selectedMessage.id !== msg.id,
@@ -522,11 +530,19 @@ function unifiedInboxManager() {
 
     // Computed
     get uniqueProjects() {
-      return [...new Set(this.allMessages.map(m => m.project_name))].sort();
+      return [...new Set(
+        this.allMessages
+          .map((m) => (typeof m.project_name === 'string' ? m.project_name.trim() : ''))
+          .filter((name) => name.length > 0)
+      )].sort((a, b) => a.localeCompare(b));
     },
 
     get uniqueSenders() {
-      return [...new Set(this.allMessages.map(m => m.sender))].sort();
+      return [...new Set(
+        this.allMessages
+          .map((m) => (typeof m.sender === 'string' ? m.sender.trim() : ''))
+          .filter((sender) => sender.length > 0)
+      )].sort((a, b) => a.localeCompare(b));
     },
 
     get uniqueRecipients() {
@@ -589,8 +605,9 @@ function unifiedInboxManager() {
       // Update keyboard shortcut display based on platform
       const shortcutKey = document.querySelector('.shortcut-key');
       if (shortcutKey) {
-        const isMac = navigator.userAgentData?.platform?.toLowerCase().includes('mac') ||
-                      /Mac|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+        const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+        const ua = navigator.userAgent || '';
+        const isMac = /mac/i.test(platform) || /mac|iphone|ipad|ipod/i.test(ua);
         if (!isMac) {
           shortcutKey.textContent = 'Ctrl';
         }
@@ -617,12 +634,17 @@ function unifiedInboxManager() {
       if (this.searchQuery) {
         const query = this.searchQuery.toLowerCase();
         filtered = filtered.filter(msg => {
+          const subject = (msg.subject || '').toLowerCase();
+          const sender = (msg.sender || '').toLowerCase();
+          const recipients = (msg.recipients || '').toLowerCase();
+          const excerpt = (msg.excerpt || '').toLowerCase();
+          const projectName = (msg.project_name || '').toLowerCase();
           return (
-            msg.subject.toLowerCase().includes(query) ||
-            msg.sender.toLowerCase().includes(query) ||
-            msg.recipients.toLowerCase().includes(query) ||
-            msg.excerpt.toLowerCase().includes(query) ||
-            msg.project_name.toLowerCase().includes(query)
+            subject.includes(query) ||
+            sender.includes(query) ||
+            recipients.includes(query) ||
+            excerpt.includes(query) ||
+            projectName.includes(query)
           );
         });
       }
@@ -730,20 +752,36 @@ function unifiedInboxManager() {
 
       this.selectedMessage = msg;
 
+      // Scroll message into view in left pane (for keyboard navigation)
+      this.$nextTick(() => {
+        const messageElements = document.querySelectorAll('[data-message-id]');
+        messageElements.forEach(el => {
+          if (el.getAttribute('data-message-id') === String(msg.id)) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }
+        });
+      });
+
       // Render markdown body
       this.$nextTick(() => {
         const bodyEl = document.getElementById('message-body-' + msg.id);
         if (bodyEl && msg.body_md) {
           // Configure marked for better rendering
           if (typeof marked !== 'undefined') {
-            marked.setOptions({
-              breaks: true,
-              gfm: true,
-              headerIds: true,
-              mangle: false
-            });
+            try {
+              marked.setOptions({
+                breaks: true,
+                gfm: true,
+                headerIds: true,
+                mangle: false
+              });
 
-            bodyEl.innerHTML = marked.parse(msg.body_md);
+              bodyEl.innerHTML = marked.parse(msg.body_md);
+            } catch (error) {
+              // Fallback to plain text if parsing fails
+              console.error('Markdown parsing failed:', error);
+              bodyEl.textContent = msg.body_md;
+            }
           } else {
             // Fallback if marked.js fails to load
             bodyEl.textContent = msg.body_md;
@@ -768,19 +806,40 @@ function unifiedInboxManager() {
             const button = document.createElement('button');
             button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
             button.className = 'absolute top-2 right-2 p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity';
-            button.onclick = () => {
-              navigator.clipboard.writeText(pre.textContent);
-              button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
-              window.showToast('Code copied!', 'success');
-              setTimeout(() => {
-                button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
-                lucide.createIcons();
-              }, 2000);
+            button.onclick = async () => {
+              try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  await navigator.clipboard.writeText(pre.textContent);
+                  button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
+                  if (typeof window.showToast === 'function') {
+                    window.showToast('Code copied!', 'success');
+                  }
+                  setTimeout(() => {
+                    button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+                    if (typeof lucide !== 'undefined') {
+                      lucide.createIcons();
+                    }
+                  }, 2000);
+                } else {
+                  // Fallback for browsers without clipboard API
+                  console.warn('Clipboard API not available');
+                  if (typeof window.showToast === 'function') {
+                    window.showToast('Clipboard not supported in this browser', 'error');
+                  }
+                }
+              } catch (error) {
+                console.error('Failed to copy code:', error);
+                if (typeof window.showToast === 'function') {
+                  window.showToast('Failed to copy code', 'error');
+                }
+              }
             };
             wrapper.appendChild(button);
           });
 
-          lucide.createIcons();
+          if (typeof lucide !== 'undefined') {
+            lucide.createIcons();
+          }
         }
       });
     },
@@ -804,9 +863,14 @@ function unifiedInboxManager() {
     toggleMessageSelection(id) {
       const index = this.selectedMessages.indexOf(id);
       if (index > -1) {
-        this.selectedMessages.splice(index, 1);
+        // Remove item - use reassignment to trigger watchers
+        this.selectedMessages = [
+          ...this.selectedMessages.slice(0, index),
+          ...this.selectedMessages.slice(index + 1)
+        ];
       } else {
-        this.selectedMessages.push(id);
+        // Add item - use reassignment to trigger watchers
+        this.selectedMessages = [...this.selectedMessages, id];
       }
     },
 

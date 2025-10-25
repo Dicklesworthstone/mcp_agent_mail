@@ -183,7 +183,7 @@
           </label>
           <div class="flex items-center gap-2">
             <code class="flex-1 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm font-mono text-slate-900 dark:text-white">{{ storage_root }}</code>
-            <button onclick="copyToClipboard('{{ storage_root }}')"
+            <button onclick="copyToClipboard({{ storage_root|tojson }})"
                     class="px-4 py-3 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors shadow-md hover:shadow-lg flex items-center gap-2">
               <i data-lucide="copy" class="w-4 h-4"></i>
               Copy

@@ -152,6 +152,136 @@ Auth notes:
 - `/mail/unified-inbox` (Cross-project activity)
   - Shows recent messages across all projects with thread counts and sender/recipients.
 
+### Human Overseer: Sending Messages to Agents
+
+Sometimes a human operator needs to guide or redirect agents directly—whether to handle an urgent issue, provide clarification, or adjust priorities. The **Human Overseer** feature provides a web-based message composer that lets humans send high-priority messages to any combination of agents in a project.
+
+**Access:** Click the prominent **"Send Message"** button (with the Overseer badge) in the header of any project view (`/mail/{project}`), or navigate directly to `/mail/{project}/overseer/compose`.
+
+#### What Makes Overseer Messages Special
+
+1. **Automatic Preamble**: Every message includes a formatted preamble that clearly identifies it as coming from a human operator and instructs agents to:
+   - **Pause current work** temporarily
+   - **Prioritize the human's request** over existing tasks
+   - **Resume original plans** afterward (unless modified by the instructions)
+
+2. **High Priority**: All overseer messages are automatically marked as **high importance**, ensuring they stand out in agent inboxes.
+
+3. **Policy Bypass**: Overseer messages bypass normal contact policies, so humans can always reach any agent regardless of their contact settings.
+
+4. **Special Sender Identity**: Messages come from a special agent named **"HumanOverseer"** (automatically created per project) with:
+   - Program: `WebUI`
+   - Model: `Human`
+   - Contact Policy: `open`
+
+#### The Message Preamble
+
+Every overseer message begins with this preamble (automatically prepended):
+
+```
+---
+
+🚨 MESSAGE FROM HUMAN OVERSEER 🚨
+
+This message is from a human operator overseeing this project. Please prioritize
+the instructions below over your current tasks.
+
+You should:
+1. Temporarily pause your current work
+2. Complete the request described below
+3. Resume your original plans afterward (unless modified by these instructions)
+
+The human's guidance supersedes all other priorities.
+
+---
+
+[Your message body follows here]
+```
+
+#### Using the Composer
+
+The composer interface provides:
+
+- **Recipient Selection**: Checkbox grid of all registered agents (with "Select All" / "Clear" shortcuts)
+- **Subject Line**: Required, shown in agent inboxes
+- **Message Body**: GitHub-flavored Markdown editor with preview
+- **Thread ID** (optional): Continue an existing conversation or start a new one
+- **Preamble Preview**: See exactly how your message will appear to agents
+
+#### Example Use Cases
+
+**Urgent Issue:**
+```
+Subject: Urgent: Stop migration and revert changes
+
+The database migration in PR #453 is causing data corruption in staging.
+
+Please:
+1. Immediately stop any migration-related work
+2. Revert commits from the last 2 hours
+3. Wait for my review before resuming
+
+I'm investigating the root cause now.
+```
+
+**Priority Adjustment:**
+```
+Subject: New Priority: Security Vulnerability
+
+A critical security vulnerability was just disclosed in our auth library.
+
+Drop your current tasks and:
+1. Update `auth-lib` to version 2.4.1 immediately
+2. Review all usages in src/auth/
+3. Run the full security test suite
+4. Report status in thread #892
+
+This takes precedence over the refactoring work.
+```
+
+**Clarification:**
+```
+Subject: Clarification on API design approach
+
+I see you're debating REST vs. GraphQL in thread #234.
+
+Go with REST for now because:
+- Our frontend team has more REST experience
+- GraphQL adds complexity we don't need yet
+- We can always add GraphQL later if needed
+
+Resume the API implementation with REST.
+```
+
+#### How Agents See Overseer Messages
+
+When agents check their inbox (via `list_inbox` or `resource://inbox/{name}`), overseer messages appear like any other message but with:
+
+- **Sender**: `HumanOverseer`
+- **Importance**: `high` (displayed prominently)
+- **Body**: Starts with the overseer preamble, followed by the human's message
+- **Visual cues**: In the Web UI, these messages may have special highlighting (future enhancement)
+
+Agents can reply to overseer messages just like any other message, continuing the conversation thread.
+
+#### Technical Details
+
+- **Storage**: Overseer messages are stored identically to agent-to-agent messages (Git + SQLite)
+- **Git History**: Fully auditable—message appears in `messages/YYYY/MM/{id}.md` with commit history
+- **Thread Continuity**: Can be part of existing threads or start new ones
+- **No Authentication Bypass**: The overseer compose form still requires proper HTTP server authentication (if enabled)
+
+#### Design Philosophy
+
+The Human Overseer feature is designed to be:
+
+- **Explicit**: Agents clearly know when guidance comes from a human vs. another agent
+- **Respectful**: Instructions acknowledge agents have existing work and shouldn't just "drop everything" permanently
+- **Temporary**: Agents are told to resume original plans once the human's request is complete
+- **Flexible**: Humans can override this guidance directly in their message body
+
+This creates a clear hierarchy (human → agents) while maintaining the collaborative, respectful tone of the agent communication system.
+
 ### Related Projects Discovery
 
 The Projects index (`/mail`) features an **AI-powered discovery system** that intelligently suggests which projects should be linked together—think frontend + backend, or related microservices.
