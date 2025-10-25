@@ -405,6 +405,8 @@ sequenceDiagram
 
 | Tool | Purpose |
 | :-- | :-- |
+| `health_check()` | Return basic readiness information for the Agent Mail server |
+| `ensure_project(human_key)` | Idempotently create or ensure a project exists for the given human key |
 | `register_agent(...)` | Register a new agent identity and write `profile.json` in Git |
 | `whois(project_key, agent_name)` | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity(project_key, program, model, name_hint?, task_description?, attachments_policy?)` | Always creates a new unique agent and writes `profile.json` |
@@ -464,9 +466,15 @@ Important: You can also create reciprocal links or set `open` policy for trusted
 | Tool | Purpose |
 | :-- | :-- |
 | `fetch_inbox(...)` | Pull recent messages for an agent |
+| `mark_message_read(project_key, agent_name, message_id)` | Mark a specific message as read for the given agent |
 | `acknowledge_message(...)` | Mark a message as acknowledged by agent |
+| `macro_start_session(...)` | Orchestrates ensure→register→optional claim→inbox fetch for session startup |
+| `macro_prepare_thread(...)` | Bundles registration, thread summary, and inbox context |
+| `macro_claim_cycle(...)` | Claim + optionally release surfaces around a focused edit block |
+| `macro_contact_handshake(...)` | Automates contact request/approval and optional welcome ping |
 | `claim_paths(...)` | Request advisory leases on files/globs |
 | `release_claims(...)` | Release existing leases |
+| `renew_claims(...)` | Extend TTL of existing claims without reissuing them |
 | `search_messages(...)` | FTS5 search over subject/body |
 | `summarize_thread(...)` | Extract summary/action items across a thread |
 | `summarize_threads(...)` | Digest across multiple threads (optional LLM refinement) |
@@ -595,7 +603,7 @@ Common variables you may set:
 | `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
 | `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
-| `LOG_LEVEL` | `info` | Future: server log level |
+| `LOG_LEVEL` | `INFO` | Server log level |
 | `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
 | `HTTP_CORS_ORIGINS` |  | CSV of allowed origins (e.g., `https://app.example.com,https://ops.example.com`) |
 | `HTTP_CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials on CORS |
@@ -967,9 +975,14 @@ if __name__ == "__main__":
 | `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
 | `ensure_project` | `ensure_project(human_key: str)` | `{id, slug, human_key, created_at}` | Idempotently creates/ensures project |
 | `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
+| `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
 | `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | Message dict | Writes canonical + inbox/outbox, converts images |
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | Message dict | Preserves/creates thread, inherits flags |
+| `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int)` | Contact link dict | Request permission to message another agent |
+| `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int)` | Contact link dict | Approve or deny a contact request |
+| `list_contacts` | `list_contacts(project_key: str, agent_name: str)` | `list[dict]` | List contact links for an agent |
+| `set_contact_policy` | `set_contact_policy(project_key: str, agent_name: str, policy: str)` | Agent dict | Set policy: `open`, `auto`, `contacts_only`, `block_all` |
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |

@@ -779,11 +779,13 @@ async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> st
 
                             # Get FIRST commit that created this file (oldest, not most recent)
                             # iter_commits returns newest first, so we need to get all and take the last
-                            commits_list = list(archive.repo.iter_commits(paths=str(rel_path)))
+                            # Limit to 1000 commits to prevent performance issues
+                            commits_list = list(archive.repo.iter_commits(paths=[str(rel_path)], max_count=1000))
                             if commits_list:
                                 # The last commit in the list is the oldest (first commit)
                                 return commits_list[-1].hexsha
-                        except (ValueError, StopIteration):
+                        except (ValueError, StopIteration, FileNotFoundError, OSError):
+                            # File may have been deleted or moved during iteration
                             continue
 
         return None

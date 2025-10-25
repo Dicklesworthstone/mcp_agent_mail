@@ -154,6 +154,19 @@
     <!-- Hotkeys.js for keyboard shortcuts -->
     <script src="https://unpkg.com/hotkeys-js@3.13.7/dist/hotkeys.min.js"></script>
 
+    <!-- Particles.js for background effects -->
+    <script src="https://cdn.jsdelivr.net/npm/particles.js@2.0.0/particles.min.js"></script>
+
+    <!-- CountUp.js for number animations -->
+    <script src="https://cdn.jsdelivr.net/npm/countup@1.8.2/dist/countUp.min.js"></script>
+
+    <!-- Mo.js for micro-animations -->
+    <script src="https://cdn.jsdelivr.net/npm/@mojs/core@1.4.1/build/mo.min.js"></script>
+
+    <!-- Splitting.js for advanced text animations -->
+    <script src="https://unpkg.com/splitting@1.0.6/dist/splitting.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/splitting@1.0.6/dist/splitting.css" />
+
     <!-- Mermaid.js for git graphs and diagrams -->
     <script type="module">
       import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
@@ -636,12 +649,295 @@
         );
         background-size: 200% 100%;
       }
+
+      /* Enhanced micro-interactions */
+      .btn-magnetic {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .btn-magnetic:hover {
+        transform: translateY(-2px) scale(1.02);
+        box-shadow: 0 12px 24px -10px currentColor;
+      }
+
+      .btn-magnetic:active {
+        transform: translateY(0) scale(0.98);
+      }
+
+      /* Smooth elevation on hover */
+      .elevate-on-hover {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .elevate-on-hover:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.15);
+      }
+
+      /* Notification badge pulse */
+      @keyframes badge-pulse {
+        0%, 100% {
+          transform: scale(1);
+          opacity: 1;
+        }
+        50% {
+          transform: scale(1.1);
+          opacity: 0.9;
+        }
+      }
+
+      .notification-badge {
+        animation: badge-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
+
+      /* Spotlight search effect */
+      .search-spotlight {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .search-spotlight::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+        transition: left 0.5s;
+      }
+
+      .search-spotlight:focus-within::before {
+        left: 100%;
+      }
+
+      /* Premium card shimmer */
+      @keyframes card-shimmer {
+        0% {
+          background-position: -1000px 0;
+        }
+        100% {
+          background-position: 1000px 0;
+        }
+      }
+
+      .card-shimmer {
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.03), transparent);
+        background-size: 1000px 100%;
+        animation: card-shimmer 3s infinite;
+      }
+
+      .dark .card-shimmer {
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.02), transparent);
+        background-size: 1000px 100%;
+      }
+
+      /* Success checkmark animation */
+      @keyframes checkmark-draw {
+        0% {
+          stroke-dashoffset: 100;
+        }
+        100% {
+          stroke-dashoffset: 0;
+        }
+      }
+
+      .checkmark-draw {
+        stroke-dasharray: 100;
+        stroke-dashoffset: 100;
+        animation: checkmark-draw 0.6s ease-out forwards;
+      }
+
+      /* Loading dots */
+      @keyframes loading-dots {
+        0%, 20% {
+          opacity: 0.3;
+          transform: scale(0.8);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.1);
+        }
+        100% {
+          opacity: 0.3;
+          transform: scale(0.8);
+        }
+      }
+
+      .loading-dot {
+        animation: loading-dots 1.4s infinite;
+      }
+
+      .loading-dot:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .loading-dot:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      /* Tooltip arrow animations */
+      [data-tippy-root] {
+        transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      /* Enhanced focus states for accessibility */
+      *:focus-visible {
+        outline: 3px solid #6366f1;
+        outline-offset: 3px;
+        border-radius: 6px;
+      }
+
+      .dark *:focus-visible {
+        outline-color: #818cf8;
+      }
+
+      /* Skip to content link for accessibility */
+      .skip-to-content {
+        position: absolute;
+        top: -40px;
+        left: 0;
+        background: #6366f1;
+        color: white;
+        padding: 8px;
+        text-decoration: none;
+        z-index: 1000;
+      }
+
+      .skip-to-content:focus {
+        top: 0;
+      }
+
+      /* Progress bar animations */
+      @keyframes progress-indeterminate {
+        0% {
+          left: -35%;
+          right: 100%;
+        }
+        60% {
+          left: 100%;
+          right: -90%;
+        }
+        100% {
+          left: 100%;
+          right: -90%;
+        }
+      }
+
+      .progress-indeterminate {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .progress-indeterminate::before {
+        content: '';
+        position: absolute;
+        background: currentColor;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        will-change: left, right;
+        animation: progress-indeterminate 2.1s cubic-bezier(0.65, 0.815, 0.735, 0.395) infinite;
+      }
+
+      /* Enhanced badge styles */
+      .badge-premium {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .badge-premium::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+        animation: badge-shimmer 3s infinite;
+      }
+
+      @keyframes badge-shimmer {
+        0% {
+          left: -100%;
+        }
+        100% {
+          left: 100%;
+        }
+      }
+
+      /* Particle background container */
+      #particles-background {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: -1;
+        opacity: 0.3;
+        pointer-events: none;
+      }
+
+      /* Smooth page transitions */
+      @keyframes page-fade-in {
+        from {
+          opacity: 0;
+          transform: translateY(20px) scale(0.98);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
+      .page-enter {
+        animation: page-fade-in 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      /* Interactive element glow */
+      .interactive-glow {
+        position: relative;
+        transition: all 0.3s ease;
+      }
+
+      .interactive-glow::after {
+        content: '';
+        position: absolute;
+        inset: -2px;
+        background: linear-gradient(45deg, #6366f1, #8b5cf6, #ec4899, #6366f1);
+        background-size: 300% 300%;
+        border-radius: inherit;
+        opacity: 0;
+        z-index: -1;
+        animation: gradient-rotate 3s ease infinite;
+        filter: blur(8px);
+        transition: opacity 0.3s;
+      }
+
+      .interactive-glow:hover::after {
+        opacity: 0.6;
+      }
+
+      @keyframes gradient-rotate {
+        0%, 100% {
+          background-position: 0% 50%;
+        }
+        50% {
+          background-position: 100% 50%;
+        }
+      }
     </style>
 
     {% block head %}{% endblock %}
   </head>
 
   <body class="bg-gradient-to-br from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
+    <!-- Accessibility: Skip to main content -->
+    <a href="#main-content" class="skip-to-content">Skip to main content</a>
+
+    <!-- Subtle particle background (optional, can be disabled) -->
+    <div id="particles-background" style="display: none;"></div>
+
     <!-- Command Palette (Cmd/Ctrl+K) -->
     <div x-data="commandPalette()"
          @keydown.window.prevent.meta.k="toggle()"
