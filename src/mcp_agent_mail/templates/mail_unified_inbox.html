@@ -574,17 +574,20 @@ function unifiedInboxManager() {
         // Cmd/Ctrl + K for search
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
           e.preventDefault();
-          document.getElementById('unified-search').focus();
+          const searchEl = document.getElementById('unified-search');
+          if (searchEl) searchEl.focus();
         }
 
         // / for search
-        if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        const activeTag = document.activeElement?.tagName;
+        if (e.key === '/' && activeTag && !['INPUT', 'TEXTAREA'].includes(activeTag)) {
           e.preventDefault();
-          document.getElementById('unified-search').focus();
+          const searchEl = document.getElementById('unified-search');
+          if (searchEl) searchEl.focus();
         }
 
         // j/k navigation
-        if (this.viewMode === 'split' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+        if (this.viewMode === 'split' && activeTag && !['INPUT', 'TEXTAREA'].includes(activeTag)) {
           if (e.key === 'j') {
             e.preventDefault();
             this.selectNextMessage();
@@ -602,6 +605,13 @@ function unifiedInboxManager() {
 
       document.addEventListener('keydown', this._keydownHandler);
 
+      // Register cleanup for Alpine.js lifecycle (prevents memory leak)
+      this.$cleanup(() => {
+        if (this._keydownHandler) {
+          document.removeEventListener('keydown', this._keydownHandler);
+        }
+      });
+
       // Update keyboard shortcut display based on platform
       const shortcutKey = document.querySelector('.shortcut-key');
       if (shortcutKey) {
@@ -616,13 +626,6 @@ function unifiedInboxManager() {
       // Auto-select first message if in split view
       if (this.viewMode === 'split' && this.filteredMessages.length > 0) {
         this.selectMessage(this.filteredMessages[0]);
-      }
-    },
-
-    destroy() {
-      // Cleanup event listeners to prevent memory leaks
-      if (this._keydownHandler) {
-        document.removeEventListener('keydown', this._keydownHandler);
       }
     },
 
@@ -914,7 +917,9 @@ function unifiedInboxManager() {
     // Helpers
     copyMessageLink(msg) {
       if (!msg) return;
-      const url = `${window.location.origin}/mail/${msg.project_slug}/message/${msg.id}`;
+      const projectSlug = encodeURIComponent(msg.project_slug || '');
+      const messageId = encodeURIComponent(String(msg.id));
+      const url = `${window.location.origin}/mail/${projectSlug}/message/${messageId}`;
       if (typeof window.copyToClipboard === 'function') {
         window.copyToClipboard(url, 'Message link copied!');
       } else if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -941,7 +946,10 @@ function unifiedInboxManager() {
         'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',
         'bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300'
       ];
-      const hash = projectName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+      // Handle null/undefined/non-string gracefully
+      const name = String(projectName || '');
+      if (name.length === 0) return colors[0]; // Default to first color
+      const hash = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
       return colors[hash % colors.length];
     }
   };
