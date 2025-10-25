@@ -616,7 +616,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 
 ```json
 {"method":"tools/call","params":{"name":"check_my_messages","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","include_bodies":true}}}
-{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","from_agent":"BlueLake","reply_to_message_id":"msg_20251023_7b3d...","body_md":"Questions: ..."}}}
+{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","sender_name":"BlueLake","reply_to_message_id":"msg_20251023_7b3d...","body_md":"Questions: ..."}}}
 ```
 
 5. Summarize the thread for quick context:
@@ -830,7 +830,7 @@ if __name__ == "__main__":
 
 ## Troubleshooting
 
-- "from_agent not registered"
+- "sender_name not registered"
   - Create the agent first with `create_agent`, or check the `project_key` you’re using matches the sender’s project
 - Pre-commit hook blocks commits
   - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive claims; inspect `.git/hooks/pre-commit`
