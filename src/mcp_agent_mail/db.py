@@ -95,6 +95,39 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     is_sqlite = "sqlite" in settings.url.lower()
 
     if is_sqlite:
+        # Register datetime adapters ONCE globally for Python 3.12+ compatibility
+        # These are module-level registrations, not per-connection
+        import datetime as dt_module
+        import sqlite3
+
+        def adapt_datetime_iso(val):
+            """Adapt datetime.datetime to ISO 8601 date."""
+            return val.isoformat()
+
+        def convert_datetime(val):
+            """Convert ISO 8601 datetime to datetime.datetime object.
+
+            Returns None for any conversion errors (invalid format, wrong type,
+            corrupted data, etc.) to allow graceful degradation rather than crashing.
+            """
+            try:
+                # Handle both bytes and str (SQLite can return either)
+                if isinstance(val, bytes):
+                    val = val.decode('utf-8')
+                return dt_module.datetime.fromisoformat(val)
+            except (ValueError, AttributeError, TypeError, UnicodeDecodeError, OverflowError):
+                # Return None for any conversion failure:
+                # - ValueError: invalid ISO format string
+                # - TypeError: unexpected type (shouldn't happen but defensive)
+                # - AttributeError: val has no expected attributes (defensive)
+                # - UnicodeDecodeError: corrupted bytes (extreme edge case)
+                # - OverflowError: datetime value out of valid range (year 9999999+)
+                return None
+
+        # Register adapters globally (safe to call multiple times - last registration wins)
+        sqlite3.register_adapter(dt_module.datetime, adapt_datetime_iso)
+        sqlite3.register_converter("timestamp", convert_datetime)
+
         connect_args = {
             "timeout": 30.0,  # Wait up to 30 seconds for lock (default is 5)
             "check_same_thread": False,  # Required for async SQLite

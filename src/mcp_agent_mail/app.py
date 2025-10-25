@@ -8,6 +8,7 @@ import functools
 import inspect
 import json
 import logging
+import time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
@@ -36,6 +37,13 @@ from .storage import (
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify
+
+# Rich logging for verbose tool call tracing
+try:
+    from . import rich_logger
+    RICH_LOGGER_AVAILABLE = True
+except ImportError:
+    RICH_LOGGER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +157,8 @@ def _instrument_tool(
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            start_time = time.perf_counter()
+
             metrics = TOOL_METRICS[tool_name]
             metrics["calls"] += 1
             bound = _bind_arguments(signature, args, kwargs)
@@ -158,33 +168,84 @@ def _instrument_tool(
                 _enforce_capabilities(ctx, required_caps, tool_name)
             project_value = _extract_argument(bound, project_arg)
             agent_value = _extract_argument(bound, agent_arg)
+
+            # Rich logging: Log tool call start if enabled
+            settings = get_settings()
+            log_enabled = RICH_LOGGER_AVAILABLE and settings.tools_log_enabled
+            log_ctx = None  # Initialize to prevent undefined variable errors
+
+            if log_enabled:
+                try:
+                    # Create a clean kwargs dict without the context
+                    clean_kwargs = {k: v for k, v in bound.arguments.items() if k != "ctx"}
+                    log_ctx = rich_logger.ToolCallContext(
+                        tool_name=tool_name,
+                        args=[],
+                        kwargs=clean_kwargs,
+                        project=project_value,
+                        agent=agent_value,
+                        start_time=start_time,
+                    )
+                    rich_logger.log_tool_call_start(log_ctx)
+                except Exception as log_exc:
+                    # Logging should never break functionality - log the logging error and continue
+                    logger.warning(
+                        "rich_logging.start_failed",
+                        extra={"tool": tool_name, "error": str(log_exc)},
+                    )
+                    log_ctx = None  # Disable logging for this call if start failed
+
+            result = None
+            error = None
             try:
                 result = await func(*args, **kwargs)
             except ToolExecutionError as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
+                error = exc
                 raise
             except NoResultFound as exc:
                 # Handle agent/project not found errors with helpful messages
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
-                raise ToolExecutionError(
+                wrapped_exc = ToolExecutionError(
                     "NOT_FOUND",
                     str(exc),  # Use the original helpful error message
                     recoverable=True,
                     data={"tool": tool_name},
-                ) from exc
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
             except Exception as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
-                raise ToolExecutionError(
+                wrapped_exc = ToolExecutionError(
                     "UNHANDLED_EXCEPTION",
                     "Server encountered an unexpected error while executing tool.",
                     recoverable=False,
                     data={"tool": tool_name, "original_error": type(exc).__name__},
-                ) from exc
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
             finally:
                 _record_recent(tool_name, project_value, agent_value)
+
+                # Rich logging: Log tool call end if enabled and start succeeded
+                if log_enabled and log_ctx is not None:
+                    try:
+                        end_time = time.perf_counter()
+                        log_ctx.end_time = end_time
+                        log_ctx.result = result
+                        log_ctx.error = error
+                        log_ctx.success = error is None
+                        rich_logger.log_tool_call_end(log_ctx)
+                    except Exception as log_exc:
+                        # Ensure logging errors in finally block don't suppress original exceptions
+                        logger.warning(
+                            "rich_logging.end_failed",
+                            extra={"tool": tool_name, "error": str(log_exc)},
+                        )
+
             return result
 
         # Preserve annotations so FastMCP can infer output schema
@@ -1811,47 +1872,103 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
 
         async with get_session() as sx:
-            # Preload local agent names
+            # Preload local agent names (normalized -> canonical stored name)
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
-            local_names = {row[0] for row in existing.fetchall()}
+            local_lookup: dict[str, str] = {}
+            for row in existing.fetchall():
+                canonical_name = (row[0] or "").strip()
+                if not canonical_name:
+                    continue
+                sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
+                for key in {canonical_name.lower(), sanitized_canonical.lower()}:
+                    local_lookup.setdefault(key, canonical_name)
+
+            sender_candidate_keys = {
+                key.lower()
+                for key in (
+                    (sender.name or "").strip(),
+                    sanitize_agent_name(sender.name or "") or "",
+                )
+                if key
+            }
+
+            def _normalize(value: str) -> tuple[str, set[str], Optional[str]]:
+                """Trim input, derive comparable lowercase keys, and canonical lookup token."""
+                trimmed = (value or "").strip()
+                sanitized = sanitize_agent_name(trimmed)
+                keys: set[str] = set()
+                if trimmed:
+                    keys.add(trimmed.lower())
+                if sanitized:
+                    keys.add(sanitized.lower())
+                canonical = sanitized or (trimmed if trimmed else None)
+                return trimmed or value, keys, canonical
+
+            unknown_local: set[str] = set()
+            unknown_external: dict[str, list[str]] = defaultdict(list)
 
             class _ContactBlocked(Exception):
                 pass
 
             async def _route(name_list: list[str], kind: str) -> None:
-                for nm in name_list:
-                    # Explicit external addressing: project:<slug-or-key>#<AgentName>
+                for raw in name_list:
+                    candidate = raw or ""
+                    explicit_override = False
                     target_project_override: Project | None = None
-                    target_name_override: str | None = None
-                    if nm.startswith("project:") and "#" in nm:
+                    target_project_label: str | None = None
+                    agent_fragment = candidate
+
+                    # Explicit external addressing: project:<slug-or-key>#<AgentName>
+                    if candidate.startswith("project:") and "#" in candidate:
+                        explicit_override = True
                         try:
-                            _, rest = nm.split(":", 1)
+                            _, rest = candidate.split(":", 1)
                             slug_part, agent_part = rest.split("#", 1)
-                            target_project_override = await _get_project_by_identifier(slug_part)
-                            target_name_override = agent_part.strip()
+                            target_project_override = await _get_project_by_identifier(slug_part.strip())
+                            target_project_label = target_project_override.human_key or target_project_override.slug
+                            agent_fragment = agent_part
                         except Exception:
-                            target_project_override = None
-                            target_name_override = None
-                    # Always allow self-send regardless of policy
-                    if nm == sender.name:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
+                            label = slug_part.strip() if "slug_part" in locals() and slug_part.strip() else "(invalid project)"
+                            unknown_external[label].append(candidate.strip() or candidate)
+                            continue
+
+                    display_value, key_candidates, canonical = _normalize(agent_fragment)
+                    if not key_candidates or not canonical:
+                        if explicit_override:
+                            label = target_project_label or "(unknown project)"
+                            unknown_external[label].append(candidate.strip() or candidate)
                         else:
-                            local_bcc.append(nm)
+                            unknown_local.add(candidate.strip() or candidate)
                         continue
-                    if nm in local_names:
+
+                    # Always allow self-send (local context only)
+                    if not explicit_override and sender_candidate_keys.intersection(key_candidates):
                         if kind == "to":
-                            local_to.append(nm)
+                            local_to.append(sender.name)
                         elif kind == "cc":
-                            local_cc.append(nm)
+                            local_cc.append(sender.name)
                         else:
-                            local_bcc.append(nm)
+                            local_bcc.append(sender.name)
                         continue
-                    # Attempt approved cross-project mapping
+
+                    if not explicit_override:
+                        resolved_local = None
+                        for key in key_candidates:
+                            resolved_local = local_lookup.get(key)
+                            if resolved_local:
+                                break
+                        if resolved_local:
+                            if kind == "to":
+                                local_to.append(resolved_local)
+                            elif kind == "cc":
+                                local_cc.append(resolved_local)
+                            else:
+                                local_bcc.append(resolved_local)
+                            continue
+
+                    lookup_value = canonical.lower()
                     rows = None
-                    if target_project_override is not None and target_name_override:
+                    if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
                             .join(Project, Project.id == AgentLink.b_project_id)
@@ -1861,7 +1978,7 @@ def build_mcp_server() -> FastMCP:
                                 AgentLink.a_agent_id == sender.id,
                                 AgentLink.status == "approved",
                                 Project.id == target_project_override.id,
-                                Agent.name == target_name_override,
+                                func.lower(Agent.name) == lookup_value,
                             )
                             .limit(1)
                         )
@@ -1874,28 +1991,30 @@ def build_mcp_server() -> FastMCP:
                                 AgentLink.a_project_id == project.id,
                                 AgentLink.a_agent_id == sender.id,
                                 AgentLink.status == "approved",
-                                Agent.name == nm,
+                                func.lower(Agent.name) == lookup_value,
                             )
                             .limit(1)
                         )
-                    rec = rows.first()
+
+                    rec = rows.first() if rows else None
                     if rec:
                         _link, target_project, target_agent = rec
-                        # Check recipient policy in target project
                         pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
                         if pol == "block_all":
                             await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
                             raise _ContactBlocked()
-                        bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
+                        bucket = external.setdefault(
+                            target_project.id or 0,
+                            {"project": target_project, "to": [], "cc": [], "bcc": []},
+                        )
                         bucket[kind].append(target_agent.name)
+                        continue
+
+                    if explicit_override:
+                        label = target_project_label or "(unknown project)"
+                        unknown_external[label].append(display_value or candidate.strip() or candidate)
                     else:
-                        # stays local (will 404 later if unknown)
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
-                        else:
-                            local_bcc.append(nm)
+                        unknown_local.add(display_value or candidate.strip() or candidate)
 
             try:
                 await _route(to, "to")
@@ -1903,6 +2022,42 @@ def build_mcp_server() -> FastMCP:
                 await _route(bcc or [], "bcc")
             except _ContactBlocked:
                 return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+
+            if unknown_local or unknown_external:
+                parts: list[str] = []
+                data_payload: dict[str, Any] = {}
+                if unknown_local:
+                    missing_local = sorted({name for name in unknown_local if name})
+                    parts.append(
+                        f"local recipients {', '.join(missing_local)} are not registered in project '{project.human_key}'"
+                    )
+                    data_payload["unknown_local"] = missing_local
+                if unknown_external:
+                    formatted_external = {
+                        label: sorted({name for name in names if name})
+                        for label, names in unknown_external.items()
+                    }
+                    ext_parts = [
+                        f"{', '.join(names)} @ {label}"
+                        for label, names in sorted(formatted_external.items())
+                        if names
+                    ]
+                    if ext_parts:
+                        parts.append(
+                            "external recipients missing approved contact links: " + "; ".join(ext_parts)
+                        )
+                    data_payload["unknown_external"] = formatted_external
+                hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
+                parts.append(hint)
+                message = "Unable to send message — " + "; ".join(parts)
+                data_payload["hint"] = hint
+                await ctx.error(f"RECIPIENT_NOT_FOUND: {message}")
+                raise ToolExecutionError(
+                    "RECIPIENT_NOT_FOUND",
+                    message,
+                    recoverable=True,
+                    data=data_payload,
+                )
 
         deliveries: list[dict[str, Any]] = []
         # Local deliver if any
@@ -2678,9 +2833,9 @@ def build_mcp_server() -> FastMCP:
 
         claims_result: Optional[dict[str, Any]] = None
         if claim_paths:
-            # Use FunctionTool.run to invoke the registered tool; avoid param shadowing
+            # Use MCP tool registry to avoid param shadowing (claim_paths param shadows claim_paths function)
             from fastmcp.tools.tool import FunctionTool
-            _claim_tool = cast(FunctionTool, cast(Any, globals().get("claim_paths")))
+            _claim_tool = cast(FunctionTool, await mcp.get_tool("claim_paths"))
             _claim_run = await _claim_tool.run({
                 "project_key": project.human_key,
                 "agent_name": agent.name,

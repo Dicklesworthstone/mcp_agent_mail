@@ -177,64 +177,67 @@
             <a :href="`/mail/{{ project.slug }}/message/${item.id}`"
                class="flex-1 min-w-0 group">
 
-            <!-- Message Header -->
-            <div class="flex items-start justify-between mb-3">
-              <div class="flex-1 min-w-0">
-                <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1 mb-2">
-                  {{ it.subject }}
-                </h3>
+              <!-- Message Header -->
+              <div class="flex items-start justify-between mb-3">
+                <div class="flex-1 min-w-0">
+                  <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1 mb-2"
+                      x-text="item.subject"></h3>
 
-                <!-- Message Meta -->
-                <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 flex-wrap">
-                  <div class="flex items-center gap-1.5">
-                    <i data-lucide="user" class="w-4 h-4"></i>
-                    <span class="font-medium">{{ it.sender }}</span>
-                  </div>
-                  <div class="flex items-center gap-1.5">
-                    <i data-lucide="calendar" class="w-4 h-4"></i>
-                    <span>{{ it.created }}</span>
-                  </div>
-                  {% if it.thread_id %}
+                  <!-- Message Meta -->
+                  <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 flex-wrap">
                     <div class="flex items-center gap-1.5">
-                      <i data-lucide="message-circle" class="w-4 h-4"></i>
-                      <span class="font-mono text-xs">{{ it.thread_id }}</span>
+                      <i data-lucide="user" class="w-4 h-4"></i>
+                      <span class="font-medium" x-text="item.sender"></span>
                     </div>
-                  {% endif %}
+                    <div class="flex items-center gap-1.5">
+                      <i data-lucide="calendar" class="w-4 h-4"></i>
+                      <span x-text="item.created"></span>
+                    </div>
+                    <template x-if="item.thread_id">
+                      <div class="flex items-center gap-1.5">
+                        <i data-lucide="message-circle" class="w-4 h-4"></i>
+                        <span class="font-mono text-xs" x-text="item.thread_id"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Badges and Status -->
+                <div class="flex items-center gap-2 ml-4">
+                  <!-- Importance Badge -->
+                  <template x-if="item.importance === 'urgent'">
+                    <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+                      <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
+                      Urgent
+                    </span>
+                  </template>
+                  <template x-if="item.importance === 'high'">
+                    <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full flex items-center gap-1.5">
+                      <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
+                      High
+                    </span>
+                  </template>
+                  <template x-if="item.importance === 'low'">
+                    <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-medium rounded-full">
+                      Low
+                    </span>
+                  </template>
+                  <template x-if="!item.importance || item.importance === 'normal'">
+                    <span class="px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                      Normal
+                    </span>
+                  </template>
+
+                  <!-- Arrow Icon -->
+                  <div class="text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all duration-300">
+                    <i data-lucide="arrow-right" class="w-5 h-5"></i>
+                  </div>
                 </div>
               </div>
-
-              <!-- Badges and Status -->
-              <div class="flex items-center gap-2 ml-4">
-                <!-- Importance Badge -->
-                {% if it.importance == 'urgent' %}
-                  <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
-                    <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
-                    Urgent
-                  </span>
-                {% elif it.importance == 'high' %}
-                  <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full flex items-center gap-1.5">
-                    <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
-                    High
-                  </span>
-                {% elif it.importance == 'low' %}
-                  <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-medium rounded-full">
-                    Low
-                  </span>
-                {% else %}
-                  <span class="px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
-                    Normal
-                  </span>
-                {% endif %}
-
-                <!-- Arrow Icon -->
-                <div class="text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all duration-300">
-                  <i data-lucide="arrow-right" class="w-5 h-5"></i>
-                </div>
-              </div>
-            </div>
+            </a>
           </div>
-        </a>
-      {% endfor %}
+        </div>
+      </template>
     </div>
 
     <!-- Pagination -->
@@ -325,10 +328,11 @@
         // Apply search
         if (this.searchQuery) {
           const query = this.searchQuery.toLowerCase();
-          filtered = filtered.filter(item =>
-            item.subject.toLowerCase().includes(query) ||
-            (item.sender && item.sender.toLowerCase().includes(query))
-          );
+          filtered = filtered.filter(item => {
+            const subject = (item.subject || '').toLowerCase();
+            const sender = (item.sender || '').toLowerCase();
+            return subject.includes(query) || sender.includes(query);
+          });
         }
 
         // Apply filter
@@ -347,10 +351,18 @@
         // Apply sort
         switch (this.sortBy) {
           case 'newest':
-            filtered.sort((a, b) => new Date(b.created) - new Date(a.created));
+            filtered.sort((a, b) => {
+              const dateA = a.created ? new Date(a.created) : new Date(0);
+              const dateB = b.created ? new Date(b.created) : new Date(0);
+              return dateB - dateA;
+            });
             break;
           case 'oldest':
-            filtered.sort((a, b) => new Date(a.created) - new Date(b.created));
+            filtered.sort((a, b) => {
+              const dateA = a.created ? new Date(a.created) : new Date(0);
+              const dateB = b.created ? new Date(b.created) : new Date(0);
+              return dateA - dateB;
+            });
             break;
           case 'sender':
             filtered.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
@@ -358,6 +370,13 @@
         }
 
         this.filteredItems = filtered;
+
+        // Re-render Lucide icons after filtering
+        this.$nextTick(() => {
+          if (typeof lucide !== 'undefined') {
+            lucide.createIcons();
+          }
+        });
       },
 
       // Selection

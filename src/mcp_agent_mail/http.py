@@ -73,6 +73,12 @@ def _configure_logging(settings: Settings) -> None:
         cache_logger_on_first_use=True,
     )
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+
+    # Suppress verbose MCP library logging for stateless HTTP sessions
+    # "Terminating session: None" is routine for stateless mode and just noise
+    logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
+    logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
+
     # mark configured
     _LOGGING_CONFIGURED = True
 

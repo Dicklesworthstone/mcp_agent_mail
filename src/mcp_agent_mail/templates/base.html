@@ -141,6 +141,67 @@
     <style>
       [x-cloak] { display: none !important; }
 
+      /* Tutorial Animations */
+      @keyframes shimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(100%); }
+      }
+
+      @keyframes gradient-x {
+        0%, 100% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+      }
+
+      @keyframes wave {
+        0%, 100% { transform: rotate(0deg); }
+        25% { transform: rotate(20deg); }
+        75% { transform: rotate(-20deg); }
+      }
+
+      @keyframes bounce-slow {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-10px); }
+      }
+
+      .animate-shimmer {
+        animation: shimmer 2s infinite;
+      }
+
+      .animate-gradient-x {
+        background-size: 200% 200%;
+        animation: gradient-x 3s ease infinite;
+      }
+
+      .animate-wave {
+        display: inline-block;
+        animation: wave 1s ease-in-out 2;
+      }
+
+      .animate-bounce-slow {
+        animation: bounce-slow 2s ease-in-out infinite;
+      }
+
+      /* Checklist checkbox animation */
+      @keyframes check-pop {
+        0% { transform: scale(0.8); }
+        50% { transform: scale(1.2); }
+        100% { transform: scale(1); }
+      }
+
+      .checkbox-checked {
+        animation: check-pop 0.3s ease-out;
+      }
+
+      /* Spotlight pulse */
+      @keyframes spotlight-pulse {
+        0%, 100% { opacity: 0.9; }
+        50% { opacity: 1; }
+      }
+
+      .tutorial-spotlight {
+        animation: spotlight-pulse 2s ease-in-out infinite;
+      }
+
       /* Smooth transitions - Only apply to interactive elements, let Tailwind utilities handle the rest */
       button, a, input[type="submit"], input[type="button"] {
         transition-property: background-color, border-color, color, fill, stroke, opacity, transform, box-shadow;
@@ -609,12 +670,30 @@
          x-cloak
          class="fixed inset-0 z-[200] flex items-center justify-center p-4"
          style="display: none;">
-      <!-- Backdrop with blur -->
+      <!-- Dynamic Backdrop with spotlight -->
       <div x-show="isActive"
            x-transition:enter="transition ease-out duration-300"
            x-transition:enter-start="opacity-0"
            x-transition:enter-end="opacity-100"
-           class="absolute inset-0 bg-slate-900/80 backdrop-blur-md"></div>
+           class="absolute inset-0 bg-slate-900/80 backdrop-blur-md tutorial-backdrop"></div>
+
+      <!-- Spotlight overlay (for highlighting elements) -->
+      <div x-show="highlightElement"
+           x-transition
+           class="absolute inset-0 pointer-events-none"
+           style="
+             background: radial-gradient(
+               circle at var(--spotlight-x, 50%) var(--spotlight-y, 50%),
+               transparent 0%,
+               transparent var(--spotlight-size, 150px),
+               rgba(0, 0, 0, 0.9) calc(var(--spotlight-size, 150px) + 100px)
+             );
+           "
+           :style="`
+             --spotlight-x: ${spotlightX}px;
+             --spotlight-y: ${spotlightY}px;
+             --spotlight-size: ${spotlightSize}px;
+           `"></div>
 
       <!-- Tutorial Panel -->
       <div x-show="isActive"
@@ -623,10 +702,20 @@
            x-transition:enter-end="opacity-100 transform scale-100 translate-y-0"
            class="relative w-full max-w-3xl glass rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden max-h-[90vh] flex flex-col">
 
-        <!-- Progress Bar -->
-        <div class="h-1.5 bg-slate-200 dark:bg-slate-700">
-          <div class="h-full bg-gradient-to-r from-primary-500 via-purple-500 to-pink-500 transition-all duration-500 ease-out"
-               :style="`width: ${((currentStep + 1) / steps.length) * 100}%`"></div>
+        <!-- Enhanced Progress Bar with percentage -->
+        <div class="relative h-2 bg-slate-200 dark:bg-slate-700 overflow-hidden">
+          <div class="absolute inset-0 bg-gradient-to-r from-primary-500 via-purple-500 to-pink-500 animate-gradient-x opacity-20"></div>
+          <div class="relative h-full bg-gradient-to-r from-primary-500 via-purple-500 to-pink-500 transition-all duration-700 ease-out shadow-glow"
+               :style="`width: ${progress}%`">
+            <!-- Shimmer effect -->
+            <div class="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent animate-shimmer"></div>
+          </div>
+          <!-- Percentage indicator -->
+          <div class="absolute right-2 -top-8 px-2 py-1 bg-gradient-to-r from-primary-600 to-purple-600 text-white text-xs font-bold rounded-full shadow-lg"
+               x-show="progress > 0 && progress < 100"
+               x-transition>
+            <span x-text="Math.round(progress)"></span>%
+          </div>
         </div>
 
         <!-- Header -->
@@ -657,15 +746,36 @@
           <template x-if="currentStep === 0">
             <div class="space-y-6 animate-fade-in">
               <div class="text-center mb-8">
-                <div class="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-primary-500 to-purple-600 rounded-3xl shadow-large mb-6 float">
-                  <i data-lucide="mail" class="w-12 h-12 text-white"></i>
+                <!-- Animated icon with pulse effect -->
+                <div class="relative inline-block mb-6">
+                  <div class="absolute inset-0 bg-gradient-to-br from-primary-500 to-purple-600 rounded-3xl blur-xl opacity-50 animate-pulse"></div>
+                  <div class="relative inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-primary-500 to-purple-600 rounded-3xl shadow-large float">
+                    <i data-lucide="mail" class="w-12 h-12 text-white"></i>
+                  </div>
                 </div>
-                <h3 class="text-3xl font-bold text-slate-900 dark:text-white mb-3">
+
+                <h3 class="text-4xl font-bold bg-gradient-to-r from-primary-600 via-purple-600 to-pink-600 bg-clip-text text-transparent mb-4">
                   Welcome to Agent Mail! 👋
                 </h3>
-                <p class="text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto">
-                  Think of this as <strong>Slack for AI assistants</strong> working on your code. Let's take a quick tour!
+                <p class="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-6">
+                  Think of this as <strong class="text-slate-900 dark:text-white">Slack for AI assistants</strong> working on your code.
                 </p>
+
+                <!-- Quick stats -->
+                <div class="flex items-center justify-center gap-8 text-sm text-slate-500 dark:text-slate-400 mb-8">
+                  <div class="flex items-center gap-2">
+                    <i data-lucide="clock" class="w-4 h-4"></i>
+                    <span>2 min tour</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <i data-lucide="layers" class="w-4 h-4"></i>
+                    <span>7 steps</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <i data-lucide="zap" class="w-4 h-4"></i>
+                    <span>Interactive</span>
+                  </div>
+                </div>
               </div>
 
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1017,20 +1127,37 @@
             </div>
           </template>
 
-          <!-- Final Step -->
+          <!-- Final Step with Celebration -->
           <template x-if="currentStep === 6">
-            <div class="space-y-6 animate-fade-in text-center">
-              <div class="inline-flex items-center justify-center w-24 h-24 bg-gradient-to-br from-success-500 to-emerald-600 rounded-3xl shadow-xl mb-4 float">
-                <i data-lucide="check-circle" class="w-12 h-12 text-white"></i>
+            <div class="space-y-6 animate-fade-in text-center" x-init="celebrateCompletion()">
+              <!-- Confetti canvas -->
+              <canvas id="confetti-canvas" class="fixed inset-0 pointer-events-none z-50" style="display: none;"></canvas>
+
+              <!-- Animated success icon -->
+              <div class="relative inline-block mb-6">
+                <div class="absolute inset-0 bg-gradient-to-br from-success-500 to-emerald-600 rounded-3xl blur-2xl opacity-60 animate-ping" style="animation-duration: 2s;"></div>
+                <div class="relative inline-flex items-center justify-center w-32 h-32 bg-gradient-to-br from-success-500 to-emerald-600 rounded-3xl shadow-2xl animate-bounce-slow">
+                  <i data-lucide="check-circle" class="w-16 h-16 text-white"></i>
+                </div>
               </div>
 
               <div>
-                <h3 class="text-3xl font-bold text-slate-900 dark:text-white mb-3">
-                  You're All Set! 🎉
+                <h3 class="text-5xl font-bold mb-2">
+                  <span class="bg-gradient-to-r from-success-600 via-emerald-600 to-green-600 bg-clip-text text-transparent">
+                    You're All Set!
+                  </span>
+                  <span class="inline-block animate-wave text-4xl ml-2">🎉</span>
                 </h3>
-                <p class="text-lg text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-8">
-                  You now understand how Agent Mail helps AI assistants work together smoothly. Remember:
+                <p class="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto mb-6">
+                  You now understand how Agent Mail helps AI assistants work together smoothly!
                 </p>
+
+                <!-- Achievement badge -->
+                <div class="inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-success-50 to-emerald-50 dark:from-success-900/20 dark:to-emerald-900/20 border-2 border-success-200 dark:border-success-800 rounded-full shadow-lg mb-8">
+                  <i data-lucide="award" class="w-5 h-5 text-success-600"></i>
+                  <span class="font-bold text-success-900 dark:text-success-100">Tutorial Complete</span>
+                  <i data-lucide="sparkles" class="w-5 h-5 text-success-600"></i>
+                </div>
               </div>
 
               <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
@@ -1360,19 +1487,44 @@
         return {
           isActive: false,
           currentStep: 0,
+          highlightElement: false,
+          spotlightX: 0,
+          spotlightY: 0,
+          spotlightSize: 150,
+          completedActions: [],
+          // Cleanup tracking
+          eventListeners: [],
+          animationCleanup: null,
           steps: [
-            { title: 'Welcome to Agent Mail', icon: 'mail' },
-            { title: 'What are Projects?', icon: 'folder' },
-            { title: 'What are Agents?', icon: 'bot' },
-            { title: 'How Agents Communicate', icon: 'message-square' },
-            { title: 'File Reservations', icon: 'file-lock' },
-            { title: 'Powerful Features', icon: 'sparkles' },
-            { title: 'You\'re All Set!', icon: 'check-circle' }
+            { title: 'Welcome to Agent Mail', icon: 'mail', actions: [] },
+            { title: 'What are Projects?', icon: 'folder', actions: ['viewed_projects'] },
+            { title: 'What are Agents?', icon: 'bot', actions: ['learned_agents'] },
+            { title: 'How Agents Communicate', icon: 'message-square', actions: ['learned_messages'] },
+            { title: 'File Reservations', icon: 'file-lock', actions: ['learned_reservations'] },
+            { title: 'Powerful Features', icon: 'sparkles', actions: ['learned_features'] },
+            { title: 'You\'re All Set!', icon: 'check-circle', actions: [] }
           ],
+
+          // Computed progress with divide-by-zero protection
+          get progress() {
+            if (this.steps.length === 0) return 0;
+            return ((this.currentStep + 1) / this.steps.length) * 100;
+          },
 
           init() {
             // Check if user has seen tutorial
             const hasSeenTutorial = localStorage.getItem('agentmail_tutorial_completed');
+
+            // Load completed actions
+            const savedActions = localStorage.getItem('agentmail_tutorial_actions');
+            if (savedActions) {
+              try {
+                this.completedActions = JSON.parse(savedActions);
+              } catch (e) {
+                this.completedActions = [];
+              }
+            }
+
             if (!hasSeenTutorial) {
               // Show tutorial on first visit (with slight delay for page to render)
               setTimeout(() => {
@@ -1381,14 +1533,40 @@
               }, 800);
             }
 
-            // Listen for restart event
-            window.addEventListener('restart-tutorial', () => {
-              this.restart();
+            // Listen for restart event (track for cleanup)
+            const restartHandler = () => { this.restart(); };
+            window.addEventListener('restart-tutorial', restartHandler);
+            this.eventListeners.push({ target: window, event: 'restart-tutorial', handler: restartHandler });
+
+            // Listen for user actions
+            this.trackUserActions();
+          },
+
+          destroy() {
+            // Clean up all event listeners
+            this.eventListeners.forEach(({ target, event, handler }) => {
+              target.removeEventListener(event, handler);
             });
+            this.eventListeners = [];
+
+            // Clean up animation timers
+            if (this.animationCleanup) {
+              this.animationCleanup();
+              this.animationCleanup = null;
+            }
           },
 
           next() {
             if (this.currentStep < this.steps.length - 1) {
+              // Mark current step actions as complete
+              const currentActions = this.steps[this.currentStep].actions;
+              currentActions.forEach(action => {
+                if (!this.completedActions.includes(action)) {
+                  this.completedActions.push(action);
+                }
+              });
+              this.saveProgress();
+
               this.currentStep++;
               this.$nextTick(() => lucide.createIcons());
             } else {
@@ -1408,7 +1586,14 @@
           },
 
           complete() {
+            // Clean up any running animations
+            if (this.animationCleanup) {
+              this.animationCleanup();
+              this.animationCleanup = null;
+            }
+
             localStorage.setItem('agentmail_tutorial_completed', 'true');
+            this.saveProgress();
             this.isActive = false;
             window.showToast('Tutorial completed! Press ? for keyboard shortcuts anytime.', 'success', 4000);
           },
@@ -1416,7 +1601,177 @@
           restart() {
             this.currentStep = 0;
             this.isActive = true;
+            this.completedActions = [];
+            localStorage.removeItem('agentmail_tutorial_completed');
             this.$nextTick(() => lucide.createIcons());
+          },
+
+          saveProgress() {
+            localStorage.setItem('agentmail_tutorial_actions', JSON.stringify(this.completedActions));
+          },
+
+          // Track user actions to detect when they actually try features
+          trackUserActions() {
+            // Detect command palette usage (track for cleanup)
+            const keydownHandler = (e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                this.markActionComplete('used_command_palette');
+              }
+              if (e.shiftKey && e.key === '?') {
+                this.markActionComplete('viewed_shortcuts');
+              }
+            };
+            document.addEventListener('keydown', keydownHandler);
+            this.eventListeners.push({ target: document, event: 'keydown', handler: keydownHandler });
+          },
+
+          markActionComplete(action) {
+            if (!this.completedActions.includes(action)) {
+              this.completedActions.push(action);
+              this.saveProgress();
+              // Show micro-feedback
+              if (this.isActive) {
+                this.showMicroFeedback(action);
+              }
+            }
+          },
+
+          showMicroFeedback(action) {
+            // Small toast or sparkle effect
+            const messages = {
+              'used_command_palette': '✨ Nice! You used the command palette!',
+              'viewed_shortcuts': '⌨️ Great! You checked the shortcuts!',
+              'clicked_inbox': '📬 You found the inbox!',
+              'searched_messages': '🔍 You tried searching!'
+            };
+
+            if (messages[action]) {
+              window.showToast(messages[action], 'success', 2000);
+            }
+          },
+
+          // Highlight a specific element with spotlight
+          highlightUIElement(selector) {
+            const element = document.querySelector(selector);
+            if (element) {
+              const rect = element.getBoundingClientRect();
+              // Account for page scroll position
+              const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
+              const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+
+              this.spotlightX = rect.left + scrollX + rect.width / 2;
+              this.spotlightY = rect.top + scrollY + rect.height / 2;
+              this.spotlightSize = Math.max(rect.width, rect.height) / 2 + 20;
+              this.highlightElement = true;
+
+              // Add pulse class to element
+              element.classList.add('tutorial-spotlight');
+            }
+          },
+
+          clearHighlight() {
+            this.highlightElement = false;
+            document.querySelectorAll('.tutorial-spotlight').forEach(el => {
+              el.classList.remove('tutorial-spotlight');
+            });
+          },
+
+          // Confetti celebration
+          celebrateCompletion() {
+            // Use $nextTick to ensure canvas is rendered before trying to use it
+            this.$nextTick(() => {
+              // Wait one more tick for DOM to fully settle
+              setTimeout(() => {
+                this.launchConfetti();
+                lucide.createIcons();
+              }, 100);
+            });
+          },
+
+          launchConfetti() {
+            const canvas = document.getElementById('confetti-canvas');
+            if (!canvas) {
+              console.warn('Confetti canvas not found - skipping animation');
+              return;
+            }
+
+            // Clean up any existing animation first
+            if (this.animationCleanup) {
+              this.animationCleanup();
+            }
+
+            canvas.style.display = 'block';
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            const confetti = [];
+            const confettiCount = 150;
+            const colors = ['#6366f1', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'];
+
+            for (let i = 0; i < confettiCount; i++) {
+              confetti.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height - canvas.height,
+                r: Math.random() * 6 + 4,
+                d: Math.random() * confettiCount,
+                color: colors[Math.floor(Math.random() * colors.length)],
+                tilt: Math.random() * 10 - 10,
+                tiltAngleIncremental: Math.random() * 0.07 + 0.05,
+                tiltAngle: 0
+              });
+            }
+
+            let animationFrame;
+            let timeoutId;
+            const draw = () => {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+              confetti.forEach((c, i) => {
+                ctx.beginPath();
+                ctx.lineWidth = c.r / 2;
+                ctx.strokeStyle = c.color;
+                ctx.moveTo(c.x + c.tilt + c.r / 3, c.y);
+                ctx.lineTo(c.x + c.tilt, c.y + c.tilt + c.r / 5);
+                ctx.stroke();
+
+                c.tiltAngle += c.tiltAngleIncremental;
+                c.y += (Math.cos(c.d) + 3 + c.r / 2) / 2;
+                c.x += Math.sin(c.d);
+                c.tilt = Math.sin(c.tiltAngle - i / 3) * 15;
+
+                if (c.y > canvas.height) {
+                  confetti[i] = {
+                    x: Math.random() * canvas.width,
+                    y: -10,
+                    r: c.r,
+                    d: c.d,
+                    color: c.color,
+                    tilt: c.tilt,
+                    tiltAngleIncremental: c.tiltAngleIncremental,
+                    tiltAngle: c.tiltAngle
+                  };
+                }
+              });
+
+              animationFrame = requestAnimationFrame(draw);
+            };
+
+            draw();
+
+            // Stop after 5 seconds and track for cleanup
+            timeoutId = setTimeout(() => {
+              cancelAnimationFrame(animationFrame);
+              canvas.style.display = 'none';
+              this.animationCleanup = null;
+            }, 5000);
+
+            // Store cleanup function
+            this.animationCleanup = () => {
+              if (animationFrame) cancelAnimationFrame(animationFrame);
+              if (timeoutId) clearTimeout(timeoutId);
+              if (canvas) canvas.style.display = 'none';
+            };
           }
         };
       }
