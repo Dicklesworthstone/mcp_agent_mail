@@ -178,15 +178,41 @@ function timeTravelManager() {
     },
 
     async timeTravel() {
-      const params = new URLSearchParams({
-        project: this.selectedProject,
-        agent: this.selectedAgent,
-        timestamp: this.selectedTime
-      });
+      try {
+        const params = new URLSearchParams({
+          project: this.selectedProject,
+          agent: this.selectedAgent,
+          timestamp: this.selectedTime
+        });
 
-      const response = await fetch(`/mail/archive/time-travel/snapshot?${params}`);
-      this.snapshot = await response.json();
-      lucide.createIcons();
+        const response = await fetch(`/mail/archive/time-travel/snapshot?${params}`);
+
+        if (!response.ok) {
+          // Handle HTTP errors (400, 500, etc.)
+          const errorData = await response.json().catch(() => ({}));
+          this.snapshot = {
+            messages: [],
+            snapshot_time: null,
+            commit_sha: null,
+            requested_time: this.selectedTime,
+            error: errorData.detail || errorData.error || `Server error: ${response.status}`
+          };
+          return;
+        }
+
+        this.snapshot = await response.json();
+        lucide.createIcons();
+      } catch (error) {
+        // Handle network errors or other exceptions
+        console.error('Time travel failed:', error);
+        this.snapshot = {
+          messages: [],
+          snapshot_time: null,
+          commit_sha: null,
+          requested_time: this.selectedTime,
+          error: 'Failed to retrieve snapshot. Please check your connection and try again.'
+        };
+      }
     }
   };
 }
