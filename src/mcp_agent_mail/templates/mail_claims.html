@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Claims — {{ project.human_key }}</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+      a { text-decoration: none; color: #1463ff; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
+      th { background: #f3f4f6; }
+    </style>
+  </head>
+  <body>
+    <a href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
+    <h1>Claims</h1>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Agent</th><th>Path Pattern</th><th>Exclusive</th><th>Created</th><th>Expires</th><th>Released</th></tr>
+      </thead>
+      <tbody>
+        {% for c in claims %}
+          <tr>
+            <td>{{ c.id }}</td>
+            <td>{{ c.agent }}</td>
+            <td>{{ c.path_pattern }}</td>
+            <td>{{ 'yes' if c.exclusive else 'no' }}</td>
+            <td>{{ c.created }}</td>
+            <td>{{ c.expires }}</td>
+            <td>{{ c.released }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </body>
+  </html>
+
+

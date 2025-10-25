@@ -9,13 +9,15 @@ import contextlib
 import importlib
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any, cast
 
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import Receive, Scope, Send
@@ -856,6 +858,292 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             _send,
         )
         return JSONResponse(response_body, status_code=status_code, headers=headers)
+
+    # ----- Simple SSR Mail UI -----
+    try:
+        import markdown2  # type: ignore
+        from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
+        templates_root = Path(__file__).resolve().parent / "templates"
+        env = Environment(
+            loader=FileSystemLoader(str(templates_root)),
+            autoescape=select_autoescape(["html", "xml"]),
+            enable_async=True,
+        )
+        async def _render(name: str, **ctx) -> HTMLResponse:
+            tpl = env.get_template(name)
+            html = await tpl.render_async(**ctx)
+            return HTMLResponse(html)
+
+        def _parse_fts_query(raw: str, scope_preference: str | None = None) -> tuple[str, str, str, list[dict[str, str]]]:
+            """Return (fts_expression, like_pattern) from a user query.
+            Supports subject:foo and body:"multi word" tokens; otherwise defaults to subject/body OR.
+            """
+            raw = (raw or "").strip()
+            if not raw:
+                return "", "", "both", []
+            scope_pref = scope_preference if scope_preference in {"subject", "body"} else "both"
+            # tokens: key:"phrase" | "phrase" | key:word | word
+            parts = re.findall(r"\w+:\"[^\"]+\"|\"[^\"]+\"|\w+:[^\s]+|[^\s]+", raw)
+            exprs: list[str] = []
+            like_terms: list[str] = []
+            like_scope = scope_pref
+            tokens: list[dict[str, str]] = []
+            def _quote(s: str) -> str:
+                return '"' + s.replace('"', '""') + '"'
+            for p in parts:
+                key = None
+                val = p
+                if ":" in p and not p.startswith("\""):
+                    key, val = p.split(":", 1)
+                val = val.strip()
+                val_inner = val[1:-1] if val.startswith('"') and val.endswith('"') and len(val) >= 2 else val
+                like_terms.append(val_inner)
+                if key in {"subject", "body"}:
+                    exprs.append(f"{key}:{_quote(val_inner)}")
+                    tokens.append({"field": key, "value": val_inner})
+                else:
+                    if scope_pref == "subject":
+                        exprs.append(f"subject:{_quote(val_inner)}")
+                        tokens.append({"field": "subject", "value": val_inner})
+                    elif scope_pref == "body":
+                        exprs.append(f"body:{_quote(val_inner)}")
+                        tokens.append({"field": "body", "value": val_inner})
+                    else:
+                        exprs.append(f"(subject:{_quote(val_inner)} OR body:{_quote(val_inner)})")
+                        tokens.append({"field": "both", "value": val_inner})
+            fts = " AND ".join(exprs) if exprs else ""
+            like_pat = "%" + "%".join(like_terms) + "%" if like_terms else ""
+            return fts, like_pat, like_scope, tokens
+
+        @fastapi_app.get("/mail", response_class=HTMLResponse)
+        async def mail_index() -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                rows = await session.execute(text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC"))
+                projects = [{"id": r[0], "slug": r[1], "human_key": r[2], "created_at": str(r[3])} for r in rows.fetchall()]
+            return await _render("mail_index.html", projects=projects)
+
+        @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
+        async def mail_project(project: str, q: str | None = None, scope: str | None = None, order: str | None = None) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                proj = await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})
+                prow = proj.fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                agents_q = await session.execute(text("SELECT id, name, program, model FROM agents WHERE project_id = :pid ORDER BY name"), {"pid": pid})
+                agents = [
+                    {"id": r[0], "name": r[1], "program": r[2], "model": r[3]} for r in agents_q.fetchall()
+                ]
+                matched_messages: list[dict] = []
+                if q and q.strip():
+                    # Prefer FTS5 when available (fts_messages maintained by triggers)
+                    fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
+                    fts_sql = (
+                        "SELECT m.id, m.subject, m.from_agent, m.created_ts, m.importance, m.thread_id, "
+                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet, "
+                        "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18), '<mark>', ''))) / 6 AS hits "
+                        "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid "
+                        "WHERE m.project_id = :pid AND fts_messages MATCH :q "
+                        + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else "ORDER BY bm25(fts_messages, 3.0, 1.0) ")
+                        + "LIMIT 50"
+                    )
+                    try:
+                        search = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q})
+                        matched_messages = [
+                            {"id": r[0], "subject": r[1], "sender": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5], "snippet": r[6], "hits": int(r[7] or 0)}
+                            for r in search.fetchall()
+                        ]
+                    except Exception:
+                        # Fallback to LIKE if FTS not available
+                        if like_scope == "subject":
+                            like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND subject LIKE :pat ORDER BY created_ts DESC LIMIT 50"
+                        elif like_scope == "body":
+                            like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND body_md LIKE :pat ORDER BY created_ts DESC LIMIT 50"
+                        else:
+                            like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND (subject LIKE :pat OR body_md LIKE :pat) ORDER BY created_ts DESC LIMIT 50"
+                        search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
+                        matched_messages = [
+                            {"id": r[0], "subject": r[1], "sender": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5], "snippet": "", "hits": 0}
+                            for r in search.fetchall()
+                        ]
+            return await _render(
+                "mail_project.html",
+                project={"id": pid, "slug": prow[1], "human_key": prow[2]},
+                agents=agents,
+                q=q or "",
+                scope=scope or "",
+                order=order or "relevance",
+                tokens=tokens if q and q.strip() else [],
+                results=matched_messages,
+            )
+
+        @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
+        async def mail_inbox(project: str, agent: str, limit: int = 50, page: int = 1) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                arow = (await session.execute(text("SELECT id, name FROM agents WHERE project_id = :pid AND name = :name"), {"pid": pid, "name": agent})).fetchone()
+                if not arow:
+                    return await _render("error.html", message="Agent not found")
+                offset = max(0, (max(1, page) - 1) * max(1, limit))
+                inbox_rows = await session.execute(text(
+                    """
+                    SELECT m.id, m.subject, m.from_agent, m.created_ts, m.importance, m.thread_id
+                    FROM messages m
+                    JOIN message_recipients mr ON mr.message_id = m.id
+                    JOIN agents a ON a.id = mr.agent_id
+                    WHERE m.project_id = :pid AND a.name = :name
+                    ORDER BY m.created_ts DESC
+                    LIMIT :lim OFFSET :off
+                    """
+                ), {"pid": pid, "name": agent, "lim": limit, "off": offset})
+                items = [
+                    {"id": r[0], "subject": r[1], "sender": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5]}
+                    for r in inbox_rows.fetchall()
+                ]
+            return await _render(
+                "mail_inbox.html",
+                project={"slug": prow[1], "human_key": prow[2]},
+                agent=agent,
+                items=items,
+                page=page,
+                limit=limit,
+                next_page=page + 1,
+                prev_page=page - 1 if page > 1 else None,
+            )
+
+        @fastapi_app.get("/mail/{project}/message/{mid}", response_class=HTMLResponse)
+        async def mail_message(project: str, mid: int) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                mrow = (await session.execute(text("SELECT id, subject, body_md, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND id = :mid"), {"pid": pid, "mid": mid})).fetchone()
+                if not mrow:
+                    return await _render("error.html", message="Message not found")
+                recs = await session.execute(text(
+                    "SELECT a.name, mr.kind FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id = :mid"
+                ), {"mid": mid})
+                recipients = [
+                    {"name": r[0], "kind": r[1]} for r in recs.fetchall()
+                ]
+                # Find thread messages if thread_id is set
+                thread_items: list[dict] = []
+                th = mrow[6]
+                if isinstance(th, str) and th.strip():
+                    th_rows = await session.execute(text(
+                        "SELECT id, subject, from_agent, created_ts FROM messages WHERE project_id = :pid AND (thread_id = :th OR id = :id) ORDER BY created_ts ASC"
+                    ), {"pid": pid, "th": th, "id": mid})
+                    thread_items = [
+                        {"id": rr[0], "subject": rr[1], "from": rr[2], "created": str(rr[3])}
+                        for rr in th_rows.fetchall()
+                    ]
+            # Convert markdown body to HTML for display (server-side render)
+            body_html = markdown2.markdown(mrow[2] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"]) if mrow[2] else ""
+            return await _render(
+                "mail_message.html",
+                project={"slug": prow[1], "human_key": prow[2]},
+                message={
+                    "id": mrow[0],
+                    "subject": mrow[1],
+                    "body_md": mrow[2],
+                    "body_html": body_html,
+                    "sender": mrow[3],
+                    "created": str(mrow[4]),
+                    "importance": mrow[5],
+                    "thread_id": mrow[6],
+                },
+                recipients=recipients,
+                thread_items=thread_items,
+            )
+
+        # Full-text search UI across subject/body using LIKE fallback (SQLite FTS handled elsewhere)
+        @fastapi_app.get("/mail/{project}/search", response_class=HTMLResponse)
+        async def mail_search(project: str, q: str, limit: int = 100, scope: str | None = None, order: str | None = None) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
+                fts_sql = (
+                    "SELECT m.id, m.subject, m.from_agent, m.created_ts, m.importance, m.thread_id, "
+                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet, "
+                    "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22), '<mark>', ''))) / 6 AS hits "
+                    "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid "
+                    "WHERE m.project_id = :pid AND fts_messages MATCH :q "
+                    + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else "ORDER BY bm25(fts_messages, 3.0, 1.0) ")
+                    + "LIMIT :lim"
+                )
+                try:
+                    rows = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q, "lim": limit})
+                    results = [
+                        {"id": r[0], "subject": r[1], "from": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5], "snippet": r[6], "hits": int(r[7] or 0)}
+                        for r in rows.fetchall()
+                    ]
+                except Exception:
+                    if like_scope == "subject":
+                        like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND subject LIKE :pat ORDER BY created_ts DESC LIMIT :lim"
+                    elif like_scope == "body":
+                        like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND body_md LIKE :pat ORDER BY created_ts DESC LIMIT :lim"
+                    else:
+                        like_sql = "SELECT id, subject, from_agent, created_ts, importance, thread_id FROM messages WHERE project_id = :pid AND (subject LIKE :pat OR body_md LIKE :pat) ORDER BY created_ts DESC LIMIT :lim"
+                    rows = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%", "lim": limit})
+                    results = [
+                        {"id": r[0], "subject": r[1], "from": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5], "snippet": "", "hits": 0}
+                        for r in rows.fetchall()
+                    ]
+            return await _render("mail_search.html", project={"slug": prow[1], "human_key": prow[2]}, q=q, scope=scope or "", order=order or "relevance", tokens=tokens, results=results)
+
+        # Claims and attachments views
+        @fastapi_app.get("/mail/{project}/claims", response_class=HTMLResponse)
+        async def mail_claims(project: str) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                rows = await session.execute(text(
+                    "SELECT c.id, a.name, c.path_pattern, c.exclusive, c.created_ts, c.expires_ts, c.released_ts FROM claims c JOIN agents a ON a.id = c.agent_id WHERE c.project_id = :pid ORDER BY c.created_ts DESC"
+                ), {"pid": pid})
+                claims = [
+                    {"id": r[0], "agent": r[1], "path_pattern": r[2], "exclusive": bool(r[3]), "created": str(r[4]), "expires": str(r[5]) if r[5] else "", "released": str(r[6]) if r[6] else ""}
+                    for r in rows.fetchall()
+                ]
+            return await _render("mail_claims.html", project={"slug": prow[1], "human_key": prow[2]}, claims=claims)
+
+        @fastapi_app.get("/mail/{project}/attachments", response_class=HTMLResponse)
+        async def mail_attachments(project: str) -> HTMLResponse:
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+                pid = int(prow[0])
+                rows = await session.execute(text(
+                    "SELECT id, subject, created_ts, attachments FROM messages WHERE project_id = :pid AND json_array_length(attachments) > 0 ORDER BY created_ts DESC LIMIT 200"
+                ), {"pid": pid})
+                items = []
+                for r in rows.fetchall():
+                    try:
+                        attachments = r[3] or []
+                    except Exception:
+                        attachments = []
+                    items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
+            return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
+    except Exception:
+        # templates/Jinja may be missing in some environments; UI remains optional
+        pass
+
     return fastapi_app
 
 

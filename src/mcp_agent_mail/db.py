@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import random
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager

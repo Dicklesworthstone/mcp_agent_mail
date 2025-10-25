@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Search — {{ project.human_key }}{% endblock %}
+{% block content %}
+    <div class="space-y-4">
+      <a class="text-slate-500" href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
+      <div class="flex items-center gap-2">
+        <h1 class="text-2xl font-semibold text-slate-800">Search</h1>
+        <button onclick="document.getElementById('help').classList.toggle('hidden')" class="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200">Query Help</button>
+      </div>
+      <div id="help" class="hidden border rounded-lg p-4 text-slate-700 bg-slate-50">
+        <div class="font-medium mb-1">Field filters</div>
+        <div class="text-sm">
+          Use <code>subject:foo</code> or <code>body:"multi word"</code>. Without a field, the query searches both subject and body. Combine terms with spaces (AND).
+        </div>
+      </div>
+      <form method="get" class="flex items-center gap-2">
+        <input class="border rounded-md px-3 py-2 w-2/3" id="q" name="q" value="{{ q }}" placeholder="subject:login body:\"api key\"" />
+        <input type="hidden" id="scope" name="scope" value="{{ scope or '' }}" />
+        <input type="hidden" id="order" name="order" value="{{ order or 'relevance' }}" />
+        <button class="px-4 py-2 rounded-md bg-indigo-600 text-white hover:bg-indigo-500" type="submit">Search</button>
+      </form>
+      <div class="flex items-center gap-2 text-sm">
+        <span class="text-slate-500">Scope:</span>
+        <button type="button" data-scope="" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if not scope %}ring-2 ring-indigo-500{% endif %}">Both</button>
+        <button type="button" data-scope="subject" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if scope == 'subject' %}ring-2 ring-indigo-500{% endif %}">Subject</button>
+        <button type="button" data-scope="body" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if scope == 'body' %}ring-2 ring-indigo-500{% endif %}">Body</button>
+      </div>
+      <div class="flex items-center gap-2 text-sm">
+        <span class="text-slate-500">Order:</span>
+        <button type="button" data-order="relevance" class="order-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if order == 'relevance' %}ring-2 ring-indigo-500{% endif %}">Relevance</button>
+        <button type="button" data-order="time" class="order-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if order == 'time' %}ring-2 ring-indigo-500{% endif %}">Time</button>
+      </div>
+      {% if results %}
+        <div class="border rounded-lg divide-y">
+          {% for r in results %}
+            <a class="block px-4 py-3 hover:bg-slate-50" href="/mail/{{ project.slug }}/message/{{ r.id }}">
+              <div class="text-slate-800 font-medium">{{ r.subject }}</div>
+              <div class="text-slate-500 text-sm">from {{ r.from }} · {{ r.created }} {% if r.thread_id %}· thread {{ r.thread_id }}{% endif %} {% if r.hits %}· {{ r.hits }} hit{{ 's' if r.hits != 1 else '' }}{% endif %}</div>
+              {% if r.snippet %}<div class="text-slate-700 text-sm">{{ r.snippet | safe }}</div>{% endif %}
+            </a>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-slate-500">No results.</p>
+      {% endif %}
+      <script>
+        (function(){
+          const q = document.getElementById('q');
+          const scope = document.getElementById('scope');
+          const chips = document.querySelectorAll('.scope-chip');
+          const order = document.getElementById('order');
+          const orderChips = document.querySelectorAll('.order-chip');
+          chips.forEach(ch => ch.addEventListener('click', () => {
+            scope.value = ch.dataset.scope || '';
+            chips.forEach(c => c.classList.remove('ring-2','ring-indigo-500'));
+            ch.classList.add('ring-2','ring-indigo-500');
+          }));
+          orderChips.forEach(ch => ch.addEventListener('click', () => {
+            order.value = ch.dataset.order || 'relevance';
+            orderChips.forEach(c => c.classList.remove('ring-2','ring-indigo-500'));
+            ch.classList.add('ring-2','ring-indigo-500');
+          }));
+          let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { q.form.submit(); }, 300); });
+        })();
+      </script>
+    </div>
+{% endblock %}
+
+

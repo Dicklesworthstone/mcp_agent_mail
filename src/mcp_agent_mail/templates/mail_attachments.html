@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Attachments — {{ project.human_key }}</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+      a { text-decoration: none; color: #1463ff; }
+      .item { padding: 10px 0; border-bottom: 1px solid #e5e7eb; }
+      .muted { color: #6b7280; font-size: 12px; }
+      .att { margin-left: 8px; font-size: 12px; background: #eef2ff; padding: 2px 6px; border-radius: 9999px; }
+    </style>
+  </head>
+  <body>
+    <a href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
+    <h1>Messages with attachments</h1>
+    {% for it in items %}
+      <div class="item">
+        <div><a href="/mail/{{ project.slug }}/message/{{ it.id }}"><strong>{{ it.subject }}</strong></a></div>
+        <div class="muted">{{ it.created }}</div>
+        <div>
+          {% for a in it.attachments %}
+            <span class="att">{{ a.media_type or 'file' }}{% if a.path %}: {{ a.path }}{% endif %}{% if a.bytes %} ({{ a.bytes }}){% endif %}</span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+  </body>
+  </html>
+
+

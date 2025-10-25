@@ -1,0 +1,300 @@
+{% extends "base.html" %}
+
+{% block title %}{{ project.human_key }} — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">{{ project.human_key }}</span>
+</nav>
+{% endblock %}
+
+{% block header_actions %}
+<div class="flex items-center gap-2">
+  <a href="/mail/{{ project.slug }}/claims"
+     class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+    <i data-lucide="lock" class="w-4 h-4"></i>
+    Claims
+  </a>
+  <a href="/mail/{{ project.slug }}/attachments"
+     class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+    <i data-lucide="paperclip" class="w-4 h-4"></i>
+    Attachments
+  </a>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-8 animate-fade-in">
+  <!-- Project Header -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-start justify-between">
+      <div class="flex-1">
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+            <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-3xl font-bold text-slate-900 dark:text-white mb-1">
+              {{ project.human_key }}
+            </h1>
+            <div class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+              <i data-lucide="hash" class="w-4 h-4"></i>
+              <span class="font-mono">{{ project.slug }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Enhanced Search Section -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700"
+       x-data="{ scope: '{{ scope or '' }}', order: '{{ order or 'relevance' }}', query: '{{ q or '' }}' }">
+
+    <div class="flex items-center gap-3 mb-4">
+      <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
+      <h2 class="text-lg font-semibold text-slate-900 dark:text-white">Search Messages</h2>
+    </div>
+
+    <form method="get" action="/mail/{{ project.slug }}" class="space-y-4">
+      <!-- Search Input with Icon -->
+      <div class="relative">
+        <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+          <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
+        </div>
+        <input
+          type="text"
+          id="q"
+          name="q"
+          x-model="query"
+          value="{{ q or '' }}"
+          placeholder="Search messages by subject or body..."
+          class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+        />
+        <input type="hidden" id="scope" name="scope" x-model="scope" />
+        <input type="hidden" id="order" name="order" x-model="order" />
+      </div>
+
+      <!-- Filters Row -->
+      <div class="flex items-center gap-6 flex-wrap">
+        <!-- Scope Filters -->
+        <div class="flex items-center gap-3">
+          <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Search in:</span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              @click="scope = ''"
+              :class="scope === '' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
+              <div class="flex items-center gap-2">
+                <i data-lucide="align-justify" class="w-4 h-4"></i>
+                Both
+              </div>
+            </button>
+            <button
+              type="button"
+              @click="scope = 'subject'"
+              :class="scope === 'subject' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
+              <div class="flex items-center gap-2">
+                <i data-lucide="heading" class="w-4 h-4"></i>
+                Subject
+              </div>
+            </button>
+            <button
+              type="button"
+              @click="scope = 'body'"
+              :class="scope === 'body' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
+              <div class="flex items-center gap-2">
+                <i data-lucide="file-text" class="w-4 h-4"></i>
+                Body
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <!-- Order Filters -->
+        <div class="flex items-center gap-3">
+          <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Order by:</span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              @click="order = 'relevance'"
+              :class="order === 'relevance' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
+              <div class="flex items-center gap-2">
+                <i data-lucide="star" class="w-4 h-4"></i>
+                Relevance
+              </div>
+            </button>
+            <button
+              type="button"
+              @click="order = 'time'"
+              :class="order === 'time' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
+              <div class="flex items-center gap-2">
+                <i data-lucide="clock" class="w-4 h-4"></i>
+                Time
+              </div>
+            </button>
+          </div>
+        </div>
+
+        <button
+          type="submit"
+          class="ml-auto px-6 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
+          <i data-lucide="search" class="w-4 h-4"></i>
+          Search
+        </button>
+      </div>
+    </form>
+
+    <!-- Search Results -->
+    {% if results is defined and results %}
+      <div class="mt-6 border-t border-slate-200 dark:border-slate-700 pt-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-sm font-semibold text-slate-900 dark:text-white">
+            Found {{ results|length }} result{{ 's' if results|length != 1 else '' }}
+          </h3>
+        </div>
+
+        <div class="space-y-2">
+          {% for r in results %}
+            <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
+               class="block p-4 bg-slate-50 dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 transition-all duration-200 group">
+              <div class="flex items-start justify-between mb-2">
+                <h4 class="text-base font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
+                  {{ r.subject }}
+                </h4>
+                {% if r.hits %}
+                  <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                    {{ r.hits }} match{{ 'es' if r.hits != 1 else '' }}
+                  </span>
+                {% endif %}
+              </div>
+              <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-2">
+                <div class="flex items-center gap-1">
+                  <i data-lucide="user" class="w-4 h-4"></i>
+                  <span>{{ r.sender }}</span>
+                </div>
+                <div class="flex items-center gap-1">
+                  <i data-lucide="calendar" class="w-4 h-4"></i>
+                  <span>{{ r.created }}</span>
+                </div>
+                {% if r.thread_id %}
+                  <div class="flex items-center gap-1">
+                    <i data-lucide="message-circle" class="w-4 h-4"></i>
+                    <span>{{ r.thread_id }}</span>
+                  </div>
+                {% endif %}
+              </div>
+              {% if r.snippet %}
+                <div class="text-sm text-slate-700 dark:text-slate-300 line-clamp-2">
+                  {{ r.snippet | safe }}
+                </div>
+              {% endif %}
+            </a>
+          {% endfor %}
+        </div>
+      </div>
+    {% elif results is defined %}
+      <div class="mt-6 border-t border-slate-200 dark:border-slate-700 pt-6 text-center py-8">
+        <i data-lucide="search-x" class="w-12 h-12 text-slate-400 mx-auto mb-3"></i>
+        <p class="text-slate-600 dark:text-slate-400">No messages found matching your search.</p>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Agents Section -->
+  <div>
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <i data-lucide="users" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+        <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Agents</h2>
+      </div>
+      {% if agents %}
+        <span class="px-3 py-1 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-sm font-medium rounded-full">
+          {{ agents|length }} active
+        </span>
+      {% endif %}
+    </div>
+
+    {% if agents %}
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {% for a in agents %}
+          <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 group">
+            <!-- Agent Header -->
+            <div class="flex items-center gap-3 mb-4">
+              <div class="w-12 h-12 bg-gradient-to-br from-success-500 to-success-700 rounded-xl flex items-center justify-center shadow-medium">
+                <i data-lucide="bot" class="w-6 h-6 text-white"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <h3 class="text-lg font-semibold text-slate-900 dark:text-white truncate">
+                  {{ a.name }}
+                </h3>
+                <div class="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400">
+                  <span class="truncate">{{ a.program }}</span>
+                  <span>•</span>
+                  <span class="truncate">{{ a.model }}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Agent Actions -->
+            <div class="flex items-center gap-2">
+              <a href="/mail/{{ project.slug }}/inbox/{{ a.name }}"
+                 class="flex-1 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-lg shadow-soft hover:shadow-medium transition-all duration-300 text-center flex items-center justify-center gap-2 btn-ripple">
+                <i data-lucide="inbox" class="w-4 h-4"></i>
+                Inbox
+              </a>
+              <button onclick="showToast('Agent details coming soon!', 'info')"
+                      class="p-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors">
+                <i data-lucide="more-horizontal" class="w-4 h-4"></i>
+              </button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+
+    {% else %}
+      <!-- Empty State for Agents -->
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-12 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+        <div class="w-20 h-20 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-4">
+          <i data-lucide="user-plus" class="w-10 h-10 text-slate-400 dark:text-slate-500"></i>
+        </div>
+        <h3 class="text-xl font-semibold text-slate-900 dark:text-white mb-2">
+          No agents registered
+        </h3>
+        <p class="text-slate-600 dark:text-slate-400 max-w-md mx-auto">
+          Agents will appear here once they register with this project. Use the MCP tools to register your first agent.
+        </p>
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    lucide.createIcons();
+
+    // Debounced search
+    const form = document.querySelector('form');
+    const input = document.getElementById('q');
+    let timeout;
+
+    input?.addEventListener('input', () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        if (input.value.length >= 2 || input.value.length === 0) {
+          form.submit();
+        }
+      }, 500);
+    });
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ message.subject }}{% endblock %}
+{% block content %}
+    <div class="space-y-4">
+      <a class="text-slate-500" href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
+      <h1 class="text-2xl font-semibold text-slate-800">{{ message.subject }}</h1>
+      <div class="text-slate-500 text-sm">from {{ message.sender }} · {{ message.created }} · {{ message.importance or 'normal' }} {% if message.thread_id %}· thread {{ message.thread_id }}{% endif %}</div>
+      <div class="space-x-2">
+        {% for r in recipients %}
+          <span class="inline-block bg-indigo-50 text-indigo-700 px-2 py-1 rounded-full text-xs">{{ r.kind }}: {{ r.name }}</span>
+        {% endfor %}
+      </div>
+      <div class="prose max-w-none">
+        {% if message.body_html %}
+          {{ message.body_html | safe }}
+        {% else %}
+          <pre class="whitespace-pre-wrap">{{ message.body_md }}</pre>
+        {% endif %}
+      </div>
+      {% if thread_items %}
+        <div class="border rounded-lg">
+          <div class="px-4 py-2 border-b bg-slate-50 text-slate-700 font-medium">Thread</div>
+          <div class="divide-y">
+            {% for t in thread_items %}
+              <div class="px-4 py-3">
+                <div class="text-slate-500 text-sm">{{ t.created }} — {{ t.from }}</div>
+                <div class="text-slate-800">{{ t.subject }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+{% endblock %}
+
+

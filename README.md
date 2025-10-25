@@ -712,10 +712,9 @@ def read_resource(uri: str) -> dict:
     data = r.json()
     if "error" in data:
         raise RuntimeError(data["error"])  # surface MCP error
-    result = data.get("result", {})
-    # MCP resource responses have contents array
-    contents = result.get("contents", [])
-    return contents[0] if contents else result
+    # Resources were not unwrapped before, so keep same behavior
+    # Returns {contents: [...]} - client can access contents array as needed
+    return data.get("result", {})
 
 if __name__ == "__main__":
     profile = call_tool("register_agent", {

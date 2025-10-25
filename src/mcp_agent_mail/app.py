@@ -164,6 +164,16 @@ def _instrument_tool(
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
                 raise
+            except NoResultFound as exc:
+                # Handle agent/project not found errors with helpful messages
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                raise ToolExecutionError(
+                    "NOT_FOUND",
+                    str(exc),  # Use the original helpful error message
+                    recoverable=True,
+                    data={"tool": tool_name},
+                ) from exc
             except Exception as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
@@ -545,7 +555,10 @@ async def _get_agent(project: Project, name: str) -> Agent:
         )
         agent = result.scalars().first()
         if not agent:
-            raise NoResultFound(f"Agent '{name}' not registered for project '{project.human_key}'.")
+            raise NoResultFound(
+                f"Agent '{name}' not registered for project '{project.human_key}'. "
+                f"Tip: Use resource://agents/{project.slug} to discover registered agents."
+            )
         return agent
 
 
@@ -1420,12 +1433,17 @@ def build_mcp_server() -> FastMCP:
         """
         Return enriched profile details for an agent, optionally including recent archive commits.
 
+        Discovery
+        ---------
+        To discover available agent names, use: resource://agents/{project_key}
+        Agent names are NOT the same as program names or user names.
+
         Parameters
         ----------
         project_key : str
             Project slug or human key.
         agent_name : str
-            Agent name to look up.
+            Agent name to look up (use resource://agents/{project_key} to discover names).
         include_recent_commits : bool
             If true, include latest commits touching the project archive authored by the configured git author.
         commit_limit : int
@@ -1553,6 +1571,11 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """
         Send a Markdown message to one or more recipients and persist canonical and mailbox copies to Git.
+
+        Discovery
+        ---------
+        To discover available agent names for recipients, use: resource://agents/{project_key}
+        Agent names are NOT the same as program names or user names.
 
         What this does
         --------------
@@ -2207,6 +2230,26 @@ def build_mcp_server() -> FastMCP:
         """Request contact approval to message another agent.
 
         Creates (or refreshes) a pending AgentLink and sends a small ack_required intro message.
+
+        Discovery
+        ---------
+        To discover available agent names, use: resource://agents/{project_key}
+        Agent names are NOT the same as program names or user names.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key.
+        from_agent : str
+            Your agent name (must be registered in the project).
+        to_agent : str
+            Target agent name (use resource://agents/{project_key} to discover names).
+        to_project : Optional[str]
+            Target project if different from your project (cross-project coordination).
+        reason : str
+            Optional explanation for the contact request.
+        ttl_seconds : int
+            Time to live for the contact approval request (default: 7 days).
         """
         project = await _get_project_by_identifier(project_key)
         a = await _get_agent(project, from_agent)
@@ -4038,6 +4081,95 @@ def build_mcp_server() -> FastMCP:
         return {
             **_project_to_dict(project),
             "agents": [_agent_to_dict(agent) for agent in agents],
+        }
+
+    @mcp.resource("resource://agents/{project_key}", mime_type="application/json")
+    async def agents_directory(project_key: str) -> dict[str, Any]:
+        """
+        List all registered agents in a project for easy agent discovery.
+
+        This is the recommended way to discover other agents working on a project.
+
+        When to use
+        -----------
+        - At the start of a coding session to see who else is working on the project.
+        - Before sending messages to discover available recipients.
+        - To check if a specific agent is registered before attempting contact.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key (both work).
+
+        Returns
+        -------
+        dict
+            {
+              "project": { "slug": "...", "human_key": "..." },
+              "agents": [
+                {
+                  "name": "BackendDev",
+                  "program": "claude-code",
+                  "model": "sonnet-4.5",
+                  "task_description": "API development",
+                  "inception_ts": "2025-10-25T...",
+                  "last_active_ts": "2025-10-25T...",
+                  "unread_count": 3
+                },
+                ...
+              ]
+            }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://agents/backend-abc123"}}
+        ```
+
+        Notes
+        -----
+        - Agent names are NOT the same as your program name or user name.
+        - Use the returned names when calling tools like whois(), request_contact(), send_message().
+        - Agents in different projects cannot see each other - project isolation is enforced.
+        """
+        project = await _get_project_by_identifier(project_key)
+        await ensure_schema()
+
+        async with get_session() as session:
+            # Get all agents in the project
+            result = await session.execute(
+                select(Agent).where(Agent.project_id == project.id).order_by(desc(Agent.last_active_ts))
+            )
+            agents = result.scalars().all()
+
+            # Get unread message counts for all agents in one query
+            unread_counts_stmt = (
+                select(
+                    MessageReceipt.agent_id,
+                    func.count(MessageReceipt.id).label("unread_count")
+                )
+                .where(
+                    MessageReceipt.read_ts.is_(None),
+                    MessageReceipt.agent_id.in_([agent.id for agent in agents])
+                )
+                .group_by(MessageReceipt.agent_id)
+            )
+            unread_counts_result = await session.execute(unread_counts_stmt)
+            unread_counts_map = {row.agent_id: row.unread_count for row in unread_counts_result}
+
+            # Build agent data with unread counts
+            agent_data = []
+            for agent in agents:
+                agent_dict = _agent_to_dict(agent)
+                agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
+                agent_data.append(agent_dict)
+
+        return {
+            "project": {
+                "slug": project.slug,
+                "human_key": project.human_key,
+            },
+            "agents": agent_data,
         }
 
     @mcp.resource("resource://claims/{slug}", mime_type="application/json")

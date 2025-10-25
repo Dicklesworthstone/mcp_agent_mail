@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en" x-data="{ darkMode: localStorage.getItem('darkMode') === 'true' }"
+      :class="{ 'dark': darkMode }" x-cloak>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Agent Mail{% endblock %}</title>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            },
+            colors: {
+              primary: {
+                50: '#eef2ff',
+                100: '#e0e7ff',
+                200: '#c7d2fe',
+                300: '#a5b4fc',
+                400: '#818cf8',
+                500: '#6366f1',
+                600: '#4f46e5',
+                700: '#4338ca',
+                800: '#3730a3',
+                900: '#312e81',
+                950: '#1e1b4b',
+              },
+              success: {
+                50: '#f0fdf4',
+                500: '#10b981',
+                600: '#059669',
+              },
+              warning: {
+                50: '#fffbeb',
+                500: '#f59e0b',
+                600: '#d97706',
+              },
+              danger: {
+                50: '#fef2f2',
+                500: '#ef4444',
+                600: '#dc2626',
+              },
+            },
+            boxShadow: {
+              'soft': '0 2px 8px 0 rgba(0, 0, 0, 0.05)',
+              'medium': '0 4px 16px 0 rgba(0, 0, 0, 0.08)',
+              'large': '0 8px 32px 0 rgba(0, 0, 0, 0.12)',
+              'glow': '0 0 20px rgba(99, 102, 241, 0.3)',
+            },
+            animation: {
+              'fade-in': 'fadeIn 0.2s ease-in-out',
+              'slide-up': 'slideUp 0.3s ease-out',
+              'slide-down': 'slideDown 0.3s ease-out',
+              'scale-in': 'scaleIn 0.2s ease-out',
+              'shimmer': 'shimmer 2s infinite',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0' },
+                '100%': { opacity: '1' },
+              },
+              slideUp: {
+                '0%': { transform: 'translateY(10px)', opacity: '0' },
+                '100%': { transform: 'translateY(0)', opacity: '1' },
+              },
+              slideDown: {
+                '0%': { transform: 'translateY(-10px)', opacity: '0' },
+                '100%': { transform: 'translateY(0)', opacity: '1' },
+              },
+              scaleIn: {
+                '0%': { transform: 'scale(0.95)', opacity: '0' },
+                '100%': { transform: 'scale(1)', opacity: '1' },
+              },
+              shimmer: {
+                '0%': { backgroundPosition: '-1000px 0' },
+                '100%': { backgroundPosition: '1000px 0' },
+              },
+            },
+          },
+        },
+      }
+    </script>
+
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Prism.js for code highlighting -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markdown.min.js"></script>
+
+    <!-- Marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@11/marked.min.js"></script>
+
+    <style>
+      [x-cloak] { display: none !important; }
+
+      /* Smooth transitions */
+      * {
+        transition-property: background-color, border-color, color, fill, stroke;
+        transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+        transition-duration: 150ms;
+      }
+
+      /* Scrollbar styling */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      ::-webkit-scrollbar-thumb {
+        background: rgba(148, 163, 184, 0.5);
+        border-radius: 4px;
+      }
+
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(148, 163, 184, 0.7);
+      }
+
+      .dark ::-webkit-scrollbar-thumb {
+        background: rgba(71, 85, 105, 0.5);
+      }
+
+      .dark ::-webkit-scrollbar-thumb:hover {
+        background: rgba(71, 85, 105, 0.7);
+      }
+
+      /* Glass effect */
+      .glass {
+        background: rgba(255, 255, 255, 0.8);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+
+      .dark .glass {
+        background: rgba(15, 23, 42, 0.8);
+      }
+
+      /* Gradient backgrounds */
+      .gradient-primary {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      }
+
+      .gradient-success {
+        background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      }
+
+      .gradient-mesh {
+        background:
+          radial-gradient(at 40% 20%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
+          radial-gradient(at 80% 0%, rgba(139, 92, 246, 0.15) 0px, transparent 50%),
+          radial-gradient(at 0% 50%, rgba(236, 72, 153, 0.15) 0px, transparent 50%),
+          radial-gradient(at 80% 50%, rgba(59, 130, 246, 0.15) 0px, transparent 50%);
+      }
+
+      /* Prose styling for markdown */
+      .prose {
+        max-width: none;
+      }
+
+      .prose h1 { font-size: 2em; font-weight: 700; margin: 1em 0 0.5em; line-height: 1.2; }
+      .prose h2 { font-size: 1.5em; font-weight: 600; margin: 1em 0 0.5em; line-height: 1.3; }
+      .prose h3 { font-size: 1.25em; font-weight: 600; margin: 1em 0 0.5em; line-height: 1.4; }
+      .prose p { margin: 1em 0; line-height: 1.7; }
+      .prose a { color: #6366f1; text-decoration: underline; }
+      .prose a:hover { color: #4f46e5; }
+      .prose ul, .prose ol { margin: 1em 0; padding-left: 2em; }
+      .prose li { margin: 0.5em 0; }
+      .prose code {
+        background: rgba(99, 102, 241, 0.1);
+        padding: 0.2em 0.4em;
+        border-radius: 4px;
+        font-size: 0.9em;
+        font-family: 'Monaco', 'Courier New', monospace;
+      }
+      .prose pre {
+        background: #1e293b;
+        padding: 1em;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 1em 0;
+      }
+      .prose pre code {
+        background: transparent;
+        padding: 0;
+        color: #e2e8f0;
+      }
+      .prose blockquote {
+        border-left: 4px solid #6366f1;
+        padding-left: 1em;
+        margin: 1em 0;
+        font-style: italic;
+        color: #64748b;
+      }
+      .prose img {
+        border-radius: 8px;
+        margin: 1em 0;
+        max-width: 100%;
+      }
+
+      .dark .prose { color: #e2e8f0; }
+      .dark .prose a { color: #818cf8; }
+      .dark .prose a:hover { color: #a5b4fc; }
+      .dark .prose code { background: rgba(99, 102, 241, 0.2); }
+      .dark .prose blockquote { color: #94a3b8; }
+
+      /* Loading skeleton */
+      .skeleton {
+        background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+        background-size: 1000px 100%;
+        animation: shimmer 2s infinite;
+      }
+
+      .dark .skeleton {
+        background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+        background-size: 1000px 100%;
+      }
+
+      /* Focus styles for accessibility */
+      *:focus-visible {
+        outline: 2px solid #6366f1;
+        outline-offset: 2px;
+        border-radius: 4px;
+      }
+
+      /* Button ripple effect */
+      .btn-ripple {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .btn-ripple::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0;
+        height: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.5);
+        transform: translate(-50%, -50%);
+        transition: width 0.6s, height 0.6s;
+      }
+
+      .btn-ripple:active::after {
+        width: 300px;
+        height: 300px;
+      }
+
+      /* Badge pulse animation */
+      .badge-pulse {
+        animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+      }
+    </style>
+
+    {% block head %}{% endblock %}
+  </head>
+
+  <body class="bg-gradient-to-br from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
+    <!-- Toast Notification Container -->
+    <div x-data="toastManager()" @toast.window="show($event.detail)"
+         class="fixed top-4 right-4 z-50 space-y-2">
+      <template x-for="toast in toasts" :key="toast.id">
+        <div x-show="toast.visible"
+             x-transition:enter="transition ease-out duration-300"
+             x-transition:enter-start="opacity-0 transform translate-x-8"
+             x-transition:enter-end="opacity-100 transform translate-x-0"
+             x-transition:leave="transition ease-in duration-200"
+             x-transition:leave-start="opacity-100 transform translate-x-0"
+             x-transition:leave-end="opacity-0 transform translate-x-8"
+             class="glass rounded-lg shadow-large p-4 max-w-sm border border-slate-200 dark:border-slate-700"
+             :class="{
+               'border-l-4 border-l-success-500': toast.type === 'success',
+               'border-l-4 border-l-danger-500': toast.type === 'error',
+               'border-l-4 border-l-warning-500': toast.type === 'warning',
+               'border-l-4 border-l-primary-500': toast.type === 'info'
+             }">
+          <div class="flex items-start gap-3">
+            <div class="flex-shrink-0 mt-0.5">
+              <template x-if="toast.type === 'success'">
+                <i data-lucide="check-circle" class="w-5 h-5 text-success-500"></i>
+              </template>
+              <template x-if="toast.type === 'error'">
+                <i data-lucide="alert-circle" class="w-5 h-5 text-danger-500"></i>
+              </template>
+              <template x-if="toast.type === 'warning'">
+                <i data-lucide="alert-triangle" class="w-5 h-5 text-warning-500"></i>
+              </template>
+              <template x-if="toast.type === 'info'">
+                <i data-lucide="info" class="w-5 h-5 text-primary-500"></i>
+              </template>
+            </div>
+            <div class="flex-1">
+              <p class="text-sm font-medium text-slate-900 dark:text-slate-100" x-text="toast.message"></p>
+            </div>
+            <button @click="remove(toast.id)" class="flex-shrink-0 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <!-- Navigation Header -->
+    <nav class="glass sticky top-0 z-40 border-b border-slate-200/80 dark:border-slate-700/80">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex items-center justify-between h-16">
+          <!-- Logo and Brand -->
+          <div class="flex items-center gap-8">
+            <a href="/mail" class="flex items-center gap-3 group">
+              <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300">
+                <i data-lucide="mail" class="w-5 h-5 text-white"></i>
+              </div>
+              <span class="text-xl font-bold bg-gradient-to-r from-primary-600 to-primary-800 dark:from-primary-400 dark:to-primary-600 bg-clip-text text-transparent">
+                Agent Mail
+              </span>
+            </a>
+
+            <!-- Breadcrumbs -->
+            {% block breadcrumbs %}{% endblock %}
+          </div>
+
+          <!-- Right side actions -->
+          <div class="flex items-center gap-3">
+            {% block header_actions %}{% endblock %}
+
+            <!-- Dark Mode Toggle -->
+            <button @click="darkMode = !darkMode; localStorage.setItem('darkMode', darkMode)"
+                    class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                    aria-label="Toggle dark mode">
+              <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
+              <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    <footer class="border-t border-slate-200 dark:border-slate-800 mt-16">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div class="flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">
+          <p>MCP Agent Mail &copy; 2025</p>
+          <div class="flex items-center gap-4">
+            <a href="#" class="hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Documentation</a>
+            <a href="#" class="hover:text-primary-600 dark:hover:text-primary-400 transition-colors">API</a>
+            <a href="#" class="hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Support</a>
+          </div>
+        </div>
+      </div>
+    </footer>
+
+    <!-- Alpine.js Components -->
+    <script>
+      // Toast Manager
+      function toastManager() {
+        return {
+          toasts: [],
+          nextId: 1,
+
+          show(detail) {
+            const id = this.nextId++;
+            const toast = {
+              id,
+              message: detail.message,
+              type: detail.type || 'info',
+              visible: true
+            };
+
+            this.toasts.push(toast);
+
+            setTimeout(() => {
+              this.remove(id);
+            }, detail.duration || 5000);
+          },
+
+          remove(id) {
+            const index = this.toasts.findIndex(t => t.id === id);
+            if (index > -1) {
+              this.toasts[index].visible = false;
+              setTimeout(() => {
+                this.toasts.splice(index, 1);
+              }, 300);
+            }
+          }
+        }
+      }
+
+      // Initialize Lucide icons after page load
+      document.addEventListener('DOMContentLoaded', () => {
+        lucide.createIcons();
+
+        // Re-initialize on Alpine mutations
+        const observer = new MutationObserver(() => {
+          lucide.createIcons();
+        });
+
+        observer.observe(document.body, {
+          childList: true,
+          subtree: true
+        });
+      });
+
+      // Helper function to show toast from anywhere
+      window.showToast = function(message, type = 'info', duration = 5000) {
+        window.dispatchEvent(new CustomEvent('toast', {
+          detail: { message, type, duration }
+        }));
+      };
+    </script>
+
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

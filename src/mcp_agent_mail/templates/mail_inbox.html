@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block title %}{{ agent }} — Inbox{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    {{ project.human_key }}
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">{{ agent }} Inbox</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+  <!-- Inbox Header -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+          <i data-lucide="inbox" class="w-8 h-8 text-white"></i>
+        </div>
+        <div>
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white mb-1">
+            {{ agent }}
+          </h1>
+          <p class="text-slate-600 dark:text-slate-400">
+            Inbox
+            {% if items %}
+              <span class="text-slate-400 dark:text-slate-500">•</span>
+              <span class="font-medium">{{ items|length }} message{{ 's' if items|length != 1 else '' }}</span>
+            {% endif %}
+          </p>
+        </div>
+      </div>
+
+      <!-- Inbox Actions -->
+      <div class="flex items-center gap-2">
+        <button onclick="location.reload()"
+                class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          Refresh
+        </button>
+        <button onclick="showToast('Mark all read coming soon!', 'info')"
+                class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors flex items-center gap-2 btn-ripple">
+          <i data-lucide="check-check" class="w-4 h-4"></i>
+          Mark All Read
+        </button>
+      </div>
+    </div>
+  </div>
+
+  {% if items %}
+    <!-- Messages List -->
+    <div class="space-y-3">
+      {% for it in items %}
+        <a href="/mail/{{ project.slug }}/message/{{ it.id }}"
+           class="block group">
+          <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-0.5">
+
+            <!-- Message Header -->
+            <div class="flex items-start justify-between mb-3">
+              <div class="flex-1 min-w-0">
+                <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1 mb-2">
+                  {{ it.subject }}
+                </h3>
+
+                <!-- Message Meta -->
+                <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 flex-wrap">
+                  <div class="flex items-center gap-1.5">
+                    <i data-lucide="user" class="w-4 h-4"></i>
+                    <span class="font-medium">{{ it.sender }}</span>
+                  </div>
+                  <div class="flex items-center gap-1.5">
+                    <i data-lucide="calendar" class="w-4 h-4"></i>
+                    <span>{{ it.created }}</span>
+                  </div>
+                  {% if it.thread_id %}
+                    <div class="flex items-center gap-1.5">
+                      <i data-lucide="message-circle" class="w-4 h-4"></i>
+                      <span class="font-mono text-xs">{{ it.thread_id }}</span>
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+
+              <!-- Badges and Status -->
+              <div class="flex items-center gap-2 ml-4">
+                <!-- Importance Badge -->
+                {% if it.importance == 'urgent' %}
+                  <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+                    <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
+                    Urgent
+                  </span>
+                {% elif it.importance == 'high' %}
+                  <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full flex items-center gap-1.5">
+                    <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
+                    High
+                  </span>
+                {% elif it.importance == 'low' %}
+                  <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-medium rounded-full">
+                    Low
+                  </span>
+                {% else %}
+                  <span class="px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                    Normal
+                  </span>
+                {% endif %}
+
+                <!-- Arrow Icon -->
+                <div class="text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all duration-300">
+                  <i data-lucide="arrow-right" class="w-5 h-5"></i>
+                </div>
+              </div>
+            </div>
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+
+    <!-- Pagination -->
+    {% if prev_page or next_page %}
+      <div class="flex items-center justify-center gap-3 pt-6">
+        {% if prev_page %}
+          <a href="?page={{ prev_page }}&limit={{ limit }}"
+             class="px-6 py-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg shadow-soft hover:shadow-medium border border-slate-200 dark:border-slate-700 transition-all duration-300 flex items-center gap-2">
+            <i data-lucide="chevron-left" class="w-4 h-4"></i>
+            Newer Messages
+          </a>
+        {% endif %}
+
+        {% if next_page %}
+          <a href="?page={{ next_page }}&limit={{ limit }}"
+             class="px-6 py-3 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg shadow-soft hover:shadow-medium border border-slate-200 dark:border-slate-700 transition-all duration-300 flex items-center gap-2">
+            Older Messages
+            <i data-lucide="chevron-right" class="w-4 h-4"></i>
+          </a>
+        {% endif %}
+      </div>
+    {% endif %}
+
+  {% else %}
+    <!-- Empty Inbox State -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
+        <i data-lucide="mail-open" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+      </div>
+      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
+        Inbox is empty
+      </h3>
+      <p class="text-slate-600 dark:text-slate-400 mb-6 max-w-md mx-auto">
+        No messages yet. New messages sent to {{ agent }} will appear here.
+      </p>
+      <a href="/mail/{{ project.slug }}"
+         class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 btn-ripple">
+        <i data-lucide="arrow-left" class="w-4 h-4"></i>
+        Back to Project
+      </a>
+    </div>
+  {% endif %}
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    lucide.createIcons();
+  });
+</script>
+{% endblock %}

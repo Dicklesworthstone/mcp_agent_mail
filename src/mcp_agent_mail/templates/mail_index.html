@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}Projects — Agent Mail{% endblock %}
+
+{% block content %}
+<div class="animate-fade-in">
+  <!-- Header Section -->
+  <div class="mb-12">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">
+          Projects
+        </h1>
+        <p class="text-lg text-slate-600 dark:text-slate-400">
+          Manage your multi-agent collaboration projects
+        </p>
+      </div>
+      <button onclick="showToast('Create project feature coming soon!', 'info')"
+              class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
+        <i data-lucide="plus" class="w-5 h-5"></i>
+        New Project
+      </button>
+    </div>
+
+    <!-- Stats Overview -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Total Projects</p>
+            <p class="text-3xl font-bold text-slate-900 dark:text-white">{{ projects|length }}</p>
+          </div>
+          <div class="w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center">
+            <i data-lucide="folder" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Active Agents</p>
+            <p class="text-3xl font-bold text-slate-900 dark:text-white">-</p>
+          </div>
+          <div class="w-12 h-12 bg-success-100 dark:bg-success-900/30 rounded-xl flex items-center justify-center">
+            <i data-lucide="users" class="w-6 h-6 text-success-600 dark:text-success-400"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Total Messages</p>
+            <p class="text-3xl font-bold text-slate-900 dark:text-white">-</p>
+          </div>
+          <div class="w-12 h-12 bg-warning-100 dark:bg-warning-900/30 rounded-xl flex items-center justify-center">
+            <i data-lucide="message-square" class="w-6 h-6 text-warning-600 dark:text-warning-400"></i>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if projects %}
+    <!-- Projects Grid -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {% for p in projects %}
+        <a href="/mail/{{ p.slug }}"
+           class="group bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-1 animate-scale-in">
+
+          <!-- Project Header -->
+          <div class="flex items-start justify-between mb-4">
+            <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-shadow duration-300">
+              <i data-lucide="git-branch" class="w-6 h-6 text-white"></i>
+            </div>
+            <span class="px-3 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+              Active
+            </span>
+          </div>
+
+          <!-- Project Name -->
+          <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2">
+            {{ p.human_key }}
+          </h3>
+
+          <!-- Project Details -->
+          <div class="space-y-2 mb-4">
+            <div class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+              <i data-lucide="hash" class="w-4 h-4"></i>
+              <span class="font-mono text-xs">{{ p.slug }}</span>
+            </div>
+            <div class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+              <i data-lucide="calendar" class="w-4 h-4"></i>
+              <span>{{ p.created_at }}</span>
+            </div>
+          </div>
+
+          <!-- Quick Stats -->
+          <div class="pt-4 border-t border-slate-200 dark:border-slate-700">
+            <div class="flex items-center justify-between text-sm">
+              <div class="flex items-center gap-1 text-slate-600 dark:text-slate-400">
+                <i data-lucide="users" class="w-4 h-4"></i>
+                <span>0 agents</span>
+              </div>
+              <div class="flex items-center gap-1 text-slate-600 dark:text-slate-400">
+                <i data-lucide="mail" class="w-4 h-4"></i>
+                <span>0 msgs</span>
+              </div>
+              <div class="text-primary-600 dark:text-primary-400 group-hover:translate-x-1 transition-transform">
+                <i data-lucide="arrow-right" class="w-4 h-4"></i>
+              </div>
+            </div>
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+
+  {% else %}
+    <!-- Empty State -->
+    <div class="flex flex-col items-center justify-center py-20 animate-fade-in">
+      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-6">
+        <i data-lucide="folder-plus" class="w-12 h-12 text-slate-400 dark:text-slate-600"></i>
+      </div>
+      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
+        No projects yet
+      </h3>
+      <p class="text-slate-600 dark:text-slate-400 mb-6 text-center max-w-md">
+        Get started by creating your first multi-agent collaboration project. Projects help you organize agents, messages, and coordination activities.
+      </p>
+      <button onclick="showToast('Create project feature coming soon!', 'info')"
+              class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
+        <i data-lucide="plus" class="w-5 h-5"></i>
+        Create Your First Project
+      </button>
+    </div>
+  {% endif %}
+</div>
+
+<script>
+  // Initialize icons after content loads
+  document.addEventListener('DOMContentLoaded', () => {
+    lucide.createIcons();
+  });
+</script>
+{% endblock %}
