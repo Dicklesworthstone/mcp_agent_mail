@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import socket
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse
@@ -106,7 +107,18 @@ async def _ensure_initialized() -> None:
                     host = parsed.hostname or "localhost"
                     port = str(parsed.port or "6379")
                     pwd = parsed.password or None
-                    litellm.enable_cache(type=LiteLLMCacheType.REDIS, host=str(host), port=str(port), password=pwd)
+                    try:
+                        # Fast DNS sanity check to avoid noisy connection errors on placeholders
+                        socket.gethostbyname(host)
+                        litellm.enable_cache(
+                            type=LiteLLMCacheType.REDIS,
+                            host=str(host),
+                            port=str(port),
+                            password=pwd,
+                        )
+                    except Exception:
+                        _logger.info("litellm.cache.redis_unavailable_fallback_local", host=host, port=port)
+                        litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
                 else:
                     litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
 
@@ -135,12 +147,24 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         {"role": "user", "content": user},
     ]
 
-    def _call():
-        if _router is not None:
-            return _router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+    def _call_router():
+        return _router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+
+    def _call_direct():
         return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
-    resp = await asyncio.to_thread(_call)
+    resp: Any
+    try:
+        if _router is not None:
+            resp = await asyncio.to_thread(_call_router)
+        else:
+            resp = await asyncio.to_thread(_call_direct)
+    except Exception:
+        # Fallback to direct completion if Router path fails (e.g., no deployments)
+        global _router
+        _router = None
+        _logger.debug("litellm.router.disabled_after_failure")
+        resp = await asyncio.to_thread(_call_direct)
 
     # Normalize content across potential shapes
     content: str

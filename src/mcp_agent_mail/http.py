@@ -1433,6 +1433,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             # Get basic stats
             from pathlib import Path as P
+
             from git import Repo as GitRepo
 
             repo_root = P(storage_root)
@@ -1476,12 +1477,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         # Catch-all for unexpected errors
                         repo_size = "Unknown"
                 except Exception:
-                    total_commits = 0
+                    total_commits = "0"
                     project_count = 0
                     repo_size = "Unknown"
                     last_commit_time = "Unknown"
             else:
-                total_commits = 0
+                total_commits = "0"
                 project_count = 0
                 repo_size = "0 MB"
                 last_commit_time = "Never"
@@ -1498,6 +1499,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/activity", response_class=HTMLResponse)
         async def archive_activity(limit: int = 50) -> HTMLResponse:
             """Display recent commits across all projects."""
+            # Validate and cap limit to prevent DoS
+            limit = max(1, min(limit, 500))  # Between 1 and 500
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
 
@@ -1536,6 +1540,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
             """Display communication timeline with Mermaid.js visualization."""
+            # Validate project slug if provided
+            if project and not _validate_project_slug(project):
+                return await _render("error.html", message="Invalid project identifier")
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
 
@@ -1572,6 +1580,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 # Show project selector - requires project parameter
                 return await _render("error.html", message="Please select a project to browse")
 
+            # Validate project slug
+            if not _validate_project_slug(project):
+                return await _render("error.html", message="Invalid project identifier")
+
             settings = get_settings()
             archive = await ensure_archive(settings, project)
             tree = await get_archive_tree(archive, path)
@@ -1581,6 +1593,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/browser/{project}/file")
         async def archive_browser_file(project: str, path: str) -> JSONResponse:
             """Get file content from archive."""
+            # Validate project slug
+            if not _validate_project_slug(project):
+                raise HTTPException(status_code=400, detail="Invalid project identifier")
+
             try:
                 settings = get_settings()
                 archive = await ensure_archive(settings, project)
@@ -1599,6 +1615,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/network", response_class=HTMLResponse)
         async def archive_network(project: str | None = None) -> HTMLResponse:
             """Display agent communication network graph."""
+            # Validate project slug if provided
+            if project and not _validate_project_slug(project):
+                return await _render("error.html", message="Invalid project identifier")
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
 
@@ -1641,6 +1661,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/time-travel/snapshot")
         async def archive_time_travel_snapshot(project: str, agent: str, timestamp: str) -> JSONResponse:
             """Get historical inbox snapshot."""
+            # Validate inputs
+            if not _validate_project_slug(project):
+                raise HTTPException(status_code=400, detail="Invalid project identifier")
+            # TODO: Add agent name validation when this feature is implemented
+            # TODO: Add timestamp validation when this feature is implemented
+
             # This is a simplified implementation - in production would parse git history at timestamp
             return JSONResponse({"messages": [], "note": "Time travel feature requires enhanced git history parsing"})
 

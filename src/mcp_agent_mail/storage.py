@@ -777,12 +777,12 @@ async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> st
                             # Get relative path from repo root
                             rel_path = md_file.relative_to(archive.repo_root)
 
-                            # Get commit that created this file (more efficient than list)
-                            commits_iter = archive.repo.iter_commits(paths=str(rel_path), max_count=1)
-                            commit = next(commits_iter, None)
-
-                            if commit:
-                                return commit.hexsha
+                            # Get FIRST commit that created this file (oldest, not most recent)
+                            # iter_commits returns newest first, so we need to get all and take the last
+                            commits_list = list(archive.repo.iter_commits(paths=str(rel_path)))
+                            if commits_list:
+                                # The last commit in the list is the oldest (first commit)
+                                return commits_list[-1].hexsha
                         except (ValueError, StopIteration):
                             continue
 
@@ -827,16 +827,16 @@ async def get_archive_tree(
 
         # Get commit (HEAD if not specified)
         if commit_sha:
+            # Validate SHA format
+            if not (7 <= len(commit_sha) <= 40) or not all(c in "0123456789abcdef" for c in commit_sha.lower()):
+                raise ValueError("Invalid commit SHA format")
             commit = archive.repo.commit(commit_sha)
         else:
             commit = archive.repo.head.commit
 
         # Navigate to the requested path within project root
         project_rel = f"projects/{archive.slug}"
-        if safe_path:
-            tree_path = f"{project_rel}/{safe_path}"
-        else:
-            tree_path = project_rel
+        tree_path = f"{project_rel}/{safe_path}" if safe_path else project_rel
 
         # Get tree object at path
         try:
@@ -903,6 +903,9 @@ async def get_file_content(
             return None
 
         if commit_sha:
+            # Validate SHA format
+            if not (7 <= len(commit_sha) <= 40) or not all(c in "0123456789abcdef" for c in commit_sha.lower()):
+                raise ValueError("Invalid commit SHA format")
             commit = archive.repo.commit(commit_sha)
         else:
             commit = archive.repo.head.commit
@@ -910,11 +913,14 @@ async def get_file_content(
         project_rel = f"projects/{archive.slug}/{safe_path}"
 
         try:
-            blob = commit.tree / project_rel
+            obj = commit.tree / project_rel
+            # Check if it's a file (blob), not a directory (tree)
+            if obj.type != "blob":
+                raise ValueError("Path is a directory, not a file")
             # Check size before reading
-            if blob.size > max_size_bytes:
-                raise ValueError(f"File too large: {blob.size} bytes (max {max_size_bytes})")
-            return blob.data_stream.read().decode("utf-8", errors="replace")
+            if obj.size > max_size_bytes:
+                raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
+            return obj.data_stream.read().decode("utf-8", errors="replace")
         except KeyError:
             return None
 

@@ -260,11 +260,12 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 ### On-disk layout (per project)
 
 ```
-<store>/projects/<slug>/repo/
+<store>/projects/<slug>/
   agents/<AgentName>/profile.json
   agents/<AgentName>/inbox/YYYY/MM/<msg-id>.md
   agents/<AgentName>/outbox/YYYY/MM/<msg-id>.md
   messages/YYYY/MM/<msg-id>.md
+  messages/threads/<thread-id>.md  # optional human digest maintained by the server
   claims/<sha1-of-path>.json
   attachments/<xx>/<sha1>.webp
 ```
@@ -276,9 +277,10 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 ```markdown
 ---json
 {
-  "id": "msg_20251023_7b3dc3a7",
+  "id": 1234,
   "thread_id": "TKT-123",
   "project": "/abs/path/backend",
+  "project_slug": "backend-abc123",
   "from": "GreenCastle",
   "to": ["BlueLake"],
   "cc": [],
