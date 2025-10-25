@@ -52,6 +52,36 @@ def generate_agent_name() -> str:
     return f"{adjective}{noun}"
 
 
+def validate_agent_name_format(name: str) -> bool:
+    """
+    Validate that an agent name matches the required adjective+noun format.
+
+    CRITICAL: Agent names MUST be randomly generated two-word combinations
+    like "GreenLake" or "BlueDog", NOT descriptive names like "BackendHarmonizer".
+
+    Names should be:
+    - Unique and easy to remember
+    - NOT descriptive of the agent's role or task
+    - One of the predefined adjective+noun combinations
+
+    Note: This validation is case-insensitive to match the database behavior
+    where "GreenLake", "greenlake", and "GREENLAKE" are treated as the same.
+
+    Returns True if valid, False otherwise.
+    """
+    if not name:
+        return False
+
+    # Check if name matches any valid adjective+noun combination (case-insensitive)
+    name_lower = name.lower()
+    for adjective in ADJECTIVES:
+        for noun in NOUNS:
+            if name_lower == f"{adjective}{noun}".lower():
+                return True
+
+    return False
+
+
 def sanitize_agent_name(value: str) -> Optional[str]:
     """Normalize user-provided agent name; return None if nothing remains."""
     cleaned = _AGENT_NAME_RE.sub("", value.strip())

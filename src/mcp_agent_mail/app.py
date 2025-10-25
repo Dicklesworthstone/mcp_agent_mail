@@ -38,7 +38,7 @@ from .storage import (
     write_claim_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, sanitize_agent_name, slugify
+from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +554,11 @@ async def _build_project_profile(
 
 
 def _heuristic_project_similarity(project_a: Project, project_b: Project) -> tuple[float, str]:
+    # CRITICAL: Projects with identical human_key are the SAME project, not siblings
+    # This should be filtered earlier, but adding safeguard here
+    if project_a.human_key == project_b.human_key:
+        return 0.0, "ERROR: Identical human_key - these are the SAME project, not siblings"
+
     slug_ratio = SequenceMatcher(None, project_a.slug, project_b.slug).ratio()
     human_ratio = SequenceMatcher(None, project_a.human_key, project_b.human_key).ratio()
     shared_prefix = 0.0
@@ -641,6 +646,13 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
             for project_b in projects[idx + 1 :]:
                 if project_b.id is None:
                     continue
+
+                # CRITICAL: Skip projects with identical human_key - they're the SAME project, not siblings
+                # Two agents in /data/projects/smartedgar_mcp are on the SAME project
+                # Siblings would be different directories like /data/projects/smartedgar_mcp_frontend
+                if project_a.human_key == project_b.human_key:
+                    continue
+
                 pair = _canonical_project_pair(project_a.id, project_b.id)
                 suggestion = existing_map.get(pair)
                 if suggestion is None:
@@ -838,6 +850,16 @@ async def _generate_unique_agent_name(
         sanitized = sanitize_agent_name(name_hint)
         if not sanitized:
             raise ValueError("Name hint must contain alphanumeric characters.")
+
+        # CRITICAL: Enforce random adjective+noun format only
+        if not validate_agent_name_format(sanitized):
+            raise ValueError(
+                f"Invalid agent name format: '{sanitized}'. "
+                f"Agent names MUST be randomly generated adjective+noun combinations "
+                f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
+                f"Omit the 'name_hint' parameter to auto-generate a valid name."
+            )
+
         if not await available(sanitized):
             raise ValueError(f"Agent name '{sanitized}' is already in use.")
         return sanitized
@@ -889,11 +911,24 @@ async def _get_or_create_agent(
         sanitized = sanitize_agent_name(name)
         if not sanitized:
             raise ValueError("Agent name must contain alphanumeric characters.")
+
+        # CRITICAL: Enforce random adjective+noun format only
+        # Names like "GreenLake" or "BlueDog" are valid
+        # Names like "BackendHarmonizer" are NOT allowed
+        if not validate_agent_name_format(sanitized):
+            raise ValueError(
+                f"Invalid agent name format: '{sanitized}'. "
+                f"Agent names MUST be randomly generated adjective+noun combinations "
+                f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
+                f"Omit the 'name' parameter to auto-generate a valid name."
+            )
+
         desired_name = sanitized
     await ensure_schema()
     async with get_session() as session:
+        # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.name == desired_name)
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())
         )
         agent = result.scalars().first()
         if agent:
@@ -1656,16 +1691,27 @@ def build_mcp_server() -> FastMCP:
 
         How it works
         ------------
+        - Validates that `human_key` is an absolute directory path (the agent's working directory).
         - Computes a stable slug from `human_key` (lowercased, safe characters) so
           multiple agents can refer to the same project consistently.
         - Ensures DB row exists and that the on-disk archive is initialized
           (e.g., `messages/`, `agents/`, `claims/` directories).
 
+        CRITICAL: Project Identity Rules
+        ---------------------------------
+        - The `human_key` MUST be the absolute path to the agent's working directory
+        - Two agents working in the SAME directory path are working on the SAME project
+        - Example: Both agents in /data/projects/smartedgar_mcp → SAME project
+        - Sibling projects are DIFFERENT directories (e.g., /data/projects/smartedgar_mcp
+          vs /data/projects/smartedgar_mcp_frontend)
+
         Parameters
         ----------
         human_key : str
-            A stable identifier for a project (often an absolute path to a repo,
-            or a canonical slug that multiple agents can share).
+            The absolute path to the agent's working directory (e.g., "/data/projects/backend").
+            This MUST be an absolute path, not a relative path or arbitrary slug.
+            This is the canonical identifier for the project - all agents working in this
+            directory will share the same project identity.
 
         Returns
         -------
@@ -1680,20 +1726,29 @@ def build_mcp_server() -> FastMCP:
           "jsonrpc": "2.0",
           "id": "2",
           "method": "tools/call",
-          "params": {"name": "ensure_project", "arguments": {"human_key": "/abs/path/backend"}}
+          "params": {"name": "ensure_project", "arguments": {"human_key": "/data/projects/backend"}}
         }
         ```
 
         Common mistakes
         ---------------
-        - Passing an ephemeral or relative path as `human_key` (prefer absolute,
-          stable identifiers to avoid accidental duplication).
+        - Passing a relative path (e.g., "./backend") instead of an absolute path
+        - Using arbitrary slugs instead of the actual working directory path
+        - Creating separate projects for the same directory with different slugs
 
         Idempotency
         -----------
         - Safe to call multiple times. If the project already exists, the existing
           record is returned and the archive is ensured on disk (no destructive changes).
         """
+        # Validate that human_key is an absolute path (cross-platform)
+        if not Path(human_key).is_absolute():
+            raise ValueError(
+                f"human_key must be an absolute directory path, got: '{human_key}'. "
+                "Use the agent's working directory path (e.g., '/data/projects/backend' on Unix "
+                "or 'C:\\projects\\backend' on Windows)."
+            )
+
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
         await ensure_archive(settings, project.slug)
@@ -1720,10 +1775,19 @@ def build_mcp_server() -> FastMCP:
 
         Semantics
         ---------
-        - If `name` is omitted, a memorable adjective+noun name is generated.
+        - If `name` is omitted, a random adjective+noun name is auto-generated.
         - Reusing the same `name` updates the profile (program/model/task) and
           refreshes `last_active_ts`.
         - A `profile.json` file is written under `agents/<Name>/` in the project archive.
+
+        CRITICAL: Agent Naming Rules
+        -----------------------------
+        - Agent names MUST be randomly generated adjective+noun combinations
+        - Examples: "GreenLake", "BlueDog", "RedStone", "PurpleBear"
+        - Names should be unique, easy to remember, and NOT descriptive
+        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
+        - The whole point: names should be memorable identifiers, not role descriptions
+        - Best practice: Omit the `name` parameter to auto-generate a valid name
 
         Parameters
         ----------
@@ -1734,7 +1798,8 @@ def build_mcp_server() -> FastMCP:
         model : str
             The underlying model (e.g., "gpt5-codex", "opus-4.1").
         name : Optional[str]
-            Desired agent name. If omitted, a memorable adjective+noun name is generated.
+            MUST be a valid adjective+noun combination if provided (e.g., "BlueLake").
+            If omitted, a random valid name is auto-generated (RECOMMENDED).
             Names are unique per project; passing the same name updates the profile.
         task_description : str
             Short description of current focus (shows up in directory listings).
@@ -1746,22 +1811,23 @@ def build_mcp_server() -> FastMCP:
 
         Examples
         --------
-        Register with generated name:
+        Register with auto-generated name (RECOMMENDED):
         ```json
         {"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"register_agent","arguments":{
-          "project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"
+          "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","task_description":"Auth refactor"
         }}}
         ```
 
-        Register with explicit name:
+        Register with explicit valid name:
         ```json
         {"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"register_agent","arguments":{
-          "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
+          "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
         }}}
         ```
 
         Pitfalls
         --------
+        - Names MUST match the adjective+noun format or an error will be raised
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
@@ -1869,8 +1935,16 @@ def build_mcp_server() -> FastMCP:
         How this differs from `register_agent`
         --------------------------------------
         - Always creates a new identity with a fresh unique name (never updates an existing one).
-        - `name_hint`, if provided, is sanitized (alphanumeric only) and must be available,
-          otherwise an error is raised. Without a hint, a readable adjective+noun name is generated.
+        - `name_hint`, if provided, MUST be a valid adjective+noun combination and must be available,
+          otherwise an error is raised. Without a hint, a random adjective+noun name is generated.
+
+        CRITICAL: Agent Naming Rules
+        -----------------------------
+        - Agent names MUST be randomly generated adjective+noun combinations
+        - Examples: "GreenCastle", "BlueLake", "RedStone", "PurpleBear"
+        - Names should be unique, easy to remember, and NOT descriptive
+        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
+        - Best practice: Omit `name_hint` to auto-generate a valid name (RECOMMENDED)
 
         When to use
         -----------
@@ -1884,18 +1958,18 @@ def build_mcp_server() -> FastMCP:
 
         Examples
         --------
-        With name hint:
+        Auto-generate name (RECOMMENDED):
         ```json
-        {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
-          "project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
-          "task_description":"DB migration spike"
+        {"jsonrpc":"2.0","id":"c2","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1"
         }}}
         ```
 
-        Let the server generate the name:
+        With valid name hint:
         ```json
-        {"jsonrpc":"2.0","id":"c2","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
-          "project_key":"/abs/path/backend","program":"claude-code","model":"opus-4.1"
+        {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
+          "task_description":"DB migration spike"
         }}}
         ```
         """
@@ -4921,9 +4995,54 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend"}}
         ```
         """
+        # Robust query parsing: some FastMCP versions do not inject query args.
+        # If the templating layer included the query string in the path segment,
+        # extract it and fill missing parameters.
+        if "?" in thread_id:
+            id_part, _, qs = thread_id.partition("?")
+            thread_id = id_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and "project" in parsed and parsed["project"]:
+                    project = parsed["project"][0]
+                if parsed.get("include_bodies"):
+                    val = parsed["include_bodies"][0].strip().lower()
+                    include_bodies = val in ("1", "true", "t", "yes", "y")
+            except Exception:
+                pass
+
+        # Determine project if omitted by client
         if project is None:
-            raise ValueError("project parameter is required for thread resource")
-        project_obj = await _get_project_by_identifier(project)
+            # Auto-detect project using numeric seed (message id) or unique thread key
+            async with get_session() as s_auto:
+                try:
+                    msg_id = int(thread_id)
+                except ValueError:
+                    msg_id = None
+                if msg_id is not None:
+                    rows = await s_auto.execute(
+                        select(Project)
+                        .join(Message, Message.project_id == Project.id)
+                        .where(cast(Any, Message.id) == msg_id)
+                        .limit(2)
+                    )
+                    projects = [row[0] for row in rows.all()]
+                else:
+                    rows = await s_auto.execute(
+                        select(Project)
+                        .join(Message, Message.project_id == Project.id)
+                        .where(Message.thread_id == thread_id)
+                        .limit(2)
+                    )
+                    projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for thread resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+
         if project_obj.id is None:
             raise ValueError("Project must have an id before listing threads.")
         await ensure_schema()
@@ -5095,7 +5214,7 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) >= 1:
+            if len(projects) == 1:
                 project_obj = projects[0]
             else:
                 raise ValueError("project parameter is required for urgent view")
@@ -5389,7 +5508,7 @@ def build_mcp_server() -> FastMCP:
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
-            if len(projects) >= 1:
+            if len(projects) == 1:
                 project_obj = projects[0]
             else:
                 raise ValueError("project parameter is required for mailbox resource")

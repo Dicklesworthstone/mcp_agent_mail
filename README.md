@@ -497,7 +497,7 @@ Example (conceptual) resource read:
   - `include_bodies`: include markdown bodies in results
   - `limit`: max results (default 20)
 - `resource://message/{id}{?project}`: fetch one message; `project` optional if id is globally unique
-- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread’s messages; if `project` omitted, resolves to the most recent matching project
+- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread’s messages; if `project` is omitted, the server auto-resolves only when the thread is uniquely identifiable to a single project (by numeric message id seed or thread key). Otherwise, pass `project` explicitly.
 
 ```mermaid
 sequenceDiagram

@@ -1,0 +1,443 @@
+{% extends "base.html" %}
+
+{% block title %}Unified Inbox — Agent Mail{% endblock %}
+
+{% block content %}
+<div class="page-transition" x-data="unifiedInboxManager()">
+  <!-- Premium Header -->
+  <div class="mb-8">
+    <div class="flex items-start justify-between flex-wrap gap-4">
+      <div>
+        <div class="flex items-center gap-3 mb-3">
+          <div class="w-12 h-12 bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 rounded-2xl flex items-center justify-center shadow-lg">
+            <i data-lucide="inbox" class="w-6 h-6 text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-3xl md:text-4xl font-bold text-slate-900 dark:text-white">
+              Unified Inbox
+            </h1>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">
+              All conversations across {{ total_agents }} active agents
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- View Controls -->
+      <div class="flex items-center gap-3">
+        <!-- View Toggle -->
+        <div class="flex items-center gap-1 bg-white dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
+          <button @click="viewMode = 'list'"
+                  :class="viewMode === 'list' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
+                  class="px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 font-medium text-sm"
+                  data-tippy-content="List view">
+            <i data-lucide="list" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">List</span>
+          </button>
+          <button @click="viewMode = 'card'"
+                  :class="viewMode === 'card' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
+                  class="px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 font-medium text-sm"
+                  data-tippy-content="Card view with full message preview">
+            <i data-lucide="layout-grid" class="w-4 h-4"></i>
+            <span class="hidden sm:inline">Cards</span>
+          </button>
+        </div>
+
+        <!-- Refresh Button -->
+        <button @click="refresh()"
+                class="p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 transition-all duration-200 shadow-sm hover:shadow-md"
+                data-tippy-content="Refresh inbox">
+          <i data-lucide="refresh-cw" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+      <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/30 rounded-xl p-4 border border-blue-200 dark:border-blue-800">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs font-semibold text-blue-600 dark:text-blue-400 uppercase tracking-wide mb-1">Projects</p>
+            <p class="text-2xl font-bold text-blue-900 dark:text-blue-100">{{ projects|length }}</p>
+          </div>
+          <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
+            <i data-lucide="folder" class="w-5 h-5 text-white"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-950/30 dark:to-emerald-900/30 rounded-xl p-4 border border-emerald-200 dark:border-emerald-800">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 uppercase tracking-wide mb-1">Agents</p>
+            <p class="text-2xl font-bold text-emerald-900 dark:text-emerald-100">{{ total_agents }}</p>
+          </div>
+          <div class="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
+            <i data-lucide="users" class="w-5 h-5 text-white"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-gradient-to-br from-violet-50 to-violet-100 dark:from-violet-950/30 dark:to-violet-900/30 rounded-xl p-4 border border-violet-200 dark:border-violet-800">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs font-semibold text-violet-600 dark:text-violet-400 uppercase tracking-wide mb-1">Messages</p>
+            <p class="text-2xl font-bold text-violet-900 dark:text-violet-100">{{ total_messages }}</p>
+          </div>
+          <div class="w-10 h-10 bg-violet-500 rounded-lg flex items-center justify-center">
+            <i data-lucide="mail" class="w-5 h-5 text-white"></i>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-950/30 dark:to-amber-900/30 rounded-xl p-4 border border-amber-200 dark:border-amber-800">
+        <div class="flex items-center justify-between">
+          <div>
+            <p class="text-xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wide mb-1">Threads</p>
+            <p class="text-2xl font-bold text-amber-900 dark:text-amber-100" x-text="threadCount()">0</p>
+          </div>
+          <div class="w-10 h-10 bg-amber-500 rounded-lg flex items-center justify-center">
+            <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filters & Search Bar -->
+  <div class="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 mb-8 shadow-sm">
+    <div class="flex flex-col lg:flex-row gap-4">
+      <!-- Search Input -->
+      <div class="flex-1">
+        <div class="relative">
+          <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+            <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
+          </div>
+          <input type="text"
+                 x-model="searchQuery"
+                 @input="debouncedFilter()"
+                 placeholder="Search messages, agents, or projects..."
+                 class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200">
+        </div>
+      </div>
+
+      <!-- Filter Buttons -->
+      <div class="flex flex-wrap gap-2">
+        <button @click="toggleFilter('all')"
+                :class="activeFilter === 'all' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
+          <i data-lucide="inbox" class="w-4 h-4"></i>
+          All
+        </button>
+        <button @click="toggleFilter('urgent')"
+                :class="activeFilter === 'urgent' ? 'bg-gradient-to-r from-red-500 to-red-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
+          <i data-lucide="alert-circle" class="w-4 h-4"></i>
+          Urgent
+        </button>
+        <button @click="toggleFilter('threaded')"
+                :class="activeFilter === 'threaded' ? 'bg-gradient-to-r from-violet-500 to-violet-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
+          <i data-lucide="git-branch" class="w-4 h-4"></i>
+          Threads
+        </button>
+      </div>
+
+      <!-- Sort Dropdown -->
+      <div class="relative" x-data="{ open: false }">
+        <button @click="open = !open"
+                class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 rounded-lg font-medium text-sm text-slate-700 dark:text-slate-300 transition-all duration-200 flex items-center gap-2 whitespace-nowrap">
+          <i data-lucide="arrow-down-up" class="w-4 h-4"></i>
+          <span x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : 'By Thread'"></span>
+          <i data-lucide="chevron-down" class="w-4 h-4"></i>
+        </button>
+        <div x-show="open"
+             @click.away="open = false"
+             x-transition:enter="transition ease-out duration-100"
+             x-transition:enter-start="opacity-0 scale-95"
+             x-transition:enter-end="opacity-100 scale-100"
+             x-transition:leave="transition ease-in duration-75"
+             x-transition:leave-start="opacity-100 scale-100"
+             x-transition:leave-end="opacity-0 scale-95"
+             class="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-10">
+          <div class="p-2">
+            <button @click="sortBy = 'newest'; open = false"
+                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
+              Newest First
+            </button>
+            <button @click="sortBy = 'oldest'; open = false"
+                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
+              Oldest First
+            </button>
+            <button @click="sortBy = 'thread'; open = false"
+                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
+              Group by Thread
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Messages Container -->
+  <template x-if="filteredMessages().length > 0">
+    <div>
+      <!-- List View -->
+      <div x-show="viewMode === 'list'" class="space-y-2">
+        <template x-for="(msg, index) in filteredMessages()" :key="msg.id">
+          <a :href="'/mail/' + msg.project_slug + '/message/' + msg.id"
+             class="block group bg-white dark:bg-slate-800 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 overflow-hidden card-hover"
+             :style="`animation-delay: ${Math.min(index * 0.03, 1)}s`">
+
+            <!-- Thread Indicator -->
+            <div x-show="msg.thread_count > 0"
+                 class="h-1 bg-gradient-to-r from-violet-500 via-purple-500 to-pink-500"
+                 :style="`opacity: ${Math.min(msg.thread_count / 5, 1)}`">
+            </div>
+
+            <div class="p-5">
+              <div class="flex items-start gap-4">
+                <!-- Avatar/Icon -->
+                <div class="flex-shrink-0">
+                  <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-md group-hover:shadow-lg group-hover:scale-110 transition-all duration-300">
+                    <i data-lucide="user" class="w-6 h-6 text-white"></i>
+                  </div>
+                </div>
+
+                <!-- Content -->
+                <div class="flex-1 min-w-0">
+                  <!-- Header Row -->
+                  <div class="flex items-start justify-between gap-4 mb-2">
+                    <div class="flex-1 min-w-0">
+                      <h3 class="text-lg font-bold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1"
+                          x-text="msg.subject"></h3>
+                      <div class="flex items-center gap-2 mt-1 flex-wrap">
+                        <span class="text-sm font-medium text-slate-600 dark:text-slate-400">
+                          <span x-text="msg.sender"></span>
+                        </span>
+                        <span class="text-slate-400 dark:text-slate-600">→</span>
+                        <span class="text-sm text-slate-500 dark:text-slate-500 truncate max-w-xs" x-text="msg.recipients"></span>
+                      </div>
+                    </div>
+
+                    <!-- Meta Info -->
+                    <div class="flex flex-col items-end gap-2 flex-shrink-0">
+                      <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" x-text="formatDate(msg.created)"></span>
+                      <template x-if="msg.importance && msg.importance !== 'normal'">
+                        <span :class="{
+                          'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800': msg.importance === 'urgent',
+                          'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800': msg.importance === 'high'
+                        }" class="px-2 py-1 rounded-lg text-xs font-semibold border flex items-center gap-1">
+                          <i data-lucide="alert-circle" class="w-3 h-3"></i>
+                          <span x-text="msg.importance.toUpperCase()"></span>
+                        </span>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- Project Badge & Thread Info -->
+                  <div class="flex items-center gap-2 flex-wrap mt-3">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-medium">
+                      <i data-lucide="folder" class="w-3 h-3"></i>
+                      <span x-text="msg.project_name" class="truncate max-w-[200px]"></span>
+                    </span>
+                    <template x-if="msg.thread_count > 0">
+                      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gradient-to-r from-violet-100 to-purple-100 dark:from-violet-900/30 dark:to-purple-900/30 text-violet-700 dark:text-violet-300 rounded-lg text-xs font-semibold border border-violet-200 dark:border-violet-800">
+                        <i data-lucide="git-branch" class="w-3 h-3"></i>
+                        <span x-text="(msg.thread_count + 1) + ' messages'"></span>
+                      </span>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Arrow -->
+                <div class="flex-shrink-0 flex items-center">
+                  <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all duration-300"></i>
+                </div>
+              </div>
+            </div>
+          </a>
+        </template>
+      </div>
+
+      <!-- Card View -->
+      <div x-show="viewMode === 'card'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <template x-for="(msg, index) in filteredMessages()" :key="msg.id">
+          <div class="group bg-white dark:bg-slate-800 rounded-2xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 shadow-soft hover:shadow-large transition-all duration-300 overflow-hidden card-hover"
+               :style="`animation-delay: ${Math.min(index * 0.03, 1)}s`">
+
+            <!-- Thread Indicator -->
+            <div x-show="msg.thread_count > 0"
+                 class="h-1 bg-gradient-to-r from-violet-500 via-purple-500 to-pink-500"
+                 :style="`opacity: ${Math.min(msg.thread_count / 5, 1)}`">
+            </div>
+
+            <div class="p-6">
+              <!-- Header -->
+              <div class="flex items-start justify-between gap-4 mb-4">
+                <div class="flex-1 min-w-0">
+                  <h3 class="text-xl font-bold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2 mb-2"
+                      x-text="msg.subject"></h3>
+                  <div class="flex items-center gap-2 text-sm">
+                    <div class="w-8 h-8 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="user" class="w-4 h-4 text-white"></i>
+                    </div>
+                    <div class="flex-1 min-w-0">
+                      <p class="font-semibold text-slate-700 dark:text-slate-300" x-text="msg.sender"></p>
+                      <p class="text-xs text-slate-500 dark:text-slate-500 truncate" x-text="'To: ' + msg.recipients"></p>
+                    </div>
+                  </div>
+                </div>
+                <template x-if="msg.importance && msg.importance !== 'normal'">
+                  <span :class="{
+                    'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800': msg.importance === 'urgent',
+                    'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800': msg.importance === 'high'
+                  }" class="px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 flex-shrink-0">
+                    <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
+                    <span x-text="msg.importance.toUpperCase()"></span>
+                  </span>
+                </template>
+              </div>
+
+              <!-- Message Preview -->
+              <div class="mb-4 prose prose-sm dark:prose-invert max-w-none">
+                <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-700 line-clamp-4 text-sm text-slate-600 dark:text-slate-400 leading-relaxed"
+                     x-html="renderMarkdownPreview(msg.body_md)"></div>
+              </div>
+
+              <!-- Footer -->
+              <div class="flex items-center justify-between gap-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-medium">
+                    <i data-lucide="folder" class="w-3 h-3"></i>
+                    <span x-text="msg.project_name" class="truncate max-w-[150px]"></span>
+                  </span>
+                  <template x-if="msg.thread_count > 0">
+                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gradient-to-r from-violet-100 to-purple-100 dark:from-violet-900/30 dark:to-purple-900/30 text-violet-700 dark:text-violet-300 rounded-lg text-xs font-semibold border border-violet-200 dark:border-violet-800">
+                      <i data-lucide="git-branch" class="w-3 h-3"></i>
+                      <span x-text="(msg.thread_count + 1)"></span>
+                    </span>
+                  </template>
+                  <span class="text-xs text-slate-500 dark:text-slate-400" x-text="formatDate(msg.created)"></span>
+                </div>
+                <a :href="'/mail/' + msg.project_slug + '/message/' + msg.id"
+                   class="px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white text-sm font-semibold rounded-lg shadow-md hover:shadow-xl transition-all duration-200 flex items-center gap-2 hover:scale-105">
+                  <span>View</span>
+                  <i data-lucide="arrow-right" class="w-4 h-4"></i>
+                </a>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </template>
+
+  <!-- Empty State -->
+  <template x-if="filteredMessages().length === 0">
+    <div class="flex flex-col items-center justify-center py-20 animate-fade-in">
+      <div class="relative mb-8">
+        <div class="w-24 h-24 bg-gradient-to-br from-slate-200 to-slate-300 dark:from-slate-700 dark:to-slate-800 rounded-3xl flex items-center justify-center shadow-lg">
+          <i data-lucide="inbox" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+        </div>
+      </div>
+      <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-2">No messages found</h3>
+      <p class="text-slate-600 dark:text-slate-400 mb-6 text-center max-w-md">
+        <template x-if="searchQuery || activeFilter !== 'all'">
+          <span>Try adjusting your filters or search query</span>
+        </template>
+        <template x-if="!searchQuery && activeFilter === 'all'">
+          <span>Your inbox is empty. Messages from all agents will appear here.</span>
+        </template>
+      </p>
+      <button @click="searchQuery = ''; activeFilter = 'all'"
+              class="px-6 py-3 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white font-semibold rounded-xl shadow-md hover:shadow-lg transition-all duration-200 flex items-center gap-2">
+        <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+        <span>Clear Filters</span>
+      </button>
+    </div>
+  </template>
+</div>
+
+<script>
+function unifiedInboxManager() {
+  return {
+    viewMode: 'list',
+    searchQuery: '',
+    activeFilter: 'all',
+    sortBy: 'newest',
+    messages: {{ messages|tojson }},
+    debounceTimeout: null,
+
+    filteredMessages() {
+      let filtered = [...this.messages];
+
+      // Apply search
+      if (this.searchQuery.trim()) {
+        const query = this.searchQuery.toLowerCase();
+        filtered = filtered.filter(m =>
+          m.subject.toLowerCase().includes(query) ||
+          m.sender.toLowerCase().includes(query) ||
+          m.recipients.toLowerCase().includes(query) ||
+          m.project_name.toLowerCase().includes(query) ||
+          m.body_md.toLowerCase().includes(query)
+        );
+      }
+
+      // Apply filter
+      if (this.activeFilter === 'urgent') {
+        filtered = filtered.filter(m => m.importance === 'urgent' || m.importance === 'high');
+      } else if (this.activeFilter === 'threaded') {
+        filtered = filtered.filter(m => m.thread_count > 0);
+      }
+
+      // Apply sort
+      if (this.sortBy === 'newest') {
+        filtered.sort((a, b) => new Date(b.created) - new Date(a.created));
+      } else if (this.sortBy === 'oldest') {
+        filtered.sort((a, b) => new Date(a.created) - new Date(b.created));
+      } else if (this.sortBy === 'thread') {
+        filtered.sort((a, b) => b.thread_count - a.thread_count);
+      }
+
+      return filtered;
+    },
+
+    threadCount() {
+      return new Set(this.messages.filter(m => m.thread_id).map(m => m.thread_id)).size;
+    },
+
+    toggleFilter(filter) {
+      this.activeFilter = filter;
+    },
+
+    debouncedFilter() {
+      clearTimeout(this.debounceTimeout);
+      this.debounceTimeout = setTimeout(() => {
+        // Trigger re-render by accessing filteredMessages
+        this.filteredMessages();
+      }, 300);
+    },
+
+    formatDate(dateStr) {
+      if (!dateStr) return '';
+      if (typeof dayjs !== 'undefined') {
+        return dayjs(dateStr).fromNow();
+      }
+      return new Date(dateStr).toLocaleString();
+    },
+
+    renderMarkdownPreview(md) {
+      if (!md) return '<p class="text-slate-400">No content</p>';
+      // Simple markdown preview - just show first 200 chars
+      const text = md.replace(/[#*`_\[\]]/g, '').substring(0, 200);
+      return text + (md.length > 200 ? '...' : '');
+    },
+
+    refresh() {
+      window.location.reload();
+    }
+  };
+}
+</script>
+{% endblock %}

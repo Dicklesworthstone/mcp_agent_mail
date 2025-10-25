@@ -90,6 +90,13 @@ def _configure_logging(settings: Settings) -> None:
     # Suppress verbose aiosqlite DEBUG logs (functools.partial cursor/operation noise)
     logging.getLogger("aiosqlite").setLevel(logging.INFO)
 
+    # Suppress verbose git library DEBUG logs (Popen commands, platform detection)
+    logging.getLogger("git.util").setLevel(logging.INFO)
+    logging.getLogger("git.cmd").setLevel(logging.INFO)
+
+    # Suppress filelock DEBUG logs (lock acquire/release routine operations)
+    logging.getLogger("filelock").setLevel(logging.INFO)
+
     # Suppress SSE ping keepalive debug logs (periodic noise every 15s)
     logging.getLogger("sse_starlette.sse").setLevel(logging.INFO)
 
@@ -1083,6 +1090,108 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return JSONResponse({"error": "Unable to update sibling status"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
+
+        @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
+        async def unified_inbox(limit: int = 100, filter_importance: str | None = None, filter_unread: bool = False) -> HTMLResponse:
+            """Unified inbox showing messages from all active agents across all projects."""
+            await ensure_schema()
+            async with get_session() as session:
+                # Get all projects with their agents
+                projects_query = await session.execute(text(
+                    """
+                    SELECT p.id, p.slug, p.human_key,
+                           COUNT(DISTINCT a.id) as agent_count,
+                           MAX(a.last_active_ts) as last_activity
+                    FROM projects p
+                    LEFT JOIN agents a ON a.project_id = p.id
+                    GROUP BY p.id, p.slug, p.human_key
+                    ORDER BY last_activity DESC NULLS LAST, p.created_at DESC
+                    """
+                ))
+                projects_data = []
+                for r in projects_query.fetchall():
+                    proj_id = int(r[0])
+                    # Get agents for this project
+                    agents_query = await session.execute(text(
+                        """
+                        SELECT a.id, a.name, a.program, a.model, a.last_active_ts
+                        FROM agents a
+                        WHERE a.project_id = :pid
+                        ORDER BY a.last_active_ts DESC, a.name ASC
+                        """
+                    ), {"pid": proj_id})
+
+                    agents_list = []
+                    for ar in agents_query.fetchall():
+                        agents_list.append({
+                            "id": int(ar[0]),
+                            "name": ar[1],
+                            "program": ar[2],
+                            "model": ar[3],
+                            "last_active": str(ar[4]) if ar[4] else None
+                        })
+
+                    if agents_list:  # Only include projects with agents
+                        projects_data.append({
+                            "id": proj_id,
+                            "slug": r[1],
+                            "human_key": r[2],
+                            "agent_count": int(r[3] or 0),
+                            "agents": agents_list
+                        })
+
+                # Get recent messages across all projects with thread information
+                importance_filter = ""
+                if filter_importance and filter_importance.lower() in ["urgent", "high"]:
+                    importance_filter = " AND m.importance IN ('urgent', 'high')"
+
+                messages_query = await session.execute(text(
+                    f"""
+                    SELECT
+                        m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
+                        p.slug, p.human_key,
+                        sender.name as sender_name,
+                        GROUP_CONCAT(DISTINCT recip.name, ', ') as recipient_names,
+                        COUNT(DISTINCT CASE WHEN m2.id IS NOT NULL THEN m2.id END) as thread_count
+                    FROM messages m
+                    JOIN projects p ON p.id = m.project_id
+                    JOIN agents sender ON sender.id = m.sender_id
+                    LEFT JOIN message_recipients mr ON mr.message_id = m.id
+                    LEFT JOIN agents recip ON recip.id = mr.agent_id
+                    LEFT JOIN messages m2 ON (m2.thread_id = m.thread_id AND m2.id != m.id) OR (m2.id = m.thread_id AND m2.id != m.id)
+                    WHERE 1=1 {importance_filter}
+                    GROUP BY m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
+                             p.slug, p.human_key, sender.name
+                    ORDER BY m.created_ts DESC
+                    LIMIT :lim
+                    """
+                ), {"lim": limit})
+
+                messages = []
+                for r in messages_query.fetchall():
+                    messages.append({
+                        "id": int(r[0]),
+                        "subject": r[1],
+                        "body_md": r[2] or "",
+                        "created": str(r[3]),
+                        "importance": r[4],
+                        "thread_id": r[5],
+                        "project_slug": r[6],
+                        "project_name": r[7],
+                        "sender": r[8],
+                        "recipients": r[9] or "",
+                        "thread_count": int(r[10] or 0)
+                    })
+
+            return await _render(
+                "mail_unified_inbox.html",
+                projects=projects_data,
+                messages=messages,
+                total_agents=sum(p["agent_count"] for p in projects_data),
+                total_messages=len(messages),
+                filter_importance=filter_importance,
+                filter_unread=filter_unread,
+            )
 
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
         async def mail_inbox(project: str, agent: str, limit: int = 50, page: int = 1) -> HTMLResponse:
