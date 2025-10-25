@@ -45,8 +45,11 @@
 
       <div>
         <label class="block text-sm font-semibold text-slate-700 dark:text-slate-300 mb-2">Agent</label>
-        <select x-model="selectedAgent" :disabled="!selectedProject" class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50">
-          <option value="">Select agent...</option>
+        <select x-model="selectedAgent" :disabled="!selectedProject || loadingAgents" class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50">
+          <option value="" x-text="loadingAgents ? 'Loading agents...' : (!selectedProject ? 'Select project first...' : (agents.length === 0 ? 'No agents found' : 'Select agent...'))"></option>
+          <template x-for="agent in agents" :key="agent">
+            <option :value="agent" x-text="agent"></option>
+          </template>
         </select>
       </div>
 
@@ -144,6 +147,35 @@ function timeTravelManager() {
     selectedAgent: '',
     selectedTime: '',
     snapshot: null,
+    agents: [],
+    loadingAgents: false,
+
+    async init() {
+      // Watch for project changes
+      this.$watch('selectedProject', async (newProject) => {
+        // Clear agent selection when project changes
+        this.selectedAgent = '';
+        this.agents = [];
+
+        if (newProject) {
+          await this.loadAgents(newProject);
+        }
+      });
+    },
+
+    async loadAgents(project) {
+      this.loadingAgents = true;
+      try {
+        const response = await fetch(`/api/projects/${project}/agents`);
+        const data = await response.json();
+        this.agents = data.agents || [];
+      } catch (error) {
+        console.error('Failed to load agents:', error);
+        this.agents = [];
+      } finally {
+        this.loadingAgents = false;
+      }
+    },
 
     async timeTravel() {
       const params = new URLSearchParams({

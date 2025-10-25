@@ -1943,6 +1943,32 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
 
+        @fastapi_app.get("/api/projects/{project}/agents")
+        async def api_project_agents(project: str) -> JSONResponse:
+            """Get list of agents for a project."""
+            # Validate project slug
+            if not _validate_project_slug(project):
+                raise HTTPException(status_code=400, detail="Invalid project identifier")
+
+            async with get_session() as session:
+                # Get project ID
+                proj_result = await session.execute(
+                    text("SELECT id FROM projects WHERE slug = :k OR human_key = :k"),
+                    {"k": project}
+                )
+                prow = proj_result.fetchone()
+                if not prow:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+                # Get agents for this project
+                agents_result = await session.execute(
+                    text("SELECT name FROM agents WHERE project_id = :pid ORDER BY name"),
+                    {"pid": prow[0]}
+                )
+                agents = [r[0] for r in agents_result.fetchall()]
+
+            return JSONResponse({"agents": agents})
+
         @fastapi_app.get("/mail/archive/time-travel", response_class=HTMLResponse)
         async def archive_time_travel() -> HTMLResponse:
             """Display time-travel interface."""

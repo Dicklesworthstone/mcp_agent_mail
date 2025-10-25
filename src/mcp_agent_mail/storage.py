@@ -1243,7 +1243,8 @@ async def get_historical_inbox_snapshot(
 
                                     if end_marker > 0:
                                         # Extract JSON between markers
-                                        json_start = 8 if blob_content.startswith('---json\n') else 10
+                                        # '---json\n' is 8 chars, '---json\r\n' is 9 chars
+                                        json_start = 8 if blob_content.startswith('---json\n') else 9
                                         json_str = blob_content[json_start:end_marker]
 
                                         try:
