@@ -331,14 +331,14 @@ sequenceDiagram
   participant DB
   participant Git
 
-  Agent->>Server: tools/call send_message(project_key, sender_name, to[], subject, body_md, ...)
-  Server->>DB: validate sender, insert into messages, recipients
-  DB-->>Server: OK (message id, timestamps)
-  Server->>Git: write canonical markdown under messages/YYYY/MM/{id}.md
-  Server->>Git: write outbox copy under agents/{from}/outbox/
-  Server->>Git: write inbox copies under agents/{to}/inbox/
-  Server->>Git: commit all paths with message summary
-  Server-->>Agent: result (id, created, subject, recipients)
+  Agent->>Server: call send_message
+  Server->>DB: insert message and recipients
+  DB-->>Server: ok
+  Server->>Git: write canonical markdown
+  Server->>Git: write outbox copy
+  Server->>Git: write inbox copies
+  Server->>Git: commit
+  Server-->>Agent: result
 ```
 
 3) Check inbox
@@ -359,16 +359,16 @@ sequenceDiagram
   participant DB
   participant Git
 
-  Agent->>Server: tools/call claim_paths(project_key, agent_name, paths[], ttl, exclusive, reason)
-  Server->>DB: expire old leases; check overlaps for each path
-  DB-->>Server: conflicts/grants
+  Agent->>Server: call claim_paths
+  Server->>DB: expire old leases and check overlaps
+  DB-->>Server: conflicts or grants
   alt conflicts exist
-    Server-->>Agent: conflicts found (none granted)
+    Server-->>Agent: conflicts only
   else no conflicts
-    Server->>DB: insert claim rows (one per path)
-    Server->>Git: write claims/sha1(path).json for each granted path
-    Server->>Git: commit claim summary
-    Server-->>Agent: granted paths (no conflicts)
+    Server->>DB: insert claim rows
+    Server->>Git: write claim JSON files
+    Server->>Git: commit
+    Server-->>Agent: granted paths
   end
 ```
 
@@ -508,10 +508,10 @@ sequenceDiagram
   participant Server
   participant DB
 
-  Client->>Server: resources/read resource://inbox/BlueLake?project=/abs/backend&limit=20
-  Server->>DB: select messages joined with recipients for agent=BlueLake
+  Client->>Server: read inbox resource
+  Server->>DB: select messages for agent
   DB-->>Server: rows
-  Server-->>Client: { project, agent, messages: [...] }
+  Server-->>Client: inbox data
 ```
 
 - `resource://views/urgent-unread/{agent}{?project,limit}`: high/urgent importance messages where `read_ts` is null
