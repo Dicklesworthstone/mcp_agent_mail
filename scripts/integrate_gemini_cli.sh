@@ -146,3 +146,16 @@ else
     "${_URL}" >/dev/null 2>&1 || true
 fi
 
+printf "%b\n" "${_b}${_cyn}==> Registering MCP server in Gemini (user scope)${_rst}"
+if command -v gemini >/dev/null 2>&1; then
+  set +e
+  gemini mcp remove -s user mcp-agent-mail >/dev/null 2>&1
+  set -e
+  _HDR_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _HDR_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+  gemini mcp add -s user -t http "${_HDR_ARGS[@]}" mcp-agent-mail "${_URL}" || true
+  printf "%b\n" "${_grn}Gemini MCP registration attempted for mcp-agent-mail -> ${_URL}.${_rst}"
+else
+  printf "%b\n" "${_ylw}Gemini CLI not found in PATH; skipped automatic registration. You can run:${_rst} gemini mcp add -s user -t http mcp-agent-mail ${_URL}"
+fi
+
