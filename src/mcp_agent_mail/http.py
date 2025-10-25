@@ -1138,7 +1138,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             sender.name as sender_name,
                             p.slug as project_slug,
                             p.human_key as project_name,
-                            GROUP_CONCAT(DISTINCT recipient.name) as recipients
+                            GROUP_CONCAT(DISTINCT recipient.name, ', ') as recipients
                         FROM messages m
                         JOIN agents sender ON m.sender_id = sender.id
                         JOIN projects p ON m.project_id = p.id
