@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import cast
 
 import pytest
-from fastmcp import Client
+from fastmcp import Client, Context
 
 from mcp_agent_mail.app import (
     ToolExecutionError,
@@ -21,7 +22,8 @@ def test_iso_and_parse_helpers():
     assert _iso(now.isoformat()).endswith("+00:00")
     assert _iso("not-iso") == "not-iso"
 
-    assert _parse_iso("2025-01-01T00:00:00Z").year == 2025
+    parsed = _parse_iso("2025-01-01T00:00:00Z")
+    assert parsed is not None and parsed.year == 2025
     assert _parse_iso("bad-value") is None
 
     raw = '{"a": 1}'
@@ -34,13 +36,13 @@ def test_iso_and_parse_helpers():
 
 def test_enforce_capabilities_denied():
     # Minimal stand-in that matches the Context metadata surface
-    class DummyCtx:  # type: ignore[override]
+    class DummyCtx:
         def __init__(self):
             self.metadata = {"allowed_capabilities": ["read", "audit"]}
 
     # Call through and expect a ToolExecutionError with explanatory message
     with pytest.raises(ToolExecutionError) as exc:
-        _enforce_capabilities(DummyCtx(), {"write"}, "send_message")
+        _enforce_capabilities(cast(Context, DummyCtx()), {"write"}, "send_message")
     assert "requires capabilities" in str(exc.value)
 
 

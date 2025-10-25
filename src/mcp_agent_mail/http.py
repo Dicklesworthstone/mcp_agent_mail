@@ -861,13 +861,42 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # ----- Simple SSR Mail UI -----
     try:
+        import bleach  # type: ignore
         import markdown2  # type: ignore
+        from bleach.sanitizer import CSSSanitizer  # type: ignore
         from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(
             loader=FileSystemLoader(str(templates_root)),
             autoescape=select_autoescape(["html", "xml"]),
             enable_async=True,
+        )
+        # HTML sanitizer (allow safe images and limited CSS)
+        _css_sanitizer = CSSSanitizer(allowed_css_properties=[
+            "color", "background-color", "text-align", "text-decoration", "font-weight"
+        ])
+        _html_cleaner = bleach.Cleaner(
+            tags=[
+                "a","abbr","acronym","b","blockquote","code","em","i","li","ol","ul","p","pre","strong",
+                "table","thead","tbody","tr","th","td","h1","h2","h3","h4","h5","h6","hr","br","span","img"
+            ],
+            attributes={
+                "*": ["class"],
+                "a": ["href","title","rel"],
+                "abbr": ["title"],
+                "acronym": ["title"],
+                "code": ["class"],
+                "pre": ["class"],
+                "span": ["class","style"],
+                "p": ["class","style"],
+                "table": ["class","style"],
+                "td": ["class","style"],
+                "th": ["class","style"],
+                "img": ["src","alt","title","width","height","loading","decoding","class"],
+            },
+            protocols=["http","https","mailto","data"],
+            strip=True,
+            css_sanitizer=_css_sanitizer,
         )
         async def _render(name: str, **ctx) -> HTMLResponse:
             tpl = env.get_template(name)
@@ -924,7 +953,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             return await _render("mail_index.html", projects=projects)
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
-        async def mail_project(project: str, q: str | None = None, scope: str | None = None, order: str | None = None) -> HTMLResponse:
+        async def mail_project(project: str, q: str | None = None, scope: str | None = None, order: str | None = None, boost: int | None = None) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
                 proj = await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})
@@ -940,13 +969,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if q and q.strip():
                     # Prefer FTS5 when available (fts_messages maintained by triggers)
                     fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
+                    weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                     fts_sql = (
                         "SELECT m.id, m.subject, m.from_agent, m.created_ts, m.importance, m.thread_id, "
                         "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet, "
                         "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18), '<mark>', ''))) / 6 AS hits "
                         "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid "
                         "WHERE m.project_id = :pid AND fts_messages MATCH :q "
-                        + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else "ORDER BY bm25(fts_messages, 3.0, 1.0) ")
+                        + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]}) ")
                         + "LIMIT 50"
                     )
                     try:
@@ -975,6 +1005,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 q=q or "",
                 scope=scope or "",
                 order=order or "relevance",
+                boost=bool(boost),
                 tokens=tokens if q and q.strip() else [],
                 results=matched_messages,
             )
@@ -1047,6 +1078,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ]
             # Convert markdown body to HTML for display (server-side render)
             body_html = markdown2.markdown(mrow[2] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"]) if mrow[2] else ""
+            if body_html:
+                body_html = _html_cleaner.clean(body_html)
             return await _render(
                 "mail_message.html",
                 project={"slug": prow[1], "human_key": prow[2]},
@@ -1066,7 +1099,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         # Full-text search UI across subject/body using LIKE fallback (SQLite FTS handled elsewhere)
         @fastapi_app.get("/mail/{project}/search", response_class=HTMLResponse)
-        async def mail_search(project: str, q: str, limit: int = 100, scope: str | None = None, order: str | None = None) -> HTMLResponse:
+        async def mail_search(project: str, q: str, limit: int = 100, scope: str | None = None, order: str | None = None, boost: int | None = None) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
                 prow = (await session.execute(text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project})).fetchone()
@@ -1074,13 +1107,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     return await _render("error.html", message="Project not found")
                 pid = int(prow[0])
                 fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
+                weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                 fts_sql = (
                     "SELECT m.id, m.subject, m.from_agent, m.created_ts, m.importance, m.thread_id, "
                     "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet, "
                     "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22), '<mark>', ''))) / 6 AS hits "
                     "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid "
                     "WHERE m.project_id = :pid AND fts_messages MATCH :q "
-                    + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else "ORDER BY bm25(fts_messages, 3.0, 1.0) ")
+                    + ("ORDER BY m.created_ts DESC " if (order or "relevance") == "time" else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]}) ")
                     + "LIMIT :lim"
                 )
                 try:
@@ -1101,7 +1135,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         {"id": r[0], "subject": r[1], "from": r[2], "created": str(r[3]), "importance": r[4], "thread_id": r[5], "snippet": "", "hits": 0}
                         for r in rows.fetchall()
                     ]
-            return await _render("mail_search.html", project={"slug": prow[1], "human_key": prow[2]}, q=q, scope=scope or "", order=order or "relevance", tokens=tokens, results=results)
+            return await _render("mail_search.html", project={"slug": prow[1], "human_key": prow[2]}, q=q, scope=scope or "", order=order or "relevance", tokens=tokens, results=results, boost=bool(boost))
 
         # Claims and attachments views
         @fastapi_app.get("/mail/{project}/claims", response_class=HTMLResponse)

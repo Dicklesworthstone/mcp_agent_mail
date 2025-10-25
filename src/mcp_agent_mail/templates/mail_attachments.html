@@ -1,31 +1,121 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Attachments — {{ project.human_key }}</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-      a { text-decoration: none; color: #1463ff; }
-      .item { padding: 10px 0; border-bottom: 1px solid #e5e7eb; }
-      .muted { color: #6b7280; font-size: 12px; }
-      .att { margin-left: 8px; font-size: 12px; background: #eef2ff; padding: 2px 6px; border-radius: 9999px; }
-    </style>
-  </head>
-  <body>
-    <a href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
-    <h1>Messages with attachments</h1>
-    {% for it in items %}
-      <div class="item">
-        <div><a href="/mail/{{ project.slug }}/message/{{ it.id }}"><strong>{{ it.subject }}</strong></a></div>
-        <div class="muted">{{ it.created }}</div>
+{% extends "base.html" %}
+
+{% block title %}Attachments — {{ project.human_key }}{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    {{ project.human_key }}
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Attachments</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+  <!-- Attachments Header -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+          <i data-lucide="paperclip" class="w-8 h-8 text-white"></i>
+        </div>
         <div>
-          {% for a in it.attachments %}
-            <span class="att">{{ a.media_type or 'file' }}{% if a.path %}: {{ a.path }}{% endif %}{% if a.bytes %} ({{ a.bytes }}){% endif %}</span>
-          {% endfor %}
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">Attachments</h1>
+          <p class="text-slate-600 dark:text-slate-400">
+            Messages with attached files
+            {% if items %}
+              <span class="text-slate-400 dark:text-slate-500">•</span>
+              <span class="font-medium">{{ items|length }} message{{ 's' if items|length != 1 else '' }}</span>
+            {% endif %}
+          </p>
         </div>
       </div>
-    {% endfor %}
-  </body>
-  </html>
+    </div>
+  </div>
 
+  {% if items %}
+    <!-- Attachments Grid -->
+    <div class="space-y-4">
+      {% for it in items %}
+        <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-all duration-300">
+          <div class="flex items-start justify-between mb-4">
+            <a href="/mail/{{ project.slug }}/message/{{ it.id }}"
+               class="flex-1 group">
+              <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors mb-2">
+                {{ it.subject }}
+              </h3>
+              <div class="text-sm text-slate-600 dark:text-slate-400">
+                {{ it.created }}
+              </div>
+            </a>
+            <a href="/mail/{{ project.slug }}/message/{{ it.id }}"
+               class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2">
+              <i data-lucide="eye" class="w-4 h-4"></i>
+              View Message
+            </a>
+          </div>
 
+          <!-- Attachments -->
+          {% if it.attachments %}
+            <div class="flex flex-wrap gap-2">
+              {% for a in it.attachments %}
+                <div class="inline-flex items-center gap-2 px-3 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm">
+                  <!-- Icon based on media type -->
+                  {% if a.media_type and 'image' in a.media_type %}
+                    <i data-lucide="image" class="w-4 h-4 text-primary-600 dark:text-primary-400"></i>
+                  {% elif a.media_type and 'video' in a.media_type %}
+                    <i data-lucide="video" class="w-4 h-4 text-danger-600 dark:text-danger-400"></i>
+                  {% elif a.media_type and 'audio' in a.media_type %}
+                    <i data-lucide="music" class="w-4 h-4 text-success-600 dark:text-success-400"></i>
+                  {% elif a.media_type and 'pdf' in a.media_type %}
+                    <i data-lucide="file-text" class="w-4 h-4 text-warning-600 dark:text-warning-400"></i>
+                  {% else %}
+                    <i data-lucide="file" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+                  {% endif %}
+
+                  <div class="flex items-center gap-2">
+                    <span class="font-medium text-slate-900 dark:text-white">
+                      {{ a.media_type or 'file' }}
+                    </span>
+                    {% if a.path %}
+                      <span class="text-slate-500 dark:text-slate-400">:</span>
+                      <span class="text-slate-700 dark:text-slate-300 font-mono text-xs">
+                        {{ a.path }}
+                      </span>
+                    {% endif %}
+                    {% if a.bytes %}
+                      <span class="px-2 py-0.5 bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs rounded">
+                        {{ a.bytes }}
+                      </span>
+                    {% endif %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+
+  {% else %}
+    <!-- Empty State -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
+        <i data-lucide="inbox" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+      </div>
+      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
+        No attachments found
+      </h3>
+      <p class="text-slate-600 dark:text-slate-400 max-w-md mx-auto">
+        Messages with attachments will appear here.
+      </p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

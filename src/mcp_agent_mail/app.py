@@ -4145,14 +4145,14 @@ def build_mcp_server() -> FastMCP:
             # Get unread message counts for all agents in one query
             unread_counts_stmt = (
                 select(
-                    MessageReceipt.agent_id,
-                    func.count(MessageReceipt.id).label("unread_count")
+                    MessageRecipient.agent_id,
+                    func.count(MessageRecipient.message_id).label("unread_count")
                 )
                 .where(
-                    MessageReceipt.read_ts.is_(None),
-                    MessageReceipt.agent_id.in_([agent.id for agent in agents])
+                    cast(Any, MessageRecipient.read_ts).is_(None),
+                    cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents])
                 )
-                .group_by(MessageReceipt.agent_id)
+                .group_by(MessageRecipient.agent_id)
             )
             unread_counts_result = await session.execute(unread_counts_stmt)
             unread_counts_map = {row.agent_id: row.unread_count for row in unread_counts_result}

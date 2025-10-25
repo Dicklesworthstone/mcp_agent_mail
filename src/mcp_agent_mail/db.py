@@ -68,8 +68,9 @@ def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: f
                     # Log the retry (if logging is available)
                     import logging
 
+                    func_name = getattr(func, "__name__", getattr(func, "__qualname__", "<callable>"))
                     logging.warning(
-                        f"Database locked, retrying {func.__name__} "
+                        f"Database locked, retrying {func_name} "
                         f"(attempt {attempt + 1}/{max_retries}) after {total_delay:.2f}s"
                     )
 

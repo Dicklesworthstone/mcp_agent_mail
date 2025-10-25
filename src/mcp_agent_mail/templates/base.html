@@ -95,7 +95,7 @@
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
 
     <!-- Lucide Icons -->
-    <script src="https://unpkg.com/lucide@latest"></script>
+    <script defer src="https://unpkg.com/lucide@latest"></script>
 
     <!-- Prism.js for code highlighting -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
@@ -107,12 +107,38 @@
     <!-- Marked.js for markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked@11/marked.min.js"></script>
 
+    <!-- Chart.js for data visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+    <!-- Day.js for date formatting -->
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/relativeTime.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/calendar.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/advancedFormat.min.js"></script>
+
+    <!-- Anime.js for advanced animations -->
+    <script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"></script>
+
+    <!-- Tippy.js for beautiful tooltips -->
+    <script src="https://unpkg.com/@popperjs/core@2"></script>
+    <script src="https://unpkg.com/tippy.js@6"></script>
+    <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/dist/tippy.css" />
+    <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/themes/light.css" />
+    <link rel="stylesheet" href="https://unpkg.com/tippy.js@6/animations/scale.css" />
+
+    <!-- NProgress for loading indicators -->
+    <script src="https://unpkg.com/nprogress@0.2.0/nprogress.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/nprogress@0.2.0/nprogress.css" />
+
+    <!-- Sortable.js for drag and drop -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+
     <style>
       [x-cloak] { display: none !important; }
 
-      /* Smooth transitions */
-      * {
-        transition-property: background-color, border-color, color, fill, stroke;
+      /* Smooth transitions - Only apply to interactive elements, let Tailwind utilities handle the rest */
+      button, a, input[type="submit"], input[type="button"] {
+        transition-property: background-color, border-color, color, fill, stroke, opacity, transform, box-shadow;
         transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
         transition-duration: 150ms;
       }
@@ -275,6 +301,167 @@
         0%, 100% { opacity: 1; }
         50% { opacity: 0.7; }
       }
+
+      /* Premium card hover effects */
+      .card-hover {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .card-hover:hover {
+        transform: translateY(-4px) scale(1.01);
+      }
+
+      /* Floating animation for hero elements */
+      .float {
+        animation: float 6s ease-in-out infinite;
+      }
+
+      @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-10px); }
+      }
+
+      /* Gradient text shimmer */
+      .text-shimmer {
+        background-size: 200% auto;
+        animation: gradient-shift 3s linear infinite;
+      }
+
+      @keyframes gradient-shift {
+        0% { background-position: 0% center; }
+        100% { background-position: 200% center; }
+      }
+
+      /* Custom NProgress styling */
+      #nprogress .bar {
+        background: linear-gradient(to right, #6366f1, #8b5cf6, #ec4899) !important;
+        height: 3px !important;
+      }
+
+      #nprogress .peg {
+        box-shadow: 0 0 10px #6366f1, 0 0 5px #6366f1 !important;
+      }
+
+      #nprogress .spinner-icon {
+        border-top-color: #6366f1 !important;
+        border-left-color: #6366f1 !important;
+      }
+
+      /* Tippy.js custom theme */
+      .tippy-box[data-theme~='agent-mail'] {
+        background-color: #1e293b;
+        color: #f1f5f9;
+        font-size: 0.875rem;
+        border-radius: 0.5rem;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      }
+
+      .tippy-box[data-theme~='agent-mail'][data-placement^='top'] > .tippy-arrow::before {
+        border-top-color: #1e293b;
+      }
+
+      /* Stagger animation for lists */
+      .stagger-item {
+        opacity: 0;
+        animation: staggerIn 0.4s ease-out forwards;
+      }
+
+      @keyframes staggerIn {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      /* Smooth page transitions */
+      .page-transition {
+        animation: pageIn 0.3s ease-out;
+      }
+
+      @keyframes pageIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      /* Premium input focus effects */
+      input:focus, textarea:focus, select:focus {
+        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+      }
+
+      /* Glow on hover for interactive elements */
+      .glow-on-hover:hover {
+        box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+      }
+
+      /* Stat counter animation */
+      .stat-number {
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Custom checkbox styling */
+      input[type="checkbox"] {
+        cursor: pointer;
+      }
+
+      input[type="checkbox"]:checked {
+        background-image: url("data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e");
+      }
+
+      /* Message bubble styles */
+      .message-bubble {
+        position: relative;
+        padding: 1rem;
+        border-radius: 1rem;
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%);
+        border: 1px solid rgba(99, 102, 241, 0.1);
+      }
+
+      .dark .message-bubble {
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
+        border: 1px solid rgba(99, 102, 241, 0.2);
+      }
+
+      /* Skeleton loader */
+      @keyframes skeleton-loading {
+        0% {
+          background-position: -200% 0;
+        }
+        100% {
+          background-position: 200% 0;
+        }
+      }
+
+      .skeleton-loader {
+        background: linear-gradient(
+          90deg,
+          rgba(226, 232, 240, 0.2) 0%,
+          rgba(226, 232, 240, 0.4) 50%,
+          rgba(226, 232, 240, 0.2) 100%
+        );
+        background-size: 200% 100%;
+        animation: skeleton-loading 1.5s ease-in-out infinite;
+        border-radius: 0.5rem;
+      }
+
+      .dark .skeleton-loader {
+        background: linear-gradient(
+          90deg,
+          rgba(51, 65, 85, 0.2) 0%,
+          rgba(51, 65, 85, 0.4) 50%,
+          rgba(51, 65, 85, 0.2) 100%
+        );
+        background-size: 200% 100%;
+      }
     </style>
 
     {% block head %}{% endblock %}
@@ -352,8 +539,8 @@
             <button @click="darkMode = !darkMode; localStorage.setItem('darkMode', darkMode)"
                     class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     aria-label="Toggle dark mode">
-              <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
-              <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
+              <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600"></i>
+              <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-yellow-400"></i>
             </button>
           </div>
         </div>
@@ -417,17 +604,25 @@
 
       // Initialize Lucide icons after page load
       document.addEventListener('DOMContentLoaded', () => {
-        lucide.createIcons();
-
-        // Re-initialize on Alpine mutations
-        const observer = new MutationObserver(() => {
+        if (typeof lucide !== 'undefined') {
           lucide.createIcons();
-        });
 
-        observer.observe(document.body, {
-          childList: true,
-          subtree: true
-        });
+          // Re-initialize on Alpine mutations with throttling for performance
+          let iconUpdateTimeout;
+          const observer = new MutationObserver(() => {
+            clearTimeout(iconUpdateTimeout);
+            iconUpdateTimeout = setTimeout(() => {
+              if (typeof lucide !== 'undefined') {
+                lucide.createIcons();
+              }
+            }, 100); // Throttle to max once per 100ms
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+        }
       });
 
       // Helper function to show toast from anywhere
@@ -435,6 +630,173 @@
         window.dispatchEvent(new CustomEvent('toast', {
           detail: { message, type, duration }
         }));
+      };
+
+      // Initialize Day.js plugins
+      if (typeof dayjs !== 'undefined') {
+        dayjs.extend(dayjs_plugin_relativeTime);
+        dayjs.extend(dayjs_plugin_calendar);
+        dayjs.extend(dayjs_plugin_advancedFormat);
+      }
+
+      // NProgress configuration
+      if (typeof NProgress !== 'undefined') {
+        NProgress.configure({
+          showSpinner: false,
+          trickleSpeed: 200,
+          minimum: 0.1
+        });
+
+        // Show progress on page navigation
+        window.addEventListener('beforeunload', () => {
+          NProgress.start();
+        });
+
+        // Show progress on AJAX requests
+        document.addEventListener('DOMContentLoaded', () => {
+          // Intercept fetch requests
+          const originalFetch = window.fetch;
+          window.fetch = function(...args) {
+            NProgress.start();
+            return originalFetch.apply(this, args)
+              .finally(() => NProgress.done());
+          };
+        });
+      }
+
+      // Initialize Tippy.js tooltips
+      document.addEventListener('DOMContentLoaded', () => {
+        if (typeof tippy !== 'undefined') {
+          // Initialize tooltips on elements with data-tippy-content
+          tippy('[data-tippy-content]', {
+            theme: 'agent-mail',
+            animation: 'scale',
+            duration: [200, 150],
+            arrow: true,
+            placement: 'top'
+          });
+
+          // Auto-initialize on new elements
+          const observer = new MutationObserver(() => {
+            tippy('[data-tippy-content]:not([data-tippy-initialized])', {
+              theme: 'agent-mail',
+              animation: 'scale',
+              duration: [200, 150],
+              arrow: true,
+              placement: 'top'
+            });
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+        }
+
+        // Stagger animation for list items
+        const staggerElements = document.querySelectorAll('.stagger-item');
+        staggerElements.forEach((el, index) => {
+          el.style.animationDelay = `${index * 0.05}s`;
+        });
+
+        // Animate stat numbers on scroll
+        const observerOptions = {
+          threshold: 0.5,
+          rootMargin: '0px'
+        };
+
+        const statObserver = new IntersectionObserver((entries) => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting && !entry.target.dataset.animated) {
+              const target = entry.target;
+              const finalValue = parseInt(target.textContent);
+              if (!isNaN(finalValue)) {
+                animateValue(target, 0, finalValue, 1000);
+                target.dataset.animated = 'true';
+              }
+            }
+          });
+        }, observerOptions);
+
+        document.querySelectorAll('.stat-number').forEach(el => {
+          statObserver.observe(el);
+        });
+
+        // Smooth scroll to anchors
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+          anchor.addEventListener('click', function (e) {
+            const href = this.getAttribute('href');
+            if (href !== '#' && href !== '#!') {
+              e.preventDefault();
+              const target = document.querySelector(href);
+              if (target) {
+                target.scrollIntoView({
+                  behavior: 'smooth',
+                  block: 'start'
+                });
+              }
+            }
+          });
+        });
+      });
+
+      // Animate number counter
+      function animateValue(element, start, end, duration) {
+        const range = end - start;
+        const increment = range / (duration / 16); // 60fps
+        let current = start;
+
+        const timer = setInterval(() => {
+          current += increment;
+          if ((increment > 0 && current >= end) || (increment < 0 && current <= end)) {
+            current = end;
+            clearInterval(timer);
+          }
+          element.textContent = Math.floor(current).toLocaleString();
+        }, 16);
+      }
+
+      // Add keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        // Ctrl/Cmd + K for search
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+          e.preventDefault();
+          const searchInput = document.querySelector('input[type="search"], input[name="q"]');
+          if (searchInput) {
+            searchInput.focus();
+            searchInput.select();
+          }
+        }
+
+        // Escape to close modals/dropdowns
+        if (e.key === 'Escape') {
+          // Close any open Alpine.js dropdowns
+          window.dispatchEvent(new CustomEvent('close-all-dropdowns'));
+        }
+      });
+
+      // Add visual feedback for copy actions
+      window.copyToClipboard = async function(text, successMessage = 'Copied to clipboard!') {
+        try {
+          await navigator.clipboard.writeText(text);
+          window.showToast(successMessage, 'success', 2000);
+          return true;
+        } catch (err) {
+          window.showToast('Failed to copy', 'error', 2000);
+          return false;
+        }
+      };
+
+      // Relative time formatting helper
+      window.formatRelativeTime = function(dateString) {
+        if (typeof dayjs === 'undefined') return dateString;
+        return dayjs(dateString).fromNow();
+      };
+
+      // Calendar time formatting helper
+      window.formatCalendarTime = function(dateString) {
+        if (typeof dayjs === 'undefined') return dateString;
+        return dayjs(dateString).calendar();
       };
     </script>
 

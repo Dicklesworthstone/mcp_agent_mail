@@ -84,6 +84,107 @@ Per-project Git repo (.mcp-mail/)           SQLite (FTS5)
   └─ claims/<sha1-of-path>.json
 ```
 
+## Web UI (human-facing mail viewer)
+
+The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, claims, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
+
+- Where it lives: built into the HTTP server in `mcp_agent_mail.http` under the `/mail` path.
+- Who it’s for: humans reviewing activity; agents should continue to use the MCP tools/resources API.
+
+### Launching the Web UI
+
+Start the HTTP server (the UI is mounted automatically):
+
+```bash
+uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
+# then open http://127.0.0.1:8765/mail
+```
+
+Alternative (ASGI factory):
+
+```bash
+uv run uvicorn mcp_agent_mail.http:build_http_app --factory --host 127.0.0.1 --port 8765
+```
+
+Auth notes:
+- GET pages in the UI are not gated by the RBAC middleware (it classifies POSTed MCP calls only), but if you set a bearer token the separate BearerAuth middleware protects all routes by default.
+- For local dev, set `HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED=true` (and optionally `HTTP_BEARER_TOKEN`), so localhost can load the UI without headers.
+- Health endpoints are always open at `/health/*`.
+
+### Routes and what you can do
+
+- `/mail` (Projects index)
+  - Lists all projects (slug, human name, created time) from SQLite.
+  - Quick stats placeholders; click a project to drill in.
+
+- `/mail/{project}` (Project overview + search + agents)
+  - Rich search form with filters:
+    - Scope: subject/body/both, Order: relevance or time, optional “boost subject”.
+    - Query tokens: supports `subject:foo`, `body:"multi word"`, quoted phrases, and bare terms.
+    - Uses FTS5 bm25 scoring when available; otherwise falls back to SQL LIKE on subject/body with your chosen scope.
+  - Results show subject, sender, created time, thread id, and a highlighted snippet when using FTS.
+  - Agents panel shows registered agents for the project with a link to each inbox.
+  - Quick links to Claims and Attachments for the project header.
+
+- `/mail/{project}/inbox/{agent}` (Inbox for one agent)
+  - Reverse‑chronological list with subject, sender, created time, importance badge, thread id.
+  - Pagination (`?page=N&limit=M`).
+
+- `/mail/{project}/message/{id}` (Message detail)
+  - Shows subject, sender, created time, importance, recipients (To/Cc/Bcc), thread messages.
+  - Body rendering:
+    - If the server pre‑converted markdown to HTML, it’s sanitized with Bleach (limited tags/attributes, safe CSS via CSSSanitizer) and then displayed.
+    - Otherwise markdown is rendered client‑side with Marked + Prism for code highlighting.
+  - Attachments are referenced from the message frontmatter (WebP files or inline data URIs).
+
+- `/mail/{project}/search?q=...` (Dedicated search page)
+  - Same query syntax as the project overview search, with a token “pill” UI for assembling/removing filters.
+
+- `/mail/{project}/claims` (Claims list)
+  - Displays active and historical claims (exclusive/shared, path pattern, timestamps, released/expired state).
+
+- `/mail/{project}/attachments` (Messages with attachments)
+  - Lists messages that contain any attachments, with subject and created time.
+
+### Search syntax (UI)
+
+The UI shares the same parsing as the API’s `_parse_fts_query`:
+- Field filters: `subject:login`, `body:"api key"`
+- Phrase search: `"build plan"`
+- Combine terms: `login AND security` (FTS)
+- Fallback LIKE: scope determines whether subject, body, or both are searched
+
+### Prerequisites to see data
+
+The UI reads from the same SQLite + Git artifacts as the MCP tools. To populate content:
+1) Ensure a project exists (via tool call or CLI):
+   - Ensure/create project: `ensure_project(human_key)`
+2) Register one or more agents: `register_agent(project_key, program, model, name?)`
+3) Send messages: `send_message(...)` (attachments and inline images are supported; images may be converted to WebP).
+
+Once messages exist, visit `/mail`, click your project, then open an agent inbox or search.
+
+### Implementation and dependencies
+
+- Templates live in `src/mcp_agent_mail/templates/` and are rendered by Jinja2.
+- Markdown is converted with `markdown2` on the server where possible; HTML is sanitized with Bleach.
+- Tailwind CSS, Lucide icons, Alpine.js, Marked, and Prism are loaded via CDN in `base.html` for a modern look without a frontend build step.
+- All rendering is server‑side; there’s no SPA router. Pages degrade cleanly without JavaScript.
+
+### Security considerations
+
+- HTML sanitization: Only a conservative set of tags/attributes are allowed; CSS is filtered. Links are limited to http/https/mailto/data.
+- Auth: Use bearer token or JWT when exposing beyond localhost. For local dev, enable localhost bypass as noted above.
+- Rate limiting (optional): Token‑bucket limiter can be enabled; UI GET requests are light and unaffected by POST limits.
+
+### Troubleshooting the UI
+
+- Blank page or 401 on localhost: Either unset `HTTP_BEARER_TOKEN` or set `HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED=true`.
+- No projects listed: Create one with `ensure_project`.
+- Empty inbox: Verify recipient names match exactly and messages were sent to that agent.
+- Search returns nothing: Try simpler terms or the LIKE fallback (toggle scope/body).
+
+
 ### On-disk layout (per project)
 
 ```

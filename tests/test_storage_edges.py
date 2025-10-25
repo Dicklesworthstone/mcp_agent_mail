@@ -16,8 +16,9 @@ async def test_data_uri_embed_without_conversion(isolated_env, monkeypatch):
     # Disable server conversion so inline images remain as data URIs
     monkeypatch.setenv("CONVERT_IMAGES", "false")
     from mcp_agent_mail import config as _config
-    with pytest.raises(Exception):  # harmless if cache clear missing; use suppress in runtime
-        raise Exception
+    # Avoid asserting on a blind Exception type; just test settings cache clear path
+    with contextlib.suppress(Exception):
+        raise RuntimeError("noop")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
     server = build_mcp_server()

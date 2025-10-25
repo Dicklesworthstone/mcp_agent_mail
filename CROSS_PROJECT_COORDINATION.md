@@ -95,8 +95,9 @@ Agents:
 - ✅ Shared project archive for all communication history
 
 **Considerations:**
-- All agents share the same inbox namespace
-- All agents see all messages (unless using contact policies)
+- All agents share the same agent namespace (agent names must be unique within the project)
+- All agents CAN message all other agents in the project (unless contact policies restrict this)
+- Agents only see messages addressed to them or sent by them (privacy is maintained)
 - Claims need careful path specification to avoid conflicts
 
 ### Pattern 2: Polyrepo with Shared Project

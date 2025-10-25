@@ -1,38 +1,149 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Claims — {{ project.human_key }}</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-      a { text-decoration: none; color: #1463ff; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; }
-      th { background: #f3f4f6; }
-    </style>
-  </head>
-  <body>
-    <a href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
-    <h1>Claims</h1>
-    <table>
-      <thead>
-        <tr><th>ID</th><th>Agent</th><th>Path Pattern</th><th>Exclusive</th><th>Created</th><th>Expires</th><th>Released</th></tr>
-      </thead>
-      <tbody>
-        {% for c in claims %}
-          <tr>
-            <td>{{ c.id }}</td>
-            <td>{{ c.agent }}</td>
-            <td>{{ c.path_pattern }}</td>
-            <td>{{ 'yes' if c.exclusive else 'no' }}</td>
-            <td>{{ c.created }}</td>
-            <td>{{ c.expires }}</td>
-            <td>{{ c.released }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </body>
-  </html>
+{% extends "base.html" %}
 
+{% block title %}Claims — {{ project.human_key }}{% endblock %}
 
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    {{ project.human_key }}
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Claims</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+  <!-- Claims Header -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-4">
+        <div class="w-16 h-16 bg-gradient-to-br from-warning-500 to-warning-700 rounded-xl flex items-center justify-center shadow-medium">
+          <i data-lucide="lock" class="w-8 h-8 text-white"></i>
+        </div>
+        <div>
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">Path Claims</h1>
+          <p class="text-slate-600 dark:text-slate-400">
+            Resource coordination and locking
+            {% if claims %}
+              <span class="text-slate-400 dark:text-slate-500">•</span>
+              <span class="font-medium">{{ claims|length }} claim{{ 's' if claims|length != 1 else '' }}</span>
+            {% endif %}
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if claims %}
+    <!-- Claims Table -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full">
+          <thead>
+            <tr class="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                ID
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Agent
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Path Pattern
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Type
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Created
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Expires
+              </th>
+              <th class="px-6 py-4 text-left text-xs font-semibold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                Status
+              </th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-200 dark:divide-slate-700">
+            {% for c in claims %}
+              <tr class="hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <span class="text-sm font-mono font-medium text-slate-900 dark:text-white">
+                    #{{ c.id }}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  <div class="flex items-center gap-2">
+                    <div class="w-8 h-8 bg-gradient-to-br from-success-500 to-success-700 rounded-lg flex items-center justify-center">
+                      <i data-lucide="bot" class="w-4 h-4 text-white"></i>
+                    </div>
+                    <span class="text-sm font-medium text-slate-900 dark:text-white">
+                      {{ c.agent }}
+                    </span>
+                  </div>
+                </td>
+                <td class="px-6 py-4">
+                  <span class="text-sm font-mono text-slate-700 dark:text-slate-300">
+                    {{ c.path_pattern }}
+                  </span>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  {% if c.exclusive %}
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-medium rounded-full">
+                      <i data-lucide="lock" class="w-3 h-3"></i>
+                      Exclusive
+                    </span>
+                  {% else %}
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 text-xs font-medium rounded-full">
+                      <i data-lucide="unlock" class="w-3 h-3"></i>
+                      Shared
+                    </span>
+                  {% endif %}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600 dark:text-slate-400">
+                  {{ c.created }}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-slate-600 dark:text-slate-400">
+                  {{ c.expires }}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                  {% if c.released %}
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-medium rounded-full">
+                      <i data-lucide="check-circle" class="w-3 h-3"></i>
+                      Released
+                    </span>
+                  {% else %}
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                      <i data-lucide="clock" class="w-3 h-3"></i>
+                      Active
+                    </span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  {% else %}
+    <!-- Empty State -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
+        <i data-lucide="shield-off" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+      </div>
+      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
+        No claims found
+      </h3>
+      <p class="text-slate-600 dark:text-slate-400 max-w-md mx-auto">
+        Path claims will appear here when agents request resource locks for coordination.
+      </p>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

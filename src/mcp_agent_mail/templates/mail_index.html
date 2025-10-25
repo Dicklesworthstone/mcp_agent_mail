@@ -3,111 +3,182 @@
 {% block title %}Projects — Agent Mail{% endblock %}
 
 {% block content %}
-<div class="animate-fade-in">
-  <!-- Header Section -->
-  <div class="mb-12">
-    <div class="flex items-center justify-between mb-4">
-      <div>
-        <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">
-          Projects
-        </h1>
-        <p class="text-lg text-slate-600 dark:text-slate-400">
-          Manage your multi-agent collaboration projects
+<div class="page-transition">
+  <!-- Hero Header Section -->
+  <div class="mb-12 text-center relative overflow-hidden">
+    <!-- Decorative gradient background -->
+    <div class="absolute inset-0 gradient-mesh opacity-30 pointer-events-none"></div>
+
+    <div class="relative z-10 py-8">
+      <div class="inline-flex items-center gap-2 px-4 py-2 bg-primary-100 dark:bg-primary-900/30 rounded-full text-primary-700 dark:text-primary-300 text-sm font-medium mb-4 animate-slide-down">
+        <i data-lucide="sparkles" class="w-4 h-4"></i>
+        <span>Multi-Agent Collaboration Platform</span>
+      </div>
+
+      <h1 class="text-5xl md:text-6xl font-bold text-slate-900 dark:text-white mb-4 animate-fade-in">
+        Your <span class="bg-gradient-to-r from-primary-600 via-purple-600 to-pink-600 bg-clip-text text-transparent text-shimmer">Projects</span>
+      </h1>
+
+      <p class="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto animate-slide-up">
+        Orchestrate, coordinate, and empower AI agents to collaborate seamlessly
+      </p>
+
+      <!-- Quick Actions -->
+      <div class="flex items-center justify-center gap-4 mt-8 flex-wrap">
+        <button onclick="showToast('Create project feature coming soon!', 'info')"
+                class="px-8 py-4 bg-gradient-to-r from-primary-600 to-primary-700 hover:from-primary-700 hover:to-primary-800 text-white font-semibold rounded-xl shadow-large hover:shadow-glow transition-all duration-300 flex items-center gap-3 btn-ripple glow-on-hover transform hover:scale-105"
+                data-tippy-content="Create a new project workspace">
+          <i data-lucide="plus-circle" class="w-5 h-5"></i>
+          <span>New Project</span>
+        </button>
+        <button onclick="showToast('Import feature coming soon!', 'info')"
+                class="px-8 py-4 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl shadow-medium hover:shadow-large border-2 border-slate-200 dark:border-slate-700 transition-all duration-300 flex items-center gap-3 transform hover:scale-105"
+                data-tippy-content="Import an existing project">
+          <i data-lucide="download" class="w-5 h-5"></i>
+          <span>Import Project</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Overview -->
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-gradient-to-br from-primary-500 to-primary-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float">
+          <i data-lucide="folder" class="w-7 h-7 text-white"></i>
+        </div>
+        <div class="w-10 h-10 bg-primary-100 dark:bg-primary-900/30 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+          <i data-lucide="trending-up" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+        </div>
+      </div>
+      <div class="space-y-2">
+        <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Total Projects</p>
+        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">{{ projects|length }}</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">
+          <span class="text-success-600 dark:text-success-400 font-medium">+0%</span> from last month
         </p>
       </div>
-      <button onclick="showToast('Create project feature coming soon!', 'info')"
-              class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
-        <i data-lucide="plus" class="w-5 h-5"></i>
-        New Project
-      </button>
     </div>
 
-    <!-- Stats Overview -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-8">
-      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Total Projects</p>
-            <p class="text-3xl font-bold text-slate-900 dark:text-white">{{ projects|length }}</p>
-          </div>
-          <div class="w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center">
-            <i data-lucide="folder" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
-          </div>
+    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.1s;">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-gradient-to-br from-success-500 to-success-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float" style="animation-delay: 0.5s;">
+          <i data-lucide="users" class="w-7 h-7 text-white"></i>
+        </div>
+        <div class="w-10 h-10 bg-success-100 dark:bg-success-900/30 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+          <i data-lucide="activity" class="w-5 h-5 text-success-600 dark:text-success-400"></i>
         </div>
       </div>
+      <div class="space-y-2">
+        <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Active Agents</p>
+        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">0</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Across all projects</p>
+      </div>
+    </div>
 
-      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Active Agents</p>
-            <p class="text-3xl font-bold text-slate-900 dark:text-white">-</p>
-          </div>
-          <div class="w-12 h-12 bg-success-100 dark:bg-success-900/30 rounded-xl flex items-center justify-center">
-            <i data-lucide="users" class="w-6 h-6 text-success-600 dark:text-success-400"></i>
-          </div>
+    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.2s;">
+      <div class="flex items-center justify-between mb-4">
+        <div class="w-14 h-14 bg-gradient-to-br from-warning-500 to-warning-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float" style="animation-delay: 1s;">
+          <i data-lucide="message-square" class="w-7 h-7 text-white"></i>
+        </div>
+        <div class="w-10 h-10 bg-warning-100 dark:bg-warning-900/30 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+          <i data-lucide="zap" class="w-5 h-5 text-warning-600 dark:text-warning-400"></i>
         </div>
       </div>
-
-      <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-shadow duration-300">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">Total Messages</p>
-            <p class="text-3xl font-bold text-slate-900 dark:text-white">-</p>
-          </div>
-          <div class="w-12 h-12 bg-warning-100 dark:bg-warning-900/30 rounded-xl flex items-center justify-center">
-            <i data-lucide="message-square" class="w-6 h-6 text-warning-600 dark:text-warning-400"></i>
-          </div>
-        </div>
+      <div class="space-y-2">
+        <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Total Messages</p>
+        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">0</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Exchanged today</p>
       </div>
     </div>
   </div>
 
   {% if projects %}
+    <!-- Projects Section Header -->
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <div class="w-1 h-8 bg-gradient-to-b from-primary-600 to-primary-800 rounded-full"></div>
+        <h2 class="text-2xl font-bold text-slate-900 dark:text-white">Active Projects</h2>
+      </div>
+
+      <!-- View Toggle -->
+      <div class="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg" x-data="{ view: 'grid' }">
+        <button @click="view = 'grid'"
+                :class="view === 'grid' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                class="px-3 py-2 rounded-md transition-all duration-200"
+                data-tippy-content="Grid view">
+          <i data-lucide="grid-3x3" class="w-4 h-4"></i>
+        </button>
+        <button @click="view = 'list'"
+                :class="view === 'list' ? 'bg-white dark:bg-slate-700 text-primary-600 dark:text-primary-400 shadow-sm' : 'text-slate-600 dark:text-slate-400'"
+                class="px-3 py-2 rounded-md transition-all duration-200"
+                data-tippy-content="List view">
+          <i data-lucide="list" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+
     <!-- Projects Grid -->
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
       {% for p in projects %}
         <a href="/mail/{{ p.slug }}"
-           class="group bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-1 animate-scale-in">
+           class="group relative bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
+           style="animation-delay: {{ loop.index0 * 0.05 }}s;">
 
-          <!-- Project Header -->
-          <div class="flex items-start justify-between mb-4">
-            <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-shadow duration-300">
-              <i data-lucide="git-branch" class="w-6 h-6 text-white"></i>
+          <!-- Decorative gradient blob -->
+          <div class="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-primary-500/10 to-purple-500/10 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
+
+          <!-- Project Icon & Status -->
+          <div class="relative flex items-start justify-between mb-6">
+            <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow group-hover:scale-110 transition-all duration-300">
+              <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
             </div>
-            <span class="px-3 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
-              Active
-            </span>
+            <div class="flex flex-col items-end gap-2">
+              <span class="px-3 py-1.5 bg-gradient-to-r from-success-100 to-success-200 dark:from-success-900/30 dark:to-success-800/30 text-success-700 dark:text-success-300 text-xs font-bold rounded-full flex items-center gap-1.5 shadow-sm">
+                <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
+                Active
+              </span>
+            </div>
           </div>
 
           <!-- Project Name -->
-          <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2">
+          <h3 class="relative text-xl font-bold text-slate-900 dark:text-white mb-3 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2 min-h-[3.5rem]">
             {{ p.human_key }}
           </h3>
 
-          <!-- Project Details -->
-          <div class="space-y-2 mb-4">
+          <!-- Project Meta -->
+          <div class="relative space-y-3 mb-6">
             <div class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-              <i data-lucide="hash" class="w-4 h-4"></i>
-              <span class="font-mono text-xs">{{ p.slug }}</span>
+              <div class="w-6 h-6 bg-slate-100 dark:bg-slate-700 rounded-lg flex items-center justify-center">
+                <i data-lucide="hash" class="w-3.5 h-3.5"></i>
+              </div>
+              <span class="font-mono text-xs truncate">{{ p.slug }}</span>
             </div>
             <div class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
-              <i data-lucide="calendar" class="w-4 h-4"></i>
-              <span>{{ p.created_at }}</span>
+              <div class="w-6 h-6 bg-slate-100 dark:bg-slate-700 rounded-lg flex items-center justify-center">
+                <i data-lucide="calendar" class="w-3.5 h-3.5"></i>
+              </div>
+              <span class="text-xs">{{ p.created_at }}</span>
             </div>
           </div>
 
-          <!-- Quick Stats -->
-          <div class="pt-4 border-t border-slate-200 dark:border-slate-700">
+          <!-- Project Stats -->
+          <div class="relative pt-6 border-t border-slate-200 dark:border-slate-700">
             <div class="flex items-center justify-between text-sm">
-              <div class="flex items-center gap-1 text-slate-600 dark:text-slate-400">
-                <i data-lucide="users" class="w-4 h-4"></i>
-                <span>0 agents</span>
+              <div class="flex items-center gap-2 text-slate-600 dark:text-slate-400">
+                <div class="flex -space-x-2">
+                  <div class="w-7 h-7 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full border-2 border-white dark:border-slate-800 flex items-center justify-center" data-tippy-content="Agents">
+                    <i data-lucide="users" class="w-3.5 h-3.5 text-white"></i>
+                  </div>
+                  <div class="w-7 h-7 bg-gradient-to-br from-purple-500 to-purple-600 rounded-full border-2 border-white dark:border-slate-800 flex items-center justify-center" data-tippy-content="Messages">
+                    <i data-lucide="mail" class="w-3.5 h-3.5 text-white"></i>
+                  </div>
+                </div>
+                <span class="text-xs font-medium">0 agents • 0 msgs</span>
               </div>
-              <div class="flex items-center gap-1 text-slate-600 dark:text-slate-400">
-                <i data-lucide="mail" class="w-4 h-4"></i>
-                <span>0 msgs</span>
-              </div>
-              <div class="text-primary-600 dark:text-primary-400 group-hover:translate-x-1 transition-transform">
+              <div class="flex items-center gap-2 text-primary-600 dark:text-primary-400 font-medium group-hover:gap-3 transition-all duration-300">
+                <span class="text-xs">Open</span>
                 <i data-lucide="arrow-right" class="w-4 h-4"></i>
               </div>
             </div>
@@ -117,30 +188,61 @@
     </div>
 
   {% else %}
-    <!-- Empty State -->
+    <!-- Premium Empty State -->
     <div class="flex flex-col items-center justify-center py-20 animate-fade-in">
-      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-6">
-        <i data-lucide="folder-plus" class="w-12 h-12 text-slate-400 dark:text-slate-600"></i>
+      <div class="relative mb-8">
+        <!-- Decorative circles -->
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div class="w-40 h-40 bg-primary-500/10 rounded-full animate-pulse"></div>
+        </div>
+        <div class="absolute inset-0 flex items-center justify-center">
+          <div class="w-32 h-32 bg-primary-500/20 rounded-full animate-pulse" style="animation-delay: 0.5s;"></div>
+        </div>
+
+        <!-- Icon -->
+        <div class="relative w-24 h-24 bg-gradient-to-br from-primary-500 to-primary-700 rounded-3xl flex items-center justify-center shadow-large float">
+          <i data-lucide="folder-plus" class="w-12 h-12 text-white"></i>
+        </div>
       </div>
-      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
-        No projects yet
+
+      <h3 class="text-3xl font-bold text-slate-900 dark:text-white mb-3">
+        Ready to get started?
       </h3>
-      <p class="text-slate-600 dark:text-slate-400 mb-6 text-center max-w-md">
-        Get started by creating your first multi-agent collaboration project. Projects help you organize agents, messages, and coordination activities.
+      <p class="text-lg text-slate-600 dark:text-slate-400 mb-8 text-center max-w-md">
+        Create your first project to enable seamless multi-agent collaboration and coordination.
       </p>
+
+      <!-- Feature highlights -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 max-w-3xl">
+        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+          <div class="w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center mb-3">
+            <i data-lucide="mail" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
+          </div>
+          <h4 class="font-semibold text-slate-900 dark:text-white mb-2">Agent Messaging</h4>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Enable agents to communicate and share context</p>
+        </div>
+        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+          <div class="w-12 h-12 bg-success-100 dark:bg-success-900/30 rounded-xl flex items-center justify-center mb-3">
+            <i data-lucide="lock" class="w-6 h-6 text-success-600 dark:text-success-400"></i>
+          </div>
+          <h4 class="font-semibold text-slate-900 dark:text-white mb-2">Resource Claims</h4>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Coordinate file access and prevent conflicts</p>
+        </div>
+        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+          <div class="w-12 h-12 bg-warning-100 dark:bg-warning-900/30 rounded-xl flex items-center justify-center mb-3">
+            <i data-lucide="git-branch" class="w-6 h-6 text-warning-600 dark:text-warning-400"></i>
+          </div>
+          <h4 class="font-semibold text-slate-900 dark:text-white mb-2">Full History</h4>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Track all interactions with Git-backed storage</p>
+        </div>
+      </div>
+
       <button onclick="showToast('Create project feature coming soon!', 'info')"
-              class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
-        <i data-lucide="plus" class="w-5 h-5"></i>
-        Create Your First Project
+              class="px-8 py-4 bg-gradient-to-r from-primary-600 to-primary-700 hover:from-primary-700 hover:to-primary-800 text-white font-semibold rounded-xl shadow-large hover:shadow-glow transition-all duration-300 flex items-center gap-3 btn-ripple glow-on-hover transform hover:scale-105">
+        <i data-lucide="plus-circle" class="w-5 h-5"></i>
+        <span>Create Your First Project</span>
       </button>
     </div>
   {% endif %}
 </div>
-
-<script>
-  // Initialize icons after content loads
-  document.addEventListener('DOMContentLoaded', () => {
-    lucide.createIcons();
-  });
-</script>
 {% endblock %}

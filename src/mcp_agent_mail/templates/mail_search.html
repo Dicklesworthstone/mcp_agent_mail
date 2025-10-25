@@ -1,69 +1,339 @@
 {% extends "base.html" %}
+
 {% block title %}Search — {{ project.human_key }}{% endblock %}
-{% block content %}
-    <div class="space-y-4">
-      <a class="text-slate-500" href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
-      <div class="flex items-center gap-2">
-        <h1 class="text-2xl font-semibold text-slate-800">Search</h1>
-        <button onclick="document.getElementById('help').classList.toggle('hidden')" class="px-3 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200">Query Help</button>
-      </div>
-      <div id="help" class="hidden border rounded-lg p-4 text-slate-700 bg-slate-50">
-        <div class="font-medium mb-1">Field filters</div>
-        <div class="text-sm">
-          Use <code>subject:foo</code> or <code>body:"multi word"</code>. Without a field, the query searches both subject and body. Combine terms with spaces (AND).
-        </div>
-      </div>
-      <form method="get" class="flex items-center gap-2">
-        <input class="border rounded-md px-3 py-2 w-2/3" id="q" name="q" value="{{ q }}" placeholder="subject:login body:\"api key\"" />
-        <input type="hidden" id="scope" name="scope" value="{{ scope or '' }}" />
-        <input type="hidden" id="order" name="order" value="{{ order or 'relevance' }}" />
-        <button class="px-4 py-2 rounded-md bg-indigo-600 text-white hover:bg-indigo-500" type="submit">Search</button>
-      </form>
-      <div class="flex items-center gap-2 text-sm">
-        <span class="text-slate-500">Scope:</span>
-        <button type="button" data-scope="" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if not scope %}ring-2 ring-indigo-500{% endif %}">Both</button>
-        <button type="button" data-scope="subject" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if scope == 'subject' %}ring-2 ring-indigo-500{% endif %}">Subject</button>
-        <button type="button" data-scope="body" class="scope-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if scope == 'body' %}ring-2 ring-indigo-500{% endif %}">Body</button>
-      </div>
-      <div class="flex items-center gap-2 text-sm">
-        <span class="text-slate-500">Order:</span>
-        <button type="button" data-order="relevance" class="order-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if order == 'relevance' %}ring-2 ring-indigo-500{% endif %}">Relevance</button>
-        <button type="button" data-order="time" class="order-chip px-3 py-1 rounded-md border text-slate-700 bg-white hover:bg-slate-50 {% if order == 'time' %}ring-2 ring-indigo-500{% endif %}">Time</button>
-      </div>
-      {% if results %}
-        <div class="border rounded-lg divide-y">
-          {% for r in results %}
-            <a class="block px-4 py-3 hover:bg-slate-50" href="/mail/{{ project.slug }}/message/{{ r.id }}">
-              <div class="text-slate-800 font-medium">{{ r.subject }}</div>
-              <div class="text-slate-500 text-sm">from {{ r.from }} · {{ r.created }} {% if r.thread_id %}· thread {{ r.thread_id }}{% endif %} {% if r.hits %}· {{ r.hits }} hit{{ 's' if r.hits != 1 else '' }}{% endif %}</div>
-              {% if r.snippet %}<div class="text-slate-700 text-sm">{{ r.snippet | safe }}</div>{% endif %}
-            </a>
-          {% endfor %}
-        </div>
-      {% else %}
-        <p class="text-slate-500">No results.</p>
-      {% endif %}
-      <script>
-        (function(){
-          const q = document.getElementById('q');
-          const scope = document.getElementById('scope');
-          const chips = document.querySelectorAll('.scope-chip');
-          const order = document.getElementById('order');
-          const orderChips = document.querySelectorAll('.order-chip');
-          chips.forEach(ch => ch.addEventListener('click', () => {
-            scope.value = ch.dataset.scope || '';
-            chips.forEach(c => c.classList.remove('ring-2','ring-indigo-500'));
-            ch.classList.add('ring-2','ring-indigo-500');
-          }));
-          orderChips.forEach(ch => ch.addEventListener('click', () => {
-            order.value = ch.dataset.order || 'relevance';
-            orderChips.forEach(c => c.classList.remove('ring-2','ring-indigo-500'));
-            ch.classList.add('ring-2','ring-indigo-500');
-          }));
-          let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { q.form.submit(); }, 300); });
-        })();
-      </script>
-    </div>
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    {{ project.human_key }}
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Search</span>
+</nav>
 {% endblock %}
 
+{% block content %}
+<div class="space-y-6 animate-fade-in" x-data="{ scope: '{{ scope or '' }}', order: '{{ order or 'relevance' }}', showHelp: false }">
+  <!-- Search Header -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-4">
+        <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+          <i data-lucide="search" class="w-8 h-8 text-white"></i>
+        </div>
+        <div>
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">Search Messages</h1>
+          <p class="text-slate-600 dark:text-slate-400">Find messages across the project</p>
+        </div>
+      </div>
+      <button @click="showHelp = !showHelp"
+              class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2">
+        <i data-lucide="help-circle" class="w-4 h-4"></i>
+        Query Help
+      </button>
+    </div>
 
+    <!-- Help Panel -->
+    <div x-show="showHelp"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="opacity-0 transform -translate-y-2"
+         x-transition:enter-end="opacity-100 transform translate-y-0"
+         x-transition:leave="transition ease-in duration-150"
+         x-transition:leave-start="opacity-100 transform translate-y-0"
+         x-transition:leave-end="opacity-0 transform -translate-y-2"
+         class="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 rounded-lg p-6 mb-6">
+      <h3 class="text-lg font-semibold text-primary-900 dark:text-primary-100 mb-4">Query Syntax</h3>
+      <div class="space-y-3 text-sm text-primary-800 dark:text-primary-200">
+        <div class="flex items-start gap-3">
+          <i data-lucide="search" class="w-4 h-4 mt-0.5 flex-shrink-0"></i>
+          <div>
+            <div class="font-semibold">Field filters:</div>
+            <div class="font-mono bg-white dark:bg-slate-800 px-2 py-1 rounded mt-1">subject:authentication</div>
+            <div class="font-mono bg-white dark:bg-slate-800 px-2 py-1 rounded mt-1">body:"API key"</div>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <i data-lucide="layers" class="w-4 h-4 mt-0.5 flex-shrink-0"></i>
+          <div>
+            <div class="font-semibold">Combine terms:</div>
+            <div class="font-mono bg-white dark:bg-slate-800 px-2 py-1 rounded mt-1">login AND security</div>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <i data-lucide="asterisk" class="w-4 h-4 mt-0.5 flex-shrink-0"></i>
+          <div>
+            <div class="font-semibold">Wildcard:</div>
+            <div class="font-mono bg-white dark:bg-slate-800 px-2 py-1 rounded mt-1">deploy*</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search Form -->
+    <form method="get" class="space-y-4">
+      <!-- Search Input -->
+      <div class="relative">
+        <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+          <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
+        </div>
+        <input
+          type="text"
+          id="q"
+          name="q"
+          value="{{ q }}"
+          placeholder='Try: subject:login body:"api key"'
+          class="w-full pl-12 pr-4 py-4 bg-slate-50 dark:bg-slate-900 border-2 border-slate-300 dark:border-slate-600 rounded-xl text-lg text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all duration-200"
+          autofocus
+        />
+        <input type="hidden" id="scope" name="scope" x-model="scope" />
+        <input type="hidden" id="order" name="order" x-model="order" />
+      </div>
+
+      <!-- Filters -->
+      <div class="flex items-center gap-6 flex-wrap">
+        <!-- Scope -->
+        <div class="flex items-center gap-3">
+          <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Search in:</span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              @click="scope = ''"
+              :class="scope === '' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2">
+              <i data-lucide="align-justify" class="w-4 h-4"></i>
+              Both
+            </button>
+            <button
+              type="button"
+              @click="scope = 'subject'"
+              :class="scope === 'subject' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2">
+              <i data-lucide="heading" class="w-4 h-4"></i>
+              Subject
+            </button>
+            <button
+              type="button"
+              @click="scope = 'body'"
+              :class="scope === 'body' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2">
+              <i data-lucide="file-text" class="w-4 h-4"></i>
+              Body
+            </button>
+          </div>
+        </div>
+
+        <!-- Order -->
+        <div class="flex items-center gap-3">
+          <span class="text-sm font-medium text-slate-700 dark:text-slate-300">Order by:</span>
+          <div class="flex items-center gap-2">
+            <button
+              type="button"
+              @click="order = 'relevance'"
+              :class="order === 'relevance' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2">
+              <i data-lucide="star" class="w-4 h-4"></i>
+              Relevance
+            </button>
+            <button
+              type="button"
+              @click="order = 'time'"
+              :class="order === 'time' ? 'bg-primary-600 text-white ring-2 ring-primary-500' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
+              class="px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center gap-2">
+              <i data-lucide="clock" class="w-4 h-4"></i>
+              Time
+            </button>
+          </div>
+        </div>
+
+        <!-- Boost Subject Toggle -->
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="boostSubject" name="boost" value="1" class="h-4 w-4 text-primary-600 border-slate-300 rounded" {% if boost %}checked{% endif %}>
+          <label for="boostSubject" class="text-sm text-slate-700 dark:text-slate-300">Boost subject</label>
+        </div>
+
+        <button
+          type="submit"
+          class="ml-auto px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
+          <i data-lucide="search" class="w-5 h-5"></i>
+          Search
+        </button>
+      </div>
+    </form>
+
+    {% if tokens %}
+    <!-- Token Pills -->
+    <!-- SECURITY: Token values are auto-escaped by Jinja2 to prevent XSS. Do not use | safe filter here. -->
+    <div class="mt-2 flex items-center gap-2 flex-wrap">
+      <span class="text-slate-500 text-sm">Tokens:</span>
+      {% for t in tokens %}
+      <span class="inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs border
+        {% if t.field == 'subject' %} bg-indigo-50 text-indigo-700 border-indigo-200
+        {% elif t.field == 'body' %} bg-emerald-50 text-emerald-700 border-emerald-200
+        {% else %} bg-slate-50 text-slate-700 border-slate-200{% endif %}">
+        <span class="uppercase">{{ t.field }}</span>
+        <span>"{{ t.value }}"</span>
+        <button type="button" class="remove-token text-slate-500 hover:text-slate-700" data-field="{{ t.field }}" data-value="{{ t.value }}" aria-label="Remove {{ t.field }} token: {{ t.value }}">×</button>
+      </span>
+      {% endfor %}
+    </div>
+    <div class="mt-2 flex items-center gap-2">
+      <span class="text-slate-500 text-sm">Add token:</span>
+      <select id="tokenField" class="border rounded-md px-2 py-1 text-sm">
+        <option value="subject">Subject</option>
+        <option value="body">Body</option>
+      </select>
+      <input id="tokenValue" class="border rounded-md px-2 py-1 text-sm" placeholder="keyword or phrase" />
+      <button type="button" id="addTokenBtn" class="px-2 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 text-sm">Add</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Search Results -->
+  {% if results %}
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <i data-lucide="list" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+            <h3 class="text-lg font-semibold text-slate-900 dark:text-white">Results</h3>
+            <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+              {{ results|length }} found
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="divide-y divide-slate-200 dark:divide-slate-700">
+        {% for r in results %}
+          <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
+             class="block p-6 hover:bg-slate-50 dark:hover:bg-slate-900 transition-all duration-200 group">
+            <div class="flex items-start justify-between mb-3">
+              <h4 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
+                {{ r.subject }}
+              </h4>
+              {% if r.hits %}
+                <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                  {{ r.hits }} match{{ 'es' if r.hits != 1 else '' }}
+                </span>
+              {% endif %}
+            </div>
+
+            <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-3">
+              <div class="flex items-center gap-1.5">
+                <i data-lucide="user" class="w-4 h-4"></i>
+                <span>{{ r.from }}</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <i data-lucide="calendar" class="w-4 h-4"></i>
+                <span>{{ r.created }}</span>
+              </div>
+              {% if r.thread_id %}
+                <div class="flex items-center gap-1.5">
+                  <i data-lucide="message-circle" class="w-4 h-4"></i>
+                  <span class="font-mono text-xs">{{ r.thread_id }}</span>
+                </div>
+              {% endif %}
+            </div>
+
+            {% if r.snippet %}
+              <div class="text-sm text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 rounded-lg p-3 line-clamp-2">
+                {{ r.snippet | safe }}
+              </div>
+            {% endif %}
+
+            <div class="flex items-center gap-2 mt-3 text-primary-600 dark:text-primary-400 opacity-0 group-hover:opacity-100 transition-opacity">
+              <span class="text-sm font-medium">View message</span>
+              <i data-lucide="arrow-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
+            </div>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+
+  {% elif q %}
+    <!-- No Results -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
+        <i data-lucide="search-x" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+      </div>
+      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
+        No results found
+      </h3>
+      <p class="text-slate-600 dark:text-slate-400 mb-6 max-w-md mx-auto">
+        No messages match your search query. Try different keywords or use the query help above.
+      </p>
+      <button @click="document.getElementById('q').value = ''; document.getElementById('q').focus()"
+              class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 mx-auto btn-ripple">
+        <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+        Clear Search
+      </button>
+    </div>
+  {% endif %}
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const form = document.querySelector('form');
+    const input = document.getElementById('q');
+    const tokenField = document.getElementById('tokenField');
+    const tokenValue = document.getElementById('tokenValue');
+    const addTokenBtn = document.getElementById('addTokenBtn');
+    const removeBtns = document.querySelectorAll('.remove-token');
+    let timeout;
+
+    // Debounced search
+    input?.addEventListener('input', () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        if (input.value.length >= 2 || input.value.length === 0) {
+          form.submit();
+        }
+      }, 600);
+    });
+
+    function appendToken(field, value){
+      if(!value) return;
+      const needsQuote = /\s/.test(value);
+      let token;
+      if (needsQuote) {
+        // Escape double quotes when wrapping in quotes
+        const escapedValue = value.replace(/"/g, '\\"');
+        token = field + ':"' + escapedValue + '"';
+      } else {
+        token = field + ':' + value;
+      }
+      const sep = input.value && !input.value.endsWith(' ') ? ' ' : '';
+      input.value = input.value + sep + token;
+      form.submit();
+    }
+    function removeToken(field, value){
+      let text = input.value;
+      const esc = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const patterns = [];
+      if(field === 'subject' || field === 'body'){
+        patterns.push(new RegExp('(?:^|\\s)'+field+':"'+esc+'"(?=\\s|$)'));
+        patterns.push(new RegExp('(?:^|\\s)'+field+':'+esc+'(?=\\s|$)'));
+      } else {
+        patterns.push(new RegExp('(?:^|\\s)"'+esc+'"(?=\\s|$)'));
+        patterns.push(new RegExp('(?:^|\\s)'+esc+'(?=\\s|$)'));
+      }
+      patterns.forEach(re => { text = text.replace(re, ' '); });
+      input.value = text.replace(/\s+/g,' ').trim();
+      form.submit();
+    }
+    addTokenBtn && addTokenBtn.addEventListener('click', () => {
+      const value = tokenValue.value.trim();
+      appendToken(tokenField.value, value);
+      // Clear input after adding token for better UX
+      tokenValue.value = '';
+    });
+    removeBtns.forEach(b => b.addEventListener('click', () => {
+      removeToken(b.dataset.field, b.dataset.value);
+    }));
+  });
+</script>
+{% endblock %}

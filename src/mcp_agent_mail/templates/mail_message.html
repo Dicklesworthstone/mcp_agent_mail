@@ -1,36 +1,208 @@
 {% extends "base.html" %}
-{% block title %}{{ message.subject }}{% endblock %}
-{% block content %}
-    <div class="space-y-4">
-      <a class="text-slate-500" href="/mail/{{ project.slug }}">← {{ project.human_key }}</a>
-      <h1 class="text-2xl font-semibold text-slate-800">{{ message.subject }}</h1>
-      <div class="text-slate-500 text-sm">from {{ message.sender }} · {{ message.created }} · {{ message.importance or 'normal' }} {% if message.thread_id %}· thread {{ message.thread_id }}{% endif %}</div>
-      <div class="space-x-2">
-        {% for r in recipients %}
-          <span class="inline-block bg-indigo-50 text-indigo-700 px-2 py-1 rounded-full text-xs">{{ r.kind }}: {{ r.name }}</span>
-        {% endfor %}
-      </div>
-      <div class="prose max-w-none">
-        {% if message.body_html %}
-          {{ message.body_html | safe }}
-        {% else %}
-          <pre class="whitespace-pre-wrap">{{ message.body_md }}</pre>
-        {% endif %}
-      </div>
-      {% if thread_items %}
-        <div class="border rounded-lg">
-          <div class="px-4 py-2 border-b bg-slate-50 text-slate-700 font-medium">Thread</div>
-          <div class="divide-y">
-            {% for t in thread_items %}
-              <div class="px-4 py-3">
-                <div class="text-slate-500 text-sm">{{ t.created }} — {{ t.from }}</div>
-                <div class="text-slate-800">{{ t.subject }}</div>
-              </div>
-            {% endfor %}
-          </div>
-        </div>
-      {% endif %}
-    </div>
+
+{% block title %}{{ message.subject }} — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    {{ project.human_key }}
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium truncate max-w-xs">{{ message.subject }}</span>
+</nav>
 {% endblock %}
 
+{% block header_actions %}
+<div class="flex items-center gap-2">
+  <button onclick="showToast('Reply feature coming soon!', 'info')"
+          class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+    <i data-lucide="reply" class="w-4 h-4"></i>
+    Reply
+  </button>
+  <button onclick="showToast('Forward feature coming soon!', 'info')"
+          class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+    <i data-lucide="forward" class="w-4 h-4"></i>
+    Forward
+  </button>
+</div>
+{% endblock %}
 
+{% block content %}
+<div class="space-y-6 animate-fade-in">
+  <!-- Message Header Card -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <!-- Subject -->
+    <div class="mb-6">
+      <div class="flex items-start justify-between gap-4 mb-3">
+        <h1 class="text-3xl font-bold text-slate-900 dark:text-white">
+          {{ message.subject }}
+        </h1>
+
+        <!-- Importance Badge -->
+        {% if message.importance == 'urgent' %}
+          <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-sm font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+            <i data-lucide="alert-circle" class="w-4 h-4"></i>
+            Urgent
+          </span>
+        {% elif message.importance == 'high' %}
+          <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-sm font-semibold rounded-full flex items-center gap-1.5">
+            <i data-lucide="alert-triangle" class="w-4 h-4"></i>
+            High Priority
+          </span>
+        {% elif message.importance == 'low' %}
+          <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-sm font-medium rounded-full">
+            Low Priority
+          </span>
+        {% endif %}
+      </div>
+
+      <!-- Metadata -->
+      <div class="flex items-center gap-6 text-sm text-slate-600 dark:text-slate-400 flex-wrap">
+        <div class="flex items-center gap-2">
+          <i data-lucide="user" class="w-4 h-4"></i>
+          <span class="font-medium text-slate-900 dark:text-white">{{ message.sender }}</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <i data-lucide="calendar" class="w-4 h-4"></i>
+          <span>{{ message.created }}</span>
+        </div>
+        {% if message.thread_id %}
+          <div class="flex items-center gap-2">
+            <i data-lucide="message-circle" class="w-4 h-4"></i>
+            <span class="font-mono text-xs">Thread: {{ message.thread_id }}</span>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Recipients -->
+    {% if recipients %}
+      <div class="border-t border-slate-200 dark:border-slate-700 pt-6">
+        <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Recipients</h3>
+        <div class="flex flex-wrap gap-2">
+          {% for r in recipients %}
+            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
+              {% if r.kind == 'to' %}
+                bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300
+              {% elif r.kind == 'cc' %}
+                bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300
+              {% elif r.kind == 'bcc' %}
+                bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400
+              {% endif %}">
+              {% if r.kind == 'to' %}
+                <i data-lucide="mail" class="w-3.5 h-3.5"></i>
+              {% elif r.kind == 'cc' %}
+                <i data-lucide="mail-open" class="w-3.5 h-3.5"></i>
+              {% elif r.kind == 'bcc' %}
+                <i data-lucide="mail-x" class="w-3.5 h-3.5"></i>
+              {% endif %}
+              <span class="uppercase text-xs font-bold">{{ r.kind }}</span>
+              <span>{{ r.name }}</span>
+            </span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Message Body -->
+  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="prose prose-slate dark:prose-invert max-w-none">
+      {% if message.body_html %}
+        <!-- SECURITY: Using | safe assumes backend properly sanitizes HTML to prevent XSS -->
+        <div id="message-body">{{ message.body_html | safe }}</div>
+      {% else %}
+        <div id="message-body" class="markdown-content"></div>
+        <script>
+          // Render markdown on client side for better security and features
+          document.addEventListener('DOMContentLoaded', () => {
+            const markdownContent = {{ message.body_md | tojson }};
+            const bodyEl = document.getElementById('message-body');
+
+            // Configure marked for better rendering
+            marked.setOptions({
+              breaks: true,
+              gfm: true,
+              headerIds: true,
+              mangle: false
+            });
+
+            bodyEl.innerHTML = marked.parse(markdownContent);
+
+            // Highlight code blocks
+            bodyEl.querySelectorAll('pre code').forEach((block) => {
+              Prism.highlightElement(block);
+            });
+
+            // Add copy buttons to code blocks
+            bodyEl.querySelectorAll('pre').forEach((pre) => {
+              const wrapper = document.createElement('div');
+              wrapper.className = 'relative group';
+              pre.parentNode.insertBefore(wrapper, pre);
+              wrapper.appendChild(pre);
+
+              const button = document.createElement('button');
+              button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+              button.className = 'absolute top-2 right-2 p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity';
+              button.onclick = () => {
+                navigator.clipboard.writeText(pre.textContent);
+                button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
+                showToast('Code copied!', 'success');
+                setTimeout(() => {
+                  button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+                  lucide.createIcons();
+                }, 2000);
+              };
+              wrapper.appendChild(button);
+              lucide.createIcons();
+            });
+          });
+        </script>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Thread Messages -->
+  {% if thread_items %}
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900">
+        <div class="flex items-center gap-3">
+          <i data-lucide="messages-square" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+          <h3 class="text-lg font-semibold text-slate-900 dark:text-white">Thread Messages</h3>
+          <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+            {{ thread_items|length }} message{{ 's' if thread_items|length != 1 else '' }}
+          </span>
+        </div>
+      </div>
+
+      <div class="divide-y divide-slate-200 dark:divide-slate-700">
+        {% for t in thread_items %}
+          <div class="p-6 hover:bg-slate-50 dark:hover:bg-slate-900 transition-colors">
+            <div class="flex items-start justify-between mb-3">
+              <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center">
+                  <i data-lucide="user" class="w-5 h-5 text-white"></i>
+                </div>
+                <div>
+                  <div class="font-semibold text-slate-900 dark:text-white">{{ t.from }}</div>
+                  <div class="text-sm text-slate-600 dark:text-slate-400">{{ t.created }}</div>
+                </div>
+              </div>
+              <a href="/mail/{{ project.slug }}/message/{{ t.id }}"
+                 class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 text-sm font-medium rounded-lg transition-colors flex items-center gap-1.5">
+                View
+                <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+              </a>
+            </div>
+            <div class="text-slate-900 dark:text-white font-medium mb-1">{{ t.subject }}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

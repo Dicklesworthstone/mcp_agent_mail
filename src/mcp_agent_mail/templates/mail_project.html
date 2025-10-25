@@ -145,6 +145,12 @@
           </div>
         </div>
 
+        <!-- Boost Subject Toggle -->
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="boostSubject" name="boost" value="1" class="h-4 w-4 text-primary-600 border-slate-300 rounded" {% if boost %}checked{% endif %}>
+          <label for="boostSubject" class="text-sm text-slate-700 dark:text-slate-300">Boost subject</label>
+        </div>
+
         <button
           type="submit"
           class="ml-auto px-6 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
@@ -280,8 +286,6 @@
 
 <script>
   document.addEventListener('DOMContentLoaded', () => {
-    lucide.createIcons();
-
     // Debounced search
     const form = document.querySelector('form');
     const input = document.getElementById('q');

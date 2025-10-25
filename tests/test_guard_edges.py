@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import subprocess
+import asyncio
+from asyncio.subprocess import PIPE
 from pathlib import Path
 
 import pytest
@@ -20,12 +21,19 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     # Initialize dummy repo and write a claim file that conflicts with staged file
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True)
+    proc_init = await asyncio.create_subprocess_exec("git", "init", cwd=str(repo_dir))
+    assert (await proc_init.wait()) == 0
     # Create a file and stage it
     f = repo_dir / "agents" / "Blue" / "inbox" / "2025" / "10" / "note.md"
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text("x", encoding="utf-8")
-    subprocess.run(["git", "add", f.relative_to(repo_dir).as_posix()], cwd=str(repo_dir), check=True)
+    proc_add = await asyncio.create_subprocess_exec(
+        "git",
+        "add",
+        f.relative_to(repo_dir).as_posix(),
+        cwd=str(repo_dir),
+    )
+    assert (await proc_add.wait()) == 0
 
     # Write a conflicting claim in archive
     claims_dir = archive.root / "claims"
@@ -39,10 +47,18 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     hook_path = await install_guard(settings, "backend", repo_dir)
     assert hook_path.exists()
     env = {"AGENT_NAME": "Blue", **{}}
-    result = subprocess.run([str(hook_path)], cwd=str(repo_dir), env=env, capture_output=True, text=True)
+    proc_hook = await asyncio.create_subprocess_exec(
+        str(hook_path),
+        cwd=str(repo_dir),
+        env=env,
+        stdout=PIPE,
+        stderr=PIPE,
+    )
+    _stdout_bytes, stderr_bytes = await proc_hook.communicate()
     # Expect non-zero due to conflict and helpful message
-    assert result.returncode != 0
-    assert "Exclusive claim conflicts" in (result.stderr or "") or "exclusive claim" in (result.stderr or "").lower()
+    assert proc_hook.returncode != 0
+    stderr_text = (stderr_bytes.decode("utf-8", "ignore") if stderr_bytes else "")
+    assert "Exclusive claim conflicts" in stderr_text or "exclusive claim" in stderr_text.lower()
 
     # Uninstall guard path returns True and removes file
     removed = await uninstall_guard(repo_dir)

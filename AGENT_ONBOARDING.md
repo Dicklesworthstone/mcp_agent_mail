@@ -233,7 +233,7 @@ Signal your intent to edit files to avoid conflicts:
     "project_key": "/data/projects/my-project",
     "agent_name": "BackendDev",
     "paths": ["app/api/*.py", "tests/test_api.py"],
-    "ttl_seconds": 7200,
+    "ttl_seconds": 7200,  // 2 hours (default is 3600 if omitted)
     "exclusive": true,
     "reason": "Refactoring API endpoints"
   }
@@ -496,10 +496,11 @@ If you encounter issues:
 ```json
 // Step 1: Ensure project
 {"tool": "ensure_project", "arguments": {"human_key": "/data/projects/smartedgar"}}
+// Returns: {"slug": "smartedgar-abc123", "human_key": "/data/projects/smartedgar", ...}
 
 // Step 2: Register
 {"tool": "register_agent", "arguments": {
-  "project_key": "/data/projects/smartedgar",
+  "project_key": "/data/projects/smartedgar",  // Can use human_key or slug
   "program": "claude-code",
   "model": "sonnet-4.5",
   "name": "BackendDev",
@@ -507,7 +508,7 @@ If you encounter issues:
 }}
 
 // Step 3: Discover others
-{"resource": "resource://agents/smartedgar-abc123"}
+{"resource": "resource://agents/smartedgar-abc123"}  // Use slug from Step 1 response
 // Response: {"agents": [{"name": "FrontendDev", ...}, {"name": "BackendDev", ...}]}
 
 // Step 4: Send message to FrontendDev

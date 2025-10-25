@@ -1,16 +1,73 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Error</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-      .err { background: #fef2f2; color: #991b1b; padding: 12px 16px; border: 1px solid #fecaca; border-radius: 8px; }
-    </style>
-  </head>
-  <body>
-    <div class="err">{{ message }}</div>
-  </body>
-  </html>
+{% extends "base.html" %}
 
+{% block title %}Error — Agent Mail{% endblock %}
 
+{% block content %}
+<div class="min-h-[60vh] flex items-center justify-center animate-fade-in">
+  <div class="max-w-2xl w-full">
+    <div class="bg-white dark:bg-slate-800 rounded-2xl p-12 shadow-large border border-slate-200 dark:border-slate-700 text-center">
+      <!-- Error Icon -->
+      <div class="w-24 h-24 bg-danger-100 dark:bg-danger-900/30 rounded-full flex items-center justify-center mx-auto mb-6">
+        <i data-lucide="alert-triangle" class="w-12 h-12 text-danger-600 dark:text-danger-400"></i>
+      </div>
+
+      <!-- Error Message -->
+      <h1 class="text-3xl font-bold text-slate-900 dark:text-white mb-4">
+        Oops! Something went wrong
+      </h1>
+
+      <div class="bg-danger-50 dark:bg-danger-900/20 border border-danger-200 dark:border-danger-800 rounded-lg p-6 mb-6">
+        <p class="text-danger-800 dark:text-danger-200 font-medium">
+          {{ message }}
+        </p>
+      </div>
+
+      <p class="text-slate-600 dark:text-slate-400 mb-8 max-w-md mx-auto">
+        We're sorry for the inconvenience. Try one of the options below or contact support if the problem persists.
+      </p>
+
+      <!-- Action Buttons -->
+      <div class="flex items-center justify-center gap-4 flex-wrap">
+        <button onclick="window.history.back()"
+                class="px-6 py-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 font-medium rounded-lg transition-colors flex items-center gap-2">
+          <i data-lucide="arrow-left" class="w-4 h-4"></i>
+          Go Back
+        </button>
+        <a href="/mail"
+           class="px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-medium hover:shadow-large transition-all duration-300 flex items-center gap-2 btn-ripple">
+          <i data-lucide="home" class="w-4 h-4"></i>
+          Go Home
+        </a>
+        <button onclick="location.reload()"
+                class="px-6 py-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 font-medium rounded-lg transition-colors flex items-center gap-2">
+          <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+          Retry
+        </button>
+      </div>
+
+      <!-- Help Section -->
+      <div class="mt-12 pt-8 border-t border-slate-200 dark:border-slate-700">
+        <p class="text-sm text-slate-600 dark:text-slate-400 mb-4">
+          Need help? Contact support or check the documentation
+        </p>
+        <div class="flex items-center justify-center gap-4 text-sm">
+          <a href="#" class="text-primary-600 dark:text-primary-400 hover:underline flex items-center gap-1">
+            <i data-lucide="book-open" class="w-4 h-4"></i>
+            Documentation
+          </a>
+          <span class="text-slate-400 dark:text-slate-600">•</span>
+          <a href="#" class="text-primary-600 dark:text-primary-400 hover:underline flex items-center gap-1">
+            <i data-lucide="life-buoy" class="w-4 h-4"></i>
+            Support
+          </a>
+          <span class="text-slate-400 dark:text-slate-600">•</span>
+          <a href="#" class="text-primary-600 dark:text-primary-400 hover:underline flex items-center gap-1">
+            <i data-lucide="bug" class="w-4 h-4"></i>
+            Report Issue
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
