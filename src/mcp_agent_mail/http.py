@@ -40,6 +40,7 @@ from .storage import (
     get_archive_tree,
     get_commit_detail,
     get_file_content,
+    get_historical_inbox_snapshot,
     get_message_commit_sha,
     get_recent_commits,
     get_timeline_commits,
@@ -1767,6 +1768,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 repo_size = "0 MB"
                 last_commit_time = "Never"
 
+            # Get list of projects for picker
+            async with get_session() as session:
+                rows = await session.execute(text("SELECT slug, human_key FROM projects ORDER BY human_key"))
+                projects = [{"slug": r[0], "human_key": r[1]} for r in rows.fetchall()]
+
             return await _render(
                 "archive_guide.html",
                 storage_root=storage_root,
@@ -1774,6 +1780,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 project_count=project_count,
                 repo_size=repo_size,
                 last_commit_time=last_commit_time,
+                projects=projects,
             )
 
         @fastapi_app.get("/mail/archive/activity", response_class=HTMLResponse)
@@ -1949,14 +1956,44 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/archive/time-travel/snapshot")
         async def archive_time_travel_snapshot(project: str, agent: str, timestamp: str) -> JSONResponse:
             """Get historical inbox snapshot."""
-            # Validate inputs
+            # Validate project slug
             if not _validate_project_slug(project):
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
-            # TODO: Add agent name validation when this feature is implemented
-            # TODO: Add timestamp validation when this feature is implemented
 
-            # This is a simplified implementation - in production would parse git history at timestamp
-            return JSONResponse({"messages": [], "note": "Time travel feature requires enhanced git history parsing"})
+            # Validate agent name (alphanumeric only)
+            if not agent or not re.match(r"^[A-Za-z0-9]+$", agent):
+                raise HTTPException(status_code=400, detail="Invalid agent name format")
+
+            # Validate timestamp format (basic ISO 8601 check)
+            if not timestamp or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", timestamp):
+                raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO 8601 format (YYYY-MM-DDTHH:MM)")
+
+            try:
+                # Get project archive
+                settings = get_settings()
+                repo = await ensure_archive(settings, project)
+
+                # Get historical snapshot
+                snapshot = await get_historical_inbox_snapshot(repo, agent, timestamp, limit=200)
+
+                return JSONResponse(snapshot)
+
+            except Exception as e:
+                # Log error but return empty result rather than failing
+                structlog.get_logger("archive").warning(
+                    "time_travel_failed",
+                    project=project,
+                    agent=agent,
+                    timestamp=timestamp,
+                    error=str(e)
+                )
+                return JSONResponse({
+                    "messages": [],
+                    "snapshot_time": None,
+                    "commit_sha": None,
+                    "requested_time": timestamp,
+                    "error": f"Unable to retrieve historical snapshot: {e!s}"
+                })
 
     except Exception as exc:
         # templates/Jinja may be missing in some environments; UI remains optional

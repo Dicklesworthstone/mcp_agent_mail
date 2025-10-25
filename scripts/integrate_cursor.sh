@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Cursor Integration (one-stop MCP HTTP config)"
+# Color styles (best-effort)
+if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
+  _b=$(tput bold); _dim=$(tput dim); _red=$(tput setaf 1); _grn=$(tput setaf 2); _ylw=$(tput setaf 3); _blu=$(tput setaf 4); _mag=$(tput setaf 5); _cyn=$(tput setaf 6); _rst=$(tput sgr0)
+else
+  _b=""; _dim=""; _red=""; _grn=""; _ylw=""; _blu=""; _mag=""; _cyn=""; _rst=""
+fi
+
+printf "%b\n" "${_b}${_cyn}==> Cursor Integration (one-stop MCP HTTP config)${_rst}"
 echo
 echo "This script will:"
 echo "  1) Detect MCP server endpoint from settings."
@@ -108,21 +115,29 @@ cat > "$HOME_CURSOR_JSON" <<JSON
   }
 }
 JSON
-echo "==> Attempt readiness check (non-blocking)"
+printf "%b\n" "${_b}${_cyn}==> Attempt readiness check (non-blocking)${_rst}"
 set +e
 curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _rc=$?
 set -e
-[[ $_rc -eq 0 ]] && echo "Server readiness OK." || echo "Note: server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
+if [[ $_rc -eq 0 ]]; then
+  printf "%b\n" "${_grn}Server readiness OK.${_rst}"
+else
+  printf "%b\n" "${_ylw}Note:${_rst} server not reachable. Start with: ${_b}uv run python -m mcp_agent_mail.cli serve-http${_rst}"
+fi
 
-echo "==> Bootstrapping project and agent on server"
-_AUTH_ARGS=()
-if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-_HUMAN_KEY="${TARGET_DIR}"
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"cursor\",\"model\":\"cursor\",\"name\":\"${USER:-cursor}\",\"task_description\":\"setup\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
+printf "%b\n" "${_b}${_cyn}==> Bootstrapping project and agent on server${_rst}"
+if [[ $_rc -ne 0 ]]; then
+  printf "%b\n" "${_ylw}Skipping bootstrap:${_rst} server not reachable (ensure_project/register_agent)."
+else
+  _AUTH_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+  _HUMAN_KEY="${TARGET_DIR}"
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"cursor\",\"model\":\"cursor\",\"name\":\"${USER:-cursor}\",\"task_description\":\"setup\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+fi
 

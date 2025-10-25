@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> OpenAI Codex CLI Integration (one-stop MCP config)"
+# Color styles (best-effort)
+if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
+  _b=$(tput bold); _dim=$(tput dim); _red=$(tput setaf 1); _grn=$(tput setaf 2); _ylw=$(tput setaf 3); _blu=$(tput setaf 4); _mag=$(tput setaf 5); _cyn=$(tput setaf 6); _rst=$(tput sgr0)
+else
+  _b=""; _dim=""; _red=""; _grn=""; _ylw=""; _blu=""; _mag=""; _cyn=""; _rst=""
+fi
+
+printf "%b\n" "${_b}${_cyn}==> OpenAI Codex CLI Integration (one-stop MCP config)${_rst}"
 echo
 echo "This script will:"
 echo "  1) Detect your MCP HTTP endpoint from settings."
@@ -37,7 +44,7 @@ if [[ -z "${TARGET_DIR}" ]]; then
   TARGET_DIR="$ROOT_DIR"
 fi
 
-echo "==> Resolving HTTP endpoint from settings"
+printf "%b\n" "${_b}${_cyn}==> Resolving HTTP endpoint from settings${_rst}"
 eval "$(uv run python - <<'PY'
 from mcp_agent_mail.config import get_settings
 s = get_settings()
@@ -48,7 +55,7 @@ PY
 )"
 
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
-echo "Detected MCP HTTP endpoint: ${_URL}"
+printf "%b\n" "${_grn}Detected MCP HTTP endpoint:${_rst} ${_URL}"
 
 _TOKEN=""
 if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
@@ -90,7 +97,7 @@ cat > "$OUT_JSON" <<JSON
 }
 JSON
 
-echo "==> Creating run helper script with token"
+printf "%b\n" "${_b}${_cyn}==> Creating run helper script with token${_rst}"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
 cat > "$RUN_HELPER" <<SH
@@ -101,15 +108,19 @@ uv run python -m mcp_agent_mail.cli serve-http "\$@"
 SH
 chmod +x "$RUN_HELPER"
 
-echo "==> Attempt readiness check (non-blocking)"
+printf "%b\n" "${_b}${_cyn}==> Attempt readiness check (non-blocking)${_rst}"
 set +e
 curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _rc=$?
 set -e
-[[ $_rc -eq 0 ]] && echo "Server readiness OK." || echo "Note: server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
+if [[ $_rc -eq 0 ]]; then
+  printf "%b\n" "${_grn}Server readiness OK.${_rst}"
+else
+  printf "%b\n" "${_ylw}Note:${_rst} server not reachable. Start with: ${_b}uv run python -m mcp_agent_mail.cli serve-http${_rst}"
+fi
 
 echo
-echo "==> Registering MCP server in Codex CLI config"
+printf "%b\n" "${_b}${_cyn}==> Registering MCP server in Codex CLI config${_rst}"
 # Update user-level ~/.codex/config.toml
 CODEX_DIR="${HOME}/.codex"
 mkdir -p "$CODEX_DIR"
@@ -141,14 +152,18 @@ TOML
 
 echo "Done."
 
-echo "==> Bootstrapping project and agent on server"
-_AUTH_ARGS=()
-if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-_HUMAN_KEY="${TARGET_DIR}"
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"name\":\"${USER:-codex}\",\"task_description\":\"setup\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
+printf "%b\n" "${_b}${_cyn}==> Bootstrapping project and agent on server${_rst}"
+if [[ $_rc -ne 0 ]]; then
+  printf "%b\n" "${_ylw}Skipping bootstrap:${_rst} server not reachable (ensure_project/register_agent)."
+else
+  _AUTH_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+  _HUMAN_KEY="${TARGET_DIR}"
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"name\":\"${USER:-codex}\",\"task_description\":\"setup\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+fi
 

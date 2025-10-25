@@ -4199,7 +4199,7 @@ def build_mcp_server() -> FastMCP:
                     f"paths={len(paths or [])}",
                     f"ids={len(file_reservation_ids or [])}",
                 ]
-                Console().print(Panel.fit("\n".join(details), title="tool: release_claims", border_style="green"))
+                Console().print(Panel.fit("\n".join(details), title="tool: release_file_reservations", border_style="green"))
             except Exception:
                 pass
         try:
@@ -4625,7 +4625,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["file_reservation_paths", "renew_file_reservations"],
                         "expected_frequency": "Each time work on a surface completes.",
                         "required_capabilities": ["file_reservations"],
-                        "usage_examples": [{"hint": "Unlock", "sample": "release_claims(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
+                        "usage_examples": [{"hint": "Unlock", "sample": "release_file_reservations(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
                     },
                     {
                         "name": "renew_file_reservations",

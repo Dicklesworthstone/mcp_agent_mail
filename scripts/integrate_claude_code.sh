@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Claude Code Integration (HTTP MCP + Hooks)"
+# Color styles (best-effort)
+if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
+  _b=$(tput bold); _dim=$(tput dim); _red=$(tput setaf 1); _grn=$(tput setaf 2); _ylw=$(tput setaf 3); _blu=$(tput setaf 4); _mag=$(tput setaf 5); _cyn=$(tput setaf 6); _rst=$(tput sgr0)
+else
+  _b=""; _dim=""; _red=""; _grn=""; _ylw=""; _blu=""; _mag=""; _cyn=""; _rst=""
+fi
+
+printf "%b\n" "${_b}${_cyn}==> Claude Code Integration (HTTP MCP + Hooks)${_rst}"
 echo
 echo "This script will:"
 echo "  1) Detect your server endpoint (host/port/path) from settings."
@@ -38,7 +45,7 @@ if [[ -z "${TARGET_DIR}" ]]; then
   TARGET_DIR="$ROOT_DIR"
 fi
 
-echo "==> Resolving HTTP endpoint from settings"
+printf "%b\n" "${_b}${_cyn}==> Resolving HTTP endpoint from settings${_rst}"
 eval "$(uv run python - <<'PY'
 from mcp_agent_mail.config import get_settings
 s = get_settings()
@@ -49,7 +56,7 @@ PY
 )"
 
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
-echo "Detected MCP HTTP endpoint: ${_URL}"
+printf "%b\n" "${_grn}Detected MCP HTTP endpoint:${_rst} ${_URL}"
 
 # Determine or generate bearer token (prefer session token provided by orchestrator)
 # Reuse existing token if possible (INTEGRATION_BEARER_TOKEN > .env > run helper)
@@ -75,7 +82,7 @@ PY
   echo "Generated bearer token."
 fi
 
-echo "==> Preparing project-local .claude/settings.json"
+printf "%b\n" "${_b}${_cyn}==> Preparing project-local .claude/settings.json${_rst}"
 CLAUDE_DIR="${TARGET_DIR}/.claude"
 SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
 mkdir -p "$CLAUDE_DIR"
@@ -87,7 +94,7 @@ _AGENT="${USER:-user}"
 if [[ -f "$SETTINGS_PATH" ]]; then
   cp "$SETTINGS_PATH" "${SETTINGS_PATH}.bak.$(date +%s)"
 fi
-  echo "==> Writing MCP server config and hooks"
+  printf "%b\n" "${_b}${_cyn}==> Writing MCP server config and hooks${_rst}"
   AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
   cat > "$SETTINGS_PATH" <<JSON
 {
@@ -174,7 +181,7 @@ JSON
   fi
 
 # Create run helper script with token
-echo "==> Creating run helper script with token"
+printf "%b\n" "${_b}${_cyn}==> Creating run helper script with token${_rst}"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
 cat > "$RUN_HELPER" <<SH
@@ -186,16 +193,16 @@ SH
 chmod +x "$RUN_HELPER"
 echo "Created $RUN_HELPER"
 
-echo "==> Verifying server readiness (non-blocking)"
+printf "%b\n" "${_b}${_cyn}==> Verifying server readiness (non-blocking)${_rst}"
 set +e
 curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
 _curl_rc=$?
 set -e
 if [[ $_curl_rc -ne 0 ]]; then
-  echo "Note: readiness endpoint not reachable right now. Start the server:"
-  echo "  uv run python -m mcp_agent_mail.cli serve-http"
+  printf "%b\n" "${_ylw}Note:${_rst} readiness endpoint not reachable right now. Start the server:"
+  printf "%b\n" "  ${_b}uv run python -m mcp_agent_mail.cli serve-http${_rst}"
 else
-  echo "Server readiness OK."
+  printf "%b\n" "${_grn}Server readiness OK.${_rst}"
 fi
 
 # Register with Claude Code CLI at user and project scope for immediate discovery
@@ -207,18 +214,22 @@ if command -v claude >/dev/null 2>&1; then
   (cd "${TARGET_DIR}" && claude mcp add --transport http --scope project mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}") || true
 fi
 
-echo "==> Bootstrapping project and agent on server"
-_AUTH_ARGS=()
-if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-_HUMAN_KEY="${TARGET_DIR}"
-# ensure_project
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
-# register_agent
-curl -fsS -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-  -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":\"${_AGENT}\",\"task_description\":\"setup\"}}}" \
-  "${_URL}" >/dev/null 2>&1 || true
+printf "%b\n" "${_b}${_cyn}==> Bootstrapping project and agent on server${_rst}"
+if [[ $_curl_rc -ne 0 ]]; then
+  printf "%b\n" "${_ylw}Skipping bootstrap:${_rst} server not reachable (ensure_project/register_agent)."
+else
+  _AUTH_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+  _HUMAN_KEY="${TARGET_DIR}"
+  # ensure_project
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+  # register_agent
+  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":\"${_AGENT}\",\"task_description\":\"setup\"}}}" \
+    "${_URL}" >/dev/null 2>&1 || true
+fi
 
-echo "==> Done. Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
+printf "%b\n" "${_grn}==> Done.${_rst} Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
 

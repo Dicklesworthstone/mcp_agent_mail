@@ -238,6 +238,38 @@
               <div class="flex-1 h-px bg-gradient-to-r from-slate-200 to-transparent dark:from-slate-700"></div>
             </div>
 
+            <!-- Value Proposition Explainer -->
+            {% if p.suggested_siblings %}
+            <div class="bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-950/30 dark:to-purple-950/30 rounded-xl p-4 border-2 border-indigo-200 dark:border-indigo-800 mb-4">
+              <div class="flex items-start gap-3">
+                <div class="w-8 h-8 rounded-lg bg-indigo-500 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <i data-lucide="sparkles" class="w-4 h-4 text-white"></i>
+                </div>
+                <div class="flex-1 space-y-2">
+                  <h5 class="font-bold text-slate-900 dark:text-white text-sm">Why Link Projects?</h5>
+                  <p class="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                    Confirming related projects helps agents discover relevant context across your workspace.
+                    When projects are linked, agents can:
+                  </p>
+                  <ul class="text-xs text-slate-600 dark:text-slate-400 space-y-1.5 ml-1">
+                    <li class="flex items-start gap-2">
+                      <i data-lucide="zap" class="w-3.5 h-3.5 text-indigo-500 flex-shrink-0 mt-0.5"></i>
+                      <span><strong class="text-slate-700 dark:text-slate-300">Find dependencies:</strong> Discover related code and shared components</span>
+                    </li>
+                    <li class="flex items-start gap-2">
+                      <i data-lucide="message-circle" class="w-3.5 h-3.5 text-indigo-500 flex-shrink-0 mt-0.5"></i>
+                      <span><strong class="text-slate-700 dark:text-slate-300">Coordinate work:</strong> Connect with agents working on related systems</span>
+                    </li>
+                    <li class="flex items-start gap-2">
+                      <i data-lucide="shield-check" class="w-3.5 h-3.5 text-indigo-500 flex-shrink-0 mt-0.5"></i>
+                      <span><strong class="text-slate-700 dark:text-slate-300">Maintain consistency:</strong> Keep shared patterns and conventions aligned</span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+            {% endif %}
+
             {% if p.confirmed_siblings %}
             <div class="flex flex-wrap gap-2" data-sibling-confirmed-container>
               {% for sibling in p.confirmed_siblings %}
@@ -401,7 +433,7 @@
             <i data-lucide="lock" class="w-6 h-6 text-success-600 dark:text-success-400"></i>
           </div>
           <h4 class="font-semibold text-slate-900 dark:text-white mb-2">File Reservations</h4>
-          <p class="text-sm text-slate-600 dark:text-slate-400">Coordinate file access and prevent conflicts</p>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Signal editing intent to coordinate between agents</p>
         </div>
         <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
           <div class="w-12 h-12 bg-warning-100 dark:bg-warning-900/30 rounded-xl flex items-center justify-center mb-3">

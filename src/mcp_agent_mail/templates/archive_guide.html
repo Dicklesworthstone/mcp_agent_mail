@@ -43,6 +43,80 @@
     <div class="absolute -top-12 -left-12 w-48 h-48 bg-white/10 rounded-full blur-2xl"></div>
   </div>
 
+  <!-- Dual Storage Explainer -->
+  <div class="bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-200 dark:border-amber-800 rounded-2xl p-8 mb-8 shadow-soft">
+    <div class="flex items-start gap-6">
+      <div class="flex-shrink-0">
+        <div class="w-16 h-16 bg-amber-500 rounded-2xl flex items-center justify-center shadow-md">
+          <i data-lucide="help-circle" class="w-8 h-8 text-white"></i>
+        </div>
+      </div>
+      <div class="flex-1">
+        <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">
+          How Does Storage Work?
+        </h3>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-slate-800 rounded-xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center shadow-sm">
+                <i data-lucide="database" class="w-5 h-5 text-white"></i>
+              </div>
+              <h4 class="font-bold text-slate-900 dark:text-white">SQLite Database</h4>
+            </div>
+            <ul class="space-y-2 text-sm text-slate-600 dark:text-slate-400">
+              <li class="flex items-start gap-2">
+                <i data-lucide="zap" class="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>For live operations:</strong> Fast message queries, search, filtering</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <i data-lucide="inbox" class="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>Powers your inbox:</strong> Real-time message delivery and threading</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <i data-lucide="refresh-cw" class="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>Mutable:</strong> Can be edited or deleted by administrators</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="bg-white dark:bg-slate-800 rounded-xl p-5 border-2 border-emerald-200 dark:border-emerald-700 shadow-sm">
+            <div class="flex items-center gap-3 mb-3">
+              <div class="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center shadow-sm">
+                <i data-lucide="git-branch" class="w-5 h-5 text-white"></i>
+              </div>
+              <h4 class="font-bold text-slate-900 dark:text-white">Git Archive</h4>
+            </div>
+            <ul class="space-y-2 text-sm text-slate-600 dark:text-slate-400">
+              <li class="flex items-start gap-2">
+                <i data-lucide="shield" class="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>For audit trail:</strong> Immutable, tamper-proof record</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <i data-lucide="clock" class="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>Complete history:</strong> Browse changes over time</span>
+              </li>
+              <li class="flex items-start gap-2">
+                <i data-lucide="hard-drive" class="w-4 h-4 text-emerald-500 flex-shrink-0 mt-0.5"></i>
+                <span><strong>Portable:</strong> Clone, backup with standard Git tools</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="mt-6 p-4 bg-gradient-to-r from-primary-50 to-purple-50 dark:from-primary-950/30 dark:to-purple-950/30 rounded-xl border border-primary-200 dark:border-primary-800">
+          <div class="flex items-start gap-3">
+            <i data-lucide="info" class="w-5 h-5 text-primary-600 dark:text-primary-400 flex-shrink-0 mt-0.5"></i>
+            <p class="text-sm text-slate-700 dark:text-slate-300">
+              <strong>Think of it like this:</strong> The database is your "working copy" for day-to-day operations,
+              while the Git archive is your "permanent record" for compliance, auditing, and forensic analysis.
+              Every message exists in BOTH places.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Quick Stats -->
   <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
     <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/30 rounded-2xl p-6 border-2 border-blue-200 dark:border-blue-800 shadow-soft hover:shadow-medium transition-shadow duration-300">
@@ -184,7 +258,7 @@
     </div>
 
     <!-- UI Features -->
-    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300">
+    <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300" x-data="{ selectedProject: '' }">
       <div class="bg-gradient-to-r from-purple-500 to-pink-600 p-6">
         <div class="flex items-center gap-3 mb-2">
           <div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
@@ -193,6 +267,27 @@
           <h2 class="text-2xl font-bold text-white">Explore in UI</h2>
         </div>
         <p class="text-white/90">Powerful visualization tools built right into the web interface</p>
+      </div>
+
+      <!-- Project Picker -->
+      <div class="px-6 pt-6 pb-2">
+        <div class="bg-gradient-to-r from-primary-50 to-purple-50 dark:from-primary-950/30 dark:to-purple-950/30 rounded-xl p-5 border-2 border-primary-200 dark:border-primary-800">
+          <div class="flex items-start gap-3 mb-4">
+            <i data-lucide="layers" class="w-5 h-5 text-primary-600 dark:text-primary-400 flex-shrink-0 mt-1"></i>
+            <div class="flex-1">
+              <h4 class="font-bold text-slate-900 dark:text-white mb-2">Select a Project</h4>
+              <p class="text-sm text-slate-600 dark:text-slate-400 mb-3">
+                Most visualization tools require a project context. Choose a project below to explore its archive.
+              </p>
+              <select x-model="selectedProject" class="w-full px-4 py-3 bg-white dark:bg-slate-900 border-2 border-slate-300 dark:border-slate-600 rounded-xl text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+                <option value="">— Select a project —</option>
+                {% for proj in projects %}
+                  <option value="{{ proj.slug }}">{{ proj.human_key }}</option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="p-6 space-y-4">
@@ -205,12 +300,17 @@
             <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
               Activity Feed
             </h3>
-            <p class="text-sm text-slate-600 dark:text-slate-400">Recent commits across all projects</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">Recent commits across all projects</p>
+            <div class="flex items-start gap-2 text-xs text-blue-600 dark:text-blue-400">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+              <span class="font-medium">Use when: Monitoring recent activity and changes</span>
+            </div>
           </div>
           <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-blue-600 dark:group-hover:text-blue-400 group-hover:translate-x-1 transition-all"></i>
         </a>
 
-        <a href="/mail/archive/browser"
+        <a :href="selectedProject ? `/mail/archive/browser?project=${selectedProject}` : '#'"
+           :class="selectedProject ? '' : 'opacity-50 pointer-events-none'"
            class="flex items-center gap-4 p-4 bg-gradient-to-r from-emerald-50 to-green-50 dark:from-emerald-950/30 dark:to-green-950/30 rounded-xl border-2 border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 transition-all duration-300 group">
           <div class="w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
             <i data-lucide="folder-tree" class="w-6 h-6 text-white"></i>
@@ -219,12 +319,17 @@
             <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
               Archive Browser
             </h3>
-            <p class="text-sm text-slate-600 dark:text-slate-400">Navigate files and view content</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">Navigate files and view content</p>
+            <div class="flex items-start gap-2 text-xs text-emerald-600 dark:text-emerald-400">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+              <span class="font-medium">Use when: Exploring directory structure and reading specific files</span>
+            </div>
           </div>
           <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 group-hover:translate-x-1 transition-all"></i>
         </a>
 
-        <a href="/mail/archive/timeline"
+        <a :href="selectedProject ? `/mail/archive/timeline?project=${selectedProject}` : '#'"
+           :class="selectedProject ? '' : 'opacity-50 pointer-events-none'"
            class="flex items-center gap-4 p-4 bg-gradient-to-r from-violet-50 to-purple-50 dark:from-violet-950/30 dark:to-purple-950/30 rounded-xl border-2 border-violet-200 dark:border-violet-800 hover:border-violet-400 dark:hover:border-violet-600 transition-all duration-300 group">
           <div class="w-12 h-12 bg-violet-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
             <i data-lucide="git-branch" class="w-6 h-6 text-white"></i>
@@ -233,12 +338,17 @@
             <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-violet-600 dark:group-hover:text-violet-400 transition-colors">
               Communication Timeline
             </h3>
-            <p class="text-sm text-slate-600 dark:text-slate-400">Visual message flow over time</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">Visual message flow over time</p>
+            <div class="flex items-start gap-2 text-xs text-violet-600 dark:text-violet-400">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+              <span class="font-medium">Use when: Visualizing chronological message history and Git evolution</span>
+            </div>
           </div>
           <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-violet-600 dark:group-hover:text-violet-400 group-hover:translate-x-1 transition-all"></i>
         </a>
 
-        <a href="/mail/archive/network"
+        <a :href="selectedProject ? `/mail/archive/network?project=${selectedProject}` : '#'"
+           :class="selectedProject ? '' : 'opacity-50 pointer-events-none'"
            class="flex items-center gap-4 p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/30 dark:to-orange-950/30 rounded-xl border-2 border-amber-200 dark:border-amber-800 hover:border-amber-400 dark:hover:border-amber-600 transition-all duration-300 group">
           <div class="w-12 h-12 bg-amber-500 rounded-xl flex items-center justify-center shadow-md group-hover:scale-110 transition-transform">
             <i data-lucide="network" class="w-6 h-6 text-white"></i>
@@ -247,7 +357,11 @@
             <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors">
               Network Graph
             </h3>
-            <p class="text-sm text-slate-600 dark:text-slate-400">Agent communication patterns</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">Agent communication patterns</p>
+            <div class="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+              <span class="font-medium">Use when: Analyzing which agents communicate and collaboration patterns</span>
+            </div>
           </div>
           <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-amber-600 dark:group-hover:text-amber-400 group-hover:translate-x-1 transition-all"></i>
         </a>
@@ -261,7 +375,11 @@
             <h3 class="font-bold text-slate-900 dark:text-white mb-1 group-hover:text-pink-600 dark:group-hover:text-pink-400 transition-colors">
               Time Travel
             </h3>
-            <p class="text-sm text-slate-600 dark:text-slate-400">View history at any point in time</p>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mb-2">View history at any point in time</p>
+            <div class="flex items-start gap-2 text-xs text-pink-600 dark:text-pink-400">
+              <i data-lucide="lightbulb" class="w-3.5 h-3.5 flex-shrink-0 mt-0.5"></i>
+              <span class="font-medium">Use when: Auditing inbox state at a specific moment for compliance or debugging</span>
+            </div>
           </div>
           <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-pink-600 dark:group-hover:text-pink-400 group-hover:translate-x-1 transition-all"></i>
         </a>

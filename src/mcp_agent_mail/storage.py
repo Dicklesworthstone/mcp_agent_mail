@@ -1123,3 +1123,161 @@ async def get_timeline_commits(
         return timeline
 
     return await _to_thread(_get_timeline)
+
+
+async def get_historical_inbox_snapshot(
+    archive: ProjectArchive,
+    agent_name: str,
+    timestamp: str,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """
+    Get historical snapshot of agent inbox at specific timestamp.
+
+    Traverses Git history to find the commit closest to (but not after)
+    the specified timestamp, then lists all message files in the agent's
+    inbox directory at that point in history.
+
+    Args:
+        archive: ProjectArchive instance with Git repo
+        agent_name: Agent name to get inbox for
+        timestamp: ISO 8601 timestamp (e.g., "2024-01-15T10:30:00")
+        limit: Maximum messages to return (capped at 500)
+
+    Returns:
+        Dict with keys:
+            - messages: List of message dicts with id, subject, date, from, importance
+            - snapshot_time: ISO timestamp of the actual commit used
+            - commit_sha: Git commit hash
+            - requested_time: The original requested timestamp
+    """
+    # Cap limit for safety
+    limit = max(1, min(limit, 500))
+
+    def _get_snapshot() -> dict[str, Any]:
+        try:
+            # Parse timestamp - handle both with and without timezone
+            timestamp_clean = timestamp.replace('Z', '+00:00')
+            target_time = datetime.fromisoformat(timestamp_clean)
+
+            # If naive datetime (no timezone), assume UTC
+            # This handles datetime-local input which doesn't include timezone
+            if target_time.tzinfo is None:
+                target_time = target_time.replace(tzinfo=timezone.utc)
+
+            target_timestamp = target_time.timestamp()
+        except (ValueError, AttributeError) as e:
+            return {
+                "messages": [],
+                "snapshot_time": None,
+                "commit_sha": None,
+                "requested_time": timestamp,
+                "error": f"Invalid timestamp format: {e}"
+            }
+
+        # Find commit closest to (but not after) target timestamp
+        closest_commit = None
+        for commit in archive.repo.iter_commits(max_count=10000):
+            if commit.authored_date <= target_timestamp:
+                closest_commit = commit
+                break
+
+        if not closest_commit:
+            # No commits before this time
+            return {
+                "messages": [],
+                "snapshot_time": None,
+                "commit_sha": None,
+                "requested_time": timestamp,
+                "note": "No commits found before this timestamp"
+            }
+
+        # Get agent inbox directory at that commit
+        inbox_path = f"projects/{archive.slug}/agents/{agent_name}/inbox"
+
+        messages = []
+        try:
+            # Navigate to the inbox folder in the commit tree
+            tree = closest_commit.tree
+            for part in inbox_path.split("/"):
+                tree = tree / part
+
+            # Iterate through message files
+            for item in tree:
+                if item.type == "blob" and item.name.endswith(".md"):
+                    # Parse filename: YYYY-MM-DDTHH-MM-SSZ__subject-slug__id.md
+                    # or variations like: date__subject__id.md
+                    parts = item.name.rsplit("__", 2)
+
+                    if len(parts) >= 2:
+                        date_str = parts[0]
+                        subject_slug = parts[1] if len(parts) >= 2 else "no-subject"
+                        msg_id = parts[2].replace(".md", "") if len(parts) == 3 else "unknown"
+
+                        # Convert slug back to readable subject
+                        subject = subject_slug.replace("-", " ").replace("_", " ").title()
+
+                        # Read file content to get From field and other metadata
+                        from_agent = "unknown"
+                        importance = "normal"
+
+                        try:
+                            blob_content = item.data_stream.read().decode('utf-8', errors='ignore')
+
+                            # Parse JSON frontmatter (format: ---json\n{...}\n---)
+                            if blob_content.startswith('---json\n') or blob_content.startswith('---json\r\n'):
+                                # Find the closing --- delimiter
+                                end_marker = blob_content.find('\n---\n', 8)
+                                if end_marker == -1:
+                                    end_marker = blob_content.find('\r\n---\r\n', 8)
+
+                                if end_marker > 0:
+                                    # Extract JSON between markers
+                                    json_start = 8 if blob_content.startswith('---json\n') else 10
+                                    json_str = blob_content[json_start:end_marker]
+
+                                    try:
+                                        metadata = json.loads(json_str)
+                                        # Extract sender from 'from' field
+                                        if 'from' in metadata:
+                                            from_agent = str(metadata['from'])
+                                        # Extract importance
+                                        if 'importance' in metadata:
+                                            importance = str(metadata['importance'])
+                                        # Extract actual subject
+                                        if 'subject' in metadata:
+                                            actual_subject = str(metadata['subject']).strip()
+                                            if actual_subject:
+                                                subject = actual_subject
+                                    except (json.JSONDecodeError, KeyError, TypeError):
+                                        pass  # Use defaults if JSON parsing fails
+
+                        except Exception:
+                            pass  # Use defaults if parsing fails
+
+                        messages.append({
+                            "id": msg_id,
+                            "subject": subject,
+                            "date": date_str,
+                            "from": from_agent,
+                            "importance": importance,
+                        })
+
+                        if len(messages) >= limit:
+                            break
+
+        except (KeyError, AttributeError):
+            # Inbox directory didn't exist at that time
+            pass
+
+        # Sort messages by date (newest first)
+        messages.sort(key=lambda m: m["date"], reverse=True)
+
+        return {
+            "messages": messages,
+            "snapshot_time": closest_commit.authored_datetime.isoformat(),
+            "commit_sha": closest_commit.hexsha,
+            "requested_time": timestamp,
+        }
+
+    return await _to_thread(_get_snapshot)

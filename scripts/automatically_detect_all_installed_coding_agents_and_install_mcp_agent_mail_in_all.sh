@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents"
+# Color styles (best-effort)
+if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
+  _b=$(tput bold); _dim=$(tput dim); _red=$(tput setaf 1); _grn=$(tput setaf 2); _ylw=$(tput setaf 3); _blu=$(tput setaf 4); _mag=$(tput setaf 5); _cyn=$(tput setaf 6); _rst=$(tput sgr0)
+else
+  _b=""; _dim=""; _red=""; _grn=""; _ylw=""; _blu=""; _mag=""; _cyn=""; _rst=""
+fi
+
+printf "%b\n" "${_b}${_cyn}==> MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents${_rst}"
 echo
 echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.gemini and generate per-agent MCP configs."
 echo "It will also create scripts/run_server_with_token.sh to start the server with a bearer token."
@@ -59,7 +66,38 @@ if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
   fi
 fi
 
-echo "==> Detecting installed agents and applying integrations"
+echo "==> Ensuring archive storage root"
+# Read STORAGE_ROOT from settings and expand to absolute path
+eval "$(uv run python - <<'PY'
+from mcp_agent_mail.config import get_settings
+from pathlib import Path
+s = get_settings()
+raw = s.storage.root
+expanded = str(Path(raw).expanduser().resolve())
+print(f"export _STORAGE_ROOT_RAW='{raw}'")
+print(f"export _STORAGE_ROOT='{expanded}'")
+PY
+)"
+
+if [[ -d "${_STORAGE_ROOT}" ]]; then
+  echo "Storage root exists: ${_STORAGE_ROOT}"
+else
+  echo "Storage root not found: ${_STORAGE_ROOT_RAW} -> ${_STORAGE_ROOT}"
+  # Reuse non-interactive flag if provided
+  if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
+    _create_ans="y"
+  else
+    read -r -p "Create storage root now? [y/N] " _create_ans || _create_ans="n"
+  fi
+  if [[ "${_create_ans}" == "y" || "${_create_ans}" == "Y" ]]; then
+    mkdir -p "${_STORAGE_ROOT}"
+    echo "Created storage root at: ${_STORAGE_ROOT}"
+  else
+    echo "Skipping creation of storage root. Server will initialize it on first write."
+  fi
+fi
+
+printf "%b\n" "${_b}${_cyn}==> Detecting installed agents and applying integrations${_rst}"
 
 # Parse optional --project-dir to tell integrators where to write client configs
 TARGET_DIR=""
@@ -80,7 +118,7 @@ HAS_CODEX=0;  [[ -d "${HOME}/.codex"  ]] && HAS_CODEX=1
 HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
 HAS_GEMINI=0; [[ -d "${HOME}/.gemini" ]] && HAS_GEMINI=1
 
-echo "Found: claude=$HAS_CLAUDE codex=$HAS_CODEX cursor=$HAS_CURSOR gemini=$HAS_GEMINI"
+printf "%b\n" "${_cyn}Found:${_rst} claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI}"
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
@@ -103,10 +141,10 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
 fi
 
 echo
-echo "==> Summary"
+printf "%b\n" "${_b}${_cyn}==> Summary${_rst}"
 MASKED_TOKEN="${INTEGRATION_BEARER_TOKEN:0:6}********${INTEGRATION_BEARER_TOKEN: -4}"
-echo "Bearer token (masked): ${MASKED_TOKEN}"
-echo "Run server with: scripts/run_server_with_token.sh"
+printf "%b\n" "${_grn}Bearer token (masked):${_rst} ${MASKED_TOKEN}"
+printf "%b\n" "${_grn}Run server with:${_rst} scripts/run_server_with_token.sh"
 if [[ -n "${TARGET_DIR}" ]]; then
   echo "Client configs were written under: ${TARGET_DIR} (e.g., ${TARGET_DIR}/.claude/settings.json)"
 fi

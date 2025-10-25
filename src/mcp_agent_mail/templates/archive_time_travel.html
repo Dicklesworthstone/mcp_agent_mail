@@ -67,7 +67,7 @@
   <template x-if="snapshot">
     <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
       <div class="bg-gradient-to-r from-pink-500 to-rose-600 p-6">
-        <div class="flex items-center justify-between text-white">
+        <div class="flex items-center justify-between text-white mb-4">
           <div>
             <h3 class="text-2xl font-bold mb-1">Historical Snapshot</h3>
             <p class="text-white/90">
@@ -79,13 +79,45 @@
             <div class="text-sm text-white/80">Messages</div>
           </div>
         </div>
+
+        <!-- Commit Info -->
+        <template x-if="snapshot.commit_sha">
+          <div class="bg-white/10 backdrop-blur-sm rounded-xl p-4 space-y-2">
+            <div class="flex items-center gap-2 text-white/90 text-sm">
+              <i data-lucide="git-commit" class="w-4 h-4"></i>
+              <span class="font-mono" x-text="snapshot.commit_sha.substring(0, 8)"></span>
+              <span class="text-white/70">—</span>
+              <span x-text="new Date(snapshot.snapshot_time).toLocaleString()"></span>
+            </div>
+            <template x-if="snapshot.note">
+              <p class="text-white/80 text-xs" x-text="snapshot.note"></p>
+            </template>
+            <template x-if="snapshot.error">
+              <div class="flex items-start gap-2 text-yellow-200 text-xs">
+                <i data-lucide="alert-triangle" class="w-4 h-4 flex-shrink-0 mt-0.5"></i>
+                <span x-text="snapshot.error"></span>
+              </div>
+            </template>
+          </div>
+        </template>
       </div>
 
       <div class="p-6 space-y-3">
         <template x-for="msg in snapshot.messages" :key="msg.id">
           <div class="p-4 bg-slate-50 dark:bg-slate-900 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all">
             <div class="flex items-start justify-between gap-4 mb-2">
-              <h4 class="font-bold text-slate-900 dark:text-white flex-1" x-text="msg.subject"></h4>
+              <div class="flex items-center gap-2 flex-1">
+                <h4 class="font-bold text-slate-900 dark:text-white" x-text="msg.subject"></h4>
+                <template x-if="msg.importance && msg.importance !== 'normal'">
+                  <span class="px-2 py-0.5 text-xs font-semibold rounded-full"
+                        :class="{
+                          'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400': msg.importance === 'urgent' || msg.importance === 'high',
+                          'bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400': msg.importance === 'low'
+                        }"
+                        x-text="msg.importance.toUpperCase()">
+                  </span>
+                </template>
+              </div>
               <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" x-text="msg.date"></span>
             </div>
             <div class="text-sm text-slate-600 dark:text-slate-400">
