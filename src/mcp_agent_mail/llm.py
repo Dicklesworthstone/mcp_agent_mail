@@ -131,6 +131,45 @@ async def _ensure_initialized() -> None:
             _router = None
 
 
+def _choose_best_available_model(preferred: str) -> str:
+    """Select a provider/model that is likely to be available based on configured API keys.
+
+    If a concrete provider is not implied by the preferred name (e.g. 'gpt-5-mini'),
+    pick a small, low-cost model for whatever provider keys are available.
+    """
+    env = os.environ
+
+    # If the string already looks provider-qualified, leave it as-is
+    if "/" in preferred or ":" in preferred:
+        return preferred
+
+    # Alias unsupported placeholder to sensible defaults by provider key presence
+    if env.get("OPENAI_API_KEY"):
+        return "gpt-4o-mini"
+    if env.get("GOOGLE_API_KEY"):
+        return "gemini-1.5-flash"
+    if env.get("ANTHROPIC_API_KEY"):
+        return "claude-3-haiku-20240307"
+    # Other providers as last resorts (strings accepted by LiteLLM)
+    if env.get("GROQ_API_KEY"):
+        return "groq/llama-3.1-70b-versatile"
+    if env.get("DEEPSEEK_API_KEY"):
+        return "deepseek/deepseek-chat"
+    if env.get("XAI_API_KEY"):
+        return "xai/grok-2-mini"
+    if env.get("OPENROUTER_API_KEY"):
+        # OpenRouter requires qualified model ids; choose a widely available one
+        return "openrouter/openai/gpt-4o-mini"
+    return preferred
+
+
+def _resolve_model_alias(name: str) -> str:
+    """Map known placeholder or project-specific names to concrete provider models."""
+    normalized = (name or "").strip().lower()
+    if normalized in {"gpt-5-mini", "gpt5-mini", "gpt-5m"}:
+        return _choose_best_available_model(normalized)
+    return name
+
 async def complete_system_user(system: str, user: str, *, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> LlmOutput:
     """Chat completion helper returning content.
 
@@ -139,6 +178,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
     await _ensure_initialized()
     settings = get_settings()
     use_model = model or settings.llm.default_model
+    use_model = _resolve_model_alias(use_model)
     temp = settings.llm.temperature if temperature is None else float(temperature)
     mtoks = settings.llm.max_tokens if max_tokens is None else int(max_tokens)
 
@@ -159,12 +199,21 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
             resp = await asyncio.to_thread(_call_router)
         else:
             resp = await asyncio.to_thread(_call_direct)
-    except Exception:
+    except Exception as err:
         # Fallback to direct completion if Router path fails (e.g., no deployments)
         global _router
         _router = None
         _logger.debug("litellm.router.disabled_after_failure")
-        resp = await asyncio.to_thread(_call_direct)
+        try:
+            resp = await asyncio.to_thread(_call_direct)
+        except Exception:
+            # As a last resort, try with a provider-backed small model if available
+            alt_model = _choose_best_available_model(use_model)
+            if alt_model != use_model:
+                use_model = alt_model
+                resp = await asyncio.to_thread(lambda: litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
+            else:
+                raise err
 
     # Normalize content across potential shapes
     content: str

@@ -78,7 +78,7 @@ Coding Agents (various CLIs)
         |                                   
         | writes/reads                             indexes/queries
         v                                          v
-Per-project Git repo (.mcp-mail/)           SQLite (FTS5)
+Global Git archive (STORAGE_ROOT)           SQLite (FTS5)
   ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/claims
   ├─ agents/<AgentName>/profile.json
   ├─ messages/YYYY/MM/<msg-id>.md (canonical)
@@ -581,7 +581,7 @@ Common variables you may set:
 | `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
 | `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
 | `HTTP_RBAC_DEFAULT_ROLE` | `reader` | Role used when none present |
-| `HTTP_RBAC_READONLY_TOOLS` | see code | CSV of read-only tool names |
+| `HTTP_RBAC_READONLY_TOOLS` | `health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads` | CSV of read-only tool names |
 | `HTTP_RATE_LIMIT_ENABLED` | `false` | Enable token-bucket limiter |
 | `HTTP_RATE_LIMIT_BACKEND` | `memory` | `memory` or `redis` |
 | `HTTP_RATE_LIMIT_PER_MINUTE` | `60` | Legacy per-IP limit (fallback) |
@@ -601,7 +601,27 @@ Common variables you may set:
 | `HTTP_CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials on CORS |
 | `HTTP_CORS_ALLOW_METHODS` | `*` | CSV of allowed methods or `*` |
 | `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
+| `HTTP_BEARER_TOKEN` |  | Static bearer token (only when JWT disabled) |
+| `HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED` | `true` | Allow localhost requests without auth (dev convenience) |
+| `HTTP_OTEL_ENABLED` | `false` | Enable OpenTelemetry instrumentation |
+| `OTEL_SERVICE_NAME` | `mcp-agent-mail` | Service name for telemetry |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` |  | OTLP exporter endpoint URL |
+| `APP_ENVIRONMENT` | `development` | Environment name (development/production) |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./storage.sqlite3` | SQLAlchemy async database URL |
+| `DATABASE_ECHO` | `false` | Echo SQL statements for debugging |
+| `GIT_AUTHOR_NAME` | `mcp-agent` | Git commit author name |
+| `GIT_AUTHOR_EMAIL` | `mcp-agent@example.com` | Git commit author email |
+| `LLM_ENABLED` | `true` | Enable LiteLLM for thread summaries and discovery |
+| `LLM_DEFAULT_MODEL` | `gpt-5-mini` | Default LiteLLM model identifier |
+| `LLM_TEMPERATURE` | `0.2` | LLM temperature for text generation |
+| `LLM_MAX_TOKENS` | `512` | Max tokens for LLM completions |
+| `LLM_CACHE_ENABLED` | `true` | Enable LLM response caching |
+| `LLM_CACHE_BACKEND` | `memory` | LLM cache backend (`memory` or `redis`) |
+| `LLM_CACHE_REDIS_URL` |  | Redis URL for LLM cache (if backend=redis) |
+| `LLM_COST_LOGGING_ENABLED` | `true` | Log LLM API costs and token usage |
 
+| `CLAIMS_CLEANUP_ENABLED` | `false` | Enable background cleanup of expired claims |
+| `CLAIMS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for claims cleanup task |
 | `CLAIMS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting claims |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
@@ -611,6 +631,21 @@ Common variables you may set:
 | `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation claims |
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation claim exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation claims |
+| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
+| `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for auto-approved contacts (1 day) |
+| `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
+| `TOOLS_LOG_ENABLED` | `false` | Log tool invocations for debugging |
+| `LOG_RICH_ENABLED` | `true` | Enable Rich console logging |
+| `LOG_INCLUDE_TRACE` | `false` | Include trace-level logs |
+| `TOOL_METRICS_EMIT_ENABLED` | `false` | Emit periodic tool usage metrics |
+| `TOOL_METRICS_EMIT_INTERVAL_SECONDS` | `60` | Interval for metrics emission |
+| `RETENTION_REPORT_ENABLED` | `false` | Enable retention/quota reporting |
+| `RETENTION_REPORT_INTERVAL_SECONDS` | `3600` | Interval for retention reports (1 hour) |
+| `RETENTION_MAX_AGE_DAYS` | `180` | Max age for retention policy reporting |
+| `QUOTA_ENABLED` | `false` | Enable quota enforcement |
+| `QUOTA_ATTACHMENTS_LIMIT_BYTES` | `0` | Max attachment storage per project (0=unlimited) |
+| `QUOTA_INBOX_LIMIT_COUNT` | `0` | Max inbox messages per agent (0=unlimited) |
+| `RETENTION_IGNORE_PROJECT_PATTERNS` | `demo,test*,testproj*,testproject,backendproj*,frontendproj*` | CSV of project patterns to ignore in retention/quota reports |
 
 ## Development quick start
 
@@ -954,6 +989,7 @@ if __name__ == "__main__":
 | :-- | :-- | :-- | :-- |
 | `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
 | `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
+| `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
 | `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
@@ -967,6 +1003,9 @@ if __name__ == "__main__":
 | `resource://mailbox-with-commits/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing enriched with commit metadata |
 | `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}` | listed | `{project, agent, count, messages[]}` | Messages sent by the agent |
 | `resource://views/acks-stale/{agent}{?project,ttl_seconds,limit}` | listed | `{project, agent, ttl_seconds, count, messages[]}` | Ack-required older than TTL without ack |
+| `resource://views/urgent-unread/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | High/urgent importance messages not yet read |
+| `resource://views/ack-required/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | Pending acknowledgements for an agent |
+| `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}` | listed | `{project, agent, ttl_minutes, count, messages[]}` | Ack-required older than TTL without ack |
 | `resource://views/ack-required/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | Pending acknowledgements for an agent |
 
 ### Client Integration Guide
