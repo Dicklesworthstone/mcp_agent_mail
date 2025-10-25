@@ -61,7 +61,11 @@ def _safe_json_format(data: Any, max_length: int = 2000) -> str:
             json_str = json_str[:max_length] + "\n... (truncated)"
         return json_str
     except Exception:
-        return str(data)
+        # Fallback to str(), but handle cases where str() itself fails
+        try:
+            return str(data)
+        except Exception:
+            return "<unserializable data>"
 
 
 def _create_syntax_panel(title: str, content: str, language: str = "json") -> Panel:

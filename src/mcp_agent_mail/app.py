@@ -170,30 +170,30 @@ def _instrument_tool(
             agent_value = _extract_argument(bound, agent_arg)
 
             # Rich logging: Log tool call start if enabled
-            settings = get_settings()
-            log_enabled = RICH_LOGGER_AVAILABLE and settings.tools_log_enabled
+            log_enabled = False
             log_ctx = None  # Initialize to prevent undefined variable errors
 
-            if log_enabled:
-                try:
-                    # Create a clean kwargs dict without the context
-                    clean_kwargs = {k: v for k, v in bound.arguments.items() if k != "ctx"}
-                    log_ctx = rich_logger.ToolCallContext(
-                        tool_name=tool_name,
-                        args=[],
-                        kwargs=clean_kwargs,
-                        project=project_value,
-                        agent=agent_value,
-                        start_time=start_time,
-                    )
-                    rich_logger.log_tool_call_start(log_ctx)
-                except Exception as log_exc:
-                    # Logging should never break functionality - log the logging error and continue
-                    logger.warning(
-                        "rich_logging.start_failed",
-                        extra={"tool": tool_name, "error": str(log_exc)},
-                    )
-                    log_ctx = None  # Disable logging for this call if start failed
+            if RICH_LOGGER_AVAILABLE:
+                settings = get_settings()
+                log_enabled = settings.tools_log_enabled
+
+                if log_enabled:
+                    try:
+                        # Create a clean kwargs dict without the context
+                        clean_kwargs = {k: v for k, v in bound.arguments.items() if k != "ctx"}
+                        log_ctx = rich_logger.ToolCallContext(
+                            tool_name=tool_name,
+                            args=[],
+                            kwargs=clean_kwargs,
+                            project=project_value,
+                            agent=agent_value,
+                            start_time=start_time,
+                        )
+                        rich_logger.log_tool_call_start(log_ctx)
+                    except Exception:
+                        # Logging should never break functionality - silently disable logging
+                        # Don't use logger.warning() here as it could also raise exceptions
+                        log_ctx = None  # Disable logging for this call if start failed
 
             result = None
             error = None
@@ -239,12 +239,10 @@ def _instrument_tool(
                         log_ctx.error = error
                         log_ctx.success = error is None
                         rich_logger.log_tool_call_end(log_ctx)
-                    except Exception as log_exc:
+                    except Exception:
                         # Ensure logging errors in finally block don't suppress original exceptions
-                        logger.warning(
-                            "rich_logging.end_failed",
-                            extra={"tool": tool_name, "error": str(log_exc)},
-                        )
+                        # Silently fail - don't use logger.warning() as it could also raise
+                        pass
 
             return result
 
