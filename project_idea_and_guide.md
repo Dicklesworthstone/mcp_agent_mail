@@ -76,7 +76,7 @@ Key flows
 
     Agent checks messages → check_my_messages(...) pulls unread/urgent since a timestamp, optionally includes bodies.
 
-    Avoiding conflicts → claim_paths(...) creates TTL leases for files/globs with Git‑tracked claim files and DB rows; agents voluntarily honor leases before editing; conflicts are resolved at the MCP layer before the edit loop begins.
+    Avoiding conflicts → reserve_file_paths(...) creates TTL leases for files/globs with Git‑tracked claim files and DB rows; agents voluntarily honor leases before editing; conflicts are resolved at the MCP layer before the edit loop begins.
 
 On transport choices (brief correction)
 
@@ -152,7 +152,7 @@ attachments:
 
 File ownership & conflict avoidance
 
-    Leases (claims): claim_paths(agent, ["app/api/*.py"], ttl=3600, exclusive=True, reason="migrations")
+    Leases (claims): reserve_file_paths(agent, ["app/api/*.py"], ttl=3600, exclusive=True, reason="migrations")
 
         Returns conflicts if another active exclusive claim overlaps.
 
@@ -595,7 +595,7 @@ def acknowledge_message(project_key: str, agent_name: str, message_id: str) -> D
     return {"message_id": message_id, "agent": agent_name, "acknowledged": ISO(ts), "updated": cur.rowcount}
 
 @mcp.tool
-def claim_paths(project_key: str, agent_name: str, paths: List[str], ttl_seconds: int=3600,
+def reserve_file_paths(project_key: str, agent_name: str, paths: List[str], ttl_seconds: int=3600,
                 exclusive: bool=True, reason: str="") -> Dict[str, Any]:
     """
     Request claims (leases) on project-relative paths/globs. Returns conflicts if any.
@@ -710,7 +710,7 @@ Tooling surface (current MVP)
 
     acknowledge_message(project_key, agent_name, message_id)
 
-    claim_paths(project_key, agent_name, paths[], ttl_seconds=3600, exclusive=True, reason?)
+    reserve_file_paths(project_key, agent_name, paths[], ttl_seconds=3600, exclusive=True, reason?)
 
     release_claims(project_key, agent_name, paths[])
 
@@ -728,7 +728,7 @@ Design notes & extensions
     CORS / Inspector: If you connect directly from a browser (e.g., MCP Inspector web), add CORS middleware to the http_app().
     gofastmcp.com
 
-    Pre-commit guard: Provide a small hook that calls claim_paths before commits; fail the commit if an exclusive conflicting lease exists (future work).
+    Pre-commit guard: Provide a small hook that calls reserve_file_paths before commits; fail the commit if an exclusive conflicting lease exists (future work).
 
     Git integration with code repos: Today we keep a separate .mcp-mail repo per project; you can also embed under your code repo as a subdirectory or submodule if that's more convenient for humans reviewing the mail/claims alongside code.
 

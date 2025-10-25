@@ -124,7 +124,7 @@ async def test_contact_auto_allows_recent_overlapping_claims(isolated_env):
 
         # Overlapping claims -> auto allow contact
         await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Alpha",
@@ -134,7 +134,7 @@ async def test_contact_auto_allows_recent_overlapping_claims(isolated_env):
             },
         )
         await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",

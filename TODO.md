@@ -1,10 +1,10 @@
 # Project TODO (in progress)
 
 - [x] Persistence archive
-  - [x] Define storage root and per-project structure (agents/, messages/, claims/, attachments/)
+  - [x] Define storage root and per-project structure (agents/, messages/, file_reservations/, attachments/)
   - [x] Implement Markdown writing with JSON front matter for canonical message + inbox/outbox copies
   - [x] Persist agent profiles to json under agents/
-  - [x] Persist claim JSON artifacts with hashed filenames
+  - [x] Persist file reservation JSON artifacts with hashed filenames
   - [x] Ensure all file operations async-friendly (use asyncio.to_thread as needed)
   - [x] Integrate GitPython: repo init per project, add commit helper with lock handling
   - [x] Add advisory file lock to serialize archive writes
@@ -18,16 +18,16 @@
   - [x] Implement urgent-only filter and ack-required flag handling
   - [x] Inline/attachment WebP conversion with Pillow; store under attachments/
   - [x] Provide acknowledgements tool
-- [x] Claims/leases
-  - [x] Expand claim tool to detect glob overlaps
-  - [x] Implement release_claims tool returning updated status
-  - [x] Build resource for active claims per project
+- [x] File Reservations/leases
+  - [x] Expand reservation tool to detect glob overlaps
+  - [x] Implement release_file_reservations tool returning updated status
+  - [x] Build resource for active file reservations per project
   - [x] Prepare pre-commit hook generator installing guard
 - [x] Resources
   - [x] resource://message/{id}{?project} returning body + metadata
   - [x] resource://thread/{thread_id}{?project,include_bodies}
   - [x] resource://inbox/{agent}{?project,...}
-  - [x] resource://claims/{project}{?active_only}
+  - [x] resource://file_reservations/{project}{?active_only}
 - [x] Search & summaries
   - [x] Configure SQLite FTS tables/triggers for messages
   - [x] search_messages tool w/ query param
@@ -40,7 +40,7 @@
   - [x] Enrich CLI output with Rich panels/logging
 - [x] Testing
   - [x] Expand tests to cover filesystem archive & git commits
-  - [x] Test claims conflict detection, release tool, resources
+  - [x] Test file reservation conflict detection, release tool, resources
   - [x] Test search and summaries tools
   - [x] Test CLI serve-http with auth defaults and migrations command
   - [x] Add image conversion test (mocking Pillow)
@@ -94,10 +94,10 @@
   - [x] CLI/agent tooling to remind agents of outstanding acknowledgements, maybe integrate with claims guard.  
   - [x] Implement ack TTL checks—warnings or auto-claims if deadlines missed.  (background worker warns; optional claim escalation implemented)
 
-- [x] **Claims & leases extensions**  (verified)  
-  - [x] Add CLI command for installing/removing the pre-commit guard (currently only a tool).  
-  - [x] Add server-side enforcement (e.g., refusal to send message updates if claims conflict).  (send_message blocks on conflicting active exclusive claims when enabled)  
-  - [x] Provide a heartbeat/renewal tool so agents can extend leases without reissuing claims.
+- [x] **File Reservations & leases extensions**  (verified)
+  - [x] Add CLI command for installing/removing the pre-commit guard (currently only a tool).
+  - [x] Add server-side enforcement (e.g., refusal to send message updates if file reservation conflicts).  (send_message blocks on conflicting active exclusive file reservations when enabled)
+  - [x] Provide a heartbeat/renewal tool so agents can extend leases without reissuing reservations.
 
 - [x] **Search & summarization improvements**  (verified)  
   - [x] Upgrade summarizer: incorporate heuristics (e.g., parse markdown TODOs or code references) or optional LLM integration for richer briefs.  
@@ -112,10 +112,10 @@
   - [x] Add `whois(agent)` tool returning project assignments, recent activity, last git commit info.  
   - [x] Integrate with Git to show the agent’s most recent archive commit summaries.
 
-- [x] **CLI/guard tooling**  (verified)  
-  - [x] Add CLI command to list active claims with expiry countdowns, and optionally raise warnings for soon-to-expire leases.  (commands `claims active` and `claims soon` implemented)  
-  - [x] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.  
-   - [x] Offer CLI command to review ack status (`cli list-acks`).  
+- [x] **CLI/guard tooling**  (verified)
+  - [x] Add CLI command to list active file reservations with expiry countdowns, and optionally raise warnings for soon-to-expire leases.  (commands `file-reservations active` and `file-reservations soon` implemented)
+  - [x] Build guard integration tests (mock git) to ensure the generated hook catches conflicts.
+   - [x] Offer CLI command to review ack status (`cli list-acks`).
     - [x] Implemented `list-acks`; includes ack age and thread columns.
 
 - [x] **HTTP transport hardening**  (verified)  
@@ -141,18 +141,18 @@
   - [ ] Background compaction/dedup/retention for old messages/attachments.  
   - [ ] Quotas for attachment storage and inbox sizes.
 
-- [ ] **Testing Expansion**  
-  - [x] HTTP JSON-RPC tests for auth/RBAC and rate limiting.  
-  - [ ] Claims conflict tests covering edge patterns and TTL transitions.  
+- [ ] **Testing Expansion**
+  - [x] HTTP JSON-RPC tests for auth/RBAC and rate limiting.
+  - [ ] File reservation conflict tests covering edge patterns and TTL transitions.
   - [ ] Attachment policy tests for agent/server overrides.
 
 - [x] **Migrations**  
   - [x] Add Alembic migrations for recent schema changes: `agents.attachments_policy`, `agents.contact_policy`, and the `agent_links` table.  
   - [x] Wire CLI `migrate` to Alembic (`alembic upgrade head`) consistently (currently uses `ensure_schema`).
 
-- [x] **Database improvements**  
-  - [x] Add indexes on created_ts, thread_id, importance for faster queries.  
-  - [x] Implement scheduled cleanup for expired claims/old messages (maybe via background tasks).  
+- [x] **Database improvements**
+  - [x] Add indexes on created_ts, thread_id, importance for faster queries.
+  - [x] Implement scheduled cleanup for expired file reservations/old messages (maybe via background tasks).
   - [x] Prepare migrations once schema evolves (Alembic integration).
 
 - [x] **Testing gaps**  (verified via scripts)

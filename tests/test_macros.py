@@ -93,7 +93,7 @@ async def test_renew_claims_extends_expiry(isolated_env):
             {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Claimer"},
         )
         g = await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Claimer",

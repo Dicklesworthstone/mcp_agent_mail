@@ -336,7 +336,7 @@ When multiple agents work on the same codebase, use file reservations to avoid c
 ```json
 // FrontendDev reserves UI files
 {
-  "tool": "claim_paths",
+  "tool": "reserve_file_paths",
   "arguments": {
     "paths": ["src/components/*.tsx", "src/styles/*.css"],
     "exclusive": true,
@@ -346,7 +346,7 @@ When multiple agents work on the same codebase, use file reservations to avoid c
 
 // BackendDev reserves API files
 {
-  "tool": "claim_paths",
+  "tool": "reserve_file_paths",
   "arguments": {
     "paths": ["api/users/*.py", "api/auth/*.py"],
     "exclusive": true,
@@ -417,7 +417,7 @@ Keep related messages in the same thread:
 }}
 
 // BackendDev reserves API files
-{"tool": "claim_paths", "arguments": {
+{"tool": "reserve_file_paths", "arguments": {
   "project_key": "/data/projects/webapp",
   "agent_name": "BackendDev",
   "paths": ["backend/api/users.py"],
@@ -432,7 +432,7 @@ Keep related messages in the same thread:
 }}
 
 // FrontendDev releases backend reservation, reserves frontend
-{"tool": "claim_paths", "arguments": {
+{"tool": "reserve_file_paths", "arguments": {
   "project_key": "/data/projects/webapp",
   "agent_name": "FrontendDev",
   "paths": ["frontend/src/components/UserProfile.tsx"],

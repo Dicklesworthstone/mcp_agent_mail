@@ -42,7 +42,7 @@ Model Context Protocol (MCP) adoption has exploded across cloud, enterprise, and
 
 - **Capability gating:** Add a lightweight guard that checks for capability tokens on the MCP context (e.g., `allowed_capabilities=["claims"]`). Agents can request only the permissions they need, reducing accidental misuse.  
 - **Recent usage resource:** Surface `resource://tooling/recent?agent=X&project=Y` to help clients replay successful tool sequences.  
-- **Macro recommendations:** Return `next_actions` hints in macro responses (e.g., “Consider `claim_paths` renew in 30 minutes”) to combine deterministic workflows with agent autonomy.
+- **Macro recommendations:** Return `next_actions` hints in macro responses (e.g., "Consider `reserve_file_paths` renew in 30 minutes") to combine deterministic workflows with agent autonomy.
 
 **Client integration guidance:** Encourage clients to pull `resource://tooling/directory` and `resource://tooling/metrics` at connect time, then mount only the relevant cluster—a pattern that aligns with Dynamic ReAct’s search-and-load strategy.citeturn0academia14
 

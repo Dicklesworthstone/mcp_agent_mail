@@ -333,7 +333,7 @@ Signal your intent to edit files to avoid conflicts:
 
 ```json
 {
-  "tool": "claim_paths",
+  "tool": "reserve_file_paths",
   "arguments": {
     "project_key": "/data/projects/my-project",
     "agent_name": "BackendDev",
@@ -350,7 +350,7 @@ Signal your intent to edit files to avoid conflicts:
 - Set realistic TTL (time to live) - default is 1 hour (3600s)
 - Use `exclusive: true` when you need write access
 - Use `exclusive: false` for read-only observation
-- Release reservations when done with `release_claims()`
+- Release reservations when done with `release_file_reservations()`
 
 ### Workflow 5: Searching Messages
 
@@ -527,7 +527,7 @@ Bootstrap a project session in one call:
     "model": "sonnet-4.5",
     "agent_name": "BackendDev",
     "task_description": "Backend API development",
-    "claim_paths": ["app/api/*.py"],
+    "reserve_paths": ["app/api/*.py"],
     "inbox_limit": 10
   }
 }
@@ -626,7 +626,7 @@ If you encounter issues:
 }}
 
 // Step 5: Reserve files before editing
-{"tool": "claim_paths", "arguments": {
+{"tool": "reserve_file_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "BackendDev",
   "paths": ["app/api/users.py"],
@@ -658,7 +658,7 @@ If you encounter issues:
 }}
 
 // Step 5: Reserve frontend files
-{"tool": "claim_paths", "arguments": {
+{"tool": "reserve_file_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "FrontendDev",
   "paths": ["src/components/UserList.tsx"],

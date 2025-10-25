@@ -108,7 +108,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         )
 
         result = await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Alpha",
@@ -120,7 +120,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         assert result.data["granted"][0]["path_pattern"] == "src/app.py"
 
         conflict = await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",
@@ -170,7 +170,7 @@ async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
 
         # Beta claims Alpha's inbox surface exclusively (overlap by pattern)
         claim = await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",
@@ -371,7 +371,7 @@ async def test_server_level_attachment_policy_override(isolated_env, monkeypatch
 @pytest.mark.asyncio
 async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, monkeypatch):
     # Ensure enforcement is enabled
-    monkeypatch.setenv("CLAIMS_ENFORCEMENT_ENABLED", "true")
+    monkeypatch.setenv("FILE_RESERVATIONS_ENFORCEMENT_ENABLED", "true")
     from mcp_agent_mail import config as _config
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
@@ -399,7 +399,7 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
         )
         # Beta claims Alpha inbox surface, short TTL
         claim = await client.call_tool(
-            "claim_paths",
+            "reserve_file_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",

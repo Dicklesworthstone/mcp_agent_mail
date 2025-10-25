@@ -84,7 +84,7 @@ Why it's useful
 How to use effectively
 1) Same repository
    - Register an identity: call `ensure_project`, then `register_agent` using this repo's absolute path as `project_key`.
-   - Reserve files before you edit: `claim_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)` to signal intent and avoid conflict.
+   - Reserve files before you edit: `reserve_file_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)` to signal intent and avoid conflict.
    - Communicate with threads: use `send_message(..., thread_id="FEAT-123")`; check inbox with `fetch_inbox` and acknowledge with `acknowledge_message`.
    - Read fast: `resource://inbox/{Agent}?project=<abs-path>&limit=20` or `resource://thread/{id}?project=<abs-path>&include_bodies=true`.
    - Tip: set `AGENT_NAME` in your environment so the pre-commit guard can block commits that conflict with others' active exclusive file reservations.
@@ -95,7 +95,7 @@ How to use effectively
 
 Macros vs granular tools
 - Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`.
-- Use granular tools when you need control: `register_agent`, `claim_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
+- Use granular tools when you need control: `register_agent`, `reserve_file_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.

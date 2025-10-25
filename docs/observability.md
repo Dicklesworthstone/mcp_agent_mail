@@ -20,7 +20,7 @@ you would get from `resource://tooling/metrics`:
   "event": "tool_metrics_snapshot",
   "tools": [
     {"name": "send_message", "cluster": "messaging", "capabilities": ["messaging", "write"], "calls": 42, "errors": 1},
-    {"name": "claim_paths", "cluster": "claims", "capabilities": ["claims", "repository"], "calls": 11, "errors": 0}
+    {"name": "reserve_file_paths", "cluster": "file_reservations", "capabilities": ["file_reservations", "repository"], "calls": 11, "errors": 0}
   ]
 }
 ```

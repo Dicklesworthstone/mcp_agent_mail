@@ -75,7 +75,7 @@ async def main() -> None:
                 "human_key": "/abs/path/backend",
                 "program": "codex",
                 "model": "gpt-5-small",
-                "claim_paths": ["src/app.py"],
+                "reserve_paths": ["src/app.py"],
             },
         )
         print("==> macro_start_session result:")
