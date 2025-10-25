@@ -159,7 +159,7 @@ def _build_environment() -> dict[str, Any]:
         "KEEP_ORIGINAL_IMAGES": "false",
         "HTTP_RBAC_ENABLED": "false",
         "LLM_ENABLED": "false",
-        "CLAIMS_ENFORCEMENT_ENABLED": "true",
+        "FILE_RESERVATIONS_ENFORCEMENT_ENABLED": "true",
         "CONTACT_ENFORCEMENT_ENABLED": "false",
         "TOOL_METRICS_EMIT_ENABLED": "false",
     }
@@ -379,7 +379,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
     settings_table.add_row("Database URL", settings.database.url)
     settings_table.add_row("Storage Root", settings.storage.root)
     settings_table.add_row("Images → WebP", str(settings.storage.convert_images))
-    settings_table.add_row("Claims enforcement", str(settings.claims_enforcement_enabled))
+    settings_table.add_row("File reservations enforcement", str(settings.file_reservations_enforcement_enabled))
     console.print(settings_table)
     console.print()
 
@@ -452,13 +452,13 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         # ------------------------------------------------------------------ #
         # Backend repo collaboration (shared project)
         # ------------------------------------------------------------------ #
-        console.print(Rule("Backend collaboration: coordinating claims & messaging", style="yellow"))
+        console.print(Rule("Backend collaboration: coordinating file reservations & messaging", style="yellow"))
 
         claim_result = await stepper.call_tool(
             actor=agents["blue"].codename,
             project_label=projects["backend"].label,
-            tool="claim_paths",
-            description="BlueLake stakes an exclusive claim on backend auth routes.",
+            tool="reserve_file_paths",
+            description="BlueLake stakes an exclusive file reservation on backend auth routes.",
             arguments={
                 "project_key": projects["backend"].human_key,
                 "agent_name": agents["blue"].codename,
@@ -469,13 +469,13 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
             },
         )
         claim_payload = claim_result.data
-        console.print(Panel(_syntax_blob(claim_payload), title="Active claim ledger", border_style="yellow"))
+        console.print(Panel(_syntax_blob(claim_payload), title="Active file reservation ledger", border_style="yellow"))
 
         conflict_attempt = await stepper.call_tool(
             actor=agents["green"].codename,
             project_label=projects["backend"].label,
-            tool="claim_paths",
-            description="GreenStone attempts to claim the same surface to illustrate conflict detection.",
+            tool="reserve_file_paths",
+            description="GreenStone attempts to reserve the same files to illustrate conflict detection.",
             arguments={
                 "project_key": projects["backend"].human_key,
                 "agent_name": agents["green"].codename,
@@ -489,7 +489,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         await stepper.call_tool(
             actor=agents["green"].codename,
             project_label=projects["backend"].label,
-            tool="claim_paths",
+            tool="reserve_file_paths",
             description="GreenStone pivots to payment webhook files to avoid conflict.",
             arguments={
                 "project_key": projects["backend"].human_key,
@@ -818,7 +818,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
                 Markdown(
                     """\
 ### Key Observations
-- Claims prevented overlapping backend work without blocking alternative surfaces.
+- File reservations prevented overlapping backend work without blocking alternative surfaces.
 - Contact handshake enabled cross-project routing with clear audit trail.
 - Message acknowledgements and replies stayed scoped to their originating projects.
 - Search & summaries surfaced the negotiated plan for downstream agents."""

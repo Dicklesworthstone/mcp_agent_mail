@@ -32,7 +32,7 @@ path = pathlib.Path(".git/hooks/pre-commit")
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(hook, encoding="utf-8")
 path.chmod(0o755)
-print(str(archive.root / "claims"))
+print(str(archive.root / "file_reservations"))
 PY
 
 CLAIMS_DIR_OUTPUT=$(uv run python - <<'PY'
@@ -43,7 +43,7 @@ import asyncio
 settings = get_settings()
 slug = "test-guard"
 archive = asyncio.run(ensure_archive(settings, slug))
-print((archive.root / "claims").resolve())
+print((archive.root / "file_reservations").resolve())
 PY
 )
 

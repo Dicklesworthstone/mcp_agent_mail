@@ -100,15 +100,15 @@ fi
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations active --project ${_PROJ}" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations soon --project ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project ${_PROJ}" } ] }
+      { "matcher": { "tool": "reserve_file_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations list --project ${_PROJ}" } ] }
     ]
   }
 }
@@ -130,15 +130,15 @@ JSON
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations active --project ${_PROJ}" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims soon --project ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations soon --project ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tool": "claim_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli claims list --project ${_PROJ}" } ] }
+      { "matcher": { "tool": "reserve_file_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations list --project ${_PROJ}" } ] }
     ]
   }
 }
