@@ -4131,7 +4131,7 @@ def build_mcp_server() -> FastMCP:
                     "created_ts": _iso(file_reservation.created_ts),
                     "expires_ts": _iso(file_reservation.expires_ts),
                 }
-                await write_claim_record(archive, file_reservation_payload)
+                await write_file_reservation_record(archive, file_reservation_payload)
                 granted.append(
                     {
                         "id": file_reservation.id,
@@ -4350,7 +4350,7 @@ def build_mcp_server() -> FastMCP:
                     "created_ts": _iso(now),
                     "expires_ts": file_reservation_info["new_expires_ts"],
                 }
-                await write_claim_record(archive, payload)
+                await write_file_reservation_record(archive, payload)
         await ctx.info(f"Renewed {len(updated)} file_reservation(s) for '{agent.name}'.")
         return {"renewed": len(updated), "file_reservations": updated}
 

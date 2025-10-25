@@ -59,7 +59,7 @@ graph LR
     GI1[agents/profile.json]
     GI2[agents/mailboxes/...]
     GI3[messages/YYYY/MM/id.md]
-    GI4[file reservations/sha1.json]
+    GI4[file_reservations/sha1.json]
     GA[attachments/xx/sha1.webp]
   end
 
@@ -79,10 +79,10 @@ Coding Agents (various CLIs)
         | writes/reads                             indexes/queries
         v                                          v
 Global Git archive (STORAGE_ROOT)           SQLite (FTS5)
-  ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/file reservations
+  ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/file_reservations
   ├─ agents/<AgentName>/profile.json
   ├─ messages/YYYY/MM/<msg-id>.md (canonical)
-  └─ file reservations/<sha1-of-path>.json
+  └─ file_reservations/<sha1-of-path>.json
 ```
 
 ## Web UI (human-facing mail viewer)
@@ -143,7 +143,7 @@ Auth notes:
 - `/mail/{project}/search?q=...` (Dedicated search page)
   - Same query syntax as the project overview search, with a token “pill” UI for assembling/removing filters.
 
-- `/mail/{project}/file reservations` (File Reservations list)
+- `/mail/{project}/file_reservations` (File Reservations list)
   - Displays active and historical file reservations (exclusive/shared, path pattern, timestamps, released/expired state).
 
 - `/mail/{project}/attachments` (Messages with attachments)
@@ -266,7 +266,7 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
   agents/<AgentName>/outbox/YYYY/MM/<msg-id>.md
   messages/YYYY/MM/<msg-id>.md
   messages/threads/<thread-id>.md  # optional human digest maintained by the server
-  file reservations/<sha1-of-path>.json
+  file_reservations/<sha1-of-path>.json
   attachments/<xx>/<sha1>.webp
 ```
 
@@ -1013,7 +1013,7 @@ if __name__ == "__main__":
 | `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
-| `resource://file reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations for a project |
+| `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations for a project |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |

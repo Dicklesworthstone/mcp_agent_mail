@@ -24,7 +24,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.types import Receive, Scope, Send
 
 from .app import (
-    _expire_stale_claims,
+    _expire_stale_file_reservations,
     _tool_metrics_snapshot,
     build_mcp_server,
     get_project_sibling_data,
@@ -44,7 +44,7 @@ from .storage import (
     get_recent_commits,
     get_timeline_commits,
     write_agent_profile,
-    write_claim_record,
+    write_file_reservation_record,
 )
 
 
@@ -177,7 +177,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 self._redis = None
 
     async def _decode_jwt(self, token: str) -> dict | None:
-        """Validate and decode JWT, returning file_reservations or None on failure."""
+        """Validate and decode JWT, returning claims or None on failure."""
         with contextlib.suppress(Exception):
             jose_mod = importlib.import_module("authlib.jose")
             JsonWebKey = jose_mod.JsonWebKey
@@ -208,13 +208,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             if key is None:
                 return None
             with contextlib.suppress(Exception):
-                file_reservations = jwt.decode(token, key)
+                claims = jwt.decode(token, key)
                 if audience:
-                    file_reservations.validate_aud(audience)
-                if issuer and str(file_reservations.get("iss") or "") != issuer:
+                    claims.validate_aud(audience)
+                if issuer and str(claims.get("iss") or "") != issuer:
                     return None
-                file_reservations.validate()
-                return dict(file_reservations)
+                claims.validate()
+                return dict(claims)
         return None
 
     @staticmethod
@@ -324,9 +324,9 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             claims_dict = await self._decode_jwt(token)
             if claims_dict is None:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
-            file_reservations = cast(dict[str, Any], claims_dict)
-            request.state.jwt_claims = file_reservations
-            roles_raw = file_reservations.get(self.settings.http.jwt_role_claim, [])
+            claims = cast(dict[str, Any], claims_dict)
+            request.state.jwt_claims = claims
+            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])
             if isinstance(roles_raw, str):
                 roles = {roles_raw}
             elif isinstance(roles_raw, (list, tuple)):
@@ -435,7 +435,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         pids = [r[0] for r in rows.fetchall() if r[0] is not None]
                     for pid in pids:
                         with contextlib.suppress(Exception):
-                            await _expire_stale_claims(pid)
+                            await _expire_stale_file_reservations(pid)
                     try:
                         rich_console = importlib.import_module("rich.console")
                         rich_panel = importlib.import_module("rich.panel")
@@ -627,7 +627,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                             seconds=settings.ack_escalation_claim_ttl_seconds
                                         )
                                         async with AsyncFileLock(archive.lock_path):
-                                            await write_claim_record(
+                                            await write_file_reservation_record(
                                                 archive,
                                                 {
                                                     "project": project_slug,

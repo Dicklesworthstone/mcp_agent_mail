@@ -8,7 +8,7 @@ import pytest
 
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.guard import render_precommit_script
-from mcp_agent_mail.storage import ensure_archive, write_claim_record
+from mcp_agent_mail.storage import ensure_archive, write_file_reservation_record
 
 
 def _init_git_repo(repo_path: Path) -> None:
@@ -61,7 +61,7 @@ async def test_precommit_conflict_detected(isolated_env, tmp_path: Path):
     script_path.write_text(script_text, encoding="utf-8")
 
     # Write an active claim held by another agent
-    await write_claim_record(
+    await write_file_reservation_record(
         archive,
         {
             "agent": "Beta",
@@ -80,4 +80,3 @@ async def test_precommit_conflict_detected(isolated_env, tmp_path: Path):
     proc = _run_precommit(script_path, code_repo, agent_name="Alpha")
     assert proc.returncode == 1
     assert "Exclusive claim conflicts detected" in (proc.stderr or "")
-
