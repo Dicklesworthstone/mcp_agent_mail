@@ -59,7 +59,7 @@ class Message(SQLModel, table=True):
     created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     attachments: list[dict[str, Any]] = Field(
         default_factory=list,
-        sa_column=Column(JSON, nullable=False, default=list),
+        sa_column=Column(JSON, nullable=False, server_default="[]"),
     )
 
 

@@ -448,11 +448,10 @@ bash scripts/test_endpoints.sh
 # Pre-commit guard smoke test (no pytest)
 bash scripts/test_guard.sh
 
-# Alembic quick start (optional)
-# Initialize once per repo, then create/apply migrations as schema evolves.
-uv run alembic init alembic
-uv run alembic revision -m "init schema"
-uv run alembic upgrade head
+# Database schema (automatic!)
+# No migrations needed - the database schema automatically syncs with model definitions
+# Just start the server or run:
+uv run python -m mcp_agent_mail.cli migrate
 ```
 
 Run the server (HTTP-only). Depending on your entrypoint, one of the following patterns will apply when the implementation is in place:

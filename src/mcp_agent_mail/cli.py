@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +16,7 @@ from sqlalchemy import asc, desc, func, select
 
 from .app import build_mcp_server
 from .config import get_settings
-from .db import ensure_fts, ensure_schema, get_session
+from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import Agent, Claim, Message, MessageRecipient, Project
@@ -140,16 +139,13 @@ def typecheck() -> None:
 
 @app.command("migrate")
 def migrate() -> None:
-    """Apply migrations (Alembic if available) and ensure FTS structures exist."""
+    """Create database schema from SQLModel definitions (pure SQLModel approach)."""
     settings = get_settings()
-    with console.status("Applying migrations..."):
-        # Prefer Alembic if configured; fall back to ensure_schema for first-time init
-        with contextlib.suppress(SystemExit):
-            _run_command(["uv", "run", "alembic", "upgrade", "head"])  # non-interactive
-        # Always ensure baseline schema and then FTS structures/common indexes
+    with console.status("Creating database schema from models..."):
+        # Pure SQLModel: models define schema, create_all() creates tables
         asyncio.run(ensure_schema(settings))
-        asyncio.run(ensure_fts(settings))
-    console.print("[green]Database migrations + FTS complete.[/]")
+    console.print("[green]✓ Database schema created from model definitions![/]")
+    console.print("[dim]Note: To apply model changes, delete storage.sqlite3 and run this again.[/]")
 
 
 @app.command("list-projects")
