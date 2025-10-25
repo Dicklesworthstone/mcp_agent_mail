@@ -183,7 +183,7 @@
           </label>
           <div class="flex items-center gap-2">
             <code class="flex-1 px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm font-mono text-slate-900 dark:text-white">{{ storage_root }}</code>
-            <button onclick="copyToClipboard({{ storage_root|tojson }})"
+            <button onclick='copyToClipboard({{ storage_root|tojson }})'
                     class="px-4 py-3 bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors shadow-md hover:shadow-lg flex items-center gap-2">
               <i data-lucide="copy" class="w-4 h-4"></i>
               Copy
@@ -204,7 +204,7 @@
                   <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">View recent commits</p>
                   <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} log --oneline -20</code>
                 </div>
-                <button onclick="copyToClipboard('git -C {{ storage_root }} log --oneline -20')"
+                <button onclick='copyToClipboard({{ ('git -C ' ~ storage_root ~ ' log --oneline -20')|tojson }})'
                         class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
                   <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                 </button>
@@ -218,7 +218,7 @@
                   <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Browse project structure</p>
                   <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">tree {{ storage_root }}/projects/</code>
                 </div>
-                <button onclick="copyToClipboard('tree {{ storage_root }}/projects/')"
+                <button onclick='copyToClipboard({{ ('tree ' ~ storage_root ~ '/projects/')|tojson }})'
                         class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
                   <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                 </button>
@@ -232,7 +232,7 @@
                   <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">Search commit messages</p>
                   <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} log --all --grep="keyword"</code>
                 </div>
-                <button onclick="copyToClipboard('git -C {{ storage_root }} log --all --grep=&quot;keyword&quot;')"
+                <button onclick='copyToClipboard({{ ('git -C ' ~ storage_root ~ ' log --all --grep=\"keyword\"')|tojson }})'
                         class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
                   <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                 </button>
@@ -246,7 +246,7 @@
                   <p class="text-xs font-medium text-slate-600 dark:text-slate-400 mb-1">View specific commit</p>
                   <code class="block text-sm font-mono text-slate-900 dark:text-white break-all">git -C {{ storage_root }} show &lt;commit-sha&gt;</code>
                 </div>
-                <button onclick="copyToClipboard('git -C {{ storage_root }} show &lt;commit-sha&gt;')"
+                <button onclick='copyToClipboard({{ ('git -C ' ~ storage_root ~ ' show <commit-sha>')|tojson }})'
                         class="opacity-0 group-hover:opacity-100 transition-opacity p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg">
                   <i data-lucide="copy" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
                 </button>

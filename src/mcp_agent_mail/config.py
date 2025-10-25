@@ -146,6 +146,12 @@ class Settings:
     quota_inbox_limit_count: int
     # Retention/project listing filters
     retention_ignore_project_patterns: list[str]
+    # Agent identity naming policy
+    # Values: "strict" | "coerce" | "always_auto"
+    # - strict: reject invalid provided names (current hard-fail behavior)
+    # - coerce: ignore invalid provided names and auto-generate a valid one (default)
+    # - always_auto: ignore any provided name and always auto-generate
+    agent_name_enforcement_mode: str
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -249,6 +255,12 @@ def get_settings() -> Settings:
         cost_logging_enabled=_bool(_decouple_config("LLM_COST_LOGGING_ENABLED", default="true"), default=True),
     )
 
+    def _agent_name_mode(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in {"strict", "coerce", "always_auto"}:
+            return v
+        return "coerce"
+
     return Settings(
         environment=environment,
         http=http_settings,
@@ -287,6 +299,7 @@ def get_settings() -> Settings:
             "RETENTION_IGNORE_PROJECT_PATTERNS",
             default="demo,test*,testproj*,testproject,backendproj*,frontendproj*",
         ),
+        agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
     )
 
 

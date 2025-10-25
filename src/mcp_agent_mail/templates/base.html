@@ -1481,8 +1481,160 @@
             </div>
           </template>
 
-          <!-- Step 5: File Reservations -->
+          <!-- Step 5: Human Overseer -->
           <template x-if="currentStep === 5">
+            <div class="space-y-6 animate-fade-in">
+              <!-- Eye-catching header -->
+              <div class="relative overflow-hidden bg-gradient-to-br from-amber-500 via-orange-500 to-red-500 rounded-2xl p-8 shadow-2xl">
+                <!-- Animated background -->
+                <div class="absolute inset-0 opacity-20">
+                  <div class="absolute top-0 right-0 w-64 h-64 bg-white rounded-full blur-3xl animate-pulse"></div>
+                  <div class="absolute bottom-0 left-0 w-48 h-48 bg-yellow-200 rounded-full blur-3xl animate-pulse" style="animation-delay: 1s;"></div>
+                </div>
+
+                <div class="relative flex items-start gap-6">
+                  <div class="w-16 h-16 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center shadow-xl flex-shrink-0 float border border-white/30">
+                    <i data-lucide="shield-alert" class="w-9 h-9 text-white"></i>
+                  </div>
+                  <div class="flex-1 text-white">
+                    <div class="inline-flex items-center gap-2 px-3 py-1 bg-white/20 backdrop-blur-sm rounded-full text-xs font-bold mb-3 border border-white/30">
+                      <i data-lucide="sparkles" class="w-3 h-3"></i>
+                      <span>NEW FEATURE</span>
+                    </div>
+                    <h3 class="text-3xl font-bold mb-3">
+                      You Can Guide Agents Directly!
+                    </h3>
+                    <p class="text-amber-50 text-lg leading-relaxed">
+                      Sometimes you need to jump in and redirect your AI team. The <strong class="text-white">Human Overseer</strong> feature lets you send high-priority messages that agents will prioritize immediately.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">When to Use Human Overseer</h3>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 not-prose mb-6">
+                  <div class="bg-red-50 dark:bg-red-900/20 border-2 border-red-200 dark:border-red-800 rounded-xl p-5">
+                    <div class="flex items-center gap-3 mb-3">
+                      <div class="w-10 h-10 bg-red-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <i data-lucide="alert-triangle" class="w-5 h-5 text-white"></i>
+                      </div>
+                      <h4 class="font-bold text-red-900 dark:text-red-100 text-lg">Urgent Issues</h4>
+                    </div>
+                    <p class="text-sm text-red-800 dark:text-red-200">
+                      "Stop everything! The production database is down. Everyone investigate the connection pool immediately."
+                    </p>
+                  </div>
+
+                  <div class="bg-orange-50 dark:bg-orange-900/20 border-2 border-orange-200 dark:border-orange-800 rounded-xl p-5">
+                    <div class="flex items-center gap-3 mb-3">
+                      <div class="w-10 h-10 bg-orange-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <i data-lucide="zap" class="w-5 h-5 text-white"></i>
+                      </div>
+                      <h4 class="font-bold text-orange-900 dark:text-orange-100 text-lg">Priority Change</h4>
+                    </div>
+                    <p class="text-sm text-orange-800 dark:text-orange-200">
+                      "New requirement from CEO: pause the dashboard and focus on the mobile app authentication first."
+                    </p>
+                  </div>
+
+                  <div class="bg-blue-50 dark:bg-blue-900/20 border-2 border-blue-200 dark:border-blue-800 rounded-xl p-5">
+                    <div class="flex items-center gap-3 mb-3">
+                      <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
+                      </div>
+                      <h4 class="font-bold text-blue-900 dark:text-blue-100 text-lg">Clarification</h4>
+                    </div>
+                    <p class="text-sm text-blue-800 dark:text-blue-200">
+                      "I see you're debating API approaches. Go with REST for now - we can add GraphQL later if needed."
+                    </p>
+                  </div>
+
+                  <div class="bg-purple-50 dark:bg-purple-900/20 border-2 border-purple-200 dark:border-purple-800 rounded-xl p-5">
+                    <div class="flex items-center gap-3 mb-3">
+                      <div class="w-10 h-10 bg-purple-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                        <i data-lucide="target" class="w-5 h-5 text-white"></i>
+                      </div>
+                      <h4 class="font-bold text-purple-900 dark:text-purple-100 text-lg">Course Correction</h4>
+                    </div>
+                    <p class="text-sm text-purple-800 dark:text-purple-200">
+                      "The refactoring you're doing is going too deep. Focus on just the auth module for now."
+                    </p>
+                  </div>
+                </div>
+
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4 mt-8">How It Works</h3>
+
+                <div class="bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-800 dark:to-slate-900 rounded-xl p-6 border-2 border-slate-200 dark:border-slate-700 not-prose mb-6">
+                  <div class="space-y-4">
+                    <div class="flex items-start gap-4">
+                      <div class="w-8 h-8 bg-gradient-to-br from-amber-500 to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0 shadow-md">
+                        1
+                      </div>
+                      <div class="flex-1">
+                        <div class="font-bold text-slate-900 dark:text-white mb-1">Visit Any Project</div>
+                        <div class="text-sm text-slate-600 dark:text-slate-400">
+                          Click the bright orange <strong>"Send Message"</strong> button with the Overseer badge
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="flex items-start gap-4">
+                      <div class="w-8 h-8 bg-gradient-to-br from-amber-500 to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0 shadow-md">
+                        2
+                      </div>
+                      <div class="flex-1">
+                        <div class="font-bold text-slate-900 dark:text-white mb-1">Select Recipients</div>
+                        <div class="text-sm text-slate-600 dark:text-slate-400">
+                          Choose which agents should receive your message. You can send to all or just specific agents.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="flex items-start gap-4">
+                      <div class="w-8 h-8 bg-gradient-to-br from-amber-500 to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0 shadow-md">
+                        3
+                      </div>
+                      <div class="flex-1">
+                        <div class="font-bold text-slate-900 dark:text-white mb-1">Write Your Message</div>
+                        <div class="text-sm text-slate-600 dark:text-slate-400">
+                          Use the rich Markdown editor with live preview. Your message will get a special preamble.
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="flex items-start gap-4">
+                      <div class="w-8 h-8 bg-gradient-to-br from-amber-500 to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0 shadow-md">
+                        4
+                      </div>
+                      <div class="flex-1">
+                        <div class="font-bold text-slate-900 dark:text-white mb-1">Agents Pause & Prioritize</div>
+                        <div class="text-sm text-slate-600 dark:text-slate-400">
+                          Agents see it's from the Human Overseer and will pause their work to address your request first.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bg-amber-50 dark:bg-amber-900/20 border-2 border-amber-300 dark:border-amber-700 rounded-xl p-5 not-prose">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="info" class="w-6 h-6 text-amber-600 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-amber-900 dark:text-amber-100">
+                      <p class="font-semibold mb-2">What happens to their current work?</p>
+                      <p class="leading-relaxed">
+                        Agents are instructed to <strong>temporarily pause</strong> their current tasks, complete your request, then <strong>resume their original plans</strong> unless you've changed the direction. Think of it like a polite interruption, not a hard reset!
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 6: File Reservations -->
+          <template x-if="currentStep === 6">
             <div class="space-y-6 animate-fade-in">
               <div class="bg-gradient-to-br from-warning-50 to-orange-50 dark:from-warning-900/20 dark:to-orange-900/20 border border-warning-200 dark:border-warning-800 rounded-xl p-6">
                 <div class="flex items-start gap-4 mb-4">
@@ -1565,8 +1717,8 @@
             </div>
           </template>
 
-          <!-- Step 6: Features -->
-          <template x-if="currentStep === 6">
+          <!-- Step 7: Features -->
+          <template x-if="currentStep === 7">
             <div class="space-y-6 animate-fade-in">
               <div class="prose dark:prose-invert max-w-none">
                 <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">Powerful Features Built In</h3>
@@ -1634,7 +1786,7 @@
           </template>
 
           <!-- Final Step with Celebration -->
-          <template x-if="currentStep === 7">
+          <template x-if="currentStep === 8">
             <div class="space-y-6 animate-fade-in text-center" x-init="celebrateCompletion()">
               <!-- Confetti canvas -->
               <canvas id="confetti-canvas" class="fixed inset-0 pointer-events-none z-50" style="display: none;"></canvas>
@@ -2102,6 +2254,7 @@
             { title: 'Related Projects', icon: 'git-branch', actions: ['learned_siblings'] },
             { title: 'What are Agents?', icon: 'bot', actions: ['learned_agents'] },
             { title: 'How Agents Communicate', icon: 'message-square', actions: ['learned_messages'] },
+            { title: 'Human Overseer', icon: 'shield-alert', actions: ['learned_overseer'] },
             { title: 'File Reservations', icon: 'file-lock', actions: ['learned_reservations'] },
             { title: 'Powerful Features', icon: 'sparkles', actions: ['learned_features'] },
             { title: 'You\'re All Set!', icon: 'check-circle', actions: [] }

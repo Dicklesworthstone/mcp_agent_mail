@@ -437,7 +437,7 @@
 
               <!-- Quick Actions -->
               <div class="flex items-center gap-2 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
-                <button @click="copyToClipboard(`${window.location.origin}/mail/${selectedMessage.project_slug}/message/${selectedMessage.id}`, 'Message link copied!')"
+                <button @click="copyMessageLink(selectedMessage)"
                         class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
                   <i data-lucide="link" class="w-4 h-4"></i>
                   Copy Link
@@ -905,11 +905,32 @@ function unifiedInboxManager() {
 
     markSelectedAsRead() {
       if (this.selectedMessages.length === 0) return;
-      window.showToast(`Marked ${this.selectedMessages.length} message(s) as read`, 'success');
+      if (typeof window.showToast === 'function') {
+        window.showToast(`Marked ${this.selectedMessages.length} message(s) as read`, 'success');
+      }
       this.selectedMessages = [];
     },
 
     // Helpers
+    copyMessageLink(msg) {
+      if (!msg) return;
+      const url = `${window.location.origin}/mail/${msg.project_slug}/message/${msg.id}`;
+      if (typeof window.copyToClipboard === 'function') {
+        window.copyToClipboard(url, 'Message link copied!');
+      } else if (navigator.clipboard && navigator.clipboard.writeText) {
+        // Fallback to direct clipboard API
+        navigator.clipboard.writeText(url).then(() => {
+          if (typeof window.showToast === 'function') {
+            window.showToast('Message link copied!', 'success');
+          }
+        }).catch(() => {
+          if (typeof window.showToast === 'function') {
+            window.showToast('Failed to copy link', 'error');
+          }
+        });
+      }
+    },
+
     getProjectBadgeClass(projectName) {
       // Generate consistent color based on project name hash
       const colors = [

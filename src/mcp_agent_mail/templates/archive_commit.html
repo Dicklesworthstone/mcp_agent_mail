@@ -22,7 +22,7 @@
 
 {% block header_actions %}
 <div class="flex items-center gap-2">
-  <button onclick="copyToClipboard({{ commit.sha|tojson }})"
+  <button onclick='copyToClipboard({{ commit.sha|tojson }})'
           class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-xl transition-all duration-200 flex items-center gap-2 font-medium shadow-sm">
     <i data-lucide="copy" class="w-4 h-4"></i>
     Copy SHA

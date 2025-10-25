@@ -886,23 +886,33 @@ async def _generate_unique_agent_name(
     async def available(candidate: str) -> bool:
         return not await _agent_name_exists(project, candidate) and not (archive.root / "agents" / candidate).exists()
 
+    mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if name_hint:
         sanitized = sanitize_agent_name(name_hint)
-        if not sanitized:
-            raise ValueError("Name hint must contain alphanumeric characters.")
-
-        # CRITICAL: Enforce random adjective+noun format only
-        if not validate_agent_name_format(sanitized):
-            raise ValueError(
-                f"Invalid agent name format: '{sanitized}'. "
-                f"Agent names MUST be randomly generated adjective+noun combinations "
-                f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                f"Omit the 'name_hint' parameter to auto-generate a valid name."
-            )
-
-        if not await available(sanitized):
-            raise ValueError(f"Agent name '{sanitized}' is already in use.")
-        return sanitized
+        if mode == "always_auto":
+            sanitized = None
+        if sanitized:
+            # When coercing, if the provided hint is not in the valid adjective+noun set,
+            # silently fall back to auto-generation instead of erroring.
+            if validate_agent_name_format(sanitized):
+                if not await available(sanitized):
+                    # In strict mode, indicate conflict; in coerce, fall back to generation
+                    if mode == "strict":
+                        raise ValueError(f"Agent name '{sanitized}' is already in use.")
+                else:
+                    return sanitized
+            else:
+                if mode == "strict":
+                    raise ValueError(
+                        f"Invalid agent name format: '{sanitized}'. "
+                        f"Agent names MUST be randomly generated adjective+noun combinations "
+                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
+                        f"Omit the 'name_hint' parameter to auto-generate a valid name."
+                    )
+        else:
+            # No alphanumerics remain; only strict mode should error
+            if mode == "strict":
+                raise ValueError("Name hint must contain alphanumeric characters.")
 
     for _ in range(1024):
         candidate = sanitize_agent_name(generate_agent_name())
@@ -945,25 +955,28 @@ async def _get_or_create_agent(
 ) -> Agent:
     if project.id is None:
         raise ValueError("Project must have an id before creating agents.")
-    if name is None:
+    mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
+    if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
     else:
         sanitized = sanitize_agent_name(name)
         if not sanitized:
-            raise ValueError("Agent name must contain alphanumeric characters.")
-
-        # CRITICAL: Enforce random adjective+noun format only
-        # Names like "GreenLake" or "BlueDog" are valid
-        # Names like "BackendHarmonizer" are NOT allowed
-        if not validate_agent_name_format(sanitized):
-            raise ValueError(
-                f"Invalid agent name format: '{sanitized}'. "
-                f"Agent names MUST be randomly generated adjective+noun combinations "
-                f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                f"Omit the 'name' parameter to auto-generate a valid name."
-            )
-
-        desired_name = sanitized
+            if mode == "strict":
+                raise ValueError("Agent name must contain alphanumeric characters.")
+            desired_name = await _generate_unique_agent_name(project, settings, None)
+        else:
+            if validate_agent_name_format(sanitized):
+                desired_name = sanitized
+            else:
+                if mode == "strict":
+                    raise ValueError(
+                        f"Invalid agent name format: '{sanitized}'. "
+                        f"Agent names MUST be randomly generated adjective+noun combinations "
+                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
+                        f"Omit the 'name' parameter to auto-generate a valid name."
+                    )
+                # coerce -> ignore invalid provided name and auto-generate
+                desired_name = await _generate_unique_agent_name(project, settings, None)
     await ensure_schema()
     async with get_session() as session:
         # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()

@@ -329,8 +329,8 @@
         if (this.searchQuery) {
           const query = this.searchQuery.toLowerCase();
           filtered = filtered.filter(item => {
-            const subject = (item.subject || '').toLowerCase();
-            const sender = (item.sender || '').toLowerCase();
+            const subject = (item.subject ?? '').toString().toLowerCase();
+            const sender = (item.sender ?? '').toString().toLowerCase();
             return subject.includes(query) || sender.includes(query);
           });
         }
@@ -352,20 +352,24 @@
         switch (this.sortBy) {
           case 'newest':
             filtered.sort((a, b) => {
-              const dateA = a.created ? new Date(a.created) : new Date(0);
-              const dateB = b.created ? new Date(b.created) : new Date(0);
-              return dateB - dateA;
+              const timeA = Date.parse(a.created || '') || 0;
+              const timeB = Date.parse(b.created || '') || 0;
+              return timeB - timeA;
             });
             break;
           case 'oldest':
             filtered.sort((a, b) => {
-              const dateA = a.created ? new Date(a.created) : new Date(0);
-              const dateB = b.created ? new Date(b.created) : new Date(0);
-              return dateA - dateB;
+              const timeA = Date.parse(a.created || '') || 0;
+              const timeB = Date.parse(b.created || '') || 0;
+              return timeA - timeB;
             });
             break;
           case 'sender':
-            filtered.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
+            filtered.sort((a, b) => {
+              const senderA = (a.sender || '').toString().toLowerCase();
+              const senderB = (b.sender || '').toString().toLowerCase();
+              return senderA.localeCompare(senderB);
+            });
             break;
         }
 

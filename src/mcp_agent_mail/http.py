@@ -2037,8 +2037,8 @@ You should:
                         await session.rollback()
                         raise HTTPException(
                             status_code=500,
-                            detail=f"Failed to write message to Git archive: {str(git_error)}"
-                        )
+                            detail=f"Failed to write message to Git archive: {git_error!s}"
+                        ) from git_error
 
                     # Only commit to database if Git write succeeded
                     await session.commit()
@@ -2055,7 +2055,7 @@ You should:
             except Exception as e:
                 import traceback
                 traceback.print_exc()
-                raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to send message: {e!s}") from e
 
         # ========== Archive Visualization Routes ==========
 
