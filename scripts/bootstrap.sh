@@ -43,6 +43,22 @@ if missing:
 print("decouple OK:", ', '.join(required))
 PY
 
+echo "==> Ensuring storage archive exists"
+uv run python - <<'PY'
+import asyncio
+from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.storage import ensure_archive_root
+
+
+async def _main() -> None:
+    settings = get_settings()
+    repo_root, _repo = await ensure_archive_root(settings)
+    print(f"Storage archive ready at {repo_root}")
+
+
+asyncio.run(_main())
+PY
+
 echo "==> Running migrations"
 uv run python -m mcp_agent_mail.cli migrate
 

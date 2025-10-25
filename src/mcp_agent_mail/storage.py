@@ -70,11 +70,17 @@ async def _to_thread(func, /, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
-async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
+async def ensure_archive_root(settings: Settings) -> tuple[Path, Repo]:
     repo_root = Path(settings.storage.root).expanduser().resolve()
+    await _to_thread(repo_root.mkdir, parents=True, exist_ok=True)
+    repo = await _ensure_repo(repo_root, settings)
+    return repo_root, repo
+
+
+async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
+    repo_root, repo = await ensure_archive_root(settings)
     project_root = repo_root / "projects" / slug
     await _to_thread(project_root.mkdir, parents=True, exist_ok=True)
-    repo = await _ensure_repo(repo_root, settings)
     return ProjectArchive(
         settings=settings,
         slug=slug,
