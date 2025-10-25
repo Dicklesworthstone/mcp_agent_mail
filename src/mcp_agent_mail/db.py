@@ -121,7 +121,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
                 # - TypeError: unexpected type (shouldn't happen but defensive)
                 # - AttributeError: val has no expected attributes (defensive)
                 # - UnicodeDecodeError: corrupted bytes (extreme edge case)
-                # - OverflowError: datetime value out of valid range (year 9999999+)
+                # - OverflowError: datetime value out of valid range (year outside 1-9999)
                 return None
 
         # Register adapters globally (safe to call multiple times - last registration wins)
