@@ -57,7 +57,10 @@ parse_common_flags() {
 
 # Traps and diagnostics
 setup_traps() {
-  trap 'last=$BASH_COMMAND; log_err "Error on: ${last}"' ERR
+  if [[ "${DEBUG:-0}" == "1" ]]; then
+    set -o errtrace
+    trap 'last=$BASH_COMMAND; log_err "Error on: ${last}"' ERR
+  fi
 }
 
 # Dependency checks
