@@ -302,7 +302,7 @@
               <!-- Message Preview -->
               <div class="mb-4 prose prose-sm dark:prose-invert max-w-none">
                 <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-700 line-clamp-4 text-sm text-slate-600 dark:text-slate-400 leading-relaxed"
-                     x-html="renderMarkdownPreview(msg.body_md)"></div>
+                     x-text="renderMarkdownPreview(msg.body_md)"></div>
               </div>
 
               <!-- Footer -->
@@ -372,39 +372,58 @@ function unifiedInboxManager() {
     filteredMessages() {
       let filtered = [...this.messages];
 
-      // Apply search
-      if (this.searchQuery.trim()) {
+      // Apply search with null-safe field access and null-safe trim
+      if (this.searchQuery && this.searchQuery.trim()) {
         const query = this.searchQuery.toLowerCase();
-        filtered = filtered.filter(m =>
-          m.subject.toLowerCase().includes(query) ||
-          m.sender.toLowerCase().includes(query) ||
-          m.recipients.toLowerCase().includes(query) ||
-          m.project_name.toLowerCase().includes(query) ||
-          m.body_md.toLowerCase().includes(query)
-        );
+        filtered = filtered.filter(m => {
+          const subject = (m.subject || '').toLowerCase();
+          const sender = (m.sender || '').toLowerCase();
+          const recipients = (m.recipients || '').toLowerCase();
+          const projectName = (m.project_name || '').toLowerCase();
+          const body = (m.body_md || '').toLowerCase();
+
+          return subject.includes(query) ||
+                 sender.includes(query) ||
+                 recipients.includes(query) ||
+                 projectName.includes(query) ||
+                 body.includes(query);
+        });
       }
 
       // Apply filter
       if (this.activeFilter === 'urgent') {
         filtered = filtered.filter(m => m.importance === 'urgent' || m.importance === 'high');
       } else if (this.activeFilter === 'threaded') {
-        filtered = filtered.filter(m => m.thread_count > 0);
+        filtered = filtered.filter(m => (m.thread_count || 0) > 0);
       }
 
-      // Apply sort
+      // Apply sort with safe date parsing (handle NaN from invalid dates)
       if (this.sortBy === 'newest') {
-        filtered.sort((a, b) => new Date(b.created) - new Date(a.created));
+        filtered.sort((a, b) => {
+          const dateA = a.created ? (new Date(a.created).getTime() || 0) : 0;
+          const dateB = b.created ? (new Date(b.created).getTime() || 0) : 0;
+          return dateB - dateA;
+        });
       } else if (this.sortBy === 'oldest') {
-        filtered.sort((a, b) => new Date(a.created) - new Date(b.created));
+        filtered.sort((a, b) => {
+          const dateA = a.created ? (new Date(a.created).getTime() || 0) : 0;
+          const dateB = b.created ? (new Date(b.created).getTime() || 0) : 0;
+          return dateA - dateB;
+        });
       } else if (this.sortBy === 'thread') {
-        filtered.sort((a, b) => b.thread_count - a.thread_count);
+        filtered.sort((a, b) => (b.thread_count || 0) - (a.thread_count || 0));
       }
 
       return filtered;
     },
 
     threadCount() {
-      return new Set(this.messages.filter(m => m.thread_id).map(m => m.thread_id)).size;
+      // Explicit null/undefined check to handle edge cases like thread_id = 0
+      return new Set(
+        this.messages
+          .filter(m => m.thread_id !== null && m.thread_id !== undefined && m.thread_id !== '')
+          .map(m => m.thread_id)
+      ).size;
     },
 
     toggleFilter(filter) {
@@ -421,17 +440,39 @@ function unifiedInboxManager() {
 
     formatDate(dateStr) {
       if (!dateStr) return '';
-      if (typeof dayjs !== 'undefined') {
-        return dayjs(dateStr).fromNow();
+      try {
+        if (typeof dayjs !== 'undefined') {
+          const formatted = dayjs(dateStr);
+          return formatted.isValid ? formatted.fromNow() : dateStr;
+        }
+        const date = new Date(dateStr);
+        return isNaN(date.getTime()) ? dateStr : date.toLocaleString();
+      } catch (e) {
+        console.warn('Date formatting error:', e);
+        return dateStr;
       }
-      return new Date(dateStr).toLocaleString();
     },
 
     renderMarkdownPreview(md) {
-      if (!md) return '<p class="text-slate-400">No content</p>';
-      // Simple markdown preview - just show first 200 chars
-      const text = md.replace(/[#*`_\[\]]/g, '').substring(0, 200);
-      return text + (md.length > 200 ? '...' : '');
+      // Type guard: ensure md is a string
+      if (!md || typeof md !== 'string') return 'No content';
+
+      try {
+        const trimmed = md.trim();
+        if (!trimmed) return 'No content';
+
+        // Strip markdown syntax and show first 200 chars (text only, no HTML)
+        const text = trimmed
+          .replace(/[#*`_\[\]]/g, '')  // Remove markdown chars
+          .replace(/\n+/g, ' ')        // Replace newlines with spaces
+          .trim()
+          .substring(0, 200);
+        // Use trimmed.length (the actual content) not md.length (which includes whitespace)
+        return text + (trimmed.length > 200 ? '...' : '');
+      } catch (e) {
+        console.warn('Markdown preview error:', e);
+        return 'Preview unavailable';
+      }
     },
 
     refresh() {

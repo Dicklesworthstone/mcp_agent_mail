@@ -46,21 +46,21 @@ It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini C
 
 ```mermaid
 flowchart LR
-  A[Agents (CLIs: Claude Code, Codex, Gemini CLI, ...)]
-  S[mcp-agent-mail (FastMCP, HTTP-only)]
-  G[(Per-project Git repo: .mcp-mail/)]
-  Q[(SQLite + FTS5)]
+  A["Agents (CLIs: Claude Code, Codex, Gemini CLI, ...)"]
+  S["mcp-agent-mail (FastMCP, HTTP-only)"]
+  G["Per-project Git repo: .mcp-mail/"]
+  Q["SQLite + FTS5"]
 
   A -- tools/resources (HTTP) --> S
   S -- writes/reads --> G
   S -- indexes/queries --> Q
 
   subgraph GitTree[Git tree]
-    GI1[agents/<Agent>/profile.json]
-    GI2[agents/<Agent>/{inbox,outbox}/...]
-    GI3[messages/YYYY/MM/<msg-id>.md]
-    GI4[claims/<sha1(path)>.json]
-    GA[attachments/<xx>/<sha1>.webp]
+    GI1["agents/<Agent>/profile.json"]
+    GI2["agents/<Agent>/{inbox,outbox}/..."]
+    GI3["messages/YYYY/MM/<msg-id>.md"]
+    GI4["claims/<sha1(path)>.json"]
+    GA["attachments/<xx>/<sha1>.webp"]
   end
 
   G --- GI1
@@ -114,7 +114,7 @@ Auth notes:
 
 ### Routes and what you can do
 
-- `/mail` (Projects index)
+- `/mail` (Projects index + Related Projects Discovery)
   - Lists all projects (slug, human name, created time) from SQLite.
   - Suggests **likely sibling projects** when two slugs appear to be parts of the same product (e.g., backend vs. frontend). Suggestions are ranked with heuristics and, when `LLM_ENABLED=true`, an LLM pass across key docs (`README.md`, `AGENTS.md`, etc.).
   - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross-project messaging—agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
@@ -148,6 +148,9 @@ Auth notes:
 
 - `/mail/{project}/attachments` (Messages with attachments)
   - Lists messages that contain any attachments, with subject and created time.
+  
+- `/mail/unified-inbox` (Cross-project activity)
+  - Shows recent messages across all projects with thread counts and sender/recipients.
 
 ### Related Projects Discovery
 
@@ -295,12 +298,12 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 ### Data model (SQLite)
 
-- `projects(id, human_key, slug, created_ts, meta)`
+- `projects(id, human_key, slug, created_at)`
 - `agents(id, project_id, name, program, model, inception_ts, task, last_active_ts)`
 - `messages(id, project_id, sender_id, thread_id, subject, body_md, created_ts, importance, ack_required, attachments)`
 - `message_recipients(message_id, agent_name, kind, read_ts, ack_ts)`
 - `claims(id, project_id, agent_name, path, exclusive, reason, created_ts, expires_ts, released_ts)`
-- `fts_messages(subject, body_md)` + triggers for incremental updates
+- `fts_messages(message_id UNINDEXED, subject, body)` + triggers for incremental updates
 
 ### Concurrency and lifecycle
 
@@ -323,24 +326,24 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 ```mermaid
 sequenceDiagram
-  participant Agent as Agent (e.g., GreenCastle)
-  participant Server as FastMCP Server
-  participant DB as SQLite (messages, recipients, FTS)
-  participant Git as Git Repo (.mcp-mail/)
+  participant Agent
+  participant Server
+  participant DB
+  participant Git
 
   Agent->>Server: tools/call send_message(project_key, sender_name, to[], subject, body_md, ...)
   Server->>DB: validate sender, insert into messages, recipients
   DB-->>Server: OK (message id, timestamps)
-  Server->>Git: write canonical markdown under messages/YYYY/MM/<id>.md
-  Server->>Git: write outbox copy under agents/<from>/outbox/
-  Server->>Git: write inbox copies under agents/<to>/inbox/
+  Server->>Git: write canonical markdown under messages/YYYY/MM/{id}.md
+  Server->>Git: write outbox copy under agents/{from}/outbox/
+  Server->>Git: write inbox copies under agents/{to}/inbox/
   Server->>Git: commit all paths with message summary
   Server-->>Agent: { id, created, subject, recipients, attachments }
 ```
 
 3) Check inbox
 
-- `check_my_messages(project_key, agent_name, since_ts?, urgent_only?, include_bodies?, limit?)` returns recent messages, preserving thread_id where available.
+- `fetch_inbox(project_key, agent_name, since_ts?, urgent_only?, include_bodies?, limit?)` returns recent messages, preserving thread_id where available.
 - `acknowledge_message(project_key, agent_name, message_id)` marks acknowledgements.
 
 4) Avoid conflicts with file reservations (leases)
@@ -351,10 +354,10 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant Agent as Agent
-  participant Server as FastMCP Server
-  participant DB as SQLite (claims)
-  participant Git as Git Repo (.mcp-mail/claims)
+  participant Agent
+  participant Server
+  participant DB
+  participant Git
 
   Agent->>Server: tools/call claim_paths(project_key, agent_name, paths[], ttl, exclusive, reason)
   Server->>DB: expire old leases; check overlaps for each path
@@ -363,8 +366,8 @@ sequenceDiagram
     Server-->>Agent: { conflicts: [...], granted: [], expires_ts }
   else no conflicts
     Server->>DB: insert claim rows (one per path)
-    Server->>Git: write claims/<sha1(path)>.json for each granted path
-    Server->>Git: commit "claim: <agent> exclusive/shared <n> path(s)"
+    Server->>Git: write claims/{sha1(path)}.json for each granted path
+    Server->>Git: commit "claim: {agent} exclusive/shared {n} path(s)"
     Server-->>Agent: { granted: [..], conflicts: [], expires_ts }
   end
 ```
@@ -373,7 +376,7 @@ sequenceDiagram
 
 - `search_messages(project_key, query, limit?)` uses FTS5 over subject and body.
 - `summarize_thread(project_key, thread_id, include_examples?)` extracts key points, actions, and participants from the thread.
-- `reply_message(project_key, sender_name, reply_to_message_id, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
+- `reply_message(project_key, message_id, sender_name, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
 
 ### Semantics & invariants
 
@@ -402,7 +405,7 @@ sequenceDiagram
 | :-- | :-- |
 | `register_agent(...)` | Register a new agent identity and write `profile.json` in Git |
 | `whois(project_key, agent_name)` | Fetch a profile for one agent |
-| `list_agents(project_key, active_only=True)` | Directory-style listing of agents and activity |
+| `whois(project_key, agent_name)` | Enriched profile details including recent commits |
 | `send_message(...)` | Create canonical + inbox/outbox markdown artifacts and commit |
 | `reply_message(...)` | Reply to an existing message and continue the thread |
 | `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` | Request permission to message another agent |
@@ -491,7 +494,7 @@ Example (conceptual) resource read:
 ### Resource parameters
 
 - `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
-  - `project`: disambiguate if the same agent name exists in multiple projects; if omitted, the most recent agent activity determines the project
+  - `project`: disambiguate if the same agent name exists in multiple projects; if omitted, the server auto-resolves only when the agent name uniquely maps to a single project. Otherwise, pass `project` explicitly.
   - `since_ts`: epoch seconds filter (defaults to 0)
   - `urgent_only`: when true, only `importance in ('high','urgent')`
   - `include_bodies`: include markdown bodies in results
@@ -501,9 +504,9 @@ Example (conceptual) resource read:
 
 ```mermaid
 sequenceDiagram
-  participant Client as MCP Client
-  participant Server as FastMCP Server
-  participant DB as SQLite
+  participant Client
+  participant Server
+  participant DB
 
   Client->>Server: resources/read resource://inbox/BlueLake?project=/abs/backend&limit=20
   Server->>DB: select messages joined with recipients for agent=BlueLake
@@ -546,9 +549,9 @@ from decouple import Config as DecoupleConfig, RepositoryEnv
 
 decouple_config = DecoupleConfig(RepositoryEnv(".env"))
 
-MCP_MAIL_STORE = decouple_config("MCP_MAIL_STORE", default="~/.mcp-agent-mail")
-HTTP_HOST = decouple_config("HOST", default="127.0.0.1")
-HTTP_PORT = int(decouple_config("PORT", default=8765))
+STORAGE_ROOT = decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo")
+HTTP_HOST = decouple_config("HTTP_HOST", default="127.0.0.1")
+HTTP_PORT = int(decouple_config("HTTP_PORT", default=8765))
 ```
 
 Common variables you may set:
@@ -557,7 +560,7 @@ Common variables you may set:
 
 | Name | Default | Description |
 | :-- | :-- | :-- |
-| `MCP_MAIL_STORE` | `~/.mcp-agent-mail` | Root for per-project repos and SQLite DB |
+| `STORAGE_ROOT` | `~/.mcp_agent_mail_git_mailbox_repo` | Root for per-project repos and SQLite DB |
 | `HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport |
 | `HTTP_PORT` | `8765` | Bind port for HTTP transport |
 | `HTTP_PATH` | `/mcp/` | HTTP path where MCP endpoint is mounted |
@@ -583,16 +586,15 @@ Common variables you may set:
 | `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
 | `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
 | `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
-| `IMAGE_INLINE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
+| `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold for inlining WebP images during send_message (if enabled) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
 | `LOG_LEVEL` | `info` | Future: server log level |
-| `ATTACHMENT_POLICY` | `auto` | Future: `auto`, `file`, or `inline` default for image conversion |
 | `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
 | `HTTP_CORS_ORIGINS` |  | CSV of allowed origins (e.g., `https://app.example.com,https://ops.example.com`) |
 | `HTTP_CORS_ALLOW_CREDENTIALS` | `false` | Allow credentials on CORS |
 | `HTTP_CORS_ALLOW_METHODS` | `*` | CSV of allowed methods or `*` |
 | `HTTP_CORS_ALLOW_HEADERS` | `*` | CSV of allowed headers or `*` |
-| `KEEP_ORIGINAL_IMAGES` | `false` | Store original attachment bytes alongside WebP |
+
 | `CLAIMS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting claims |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
@@ -624,17 +626,11 @@ bash scripts/test_guard.sh
 uv run python -m mcp_agent_mail.cli migrate
 ```
 
-Run the server (HTTP-only). Depending on your entrypoint, one of the following patterns will apply when the implementation is in place:
+Run the server (HTTP-only). Use the Typer CLI or module entry:
 
 ```bash
-# If the project exposes a CLI entry (example):
-uv run mcp-agent-mail/cli.py serve-http
-
-# Or a Python module entry:
-uv run python -m mcp_agent_mail serve-http
-
-# Or a direct script entry:
-uv run python server.py
+uv run python -m mcp_agent_mail.cli serve-http
+uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port.
@@ -672,20 +668,20 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 2. Backend agent reserves `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
 
 ```json
-{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths_list":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
+{"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
 ```
 
 3. Backend agent sends a design doc with an embedded diagram image:
 
 ```json
-{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true,"image_embed_policy":"auto","inline_max_bytes":32768}}}
+{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true}}}
 ```
 
 4. Frontend agent checks inbox and replies in-thread with questions; reply inherits/sets `thread_id`:
 
 ```json
-{"method":"tools/call","params":{"name":"check_my_messages","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","include_bodies":true}}}
-{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","sender_name":"BlueLake","reply_to_message_id":"msg_20251023_7b3d...","body_md":"Questions: ..."}}}
+{"method":"tools/call","params":{"name":"fetch_inbox","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","include_bodies":true}}}
+{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake","body_md":"Questions: ..."}}}
 ```
 
 5. Summarize the thread for quick context:
@@ -714,7 +710,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
     "id": "1",
     "method": "tools/call",
     "params": {
-      "name": "create_agent",
+      "name": "register_agent",
       "arguments": {
         "project_key": "/abs/path/backend",
         "program": "codex-cli",
@@ -786,7 +782,7 @@ Send a message (auto-convert images to WebP; inline small ones):
     "name": "send_message",
     "arguments": {
       "project_key": "/abs/path/backend",
-      "from_agent": "GreenCastle",
+      "sender_name": "GreenCastle",
       "to": ["BlueLake"],
       "subject": "Plan for /api/users",
       "body_md": "Here is the flow...\n\n![diagram](docs/flow.png)",
@@ -808,7 +804,7 @@ Reserve a surface for editing:
     "arguments": {
       "project_key": "/abs/path/backend",
       "agent_name": "GreenCastle",
-      "paths_list": ["app/api/*.py"],
+      "paths": ["app/api/*.py"],
       "ttl_seconds": 7200,
       "exclusive": true,
       "reason": "migrations"
@@ -871,9 +867,8 @@ def call_tool(name: str, arguments: dict) -> dict:
     data = r.json()
     if "error" in data:
         raise RuntimeError(data["error"])  # surface MCP error
-    result = data.get("result", {})
-    # MCP returns structuredContent with the actual data
-    return result.get("structuredContent", result)
+    # JSON-RPC response body from Streamable HTTP includes the tool result directly in result
+    return data.get("result", {})
 
 def read_resource(uri: str) -> dict:
     payload = {"jsonrpc":"2.0","id":"2","method":"resources/read","params":{"uri": uri}}
@@ -960,7 +955,10 @@ if __name__ == "__main__":
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
-| `resource://mailbox/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing (all messages for an agent) |
+| `resource://mailbox/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing (recent messages with basic commit ref) |
+| `resource://mailbox-with-commits/{agent}{?project,limit}` | `project`, `limit` | `{project, agent, count, messages[]}` | Mailbox listing enriched with commit metadata |
+| `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}` | listed | `{project, agent, count, messages[]}` | Messages sent by the agent |
+| `resource://views/acks-stale/{agent}{?project,ttl_seconds,limit}` | listed | `{project, agent, ttl_seconds, count, messages[]}` | Ack-required older than TTL without ack |
 
 ### Client Integration Guide
 
@@ -1094,15 +1092,15 @@ The project exposes a developer CLI for common operations:
 - `migrate`: ensure schema and FTS structures exist
 - `lint` / `typecheck`: developer helpers
 - `list-projects [--include-agents]`: enumerate projects
-- `guard-install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
-- `guard-uninstall <code_repo_path>`: remove the guard from a repo
+- `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
+- `guard uninstall <code_repo_path>`: remove the guard from a repo
 - `list-acks --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
 
 Examples:
 
 ```bash
 # Install guard into a repo
-uv run python -m mcp_agent_mail.cli guard-install /abs/path/backend /abs/path/backend
+uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/backend
 
 # List pending acknowledgements for an agent
 uv run python -m mcp_agent_mail.cli list-acks --project /abs/path/backend --agent BlueLake --limit 10

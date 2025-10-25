@@ -26,9 +26,14 @@ _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 class ProjectArchive:
     settings: Settings
     slug: str
+    # Project-specific root inside the single global archive repo
     root: Path
+    # The single Git repo object rooted at settings.storage.root
     repo: Repo
+    # Path used for advisory file lock during archive writes
     lock_path: Path
+    # Filesystem path to the Git repo working directory (archive root)
+    repo_root: Path
 
     @property
     def attachments_dir(self) -> Path:
@@ -66,10 +71,18 @@ async def _to_thread(func, /, *args, **kwargs):
 
 
 async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
-    root = Path(settings.storage.root).expanduser().resolve() / slug
-    await _to_thread(root.mkdir, parents=True, exist_ok=True)
-    repo = await _ensure_repo(root, settings)
-    return ProjectArchive(settings=settings, slug=slug, root=root, repo=repo, lock_path=root / ".archive.lock")
+    repo_root = Path(settings.storage.root).expanduser().resolve()
+    project_root = repo_root / "projects" / slug
+    await _to_thread(project_root.mkdir, parents=True, exist_ok=True)
+    repo = await _ensure_repo(repo_root, settings)
+    return ProjectArchive(
+        settings=settings,
+        slug=slug,
+        root=project_root,
+        repo=repo,
+        lock_path=repo_root / ".archive.lock",
+        repo_root=repo_root,
+    )
 
 
 async def _ensure_repo(root: Path, settings: Settings) -> Repo:
@@ -96,7 +109,8 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
 async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object]) -> None:
     profile_path = archive.root / "agents" / agent["name"].__str__() / "profile.json"
     await _write_json(profile_path, agent)
-    await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [profile_path.relative_to(archive.root).as_posix()])
+    rel = profile_path.relative_to(archive.repo_root).as_posix()
+    await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [rel])
 
 
 async def write_claim_record(archive: ProjectArchive, claim: dict[str, object]) -> None:
@@ -114,7 +128,7 @@ async def write_claim_record(archive: ProjectArchive, claim: dict[str, object]) 
         archive.repo,
         archive.settings,
         f"claim: {agent_name} {path_pattern}",
-        [claim_path.relative_to(archive.root).as_posix()],
+        [claim_path.relative_to(archive.repo_root).as_posix()],
     )
 
 
@@ -146,24 +160,33 @@ async def write_message_bundle(
     frontmatter = json.dumps(message, indent=2, sort_keys=True)
     content = f"---json\n{frontmatter}\n---\n\n{body_md.strip()}\n"
 
-    filename = f"{message['id']}.md"
+    # Descriptive, ISO-prefixed filename: <ISO>__<subject-slug>__<id>.md
+    created_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    subject_value = str(message.get("subject", "")).strip() or "message"
+    subject_slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", subject_value).strip("-_").lower()[:80] or "message"
+    id_suffix = str(message.get("id", ""))
+    filename = (
+        f"{created_iso}__{subject_slug}__{id_suffix}.md"
+        if id_suffix
+        else f"{created_iso}__{subject_slug}.md"
+    )
     canonical_path = canonical_dir / filename
     await _write_text(canonical_path, content)
-    rel_paths.append(canonical_path.relative_to(archive.root).as_posix())
+    rel_paths.append(canonical_path.relative_to(archive.repo_root).as_posix())
 
     outbox_path = outbox_dir / filename
     await _write_text(outbox_path, content)
-    rel_paths.append(outbox_path.relative_to(archive.root).as_posix())
+    rel_paths.append(outbox_path.relative_to(archive.repo_root).as_posix())
 
     for inbox_dir in inbox_dirs:
         inbox_path = inbox_dir / filename
         await _write_text(inbox_path, content)
-        rel_paths.append(inbox_path.relative_to(archive.root).as_posix())
+        rel_paths.append(inbox_path.relative_to(archive.repo_root).as_posix())
 
     # Update thread-level digest for human review if thread_id present
     thread_id_obj = message.get("thread_id")
     if isinstance(thread_id_obj, str) and thread_id_obj.strip():
-        canonical_rel = canonical_path.relative_to(archive.root).as_posix()
+        canonical_rel = canonical_path.relative_to(archive.repo_root).as_posix()
         digest_rel = await _update_thread_digest(
             archive,
             thread_id_obj.strip(),
@@ -182,8 +205,17 @@ async def write_message_bundle(
     if extra_paths:
         rel_paths.extend(extra_paths)
     thread_key = message.get("thread_id") or message.get("id")
-    commit_subject = f"mail: {sender} -> {', '.join(recipients)} | {message['subject']}"
-    commit_message = commit_subject + "\n\n" + f"Agent: {sender}\n" + f"Thread: {thread_key}\n"
+    commit_subject = f"mail: {sender} -> {', '.join(recipients)} | {message.get('subject', '')}"
+    # Enriched commit body mirroring console logs
+    commit_body_lines = [
+        "TOOL: send_message",
+        f"Agent: {sender}",
+        f"Project: {message.get('project', '')}",
+        f"Started: {timestamp_str}",
+        "Status: SUCCESS",
+        f"Thread: {thread_key}",
+    ]
+    commit_message = commit_subject + "\n\n" + "\n".join(commit_body_lines) + "\n"
     await _commit(archive.repo, archive.settings, commit_message, rel_paths)
 
 
@@ -235,7 +267,7 @@ async def _update_thread_digest(
             f.write(entry)
 
     await _to_thread(_append)
-    return digest_path.relative_to(archive.root).as_posix()
+    return digest_path.relative_to(archive.repo_root).as_posix()
 
 
 async def process_attachments(
@@ -362,11 +394,11 @@ async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str
         orig_path = originals_dir / f"{digest}.{orig_ext}"
         if not orig_path.exists():
             await _to_thread(orig_path.write_bytes, data)
-        original_rel = orig_path.relative_to(archive.root).as_posix()
+        original_rel = orig_path.relative_to(archive.repo_root).as_posix()
     if not target_path.exists():
         await _save_webp(img, target_path)
     new_bytes = await _to_thread(target_path.read_bytes)
-    rel_path = target_path.relative_to(archive.root).as_posix()
+    rel_path = target_path.relative_to(archive.repo_root).as_posix()
     # Update per-attachment manifest with metadata
     try:
         manifest_dir = archive.root / "attachments" / "_manifests"

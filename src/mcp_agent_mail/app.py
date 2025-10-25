@@ -658,7 +658,16 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                 if suggestion is None:
                     to_evaluate.append((project_a, project_b, None))
                 else:
-                    age = now - suggestion.evaluated_ts
+                    eval_ts = suggestion.evaluated_ts
+                    # Normalize to timezone-aware UTC before arithmetic; SQLite may return naive datetimes
+                    if eval_ts is not None:
+                        if eval_ts.tzinfo is None or eval_ts.tzinfo.utcoffset(eval_ts) is None:
+                            eval_ts = eval_ts.replace(tzinfo=timezone.utc)
+                        else:
+                            eval_ts = eval_ts.astimezone(timezone.utc)
+                        age = now - eval_ts
+                    else:
+                        age = _PROJECT_SIBLING_REFRESH_TTL
                     if suggestion.status == "dismissed" and age < timedelta(days=7):
                         continue
                     if age >= _PROJECT_SIBLING_REFRESH_TTL and len(to_evaluate) < max_pairs:
@@ -1190,18 +1199,48 @@ async def _list_outbox(
     return messages
 
 
-def _canonical_relpath_for_message(message: Message) -> str:
-    """Return canonical archive-relative path for a message markdown file."""
+def _canonical_relpath_for_message(project: Project, message: Message, archive) -> str | None:
+    """Resolve the canonical repo-relative path for a message markdown file.
+
+    Supports both legacy filenames ("<id>.md") and the new descriptive pattern
+    ("<ISO>__<subject-slug>__<id>.md"). Returns a path relative to the archive
+    Git repo root, or None if no matching file is found.
+    """
     ts = message.created_ts.astimezone(timezone.utc)
     y = ts.strftime("%Y")
     m = ts.strftime("%m")
-    return f"messages/{y}/{m}/{message.id}.md"
+    project_root = archive.root
+    base_dir = project_root / "messages" / y / m
+    id_str = str(message.id)
+
+    candidates: list[Path] = []
+    try:
+        if base_dir.is_dir():
+            # New filename pattern with ISO + subject slug + id suffix
+            candidates.extend(base_dir.glob(f"*__*__{id_str}.md"))
+            # Legacy filename pattern (id only)
+            legacy = base_dir / f"{id_str}.md"
+            if legacy.exists():
+                candidates.append(legacy)
+    except Exception:
+        return None
+
+    if not candidates:
+        return None
+    # Prefer lexicographically last (ISO prefix sorts ascending)
+    selected = sorted(candidates)[-1]
+    try:
+        return selected.relative_to(archive.repo_root).as_posix()
+    except Exception:
+        return None
 
 
 async def _commit_info_for_message(settings: Settings, project: Project, message: Message) -> dict[str, Any] | None:
     """Fetch commit metadata for the canonical message file (hexsha, summary, authored_ts, stats)."""
     archive = await ensure_archive(settings, project.slug)
-    relpath = _canonical_relpath_for_message(message)
+    relpath = _canonical_relpath_for_message(project, message, archive)
+    if not relpath:
+        return None
 
     def _lookup():
         try:
@@ -2121,40 +2160,36 @@ def build_mcp_server() -> FastMCP:
             bcc = [bcc]
         if cc is not None and not isinstance(cc, list):
             await ctx.error("INVALID_ARGUMENT: cc must be a list of strings or a single string.")
-            return {
-                "error": {
-                    "type": "INVALID_ARGUMENT",
-                    "message": "cc must be a list of strings or a single string.",
-                    "data": {"argument": "cc"},
-                }
-            }
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "cc must be a list of strings or a single string.",
+                recoverable=True,
+                data={"argument": "cc"},
+            )
         if bcc is not None and not isinstance(bcc, list):
             await ctx.error("INVALID_ARGUMENT: bcc must be a list of strings or a single string.")
-            return {
-                "error": {
-                    "type": "INVALID_ARGUMENT",
-                    "message": "bcc must be a list of strings or a single string.",
-                    "data": {"argument": "bcc"},
-                }
-            }
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "bcc must be a list of strings or a single string.",
+                recoverable=True,
+                data={"argument": "bcc"},
+            )
         if cc is not None and any(not isinstance(x, str) for x in cc):
             await ctx.error("INVALID_ARGUMENT: cc items must be strings (agent names).")
-            return {
-                "error": {
-                    "type": "INVALID_ARGUMENT",
-                    "message": "cc items must be strings (agent names).",
-                    "data": {"argument": "cc"},
-                }
-            }
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "cc items must be strings (agent names).",
+                recoverable=True,
+                data={"argument": "cc"},
+            )
         if bcc is not None and any(not isinstance(x, str) for x in bcc):
             await ctx.error("INVALID_ARGUMENT: bcc items must be strings (agent names).")
-            return {
-                "error": {
-                    "type": "INVALID_ARGUMENT",
-                    "message": "bcc items must be strings (agent names).",
-                    "data": {"argument": "bcc"},
-                }
-            }
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "bcc items must be strings (agent names).",
+                recoverable=True,
+                data={"argument": "bcc"},
+            )
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -2247,7 +2282,11 @@ def build_mcp_server() -> FastMCP:
                         continue
                     if rec_policy == "block_all":
                         await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
-                        return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+                        raise ToolExecutionError(
+                            "CONTACT_BLOCKED",
+                            "Recipient is not accepting messages.",
+                            recoverable=True,
+                        )
                     # contacts_only or auto -> must have approved link or prior contact within TTL
                     ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
                     recent_ok = False
@@ -2304,32 +2343,67 @@ def build_mcp_server() -> FastMCP:
                 if auto_contact_if_blocked:
                     try:
                         from fastmcp.tools.tool import FunctionTool  # type: ignore
-                        req_tool = cast(FunctionTool, cast(Any, request_contact))
+                        # Prefer a single handshake with auto_accept=true
+                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
                         for nm in blocked_recipients:
                             try:
-                                await req_tool.run({
+                                await handshake.run({
                                     "project_key": project.human_key,
-                                    "from_agent": sender.name,
-                                    "to_agent": nm,
-                                    "reason": "auto-request by send_message",
+                                    "requester": sender.name,
+                                    "target": nm,
+                                    "reason": "auto-handshake by send_message",
+                                    "auto_accept": True,
                                     "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                 })
                                 attempted.append(nm)
                             except Exception:
                                 pass
+
+                        # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
+                        if settings_local.contact_auto_retry_enabled and attempted:
+                            blocked_recipients = []
+                            async with get_session() as s3b:
+                                for nm in to + (cc or []) + (bcc or []):
+                                    try:
+                                        rec = await _get_agent(project, nm)
+                                    except Exception:
+                                        continue
+                                    if rec.name == sender.name:
+                                        continue
+                                    rec_policy = getattr(rec, "contact_policy", "auto").lower()
+                                    if rec_policy == "open":
+                                        continue
+                                    # After auto-approval, link should exist; double-check
+                                    link = await s3b.execute(
+                                        select(AgentLink)
+                                        .where(
+                                            AgentLink.a_project_id == project.id,
+                                            AgentLink.a_agent_id == sender.id,
+                                            AgentLink.b_project_id == project.id,
+                                            AgentLink.b_agent_id == rec.id,
+                                            AgentLink.status == "approved",
+                                        )
+                                        .limit(1)
+                                    )
+                                    if link.first() is None and not ack_required:
+                                        blocked_recipients.append(rec.name)
                     except Exception:
                         pass
-                payload = {
-                    "type": "CONTACT_REQUIRED",
-                    "message": "Recipient requires contact approval or recent context.",
-                    "data": {
+                if blocked_recipients:
+                    err_type: str = "CONTACT_REQUIRED"
+                    err_msg: str = "Recipient requires contact approval or recent context."
+                    err_data: dict[str, Any] = {
                         "recipients_blocked": sorted(set(blocked_recipients)),
                         "remedies": remedies,
                         "auto_contact_attempted": attempted,
-                    },
-                }
-                await ctx.error(f"CONTACT_REQUIRED: {payload['message']}")
-                return {"error": payload}
+                    }
+                    await ctx.error(f"{err_type}: {err_msg}")
+                    raise ToolExecutionError(
+                        err_type,
+                        err_msg,
+                        recoverable=True,
+                        data=err_data,
+                    )
         # Split recipients into local vs external (approved links)
         local_to: list[str] = []
         local_cc: list[str] = []
@@ -2485,8 +2559,12 @@ def build_mcp_server() -> FastMCP:
                 await _route(to, "to")
                 await _route(cc or [], "cc")
                 await _route(bcc or [], "bcc")
-            except _ContactBlocked:
-                return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+            except _ContactBlocked as err:
+                raise ToolExecutionError(
+                    "CONTACT_BLOCKED",
+                    "Recipient is not accepting messages.",
+                    recoverable=True,
+                ) from err
 
             if unknown_local or unknown_external:
                 parts: list[str] = []
@@ -4625,6 +4703,17 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
     def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
+        # Parse query embedded in agent path if present (robust to FastMCP variants)
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+            except Exception:
+                pass
         caps = _capabilities_for(agent, project)
         return {
             "generated_at": _iso(datetime.now(timezone.utc)),
@@ -5146,7 +5235,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5210,7 +5299,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5272,7 +5361,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5350,7 +5439,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5433,7 +5522,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5504,7 +5593,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]
@@ -5570,7 +5659,7 @@ def build_mcp_server() -> FastMCP:
                 rows = await s_auto.execute(
                     select(Project)
                     .join(Agent, Agent.project_id == Project.id)
-                    .where(Agent.name == agent)
+                    .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
                 projects = [row[0] for row in rows.all()]

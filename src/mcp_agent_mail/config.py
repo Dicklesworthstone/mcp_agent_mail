@@ -126,6 +126,7 @@ class Settings:
     # Contacts/links
     contact_enforcement_enabled: bool
     contact_auto_ttl_seconds: int
+    contact_auto_retry_enabled: bool
     # Logging
     log_rich_enabled: bool
     log_level: str
@@ -214,7 +215,8 @@ def get_settings() -> Settings:
     )
 
     storage_settings = StorageSettings(
-        root=_decouple_config("STORAGE_ROOT", default="./storage"),
+        # Default to a global, user-scoped archive directory outside the source tree
+        root=_decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo"),
         git_author_name=_decouple_config("GIT_AUTHOR_NAME", default="mcp-agent"),
         git_author_email=_decouple_config("GIT_AUTHOR_EMAIL", default="mcp-agent@example.com"),
         inline_image_max_bytes=_int(_decouple_config("INLINE_IMAGE_MAX_BYTES", default=str(64 * 1024)), default=64 * 1024),
@@ -271,6 +273,7 @@ def get_settings() -> Settings:
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),
         contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="true"), default=True),
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
+        contact_auto_retry_enabled=_bool(_decouple_config("CONTACT_AUTO_RETRY_ENABLED", default="true"), default=True),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
         tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),

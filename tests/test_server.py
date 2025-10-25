@@ -74,11 +74,11 @@ async def test_messaging_flow(isolated_env):
         assert "BlueLake" in text_payload
 
         storage_root = Path(get_settings().storage.root).resolve()
-        profile = storage_root / "backend" / "agents" / "BlueLake" / "profile.json"
+        profile = storage_root / "projects" / "backend" / "agents" / "BlueLake" / "profile.json"
         assert profile.exists()
-        message_file = next(iter((storage_root / "backend" / "messages").rglob("*.md")))
+        message_file = next(iter((storage_root / "projects" / "backend" / "messages").rglob("*.md")))
         assert "Test" in message_file.read_text()
-        repo = Repo(str(storage_root / "backend"))
+        repo = Repo(str(storage_root))
         assert repo.head.commit.message.startswith("mail: BlueLake")
 
 
@@ -283,7 +283,7 @@ async def test_attachment_conversion(isolated_env):
         )
         attachments = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments")
         assert attachments
-        storage_root = storage / "backend"
+        storage_root = storage / "projects" / "backend"
         attachment_files = list((storage_root / "attachments").rglob("*.webp"))
         assert attachment_files
     image_path.unlink(missing_ok=True)

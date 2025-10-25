@@ -440,7 +440,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         rows = result.fetchall()
                     now = _dt.datetime.now(_dt.timezone.utc)
                     for mid, project_id, created_ts, agent_id in rows:
-                        age = (now - created_ts).total_seconds()
+                        # Normalize to timezone-aware UTC before arithmetic; SQLite may yield naive datetimes
+                        ts = created_ts
+                        if getattr(ts, "tzinfo", None) is None or ts.tzinfo.utcoffset(ts) is None:
+                            ts = ts.replace(tzinfo=_dt.timezone.utc)
+                        else:
+                            ts = ts.astimezone(_dt.timezone.utc)
+                        age = (now - ts).total_seconds()
                         if age >= settings.ack_ttl_seconds:
                             try:
                                 rich_console = importlib.import_module("rich.console")
@@ -1092,7 +1098,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
 
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
-        async def unified_inbox(limit: int = 100, filter_importance: str | None = None, filter_unread: bool = False) -> HTMLResponse:
+        async def unified_inbox(limit: int = 100, filter_importance: str | None = None) -> HTMLResponse:
             """Unified inbox showing messages from all active agents across all projects."""
             await ensure_schema()
             async with get_session() as session:
@@ -1105,7 +1111,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     FROM projects p
                     LEFT JOIN agents a ON a.project_id = p.id
                     GROUP BY p.id, p.slug, p.human_key
-                    ORDER BY last_activity DESC NULLS LAST, p.created_at DESC
+                    ORDER BY (last_activity IS NULL) ASC, last_activity DESC, p.created_at DESC
                     """
                 ))
                 projects_data = []
@@ -1141,9 +1147,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         })
 
                 # Get recent messages across all projects with thread information
-                importance_filter = ""
+                # Build WHERE clause safely using parameterized queries
+                importance_conditions = []
+                query_params = {"lim": limit}
+
                 if filter_importance and filter_importance.lower() in ["urgent", "high"]:
-                    importance_filter = " AND m.importance IN ('urgent', 'high')"
+                    importance_conditions.append("m.importance IN ('urgent', 'high')")
+
+                where_clause = "WHERE " + " AND ".join(importance_conditions) if importance_conditions else "WHERE 1=1"
 
                 messages_query = await session.execute(text(
                     f"""
@@ -1151,21 +1162,38 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
                         p.slug, p.human_key,
                         sender.name as sender_name,
-                        GROUP_CONCAT(DISTINCT recip.name, ', ') as recipient_names,
+                        COALESCE(
+                            (
+                                SELECT GROUP_CONCAT(name, ', ')
+                                FROM (
+                                    SELECT DISTINCT recip2.name AS name
+                                    FROM message_recipients mr2
+                                    JOIN agents recip2 ON recip2.id = mr2.agent_id
+                                    WHERE mr2.message_id = m.id
+                                    ORDER BY name
+                                )
+                            ),
+                            ''
+                        ) as recipient_names,
                         COUNT(DISTINCT CASE WHEN m2.id IS NOT NULL THEN m2.id END) as thread_count
                     FROM messages m
                     JOIN projects p ON p.id = m.project_id
                     JOIN agents sender ON sender.id = m.sender_id
                     LEFT JOIN message_recipients mr ON mr.message_id = m.id
                     LEFT JOIN agents recip ON recip.id = mr.agent_id
-                    LEFT JOIN messages m2 ON (m2.thread_id = m.thread_id AND m2.id != m.id) OR (m2.id = m.thread_id AND m2.id != m.id)
-                    WHERE 1=1 {importance_filter}
+                    LEFT JOIN messages m2 ON (
+                        m.thread_id IS NOT NULL
+                        AND m2.thread_id = m.thread_id
+                        AND m2.project_id = m.project_id
+                        AND m2.id != m.id
+                    )
+                    {where_clause}
                     GROUP BY m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
                              p.slug, p.human_key, sender.name
                     ORDER BY m.created_ts DESC
                     LIMIT :lim
                     """
-                ), {"lim": limit})
+                ), query_params)
 
                 messages = []
                 for r in messages_query.fetchall():
@@ -1174,7 +1202,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         "subject": r[1],
                         "body_md": r[2] or "",
                         "created": str(r[3]),
-                        "importance": r[4],
+                        "importance": r[4] or "normal",
                         "thread_id": r[5],
                         "project_slug": r[6],
                         "project_name": r[7],
@@ -1189,8 +1217,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 messages=messages,
                 total_agents=sum(p["agent_count"] for p in projects_data),
                 total_messages=len(messages),
-                filter_importance=filter_importance,
-                filter_unread=filter_unread,
+                filter_importance=filter_importance or "",
             )
 
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
@@ -1201,7 +1228,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if not prow:
                     return await _render("error.html", message="Project not found")
                 pid = int(prow[0])
-                arow = (await session.execute(text("SELECT id, name FROM agents WHERE project_id = :pid AND name = :name"), {"pid": pid, "name": agent})).fetchone()
+                arow = (await session.execute(text("SELECT id, name FROM agents WHERE project_id = :pid AND lower(name) = lower(:name)"), {"pid": pid, "name": agent})).fetchone()
                 if not arow:
                     return await _render("error.html", message="Agent not found")
                 offset = max(0, (max(1, page) - 1) * max(1, limit))
