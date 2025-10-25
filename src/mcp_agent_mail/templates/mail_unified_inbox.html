@@ -2,481 +2,780 @@
 
 {% block title %}Unified Inbox — Agent Mail{% endblock %}
 
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 transition-colors font-medium flex items-center gap-1">
+    <i data-lucide="inbox" class="w-3.5 h-3.5"></i>
+    Unified Inbox
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/projects" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Projects
+  </a>
+</nav>
+{% endblock %}
+
 {% block content %}
-<div class="page-transition" x-data="unifiedInboxManager()">
-  <!-- Premium Header -->
-  <div class="mb-8">
-    <div class="flex items-start justify-between flex-wrap gap-4">
-      <div>
-        <div class="flex items-center gap-3 mb-3">
-          <div class="w-12 h-12 bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 rounded-2xl flex items-center justify-center shadow-lg">
-            <i data-lucide="inbox" class="w-6 h-6 text-white"></i>
-          </div>
-          <div>
-            <h1 class="text-3xl md:text-4xl font-bold text-slate-900 dark:text-white">
-              Unified Inbox
-            </h1>
-            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">
-              All conversations across {{ total_agents }} active agents
-            </p>
-          </div>
-        </div>
+<div class="h-[calc(100vh-8rem)] flex flex-col page-transition" x-data="unifiedInboxManager()" x-init="init()">
+
+  <!-- Gmail-style Search Header -->
+  <div class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4 flex items-center gap-4 sticky top-0 z-10 shadow-sm">
+    <!-- Search Bar -->
+    <div class="flex-1 relative group">
+      <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+        <i data-lucide="search" class="w-5 h-5 text-slate-400 group-focus-within:text-primary-500 transition-colors"></i>
       </div>
-
-      <!-- View Controls -->
-      <div class="flex items-center gap-3">
-        <!-- View Toggle -->
-        <div class="flex items-center gap-1 bg-white dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-          <button @click="viewMode = 'list'"
-                  :class="viewMode === 'list' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
-                  class="px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 font-medium text-sm"
-                  data-tippy-content="List view">
-            <i data-lucide="list" class="w-4 h-4"></i>
-            <span class="hidden sm:inline">List</span>
+      <input
+        x-model="searchQuery"
+        @input="filterMessages()"
+        @keydown.escape="searchQuery = ''; filterMessages()"
+        type="search"
+        placeholder="Search all messages across all projects and agents..."
+        class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 focus:ring-2 focus:ring-primary-500/20"
+        autocomplete="off"
+        id="unified-search"
+      />
+      <div class="absolute inset-y-0 right-0 pr-3 flex items-center gap-2">
+        <template x-if="searchQuery">
+          <button @click="searchQuery = ''; filterMessages()" class="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Clear search">
+            <i data-lucide="x" class="w-4 h-4 text-slate-500"></i>
           </button>
-          <button @click="viewMode = 'card'"
-                  :class="viewMode === 'card' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
-                  class="px-4 py-2 rounded-lg transition-all duration-200 flex items-center gap-2 font-medium text-sm"
-                  data-tippy-content="Card view with full message preview">
-            <i data-lucide="layout-grid" class="w-4 h-4"></i>
-            <span class="hidden sm:inline">Cards</span>
-          </button>
-        </div>
-
-        <!-- Refresh Button -->
-        <button @click="refresh()"
-                class="p-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-700 transition-all duration-200 shadow-sm hover:shadow-md"
-                data-tippy-content="Refresh inbox">
-          <i data-lucide="refresh-cw" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
-        </button>
+        </template>
+        <kbd class="hidden sm:inline-flex items-center gap-1 px-2 py-1 bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-mono rounded border border-slate-300 dark:border-slate-600">
+          <span class="shortcut-key">⌘</span><span>K</span>
+        </kbd>
       </div>
     </div>
 
-    <!-- Stats Cards -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
-      <div class="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/30 rounded-xl p-4 border border-blue-200 dark:border-blue-800">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-xs font-semibold text-blue-600 dark:text-blue-400 uppercase tracking-wide mb-1">Projects</p>
-            <p class="text-2xl font-bold text-blue-900 dark:text-blue-100">{{ projects|length }}</p>
-          </div>
-          <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
-            <i data-lucide="folder" class="w-5 h-5 text-white"></i>
-          </div>
-        </div>
+    <!-- Filters Toggle -->
+    <button @click="showFilters = !showFilters"
+            :class="filtersActive ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400 border-primary-300 dark:border-primary-700' : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-primary-300 dark:hover:border-primary-700'"
+            class="px-4 py-2.5 border rounded-lg transition-all duration-200 flex items-center gap-2 font-medium shadow-sm hover:shadow-md">
+      <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
+      <span class="hidden sm:inline">Filters</span>
+      <template x-if="filtersActive">
+        <span class="w-2 h-2 bg-primary-500 rounded-full animate-pulse"></span>
+      </template>
+    </button>
+
+    <!-- View Options -->
+    <div class="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+      <button @click="viewMode = 'split'; selectMessage(selectedMessage)"
+              :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
+              class="p-2 rounded transition-colors"
+              title="Split view (Gmail style)">
+        <i data-lucide="columns-2" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
+      </button>
+      <button @click="viewMode = 'list'"
+              :class="viewMode === 'list' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
+              class="p-2 rounded transition-colors"
+              title="List view only">
+        <i data-lucide="list" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
+      </button>
+    </div>
+
+    <!-- Message Count -->
+    <div class="hidden md:flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+      <span class="font-semibold text-slate-900 dark:text-white" x-text="filteredMessages.length"></span>
+      <span x-text="filteredMessages.length === 1 ? 'message' : 'messages'"></span>
+    </div>
+  </div>
+
+  <!-- Advanced Filters Panel (Collapsible) -->
+  <div x-show="showFilters"
+       x-transition:enter="transition ease-out duration-200"
+       x-transition:enter-start="opacity-0 -translate-y-2"
+       x-transition:enter-end="opacity-100 translate-y-0"
+       x-transition:leave="transition ease-in duration-150"
+       x-transition:leave-start="opacity-100 translate-y-0"
+       x-transition:leave-end="opacity-0 -translate-y-2"
+       class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4">
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+      <!-- Project Filter -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Project</label>
+        <select x-model="filters.project" @change="filterMessages()"
+                class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">All Projects</option>
+          <template x-for="proj in uniqueProjects" :key="proj">
+            <option :value="proj" x-text="proj"></option>
+          </template>
+        </select>
       </div>
 
-      <div class="bg-gradient-to-br from-emerald-50 to-emerald-100 dark:from-emerald-950/30 dark:to-emerald-900/30 rounded-xl p-4 border border-emerald-200 dark:border-emerald-800">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 uppercase tracking-wide mb-1">Agents</p>
-            <p class="text-2xl font-bold text-emerald-900 dark:text-emerald-100">{{ total_agents }}</p>
-          </div>
-          <div class="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
-            <i data-lucide="users" class="w-5 h-5 text-white"></i>
-          </div>
-        </div>
+      <!-- Sender Filter -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Sender</label>
+        <select x-model="filters.sender" @change="filterMessages()"
+                class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">All Senders</option>
+          <template x-for="sender in uniqueSenders" :key="sender">
+            <option :value="sender" x-text="sender"></option>
+          </template>
+        </select>
       </div>
 
-      <div class="bg-gradient-to-br from-violet-50 to-violet-100 dark:from-violet-950/30 dark:to-violet-900/30 rounded-xl p-4 border border-violet-200 dark:border-violet-800">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-xs font-semibold text-violet-600 dark:text-violet-400 uppercase tracking-wide mb-1">Messages</p>
-            <p class="text-2xl font-bold text-violet-900 dark:text-violet-100">{{ total_messages }}</p>
-          </div>
-          <div class="w-10 h-10 bg-violet-500 rounded-lg flex items-center justify-center">
-            <i data-lucide="mail" class="w-5 h-5 text-white"></i>
-          </div>
-        </div>
+      <!-- Recipient Filter -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Recipient</label>
+        <select x-model="filters.recipient" @change="filterMessages()"
+                class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">All Recipients</option>
+          <template x-for="recip in uniqueRecipients" :key="recip">
+            <option :value="recip" x-text="recip"></option>
+          </template>
+        </select>
       </div>
 
-      <div class="bg-gradient-to-br from-amber-50 to-amber-100 dark:from-amber-950/30 dark:to-amber-900/30 rounded-xl p-4 border border-amber-200 dark:border-amber-800">
-        <div class="flex items-center justify-between">
-          <div>
-            <p class="text-xs font-semibold text-amber-600 dark:text-amber-400 uppercase tracking-wide mb-1">Threads</p>
-            <p class="text-2xl font-bold text-amber-900 dark:text-amber-100" x-text="threadCount()">0</p>
-          </div>
-          <div class="w-10 h-10 bg-amber-500 rounded-lg flex items-center justify-center">
-            <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
-          </div>
-        </div>
+      <!-- Importance Filter -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Importance</label>
+        <select x-model="filters.importance" @change="filterMessages()"
+                class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">All</option>
+          <option value="urgent">Urgent</option>
+          <option value="high">High</option>
+          <option value="normal">Normal</option>
+          <option value="low">Low</option>
+        </select>
+      </div>
+
+      <!-- Thread Filter -->
+      <div>
+        <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">Threads</label>
+        <select x-model="filters.hasThread" @change="filterMessages()"
+                class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
+          <option value="">All Messages</option>
+          <option value="true">Threaded Only</option>
+          <option value="false">Non-threaded</option>
+        </select>
+      </div>
+
+      <!-- Clear Filters -->
+      <div class="flex items-end">
+        <button @click="clearFilters()"
+                class="w-full px-3 py-2 text-sm bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 font-medium rounded-lg transition-colors flex items-center justify-center gap-2">
+          <i data-lucide="x-circle" class="w-4 h-4"></i>
+          Clear
+        </button>
       </div>
     </div>
   </div>
 
-  <!-- Filters & Search Bar -->
-  <div class="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 mb-8 shadow-sm">
-    <div class="flex flex-col lg:flex-row gap-4">
-      <!-- Search Input -->
-      <div class="flex-1">
-        <div class="relative">
-          <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-            <i data-lucide="search" class="w-5 h-5 text-slate-400"></i>
-          </div>
-          <input type="text"
-                 x-model="searchQuery"
-                 @input="debouncedFilter()"
-                 placeholder="Search messages, agents, or projects..."
-                 class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200">
+  <!-- Gmail-style Split Pane Layout -->
+  <div class="flex-1 flex overflow-hidden">
+
+    <!-- Left Pane: Message List -->
+    <aside :class="viewMode === 'split' ? 'w-full md:w-2/5 lg:w-1/3 border-r border-slate-200 dark:border-slate-700' : 'w-full'"
+           class="bg-white dark:bg-slate-800 flex flex-col overflow-hidden">
+
+      <!-- List Header with Bulk Actions -->
+      <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between bg-slate-50 dark:bg-slate-900">
+        <div class="flex items-center gap-3">
+          <input type="checkbox"
+                 @change="toggleSelectAll()"
+                 :checked="selectedMessages.length > 0 && selectedMessages.length === filteredMessages.length"
+                 :indeterminate="selectedMessages.length > 0 && selectedMessages.length < filteredMessages.length"
+                 class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
+                 title="Select all">
+          <template x-if="selectedMessages.length > 0">
+            <div class="flex items-center gap-2 text-sm animate-slide-in">
+              <span class="font-semibold text-primary-600 dark:text-primary-400" x-text="selectedMessages.length + ' selected'"></span>
+              <button @click="markSelectedAsRead()"
+                      class="px-2 py-1 text-xs bg-success-100 dark:bg-success-900/30 hover:bg-success-200 dark:hover:bg-success-800/40 text-success-700 dark:text-success-300 rounded font-medium transition-colors flex items-center gap-1">
+                <i data-lucide="check" class="w-3 h-3"></i>
+                Mark Read
+              </button>
+              <button @click="selectedMessages = []"
+                      class="px-2 py-1 text-xs bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded font-medium transition-colors">
+                Clear
+              </button>
+            </div>
+          </template>
         </div>
-      </div>
 
-      <!-- Filter Buttons -->
-      <div class="flex flex-wrap gap-2">
-        <button @click="toggleFilter('all')"
-                :class="activeFilter === 'all' ? 'bg-gradient-to-r from-primary-500 to-primary-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
-                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
-          <i data-lucide="inbox" class="w-4 h-4"></i>
-          All
-        </button>
-        <button @click="toggleFilter('urgent')"
-                :class="activeFilter === 'urgent' ? 'bg-gradient-to-r from-red-500 to-red-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
-                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
-          <i data-lucide="alert-circle" class="w-4 h-4"></i>
-          Urgent
-        </button>
-        <button @click="toggleFilter('threaded')"
-                :class="activeFilter === 'threaded' ? 'bg-gradient-to-r from-violet-500 to-violet-600 text-white shadow-md' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'"
-                class="px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 flex items-center gap-2">
-          <i data-lucide="git-branch" class="w-4 h-4"></i>
-          Threads
-        </button>
-      </div>
+        <!-- Sort Options -->
+        <div class="relative" x-data="{ sortOpen: false }">
+          <button @click="sortOpen = !sortOpen"
+                  class="px-2 py-1 text-xs bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1">
+            <i data-lucide="arrow-down-up" class="w-3 h-3"></i>
+            <span class="hidden sm:inline" x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : 'Sender'"></span>
+          </button>
 
-      <!-- Sort Dropdown -->
-      <div class="relative" x-data="{ open: false }">
-        <button @click="open = !open"
-                class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 rounded-lg font-medium text-sm text-slate-700 dark:text-slate-300 transition-all duration-200 flex items-center gap-2 whitespace-nowrap">
-          <i data-lucide="arrow-down-up" class="w-4 h-4"></i>
-          <span x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : 'By Thread'"></span>
-          <i data-lucide="chevron-down" class="w-4 h-4"></i>
-        </button>
-        <div x-show="open"
-             @click.away="open = false"
-             x-transition:enter="transition ease-out duration-100"
-             x-transition:enter-start="opacity-0 scale-95"
-             x-transition:enter-end="opacity-100 scale-100"
-             x-transition:leave="transition ease-in duration-75"
-             x-transition:leave-start="opacity-100 scale-100"
-             x-transition:leave-end="opacity-0 scale-95"
-             class="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-10">
-          <div class="p-2">
-            <button @click="sortBy = 'newest'; open = false"
-                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
+          <div x-show="sortOpen"
+               @click.outside="sortOpen = false"
+               x-transition:enter="transition ease-out duration-100"
+               x-transition:enter-start="opacity-0 scale-95"
+               x-transition:enter-end="opacity-100 scale-100"
+               class="absolute right-0 mt-1 w-40 bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-slate-200 dark:border-slate-700 py-1 z-20">
+            <button @click="sortBy = 'newest'; filterMessages(); sortOpen = false"
+                    :class="sortBy === 'newest' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="arrow-down" class="w-4 h-4"></i>
               Newest First
             </button>
-            <button @click="sortBy = 'oldest'; open = false"
-                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
+            <button @click="sortBy = 'oldest'; filterMessages(); sortOpen = false"
+                    :class="sortBy === 'oldest' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="arrow-up" class="w-4 h-4"></i>
               Oldest First
             </button>
-            <button @click="sortBy = 'thread'; open = false"
-                    class="w-full text-left px-4 py-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-sm transition-colors duration-200">
-              Group by Thread
+            <button @click="sortBy = 'sender'; filterMessages(); sortOpen = false"
+                    :class="sortBy === 'sender' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="user" class="w-4 h-4"></i>
+              By Sender
             </button>
           </div>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- Messages Container -->
-  <template x-if="filteredMessages().length > 0">
-    <div>
-      <!-- List View -->
-      <div x-show="viewMode === 'list'" class="space-y-2">
-        <template x-for="(msg, index) in filteredMessages()" :key="msg.id">
-          <a :href="'/mail/' + msg.project_slug + '/message/' + msg.id"
-             class="block group bg-white dark:bg-slate-800 rounded-xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 overflow-hidden card-hover"
-             :style="`animation-delay: ${Math.min(index * 0.03, 1)}s`">
+      <!-- Message List (Scrollable) -->
+      <div class="flex-1 overflow-y-auto">
+        <template x-if="filteredMessages.length > 0">
+          <div>
+            <template x-for="(msg, index) in filteredMessages" :key="msg.id">
+              <!-- Gmail-style Message Item -->
+              <div @click="selectMessage(msg); if (viewMode === 'list') { window.location.href = `/mail/${msg.project_slug}/message/${msg.id}`; }"
+                   @keydown.enter="selectMessage(msg)"
+                   :class="{
+                     'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500': selectedMessage && selectedMessage.id === msg.id,
+                     'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900': !selectedMessage || selectedMessage.id !== msg.id,
+                     'font-semibold': !msg.read
+                   }"
+                   class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group"
+                   :style="`animation-delay: ${Math.min(index * 0.02, 0.5)}s;`"
+                   tabindex="0"
+                   role="button">
 
-            <!-- Thread Indicator -->
-            <div x-show="msg.thread_count > 0"
-                 class="h-1 bg-gradient-to-r from-violet-500 via-purple-500 to-pink-500"
-                 :style="`opacity: ${Math.min(msg.thread_count / 5, 1)}`">
-            </div>
+                <div class="flex items-start gap-3">
+                  <!-- Checkbox -->
+                  <input type="checkbox"
+                         @click.stop
+                         @change="toggleMessageSelection(msg.id)"
+                         :checked="selectedMessages.includes(msg.id)"
+                         class="mt-1 w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer opacity-0 group-hover:opacity-100"
+                         :class="selectedMessages.includes(msg.id) ? 'opacity-100' : ''">
 
-            <div class="p-5">
-              <div class="flex items-start gap-4">
-                <!-- Avatar/Icon -->
-                <div class="flex-shrink-0">
-                  <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-md group-hover:shadow-lg group-hover:scale-110 transition-all duration-300">
-                    <i data-lucide="user" class="w-6 h-6 text-white"></i>
-                  </div>
-                </div>
-
-                <!-- Content -->
-                <div class="flex-1 min-w-0">
-                  <!-- Header Row -->
-                  <div class="flex items-start justify-between gap-4 mb-2">
-                    <div class="flex-1 min-w-0">
-                      <h3 class="text-lg font-bold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1"
-                          x-text="msg.subject"></h3>
-                      <div class="flex items-center gap-2 mt-1 flex-wrap">
-                        <span class="text-sm font-medium text-slate-600 dark:text-slate-400">
-                          <span x-text="msg.sender"></span>
-                        </span>
-                        <span class="text-slate-400 dark:text-slate-600">→</span>
-                        <span class="text-sm text-slate-500 dark:text-slate-500 truncate max-w-xs" x-text="msg.recipients"></span>
-                      </div>
+                  <!-- Message Content -->
+                  <div class="flex-1 min-w-0">
+                    <!-- Sender → Recipients -->
+                    <div class="flex items-center gap-2 mb-1">
+                      <span class="text-sm font-semibold text-slate-900 dark:text-white truncate" x-text="msg.sender"></span>
+                      <i data-lucide="arrow-right" class="w-3 h-3 text-slate-400 flex-shrink-0"></i>
+                      <span class="text-sm text-slate-600 dark:text-slate-400 truncate" x-text="msg.recipients"></span>
                     </div>
 
-                    <!-- Meta Info -->
-                    <div class="flex flex-col items-end gap-2 flex-shrink-0">
-                      <span class="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap" x-text="formatDate(msg.created)"></span>
-                      <template x-if="msg.importance && msg.importance !== 'normal'">
-                        <span :class="{
-                          'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800': msg.importance === 'urgent',
-                          'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800': msg.importance === 'high'
-                        }" class="px-2 py-1 rounded-lg text-xs font-semibold border flex items-center gap-1">
+                    <!-- Badges Row -->
+                    <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                      <!-- Project Badge -->
+                      <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full"
+                            :class="getProjectBadgeClass(msg.project_name)"
+                            :title="msg.project_name">
+                        <i data-lucide="folder" class="w-3 h-3"></i>
+                        <span class="truncate max-w-[100px]" x-text="msg.project_name"></span>
+                      </span>
+
+                      <!-- Importance Badge -->
+                      <template x-if="msg.importance === 'urgent'">
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-bold rounded-full">
                           <i data-lucide="alert-circle" class="w-3 h-3"></i>
-                          <span x-text="msg.importance.toUpperCase()"></span>
+                          Urgent
+                        </span>
+                      </template>
+                      <template x-if="msg.importance === 'high'">
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full">
+                          <i data-lucide="alert-triangle" class="w-3 h-3"></i>
+                          High
+                        </span>
+                      </template>
+
+                      <!-- Thread Indicator -->
+                      <template x-if="msg.thread_id">
+                        <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 text-xs font-medium rounded-full">
+                          <i data-lucide="message-circle" class="w-3 h-3"></i>
+                          Thread
                         </span>
                       </template>
                     </div>
-                  </div>
 
-                  <!-- Project Badge & Thread Info -->
-                  <div class="flex items-center gap-2 flex-wrap mt-3">
-                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-medium">
-                      <i data-lucide="folder" class="w-3 h-3"></i>
-                      <span x-text="msg.project_name" class="truncate max-w-[200px]"></span>
-                    </span>
-                    <template x-if="msg.thread_count > 0">
-                      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gradient-to-r from-violet-100 to-purple-100 dark:from-violet-900/30 dark:to-purple-900/30 text-violet-700 dark:text-violet-300 rounded-lg text-xs font-semibold border border-violet-200 dark:border-violet-800">
-                        <i data-lucide="git-branch" class="w-3 h-3"></i>
-                        <span x-text="(msg.thread_count + 1) + ' messages'"></span>
-                      </span>
-                    </template>
-                  </div>
-                </div>
+                    <!-- Subject -->
+                    <div class="text-sm mb-1 text-slate-900 dark:text-white truncate" x-text="msg.subject"></div>
 
-                <!-- Arrow -->
-                <div class="flex-shrink-0 flex items-center">
-                  <i data-lucide="arrow-right" class="w-5 h-5 text-slate-400 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all duration-300"></i>
+                    <!-- Excerpt -->
+                    <div class="text-xs text-slate-600 dark:text-slate-400 line-clamp-2" x-text="msg.excerpt"></div>
+
+                    <!-- Timestamp -->
+                    <div class="text-xs text-slate-500 dark:text-slate-500 mt-1" x-text="msg.created_relative"></div>
+                  </div>
                 </div>
               </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Empty State -->
+        <template x-if="filteredMessages.length === 0">
+          <div class="flex flex-col items-center justify-center h-full p-12 text-center">
+            <div class="w-20 h-20 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mb-4">
+              <i data-lucide="inbox" class="w-10 h-10 text-slate-400 dark:text-slate-500"></i>
             </div>
-          </a>
+            <h3 class="text-xl font-semibold text-slate-900 dark:text-white mb-2">
+              <template x-if="searchQuery || filtersActive">No messages found</template>
+              <template x-if="!searchQuery && !filtersActive">Your inbox is empty</template>
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400 max-w-sm mb-4">
+              <template x-if="searchQuery || filtersActive">Try adjusting your search or filters</template>
+              <template x-if="!searchQuery && !filtersActive">Messages from your AI agents will appear here</template>
+            </p>
+            <template x-if="searchQuery || filtersActive">
+              <button @click="clearFilters(); searchQuery = ''; filterMessages()"
+                      class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-md hover:shadow-lg transition-all duration-300 btn-ripple">
+                Clear All Filters
+              </button>
+            </template>
+          </div>
         </template>
       </div>
+    </aside>
 
-      <!-- Card View -->
-      <div x-show="viewMode === 'card'" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <template x-for="(msg, index) in filteredMessages()" :key="msg.id">
-          <div class="group bg-white dark:bg-slate-800 rounded-2xl border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 shadow-soft hover:shadow-large transition-all duration-300 overflow-hidden card-hover"
-               :style="`animation-delay: ${Math.min(index * 0.03, 1)}s`">
+    <!-- Right Pane: Message Detail (Split View Only) -->
+    <template x-if="viewMode === 'split'">
+      <main class="hidden md:flex flex-col flex-1 bg-slate-50 dark:bg-slate-900 overflow-hidden">
+        <template x-if="selectedMessage">
+          <div class="flex-1 overflow-y-auto p-8 animate-fade-in">
+            <!-- Message Header Card -->
+            <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border border-slate-200 dark:border-slate-700 p-8 mb-6">
+              <!-- Subject -->
+              <div class="flex items-start justify-between gap-4 mb-6">
+                <h1 class="text-3xl font-bold text-slate-900 dark:text-white" x-text="selectedMessage.subject"></h1>
 
-            <!-- Thread Indicator -->
-            <div x-show="msg.thread_count > 0"
-                 class="h-1 bg-gradient-to-r from-violet-500 via-purple-500 to-pink-500"
-                 :style="`opacity: ${Math.min(msg.thread_count / 5, 1)}`">
-            </div>
-
-            <div class="p-6">
-              <!-- Header -->
-              <div class="flex items-start justify-between gap-4 mb-4">
-                <div class="flex-1 min-w-0">
-                  <h3 class="text-xl font-bold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2 mb-2"
-                      x-text="msg.subject"></h3>
-                  <div class="flex items-center gap-2 text-sm">
-                    <div class="w-8 h-8 bg-gradient-to-br from-primary-500 to-primary-700 rounded-lg flex items-center justify-center flex-shrink-0">
-                      <i data-lucide="user" class="w-4 h-4 text-white"></i>
-                    </div>
-                    <div class="flex-1 min-w-0">
-                      <p class="font-semibold text-slate-700 dark:text-slate-300" x-text="msg.sender"></p>
-                      <p class="text-xs text-slate-500 dark:text-slate-500 truncate" x-text="'To: ' + msg.recipients"></p>
-                    </div>
-                  </div>
-                </div>
-                <template x-if="msg.importance && msg.importance !== 'normal'">
-                  <span :class="{
-                    'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800': msg.importance === 'urgent',
-                    'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800': msg.importance === 'high'
-                  }" class="px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 flex-shrink-0">
-                    <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
-                    <span x-text="msg.importance.toUpperCase()"></span>
+                <!-- Importance Badge -->
+                <template x-if="selectedMessage.importance === 'urgent'">
+                  <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-sm font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+                    <i data-lucide="alert-circle" class="w-4 h-4"></i>
+                    Urgent
+                  </span>
+                </template>
+                <template x-if="selectedMessage.importance === 'high'">
+                  <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-sm font-semibold rounded-full flex items-center gap-1.5">
+                    <i data-lucide="alert-triangle" class="w-4 h-4"></i>
+                    High Priority
                   </span>
                 </template>
               </div>
 
-              <!-- Message Preview -->
-              <div class="mb-4 prose prose-sm dark:prose-invert max-w-none">
-                <div class="p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-200 dark:border-slate-700 line-clamp-4 text-sm text-slate-600 dark:text-slate-400 leading-relaxed"
-                     x-text="renderMarkdownPreview(msg.body_md)"></div>
+              <!-- Metadata Grid -->
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-6 border-t border-slate-200 dark:border-slate-700">
+                <!-- From -->
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-gradient-to-br from-success-500 to-success-700 rounded-xl flex items-center justify-center shadow-medium">
+                    <i data-lucide="user" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">From</div>
+                    <div class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedMessage.sender"></div>
+                  </div>
+                </div>
+
+                <!-- To -->
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+                    <i data-lucide="users" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">To</div>
+                    <div class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedMessage.recipients"></div>
+                  </div>
+                </div>
+
+                <!-- Project -->
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-gradient-to-br from-purple-500 to-purple-700 rounded-xl flex items-center justify-center shadow-medium">
+                    <i data-lucide="folder" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Project</div>
+                    <a :href="`/mail/${selectedMessage.project_slug}`"
+                       class="text-sm font-semibold text-primary-600 dark:text-primary-400 hover:underline"
+                       x-text="selectedMessage.project_name"></a>
+                  </div>
+                </div>
+
+                <!-- Date -->
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-gradient-to-br from-amber-500 to-amber-700 rounded-xl flex items-center justify-center shadow-medium">
+                    <i data-lucide="calendar" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Sent</div>
+                    <div class="text-sm font-semibold text-slate-900 dark:text-white" x-text="selectedMessage.created_full"></div>
+                  </div>
+                </div>
+
+                <!-- Thread (if applicable) -->
+                <template x-if="selectedMessage.thread_id">
+                  <div class="flex items-center gap-3 col-span-full">
+                    <div class="w-10 h-10 bg-gradient-to-br from-pink-500 to-pink-700 rounded-xl flex items-center justify-center shadow-medium">
+                      <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div>
+                      <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Thread</div>
+                      <div class="text-sm font-mono text-slate-900 dark:text-white" x-text="selectedMessage.thread_id"></div>
+                    </div>
+                  </div>
+                </template>
               </div>
 
-              <!-- Footer -->
-              <div class="flex items-center justify-between gap-4 pt-4 border-t border-slate-200 dark:border-slate-700">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 rounded-lg text-xs font-medium">
-                    <i data-lucide="folder" class="w-3 h-3"></i>
-                    <span x-text="msg.project_name" class="truncate max-w-[150px]"></span>
-                  </span>
-                  <template x-if="msg.thread_count > 0">
-                    <span class="inline-flex items-center gap-1.5 px-2.5 py-1 bg-gradient-to-r from-violet-100 to-purple-100 dark:from-violet-900/30 dark:to-purple-900/30 text-violet-700 dark:text-violet-300 rounded-lg text-xs font-semibold border border-violet-200 dark:border-violet-800">
-                      <i data-lucide="git-branch" class="w-3 h-3"></i>
-                      <span x-text="(msg.thread_count + 1)"></span>
-                    </span>
-                  </template>
-                  <span class="text-xs text-slate-500 dark:text-slate-400" x-text="formatDate(msg.created)"></span>
-                </div>
-                <a :href="'/mail/' + msg.project_slug + '/message/' + msg.id"
-                   class="px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white text-sm font-semibold rounded-lg shadow-md hover:shadow-xl transition-all duration-200 flex items-center gap-2 hover:scale-105">
-                  <span>View</span>
-                  <i data-lucide="arrow-right" class="w-4 h-4"></i>
+              <!-- Quick Actions -->
+              <div class="flex items-center gap-2 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
+                <button @click="copyToClipboard(`${window.location.origin}/mail/${selectedMessage.project_slug}/message/${selectedMessage.id}`, 'Message link copied!')"
+                        class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                  <i data-lucide="link" class="w-4 h-4"></i>
+                  Copy Link
+                </button>
+                <a :href="`/mail/${selectedMessage.project_slug}/message/${selectedMessage.id}`"
+                   class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                  <i data-lucide="external-link" class="w-4 h-4"></i>
+                  Open in Project
                 </a>
+                <template x-if="selectedMessage.thread_id">
+                  <button class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                    <i data-lucide="git-branch" class="w-4 h-4"></i>
+                    View Thread
+                  </button>
+                </template>
+              </div>
+            </div>
+
+            <!-- Message Body -->
+            <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border border-slate-200 dark:border-slate-700 p-8">
+              <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+                <i data-lucide="file-text" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
+                Message Content
+              </h3>
+              <div class="prose prose-slate dark:prose-invert max-w-none">
+                <div :id="'message-body-' + selectedMessage.id" class="markdown-content"></div>
               </div>
             </div>
           </div>
         </template>
-      </div>
-    </div>
-  </template>
 
-  <!-- Empty State -->
-  <template x-if="filteredMessages().length === 0">
-    <div class="flex flex-col items-center justify-center py-20 animate-fade-in">
-      <div class="relative mb-8">
-        <div class="w-24 h-24 bg-gradient-to-br from-slate-200 to-slate-300 dark:from-slate-700 dark:to-slate-800 rounded-3xl flex items-center justify-center shadow-lg">
-          <i data-lucide="inbox" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
-        </div>
-      </div>
-      <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-2">No messages found</h3>
-      <p class="text-slate-600 dark:text-slate-400 mb-6 text-center max-w-md">
-        <template x-if="searchQuery || activeFilter !== 'all'">
-          <span>Try adjusting your filters or search query</span>
+        <!-- No Message Selected State -->
+        <template x-if="!selectedMessage">
+          <div class="flex flex-col items-center justify-center h-full p-12 text-center">
+            <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mb-6">
+              <i data-lucide="mouse-pointer-click" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+            </div>
+            <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-2">
+              Select a message to view
+            </h3>
+            <p class="text-sm text-slate-600 dark:text-slate-400 max-w-md">
+              Choose a message from the list to see its full contents and details
+            </p>
+            <div class="mt-8 grid grid-cols-2 gap-4 text-xs text-slate-600 dark:text-slate-400">
+              <div class="flex items-center gap-2">
+                <kbd class="px-2 py-1 bg-slate-200 dark:bg-slate-700 rounded font-mono">j</kbd>
+                <span>Next message</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <kbd class="px-2 py-1 bg-slate-200 dark:bg-slate-700 rounded font-mono">k</kbd>
+                <span>Previous message</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <kbd class="px-2 py-1 bg-slate-200 dark:bg-slate-700 rounded font-mono">/</kbd>
+                <span>Search</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <kbd class="px-2 py-1 bg-slate-200 dark:bg-slate-700 rounded font-mono">Esc</kbd>
+                <span>Deselect</span>
+              </div>
+            </div>
+          </div>
         </template>
-        <template x-if="!searchQuery && activeFilter === 'all'">
-          <span>Your inbox is empty. Messages from all agents will appear here.</span>
-        </template>
-      </p>
-      <button @click="searchQuery = ''; activeFilter = 'all'"
-              class="px-6 py-3 bg-gradient-to-r from-primary-500 to-primary-600 hover:from-primary-600 hover:to-primary-700 text-white font-semibold rounded-xl shadow-md hover:shadow-lg transition-all duration-200 flex items-center gap-2">
-        <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
-        <span>Clear Filters</span>
-      </button>
-    </div>
-  </template>
+      </main>
+    </template>
+  </div>
 </div>
 
 <script>
 function unifiedInboxManager() {
   return {
-    viewMode: 'list',
+    // Data
+    allMessages: {{ messages | tojson if messages else '[]' }},
+    filteredMessages: [],
+    selectedMessage: null,
+    selectedMessages: [],
     searchQuery: '',
-    activeFilter: 'all',
+    showFilters: false,
     sortBy: 'newest',
-    messages: {{ messages|tojson }},
-    debounceTimeout: null,
+    viewMode: 'split',
 
-    filteredMessages() {
-      let filtered = [...this.messages];
-
-      // Apply search with null-safe field access and null-safe trim
-      if (this.searchQuery && this.searchQuery.trim()) {
-        const query = this.searchQuery.toLowerCase();
-        filtered = filtered.filter(m => {
-          const subject = (m.subject || '').toLowerCase();
-          const sender = (m.sender || '').toLowerCase();
-          const recipients = (m.recipients || '').toLowerCase();
-          const projectName = (m.project_name || '').toLowerCase();
-          const body = (m.body_md || '').toLowerCase();
-
-          return subject.includes(query) ||
-                 sender.includes(query) ||
-                 recipients.includes(query) ||
-                 projectName.includes(query) ||
-                 body.includes(query);
-        });
-      }
-
-      // Apply filter
-      if (this.activeFilter === 'urgent') {
-        filtered = filtered.filter(m => m.importance === 'urgent' || m.importance === 'high');
-      } else if (this.activeFilter === 'threaded') {
-        filtered = filtered.filter(m => (m.thread_count || 0) > 0);
-      }
-
-      // Apply sort with safe date parsing (handle NaN from invalid dates)
-      if (this.sortBy === 'newest') {
-        filtered.sort((a, b) => {
-          const dateA = a.created ? (new Date(a.created).getTime() || 0) : 0;
-          const dateB = b.created ? (new Date(b.created).getTime() || 0) : 0;
-          return dateB - dateA;
-        });
-      } else if (this.sortBy === 'oldest') {
-        filtered.sort((a, b) => {
-          const dateA = a.created ? (new Date(a.created).getTime() || 0) : 0;
-          const dateB = b.created ? (new Date(b.created).getTime() || 0) : 0;
-          return dateA - dateB;
-        });
-      } else if (this.sortBy === 'thread') {
-        filtered.sort((a, b) => (b.thread_count || 0) - (a.thread_count || 0));
-      }
-
-      return filtered;
+    // Filters
+    filters: {
+      project: '',
+      sender: '',
+      recipient: '',
+      importance: '',
+      hasThread: ''
     },
 
-    threadCount() {
-      // Explicit null/undefined check to handle edge cases like thread_id = 0
-      return new Set(
-        this.messages
-          .filter(m => m.thread_id !== null && m.thread_id !== undefined && m.thread_id !== '')
-          .map(m => m.thread_id)
-      ).size;
+    // Computed
+    get uniqueProjects() {
+      return [...new Set(this.allMessages.map(m => m.project_name))].sort();
     },
 
-    toggleFilter(filter) {
-      this.activeFilter = filter;
+    get uniqueSenders() {
+      return [...new Set(this.allMessages.map(m => m.sender))].sort();
     },
 
-    debouncedFilter() {
-      clearTimeout(this.debounceTimeout);
-      this.debounceTimeout = setTimeout(() => {
-        // Trigger re-render by accessing filteredMessages
-        this.filteredMessages();
-      }, 300);
+    get uniqueRecipients() {
+      const recipients = new Set();
+      this.allMessages.forEach(m => {
+        m.recipients.split(',').forEach(r => recipients.add(r.trim()));
+      });
+      return [...recipients].sort();
     },
 
-    formatDate(dateStr) {
-      if (!dateStr) return '';
-      try {
-        if (typeof dayjs !== 'undefined') {
-          const formatted = dayjs(dateStr);
-          return formatted.isValid ? formatted.fromNow() : dateStr;
+    get filtersActive() {
+      return this.filters.project || this.filters.sender || this.filters.recipient ||
+             this.filters.importance || this.filters.hasThread;
+    },
+
+    init() {
+      this.filteredMessages = [...this.allMessages];
+      this.filterMessages();
+
+      // Setup keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        // Cmd/Ctrl + K for search
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+          e.preventDefault();
+          document.getElementById('unified-search').focus();
         }
-        const date = new Date(dateStr);
-        return isNaN(date.getTime()) ? dateStr : date.toLocaleString();
-      } catch (e) {
-        console.warn('Date formatting error:', e);
-        return dateStr;
+
+        // / for search
+        if (e.key === '/' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+          e.preventDefault();
+          document.getElementById('unified-search').focus();
+        }
+
+        // j/k navigation
+        if (this.viewMode === 'split' && !['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) {
+          if (e.key === 'j') {
+            e.preventDefault();
+            this.selectNextMessage();
+          } else if (e.key === 'k') {
+            e.preventDefault();
+            this.selectPreviousMessage();
+          }
+        }
+
+        // Escape to clear selection
+        if (e.key === 'Escape' && this.selectedMessage) {
+          this.selectedMessage = null;
+        }
+      });
+
+      // Update keyboard shortcut display based on platform
+      const shortcutKey = document.querySelector('.shortcut-key');
+      if (shortcutKey) {
+        const isMac = navigator.userAgentData?.platform?.toLowerCase().includes('mac') ||
+                      /Mac|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+        if (!isMac) {
+          shortcutKey.textContent = 'Ctrl';
+        }
+      }
+
+      // Auto-select first message if in split view
+      if (this.viewMode === 'split' && this.filteredMessages.length > 0) {
+        this.selectMessage(this.filteredMessages[0]);
       }
     },
 
-    renderMarkdownPreview(md) {
-      // Type guard: ensure md is a string
-      if (!md || typeof md !== 'string') return 'No content';
+    // Filtering
+    filterMessages() {
+      let filtered = [...this.allMessages];
 
-      try {
-        const trimmed = md.trim();
-        if (!trimmed) return 'No content';
+      // Search query
+      if (this.searchQuery) {
+        const query = this.searchQuery.toLowerCase();
+        filtered = filtered.filter(msg => {
+          return (
+            msg.subject.toLowerCase().includes(query) ||
+            msg.sender.toLowerCase().includes(query) ||
+            msg.recipients.toLowerCase().includes(query) ||
+            msg.excerpt.toLowerCase().includes(query) ||
+            msg.project_name.toLowerCase().includes(query)
+          );
+        });
+      }
 
-        // Strip markdown syntax and show first 200 chars (text only, no HTML)
-        const text = trimmed
-          .replace(/[#*`_\[\]]/g, '')  // Remove markdown chars
-          .replace(/\n+/g, ' ')        // Replace newlines with spaces
-          .trim()
-          .substring(0, 200);
-        // Use trimmed.length (the actual content) not md.length (which includes whitespace)
-        return text + (trimmed.length > 200 ? '...' : '');
-      } catch (e) {
-        console.warn('Markdown preview error:', e);
-        return 'Preview unavailable';
+      // Project filter
+      if (this.filters.project) {
+        filtered = filtered.filter(msg => msg.project_name === this.filters.project);
+      }
+
+      // Sender filter
+      if (this.filters.sender) {
+        filtered = filtered.filter(msg => msg.sender === this.filters.sender);
+      }
+
+      // Recipient filter
+      if (this.filters.recipient) {
+        filtered = filtered.filter(msg => msg.recipients.includes(this.filters.recipient));
+      }
+
+      // Importance filter
+      if (this.filters.importance) {
+        filtered = filtered.filter(msg => msg.importance === this.filters.importance);
+      }
+
+      // Thread filter
+      if (this.filters.hasThread === 'true') {
+        filtered = filtered.filter(msg => msg.thread_id);
+      } else if (this.filters.hasThread === 'false') {
+        filtered = filtered.filter(msg => !msg.thread_id);
+      }
+
+      // Sort
+      switch (this.sortBy) {
+        case 'newest':
+          filtered.sort((a, b) => new Date(b.created_ts) - new Date(a.created_ts));
+          break;
+        case 'oldest':
+          filtered.sort((a, b) => new Date(a.created_ts) - new Date(b.created_ts));
+          break;
+        case 'sender':
+          filtered.sort((a, b) => a.sender.localeCompare(b.sender));
+          break;
+      }
+
+      this.filteredMessages = filtered;
+
+      // Re-render icons
+      this.$nextTick(() => {
+        if (typeof lucide !== 'undefined') {
+          lucide.createIcons();
+        }
+      });
+    },
+
+    clearFilters() {
+      this.filters = {
+        project: '',
+        sender: '',
+        recipient: '',
+        importance: '',
+        hasThread: ''
+      };
+      this.filterMessages();
+    },
+
+    // Selection
+    selectMessage(msg) {
+      this.selectedMessage = msg;
+
+      // Render markdown body
+      this.$nextTick(() => {
+        const bodyEl = document.getElementById('message-body-' + msg.id);
+        if (bodyEl && msg.body_md) {
+          // Configure marked for better rendering
+          marked.setOptions({
+            breaks: true,
+            gfm: true,
+            headerIds: true,
+            mangle: false
+          });
+
+          bodyEl.innerHTML = marked.parse(msg.body_md);
+
+          // Highlight code blocks
+          bodyEl.querySelectorAll('pre code').forEach((block) => {
+            Prism.highlightElement(block);
+          });
+
+          // Add copy buttons to code blocks
+          bodyEl.querySelectorAll('pre').forEach((pre) => {
+            if (pre.parentNode.classList.contains('relative')) return; // Already has button
+
+            const wrapper = document.createElement('div');
+            wrapper.className = 'relative group';
+            pre.parentNode.insertBefore(wrapper, pre);
+            wrapper.appendChild(pre);
+
+            const button = document.createElement('button');
+            button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+            button.className = 'absolute top-2 right-2 p-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity';
+            button.onclick = () => {
+              navigator.clipboard.writeText(pre.textContent);
+              button.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i>';
+              window.showToast('Code copied!', 'success');
+              setTimeout(() => {
+                button.innerHTML = '<i data-lucide="copy" class="w-4 h-4"></i>';
+                lucide.createIcons();
+              }, 2000);
+            };
+            wrapper.appendChild(button);
+          });
+
+          lucide.createIcons();
+        }
+      });
+    },
+
+    selectNextMessage() {
+      if (!this.selectedMessage || this.filteredMessages.length === 0) return;
+      const currentIndex = this.filteredMessages.findIndex(m => m.id === this.selectedMessage.id);
+      if (currentIndex < this.filteredMessages.length - 1) {
+        this.selectMessage(this.filteredMessages[currentIndex + 1]);
       }
     },
 
-    refresh() {
-      window.location.reload();
+    selectPreviousMessage() {
+      if (!this.selectedMessage || this.filteredMessages.length === 0) return;
+      const currentIndex = this.filteredMessages.findIndex(m => m.id === this.selectedMessage.id);
+      if (currentIndex > 0) {
+        this.selectMessage(this.filteredMessages[currentIndex - 1]);
+      }
+    },
+
+    toggleMessageSelection(id) {
+      const index = this.selectedMessages.indexOf(id);
+      if (index > -1) {
+        this.selectedMessages.splice(index, 1);
+      } else {
+        this.selectedMessages.push(id);
+      }
+    },
+
+    toggleSelectAll() {
+      if (this.selectedMessages.length === this.filteredMessages.length) {
+        this.selectedMessages = [];
+      } else {
+        this.selectedMessages = this.filteredMessages.map(m => m.id);
+      }
+    },
+
+    markSelectedAsRead() {
+      if (this.selectedMessages.length === 0) return;
+      window.showToast(`Marked ${this.selectedMessages.length} message(s) as read`, 'success');
+      this.selectedMessages = [];
+    },
+
+    // Helpers
+    getProjectBadgeClass(projectName) {
+      // Generate consistent color based on project name hash
+      const colors = [
+        'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
+        'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300',
+        'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300',
+        'bg-pink-100 dark:bg-pink-900/30 text-pink-700 dark:text-pink-300',
+        'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300',
+        'bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-300'
+      ];
+      const hash = projectName.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+      return colors[hash % colors.length];
     }
   };
 }

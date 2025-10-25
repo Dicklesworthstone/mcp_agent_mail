@@ -149,6 +149,7 @@ function timeTravelManager() {
     snapshot: null,
     agents: [],
     loadingAgents: false,
+    _lastProjectLoaded: null,
 
     async init() {
       // Watch for project changes
@@ -164,16 +165,30 @@ function timeTravelManager() {
     },
 
     async loadAgents(project) {
+      // Store the project we're loading to detect race conditions
+      this._lastProjectLoaded = project;
       this.loadingAgents = true;
+
       try {
         const response = await fetch(`/api/projects/${project}/agents`);
         const data = await response.json();
-        this.agents = data.agents || [];
+
+        // Only update agents if this is still the current project
+        // (user might have switched projects while we were loading)
+        if (this._lastProjectLoaded === project) {
+          this.agents = data.agents || [];
+        }
       } catch (error) {
         console.error('Failed to load agents:', error);
-        this.agents = [];
+        // Only clear agents if this is still the current project
+        if (this._lastProjectLoaded === project) {
+          this.agents = [];
+        }
       } finally {
-        this.loadingAgents = false;
+        // Only clear loading state if this is still the current project
+        if (this._lastProjectLoaded === project) {
+          this.loadingAgents = false;
+        }
       }
     },
 
@@ -197,6 +212,8 @@ function timeTravelManager() {
             requested_time: this.selectedTime,
             error: errorData.detail || errorData.error || `Server error: ${response.status}`
           };
+          // Render lucide icons (for the alert-triangle icon in error display)
+          lucide.createIcons();
           return;
         }
 
@@ -212,6 +229,8 @@ function timeTravelManager() {
           requested_time: this.selectedTime,
           error: 'Failed to retrieve snapshot. Please check your connection and try again.'
         };
+        // Render lucide icons (for the alert-triangle icon in error display)
+        lucide.createIcons();
       }
     }
   };

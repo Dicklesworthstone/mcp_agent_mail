@@ -1117,7 +1117,90 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             return fts, like_pat, like_scope, tokens
 
         @fastapi_app.get("/mail", response_class=HTMLResponse)
-        async def mail_index() -> HTMLResponse:
+        async def mail_unified_inbox() -> HTMLResponse:
+            """Unified inbox showing ALL messages across ALL projects (Gmail-style)"""
+            await ensure_schema()
+            async with get_session() as session:
+                # Fetch all messages with project and agent information
+                query = text("""
+                    SELECT
+                        m.id,
+                        m.subject,
+                        m.body_md,
+                        m.created_ts,
+                        m.importance,
+                        m.thread_id,
+                        sender.name as sender_name,
+                        p.slug as project_slug,
+                        p.human_key as project_name,
+                        GROUP_CONCAT(DISTINCT recipient.name) as recipients
+                    FROM messages m
+                    JOIN agents sender ON m.sender_id = sender.id
+                    JOIN projects p ON m.project_id = p.id
+                    LEFT JOIN message_recipients mr ON m.id = mr.message_id
+                    LEFT JOIN agents recipient ON mr.agent_id = recipient.id
+                    GROUP BY m.id
+                    ORDER BY m.created_ts DESC
+                    LIMIT 500
+                """)
+
+                rows = await session.execute(query)
+                messages = []
+
+                for r in rows.fetchall():
+                    # Extract excerpt from body (first 150 chars, stripped of markdown)
+                    body = r[2] or ""
+                    excerpt = body[:150].replace('#', '').replace('*', '').replace('`', '').strip()
+                    if len(body) > 150:
+                        excerpt += "..."
+
+                    # Format created timestamp
+                    from datetime import datetime, timezone
+                    created_ts = r[3]
+                    if isinstance(created_ts, str):
+                        created_dt = datetime.fromisoformat(created_ts.replace('Z', '+00:00'))
+                    else:
+                        created_dt = created_ts
+
+                    # Relative time
+                    now = datetime.now(timezone.utc)
+                    delta = now - created_dt.replace(tzinfo=timezone.utc) if created_dt.tzinfo is None else now - created_dt
+
+                    if delta.days > 365:
+                        created_relative = f"{delta.days // 365}y ago"
+                    elif delta.days > 30:
+                        created_relative = f"{delta.days // 30}mo ago"
+                    elif delta.days > 0:
+                        created_relative = f"{delta.days}d ago"
+                    elif delta.seconds > 3600:
+                        created_relative = f"{delta.seconds // 3600}h ago"
+                    elif delta.seconds > 60:
+                        created_relative = f"{delta.seconds // 60}m ago"
+                    else:
+                        created_relative = "Just now"
+
+                    messages.append({
+                        "id": r[0],
+                        "subject": r[1] or "(No subject)",
+                        "body_md": r[2] or "",
+                        "excerpt": excerpt,
+                        "created_ts": str(r[3]),
+                        "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
+                        "created_relative": created_relative,
+                        "importance": r[4] or "normal",
+                        "thread_id": r[5],
+                        "sender": r[6],
+                        "project_slug": r[7],
+                        "project_name": r[8],
+                        "recipients": r[9] or "",
+                        "read": False  # TODO: Implement read tracking
+                    })
+
+            return await _render("mail_unified_inbox.html", messages=messages)
+
+        @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
+        async def mail_projects_list() -> HTMLResponse:
+            """Projects list view (moved from /mail)"""
             await ensure_schema()
             await refresh_project_sibling_suggestions()
             sibling_map = await get_project_sibling_data()
