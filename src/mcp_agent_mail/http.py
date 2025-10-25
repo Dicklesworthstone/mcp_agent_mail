@@ -19,10 +19,18 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
+from sqlalchemy.exc import NoResultFound
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.types import Receive, Scope, Send
 
-from .app import _expire_stale_claims, _tool_metrics_snapshot, build_mcp_server
+from .app import (
+    _expire_stale_claims,
+    _tool_metrics_snapshot,
+    build_mcp_server,
+    get_project_sibling_data,
+    refresh_project_sibling_suggestions,
+    update_project_sibling_status,
+)
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import AsyncFileLock, ensure_archive, write_agent_profile, write_claim_record
@@ -78,6 +86,12 @@ def _configure_logging(settings: Settings) -> None:
     # "Terminating session: None" is routine for stateless mode and just noise
     logging.getLogger("mcp.server.streamable_http").setLevel(logging.WARNING)
     logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
+
+    # Suppress verbose aiosqlite DEBUG logs (functools.partial cursor/operation noise)
+    logging.getLogger("aiosqlite").setLevel(logging.INFO)
+
+    # Suppress SSE ping keepalive debug logs (periodic noise every 15s)
+    logging.getLogger("sse_starlette.sse").setLevel(logging.INFO)
 
     # mark configured
     _LOGGING_CONFIGURED = True
@@ -958,9 +972,24 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail", response_class=HTMLResponse)
         async def mail_index() -> HTMLResponse:
             await ensure_schema()
+            await refresh_project_sibling_suggestions()
+            sibling_map = await get_project_sibling_data()
             async with get_session() as session:
                 rows = await session.execute(text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC"))
-                projects = [{"id": r[0], "slug": r[1], "human_key": r[2], "created_at": str(r[3])} for r in rows.fetchall()]
+                projects = []
+                for r in rows.fetchall():
+                    project_id = int(r[0])
+                    siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
+                    projects.append(
+                        {
+                            "id": project_id,
+                            "slug": r[1],
+                            "human_key": r[2],
+                            "created_at": str(r[3]),
+                            "confirmed_siblings": siblings.get("confirmed", []),
+                            "suggested_siblings": siblings.get("suggested", []),
+                        }
+                    )
             return await _render("mail_index.html", projects=projects)
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
@@ -1020,6 +1049,40 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 tokens=tokens if q and q.strip() else [],
                 results=matched_messages,
             )
+
+        @fastapi_app.post("/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
+        async def update_project_sibling(project_id: int, other_id: int, request: Request) -> JSONResponse:
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+            action = str(payload.get("action", "")).lower()
+            if action not in {"confirm", "dismiss", "reset"}:
+                return JSONResponse({"error": "Invalid action"}, status_code=status.HTTP_400_BAD_REQUEST)
+
+            target_status = {
+                "confirm": "confirmed",
+                "dismiss": "dismissed",
+                "reset": "suggested",
+            }[action]
+
+            try:
+                suggestion = await update_project_sibling_status(project_id, other_id, target_status)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=status.HTTP_400_BAD_REQUEST)
+            except NoResultFound:
+                return JSONResponse({"error": "Project pair not found"}, status_code=status.HTTP_404_NOT_FOUND)
+            except Exception as exc:
+                structlog.get_logger("sibling").exception(
+                    "project_sibling.update_failed",
+                    project_id=project_id,
+                    other_id=other_id,
+                    action=action,
+                    error=str(exc),
+                )
+                return JSONResponse({"error": "Unable to update sibling status"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
 
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
         async def mail_inbox(project: str, agent: str, limit: int = 50, page: int = 1) -> HTMLResponse:

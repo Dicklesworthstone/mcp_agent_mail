@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Claims — {{ project.human_key }}{% endblock %}
+{% block title %}File Reservations — {{ project.human_key }}{% endblock %}
 
 {% block breadcrumbs %}
 <nav class="flex items-center gap-2 text-sm">
@@ -12,7 +12,7 @@
     {{ project.human_key }}
   </a>
   <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
-  <span class="text-slate-900 dark:text-white font-medium">Claims</span>
+  <span class="text-slate-900 dark:text-white font-medium">File Reservations</span>
 </nav>
 {% endblock %}
 
@@ -26,12 +26,12 @@
           <i data-lucide="lock" class="w-8 h-8 text-white"></i>
         </div>
         <div>
-          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">Path Claims</h1>
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">File Reservations</h1>
           <p class="text-slate-600 dark:text-slate-400">
             Resource coordination and locking
             {% if claims %}
               <span class="text-slate-400 dark:text-slate-500">•</span>
-              <span class="font-medium">{{ claims|length }} claim{{ 's' if claims|length != 1 else '' }}</span>
+              <span class="font-medium">{{ claims|length }} reservation{{ 's' if claims|length != 1 else '' }}</span>
             {% endif %}
           </p>
         </div>
@@ -138,10 +138,10 @@
         <i data-lucide="shield-off" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
       </div>
       <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
-        No claims found
+        No file reservations found
       </h3>
       <p class="text-slate-600 dark:text-slate-400 max-w-md mx-auto">
-        Path claims will appear here when agents request resource locks for coordination.
+        File reservations will appear here when agents request resource locks for coordination.
       </p>
     </div>
   {% endif %}

@@ -5,9 +5,16 @@ import pytest
 from fastmcp import Client
 from git import Repo
 from PIL import Image
+from sqlalchemy import text
 
-from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.app import (
+    build_mcp_server,
+    get_project_sibling_data,
+    refresh_project_sibling_suggestions,
+    update_project_sibling_status,
+)
 from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.db import get_session
 
 
 @pytest.mark.asyncio
@@ -435,3 +442,33 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
         )
         deliveries = resp2.data.get("deliveries") or []
         assert deliveries and deliveries[0]["payload"]["subject"] == "AllowedAfterTTL"
+
+
+@pytest.mark.asyncio
+async def test_project_sibling_suggestions_backend(isolated_env, monkeypatch):
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/data/projects/smartedgar_mcp"})
+        await client.call_tool("ensure_project", {"human_key": "/data/projects/smartedgar_mcp_frontend"})
+
+    await refresh_project_sibling_suggestions(max_pairs=5)
+    data = await get_project_sibling_data()
+
+    async with get_session() as session:
+        rows = await session.execute(text("SELECT id FROM projects ORDER BY slug"))
+        project_ids = [int(row[0]) for row in rows.fetchall()]
+
+    assert len(project_ids) == 2
+    first_id, second_id = project_ids
+    assert first_id in data and second_id in data
+    assert any(entry["peer"]["id"] == second_id for entry in data[first_id]["suggested"])
+
+    confirmation = await update_project_sibling_status(first_id, second_id, "confirmed")
+    assert confirmation["status"] == "confirmed"
+
+    updated_map = await get_project_sibling_data()
+    assert any(entry["peer"]["id"] == second_id for entry in updated_map[first_id]["confirmed"])
+    assert not any(entry["peer"]["id"] == second_id for entry in updated_map[first_id]["suggested"])
+    assert any(entry["peer"]["id"] == first_id for entry in updated_map[second_id]["confirmed"])

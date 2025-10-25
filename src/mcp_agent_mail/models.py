@@ -97,3 +97,20 @@ class AgentLink(SQLModel, table=True):
     updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_ts: Optional[datetime] = None
 
+
+class ProjectSiblingSuggestion(SQLModel, table=True):
+    """LLM-ranked sibling project suggestion (undirected pair)."""
+
+    __tablename__ = "project_sibling_suggestions"
+    __table_args__ = (UniqueConstraint("project_a_id", "project_b_id", name="uq_project_sibling_pair"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_a_id: int = Field(foreign_key="projects.id", index=True)
+    project_b_id: int = Field(foreign_key="projects.id", index=True)
+    score: float = Field(default=0.0)
+    status: str = Field(default="suggested", max_length=16)  # suggested | confirmed | dismissed
+    rationale: str = Field(default="", max_length=4096)
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    evaluated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    confirmed_ts: Optional[datetime] = Field(default=None)
+    dismissed_ts: Optional[datetime] = Field(default=None)

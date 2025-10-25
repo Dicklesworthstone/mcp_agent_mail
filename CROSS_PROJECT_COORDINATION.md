@@ -12,7 +12,7 @@ This guide explains how to coordinate agents working across different parts of a
 
 - Agents registered in different projects **cannot see each other**
 - Agents in different projects **cannot send messages to each other**
-- Claims are scoped to a single project
+- File reservations are scoped to a single project
 - Inbox/outbox are per-project
 
 **Example of what DOES NOT work:**
@@ -91,14 +91,14 @@ Agents:
 - ✅ Agents can discover each other via `resource://agents/my-app`
 - ✅ Agents can send messages to coordinate
 - ✅ Thread discussions can include all stakeholders
-- ✅ Claims work across the entire codebase
+- ✅ File reservations work across the entire codebase
 - ✅ Shared project archive for all communication history
 
 **Considerations:**
 - All agents share the same agent namespace (agent names must be unique within the project)
 - All agents CAN message all other agents in the project (unless contact policies restrict this)
 - Agents only see messages addressed to them or sent by them (privacy is maintained)
-- Claims need careful path specification to avoid conflicts
+- File reservations need careful path specification to avoid conflicts
 
 ### Pattern 2: Polyrepo with Shared Project
 
@@ -154,7 +154,7 @@ Agents:
 - ✅ Clear separation between coordination and code
 
 **Considerations:**
-- Claims won't prevent conflicts across different repos (use messages to coordinate instead)
+- File reservations won't prevent conflicts across different repos (use messages to coordinate instead)
 - Need to manage multiple git repositories
 
 ## When to Use Separate Projects
@@ -329,12 +329,12 @@ Agents:
   - Helper
 ```
 
-### DO: Use Claims to Signal Editing Intent
+### DO: Use File Reservations to Signal Editing Intent
 
-When multiple agents work on the same codebase, use claims to avoid conflicts:
+When multiple agents work on the same codebase, use file reservations to avoid conflicts:
 
 ```json
-// FrontendDev claims UI files
+// FrontendDev reserves UI files
 {
   "tool": "claim_paths",
   "arguments": {
@@ -344,7 +344,7 @@ When multiple agents work on the same codebase, use claims to avoid conflicts:
   }
 }
 
-// BackendDev claims API files
+// BackendDev reserves API files
 {
   "tool": "claim_paths",
   "arguments": {
@@ -416,7 +416,7 @@ Keep related messages in the same thread:
   "body_md": "Adding avatar upload. Need API endpoint: POST /api/users/{id}/avatar"
 }}
 
-// BackendDev claims API files
+// BackendDev reserves API files
 {"tool": "claim_paths", "arguments": {
   "project_key": "/data/projects/webapp",
   "agent_name": "BackendDev",
@@ -431,7 +431,7 @@ Keep related messages in the same thread:
   "body_md": "Done! Endpoint accepts multipart/form-data. See backend/api/users.py:145"
 }}
 
-// FrontendDev releases backend claim, claims frontend
+// FrontendDev releases backend reservation, reserves frontend
 {"tool": "claim_paths", "arguments": {
   "project_key": "/data/projects/webapp",
   "agent_name": "FrontendDev",
@@ -555,13 +555,13 @@ Re-register all agents in a single shared project (see Migration Guide above).
 - ✅ Use a **single shared project** for all agents that need to coordinate
 - ✅ Choose a descriptive project name (e.g., `/data/projects/my-product`)
 - ✅ Register all agents in the same project
-- ✅ Use claims to signal editing intent and avoid conflicts
+- ✅ Use file reservations to signal editing intent and avoid conflicts
 - ✅ Use threads to organize related discussions
 
 **Future:**
 - ⏳ Cross-project messaging (planned)
 - ⏳ Federated agent directory (planned)
-- ⏳ Cross-project claims (planned)
+- ⏳ Cross-project file reservations (planned)
 
 **When in doubt:**
 - If agents need to coordinate → Same project

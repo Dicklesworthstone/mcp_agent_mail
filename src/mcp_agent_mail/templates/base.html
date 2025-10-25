@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" x-data="{ darkMode: localStorage.getItem('darkMode') === 'true' }"
+<html lang="en" x-data="darkModeController()" x-init="init()"
       :class="{ 'dark': darkMode }" x-cloak>
   <head>
     <meta charset="utf-8" />
@@ -10,6 +10,22 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <script>
+      (function () {
+        try {
+          const stored = localStorage.getItem('darkMode');
+          const prefers = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (stored === 'true' || (stored === null && prefers)) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (error) {
+          document.documentElement.classList.remove('dark');
+        }
+      })();
+    </script>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -443,6 +459,37 @@
         }
       }
 
+      @keyframes slideInRight {
+        from {
+          opacity: 0;
+          transform: translateX(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+
+      @keyframes fadeOutCollapse {
+        0% {
+          opacity: 1;
+          max-height: 500px;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0;
+          max-height: 500px;
+          transform: scale(0.95);
+        }
+        100% {
+          opacity: 0;
+          max-height: 0;
+          transform: scale(0.95);
+          margin: 0;
+          padding: 0;
+        }
+      }
+
       /* Respect user's reduced motion preference */
       @media (prefers-reduced-motion: reduce) {
         /* Disable decorative animations */
@@ -769,7 +816,7 @@
                   </div>
                   <div class="flex items-center gap-2">
                     <i data-lucide="layers" class="w-4 h-4"></i>
-                    <span>7 steps</span>
+                    <span>8 steps</span>
                   </div>
                   <div class="flex items-center gap-2">
                     <i data-lucide="zap" class="w-4 h-4"></i>
@@ -859,8 +906,135 @@
             </div>
           </template>
 
-          <!-- Step 2: Agents -->
+          <!-- Step 2: Related Projects (Siblings) -->
           <template x-if="currentStep === 2">
+            <div class="space-y-6 animate-fade-in">
+              <div class="aspect-video bg-gradient-to-br from-violet-100 to-purple-200 dark:from-violet-900/30 dark:to-purple-900/30 rounded-xl border border-violet-300 dark:border-violet-700 p-8 flex items-center justify-center">
+                <div class="flex items-center gap-6">
+                  <div class="text-center">
+                    <div class="w-20 h-20 bg-gradient-to-br from-primary-500 to-primary-700 rounded-2xl flex items-center justify-center shadow-lg">
+                      <i data-lucide="folder" class="w-10 h-10 text-white"></i>
+                    </div>
+                    <div class="text-sm font-semibold text-slate-700 dark:text-slate-300 mt-2">Frontend</div>
+                  </div>
+                  <div class="flex flex-col items-center gap-2">
+                    <i data-lucide="git-branch" class="w-8 h-8 text-violet-500"></i>
+                    <div class="text-xs font-semibold text-violet-600 dark:text-violet-400">linked</div>
+                  </div>
+                  <div class="text-center">
+                    <div class="w-20 h-20 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-2xl flex items-center justify-center shadow-lg">
+                      <i data-lucide="folder" class="w-10 h-10 text-white"></i>
+                    </div>
+                    <div class="text-sm font-semibold text-slate-700 dark:text-slate-300 mt-2">Backend</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="prose dark:prose-invert max-w-none">
+                <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-4">Discover Related Projects</h3>
+                <p class="text-lg text-slate-600 dark:text-slate-400 mb-4">
+                  Agent Mail can <strong>automatically detect</strong> when projects are related and should work together!
+                </p>
+
+                <div class="bg-gradient-to-br from-violet-50 to-purple-50 dark:from-violet-900/20 dark:to-purple-900/20 border border-violet-200 dark:border-violet-800 rounded-lg p-5 mb-4">
+                  <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 bg-gradient-to-br from-violet-500 to-purple-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="sparkles" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                      <h4 class="font-bold text-violet-900 dark:text-violet-100 mb-2">Smart Suggestions</h4>
+                      <p class="text-sm text-violet-800 dark:text-violet-200 mb-3">
+                        Using AI, we analyze your projects and suggest which ones should be linked based on:
+                      </p>
+                      <ul class="space-y-1.5 text-sm text-violet-700 dark:text-violet-300">
+                        <li class="flex items-center gap-2">
+                          <i data-lucide="check" class="w-4 h-4 text-violet-600"></i>
+                          <span>Similar code patterns and dependencies</span>
+                        </li>
+                        <li class="flex items-center gap-2">
+                          <i data-lucide="check" class="w-4 h-4 text-violet-600"></i>
+                          <span>Shared file structures (like frontend + backend)</span>
+                        </li>
+                        <li class="flex items-center gap-2">
+                          <i data-lucide="check" class="w-4 h-4 text-violet-600"></i>
+                          <span>Common naming conventions</span>
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-amber-50 to-yellow-50 dark:from-amber-900/20 dark:to-yellow-900/20 border-2 border-amber-300 dark:border-amber-700 rounded-xl p-5 mb-6">
+                  <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 bg-amber-500 rounded-xl flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="shield-check" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                      <h4 class="font-bold text-amber-900 dark:text-amber-100 mb-2">Important: Discovery ≠ Messaging Permission</h4>
+                      <p class="text-sm text-amber-800 dark:text-amber-200 mb-3">
+                        Confirming a link <strong>only updates your UI</strong> with handy navigation badges. It does <strong>not</strong> let agents automatically message across projects.
+                      </p>
+                      <div class="bg-white/60 dark:bg-slate-800/60 rounded-lg p-3 text-xs text-amber-900 dark:text-amber-100 space-y-2">
+                        <div class="flex items-start gap-2">
+                          <span class="text-emerald-600 dark:text-emerald-400 font-bold">✓</span>
+                          <span><strong>What confirmation does:</strong> Adds badges for quick navigation between related projects</span>
+                        </div>
+                        <div class="flex items-start gap-2">
+                          <span class="text-red-600 dark:text-red-400 font-bold">✗</span>
+                          <span><strong>What it doesn't do:</strong> Grant agents permission to send messages across projects</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-blue-900/20 dark:to-indigo-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-5">
+                  <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 bg-blue-500 rounded-xl flex items-center justify-center flex-shrink-0">
+                      <i data-lucide="lock" class="w-5 h-5 text-white"></i>
+                    </div>
+                    <div class="flex-1">
+                      <h4 class="font-bold text-blue-900 dark:text-blue-100 mb-2">Why Keep Them Separate?</h4>
+                      <p class="text-sm text-blue-800 dark:text-blue-200 mb-3">
+                        <strong>Agent Mail uses agent-centric messaging</strong> — every message requires explicit permission. This ensures:
+                      </p>
+                      <div class="space-y-2 text-sm text-blue-700 dark:text-blue-300">
+                        <div class="flex items-center gap-2">
+                          <i data-lucide="shield" class="w-4 h-4 text-blue-600"></i>
+                          <span><strong>Security:</strong> No surprise deliveries to unintended recipients</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <i data-lucide="eye" class="w-4 h-4 text-blue-600"></i>
+                          <span><strong>Transparency:</strong> You always know who can message whom</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <i data-lucide="file-check" class="w-4 h-4 text-blue-600"></i>
+                          <span><strong>Control:</strong> You approve every communication path</span>
+                        </div>
+                      </div>
+                      <div class="mt-3 pt-3 border-t border-blue-200 dark:border-blue-700">
+                        <p class="text-xs text-blue-700 dark:text-blue-300 italic">
+                          Think of it like LinkedIn: The system suggests connections (discovery), but only you decide who can send messages (authorization).
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-6 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-lg p-4">
+                  <div class="flex items-start gap-3">
+                    <i data-lucide="info" class="w-5 h-5 text-slate-600 dark:text-slate-400 mt-0.5 flex-shrink-0"></i>
+                    <div class="text-sm text-slate-700 dark:text-slate-300">
+                      <strong>Where to find it:</strong> Look for the "Related Projects" section on your project cards. You'll see suggestions with confidence scores and AI-generated explanations!
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Step 3: Agents -->
+          <template x-if="currentStep === 3">
             <div class="space-y-6 animate-fade-in">
               <div class="aspect-video bg-gradient-to-br from-slate-100 to-slate-200 dark:from-slate-800 dark:to-slate-900 rounded-xl border border-slate-300 dark:border-slate-700 p-8 flex items-center justify-center">
                 <div class="flex items-center gap-8">
@@ -914,8 +1088,8 @@
             </div>
           </template>
 
-          <!-- Step 3: Messages -->
-          <template x-if="currentStep === 3">
+          <!-- Step 4: Messages -->
+          <template x-if="currentStep === 4">
             <div class="space-y-6 animate-fade-in">
               <div class="space-y-3">
                 <div class="bg-white dark:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 p-4">
@@ -975,8 +1149,8 @@
             </div>
           </template>
 
-          <!-- Step 4: File Reservations -->
-          <template x-if="currentStep === 4">
+          <!-- Step 5: File Reservations -->
+          <template x-if="currentStep === 5">
             <div class="space-y-6 animate-fade-in">
               <div class="bg-gradient-to-br from-warning-50 to-orange-50 dark:from-warning-900/20 dark:to-orange-900/20 border border-warning-200 dark:border-warning-800 rounded-xl p-6">
                 <div class="flex items-start gap-4 mb-4">
@@ -985,7 +1159,7 @@
                   </div>
                   <div>
                     <h4 class="text-xl font-bold text-warning-900 dark:text-warning-100 mb-2">
-                      File Reservation (Previously "Claims")
+                      File Reservations
                     </h4>
                     <p class="text-warning-800 dark:text-warning-200">
                       Think of it like putting a sticky note on a file: "I'm working here - please wait!"
@@ -1059,8 +1233,8 @@
             </div>
           </template>
 
-          <!-- Step 5: Features -->
-          <template x-if="currentStep === 5">
+          <!-- Step 6: Features -->
+          <template x-if="currentStep === 6">
             <div class="space-y-6 animate-fade-in">
               <div class="prose dark:prose-invert max-w-none">
                 <h3 class="text-2xl font-bold text-slate-900 dark:text-white mb-6 text-center">Powerful Features Built In</h3>
@@ -1128,7 +1302,7 @@
           </template>
 
           <!-- Final Step with Celebration -->
-          <template x-if="currentStep === 6">
+          <template x-if="currentStep === 7">
             <div class="space-y-6 animate-fade-in text-center" x-init="celebrateCompletion()">
               <!-- Confetti canvas -->
               <canvas id="confetti-canvas" class="fixed inset-0 pointer-events-none z-50" style="display: none;"></canvas>
@@ -1449,12 +1623,17 @@
             </button>
 
             <!-- Dark Mode Toggle -->
-            <button @click="darkMode = !darkMode; localStorage.setItem('darkMode', darkMode)"
+            <button @click="toggleDarkMode()"
                     class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                     data-tippy-content="Toggle dark/light mode"
                     aria-label="Toggle dark mode">
-              <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600"></i>
-              <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-yellow-400"></i>
+              <svg x-show="!darkMode" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+              <svg x-show="darkMode" xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-yellow-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="4" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M12 2v2m0 16v2m10-10h-2M6 12H4m15.364 6.364-1.414-1.414M6.05 6.05 4.636 4.636m12.728 0-1.414 1.414M6.05 17.95l-1.414 1.414" />
+              </svg>
             </button>
           </div>
         </div>
@@ -1482,6 +1661,46 @@
 
     <!-- Alpine.js Components -->
     <script>
+      function darkModeController() {
+        return {
+          darkMode: document.documentElement.classList.contains('dark'),
+          init() {
+            try {
+              const stored = localStorage.getItem('darkMode');
+              if (stored === null) {
+                localStorage.setItem('darkMode', String(this.darkMode));
+              } else {
+                this.darkMode = stored === 'true';
+              }
+            } catch (error) {
+              this.darkMode = document.documentElement.classList.contains('dark');
+            }
+            const apply = (value) => {
+              document.documentElement.classList.toggle('dark', value);
+              try {
+                localStorage.setItem('darkMode', String(value));
+              } catch (error) {
+                // ignore storage failures (e.g., private mode)
+              }
+            };
+            apply(this.darkMode);
+            this.$watch('darkMode', (value) => {
+              apply(value);
+              window.dispatchEvent(new CustomEvent('darkmode-change', { detail: { darkMode: value } }));
+            });
+            window.setDarkMode = (value) => {
+              this.darkMode = Boolean(value);
+            };
+            window.toggleDarkMode = () => {
+              this.darkMode = !this.darkMode;
+            };
+          },
+          toggleDarkMode() {
+            this.darkMode = !this.darkMode;
+          },
+        };
+      }
+
       // Tutorial Manager
       function tutorialManager() {
         return {
@@ -1498,6 +1717,7 @@
           steps: [
             { title: 'Welcome to Agent Mail', icon: 'mail', actions: [] },
             { title: 'What are Projects?', icon: 'folder', actions: ['viewed_projects'] },
+            { title: 'Related Projects', icon: 'git-branch', actions: ['learned_siblings'] },
             { title: 'What are Agents?', icon: 'bot', actions: ['learned_agents'] },
             { title: 'How Agents Communicate', icon: 'message-square', actions: ['learned_messages'] },
             { title: 'File Reservations', icon: 'file-lock', actions: ['learned_reservations'] },
@@ -1823,9 +2043,14 @@
               iconColor: 'text-yellow-600',
               shortcut: 'D',
               action: () => {
-                const darkMode = localStorage.getItem('darkMode') === 'true';
-                localStorage.setItem('darkMode', !darkMode);
-                window.location.reload();
+                if (window.toggleDarkMode) {
+                  window.toggleDarkMode();
+                } else {
+                  const html = document.documentElement;
+                  const next = !html.classList.contains('dark');
+                  html.classList.toggle('dark', next);
+                  localStorage.setItem('darkMode', String(next));
+                }
               },
               keywords: 'dark mode theme light toggle'
             },
@@ -2255,9 +2480,14 @@
         if (e.key === 'd' || e.key === 'D') {
           if (!e.ctrlKey && !e.metaKey && !e.shiftKey) {
             e.preventDefault();
-            const darkMode = localStorage.getItem('darkMode') === 'true';
-            localStorage.setItem('darkMode', !darkMode);
-            window.location.reload();
+            if (window.toggleDarkMode) {
+              window.toggleDarkMode();
+            } else {
+              const html = document.documentElement;
+              const next = !html.classList.contains('dark');
+              html.classList.toggle('dark', next);
+              localStorage.setItem('darkMode', String(next));
+            }
           }
         }
 

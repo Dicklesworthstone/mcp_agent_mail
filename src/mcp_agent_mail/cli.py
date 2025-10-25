@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
@@ -21,6 +22,9 @@ from .guard import install_guard as install_guard_script, uninstall_guard as uni
 from .http import build_http_app
 from .models import Agent, Claim, Message, MessageRecipient, Project
 from .utils import slugify
+
+# Suppress annoying bleach CSS sanitizer warning from dependencies
+warnings.filterwarnings("ignore", category=UserWarning, module="bleach")
 
 console = Console()
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")

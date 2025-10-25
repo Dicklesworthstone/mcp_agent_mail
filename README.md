@@ -1,6 +1,6 @@
 # mcp-agent-mail
 
-A mail-like coordination layer for coding agents, exposed as an HTTP-only FastMCP server. It gives agents memorable identities, an inbox/outbox, searchable message history, and voluntary file-claim “leases” to avoid stepping on each other.
+A mail-like coordination layer for coding agents, exposed as an HTTP-only FastMCP server. It gives agents memorable identities, an inbox/outbox, searchable message history, and voluntary file reservation "leases" to avoid stepping on each other.
 
 Think of it as asynchronous email + directory + change-intent signaling for your agents, backed by Git (for human-auditable artifacts) and SQLite (for indexing and queries).
 
@@ -19,7 +19,7 @@ This project provides a lightweight, interoperable layer so agents can:
 - Register a temporary-but-persistent identity (e.g., GreenCastle)
 - Send/receive GitHub-Flavored Markdown messages with images
 - Search, summarize, and thread conversations
-- Declare advisory claims (leases) on files/globs to signal intent
+- Declare advisory file reservations (leases) on files/globs to signal intent
 - Inspect a directory of active agents, programs/models, and activity
 
 It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
@@ -29,17 +29,18 @@ It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini C
 - HTTP-only FastMCP server (Streamable HTTP). No SSE, no STDIO.
 - Dual persistence model:
   - Human-readable markdown in a per-project Git repo for every canonical message and per-recipient inbox/outbox copy
-  - SQLite with FTS5 for fast search, directory queries, and claims/leases
-- “Directory/LDAP” style queries for agents; memorable adjective+noun names
-- Advisory claims for editing surfaces; optional pre-commit guard
+  - SQLite with FTS5 for fast search, directory queries, and file reservations/leases
+- "Directory/LDAP" style queries for agents; memorable adjective+noun names
+- Advisory file reservations for editing surfaces; optional pre-commit guard
 - Resource layer for convenient reads (e.g., `resource://inbox/{agent}`)
 
 ## Typical use cases
 
 - Multiple agents splitting a large refactor across services while staying in sync
 - Frontend and backend teams of agents coordinating thread-by-thread
-- Protecting critical migrations with exclusive claims and a pre-commit guard
+- Protecting critical migrations with exclusive file reservations and a pre-commit guard
 - Searching and summarizing long technical discussions as threads evolve
+- Discovering and linking related projects (e.g., frontend/backend) through AI-powered suggestions
 
 ## Architecture
 
@@ -86,7 +87,7 @@ Per-project Git repo (.mcp-mail/)           SQLite (FTS5)
 
 ## Web UI (human-facing mail viewer)
 
-The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, claims, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
+The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, file reservations, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
 
 - Where it lives: built into the HTTP server in `mcp_agent_mail.http` under the `/mail` path.
 - Who it’s for: humans reviewing activity; agents should continue to use the MCP tools/resources API.
@@ -115,6 +116,8 @@ Auth notes:
 
 - `/mail` (Projects index)
   - Lists all projects (slug, human name, created time) from SQLite.
+  - Suggests **likely sibling projects** when two slugs appear to be parts of the same product (e.g., backend vs. frontend). Suggestions are ranked with heuristics and, when `LLM_ENABLED=true`, an LLM pass across key docs (`README.md`, `AGENTS.md`, etc.).
+  - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross-project messaging—agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
   - Quick stats placeholders; click a project to drill in.
 
 - `/mail/{project}` (Project overview + search + agents)
@@ -124,7 +127,7 @@ Auth notes:
     - Uses FTS5 bm25 scoring when available; otherwise falls back to SQL LIKE on subject/body with your chosen scope.
   - Results show subject, sender, created time, thread id, and a highlighted snippet when using FTS.
   - Agents panel shows registered agents for the project with a link to each inbox.
-  - Quick links to Claims and Attachments for the project header.
+  - Quick links to File Reservations and Attachments for the project header.
 
 - `/mail/{project}/inbox/{agent}` (Inbox for one agent)
   - Reverse‑chronological list with subject, sender, created time, importance badge, thread id.
@@ -140,11 +143,77 @@ Auth notes:
 - `/mail/{project}/search?q=...` (Dedicated search page)
   - Same query syntax as the project overview search, with a token “pill” UI for assembling/removing filters.
 
-- `/mail/{project}/claims` (Claims list)
-  - Displays active and historical claims (exclusive/shared, path pattern, timestamps, released/expired state).
+- `/mail/{project}/claims` (File Reservations list)
+  - Displays active and historical file reservations (exclusive/shared, path pattern, timestamps, released/expired state).
 
 - `/mail/{project}/attachments` (Messages with attachments)
   - Lists messages that contain any attachments, with subject and created time.
+
+### Related Projects Discovery
+
+The Projects index (`/mail`) features an **AI-powered discovery system** that intelligently suggests which projects should be linked together—think frontend + backend, or related microservices.
+
+#### How Discovery Works
+
+**1. Smart Analysis**
+The system uses multiple signals to identify relationships:
+- **Pattern matching**: Compares project names and paths (e.g., "my-app-frontend" ↔ "my-app-backend")
+- **AI understanding** (when `LLM_ENABLED=true`): Reads `README.md`, `AGENTS.md`, and other docs to understand each project's purpose and detect natural relationships
+- **Confidence scoring**: Ranks suggestions from 0-100% with clear rationales
+
+**2. Beautiful Suggestions**
+Related projects appear as polished cards on your dashboard with:
+- 🎯 Visual confidence indicators showing match strength
+- 💬 AI-generated rationales explaining the relationship
+- ✅ **Confirm Link** — accept the suggestion
+- ✖️ **Dismiss** — hide irrelevant matches
+
+**3. Quick Navigation**
+Once confirmed, both projects display interactive badges for instant navigation between related codebases.
+
+#### Why Suggestions, Not Auto-Linking?
+
+> **TL;DR**: We keep you in control. Discovery helps you find relationships; explicit approvals control who can actually communicate.
+
+**Agent Mail uses agent-centric messaging** — every message follows explicit permission chains:
+
+```
+Send Message → Find Recipient → Check AgentLink Approval → Deliver
+```
+
+This design ensures:
+- **Security**: No accidental cross-project message delivery
+- **Transparency**: You always know who can talk to whom
+- **Audit trails**: All communication paths are explicitly approved
+
+**Why not auto-link with AI?**
+If we let an LLM automatically authorize messaging between projects, we'd be:
+- ❌ Bypassing contact policies without human oversight
+- ❌ Risking message misdelivery to unintended recipients
+- ❌ Creating invisible routing paths that are hard to audit
+- ❌ Potentially linking ambiguously-named projects incorrectly
+
+Instead, we give you **discovery + control**:
+- ✅ AI suggests likely relationships (safe, read-only analysis)
+- ✅ You confirm what makes sense (one click)
+- ✅ Agents still use `request_contact` / `respond_contact` for actual messaging permissions
+- ✅ Clear separation: discovery ≠ authorization
+
+#### The Complete Workflow
+
+```
+1. System suggests: "These projects look related" (AI analysis)
+           ↓
+2. You confirm: "Yes, link them" (updates UI badges)
+           ↓
+3. Agents request: request_contact(from_agent, to_agent, to_project)
+           ↓
+4. You approve: respond_contact(accept=true)
+           ↓
+5. Messages flow: Agents can now communicate across projects
+```
+
+**Think of it like LinkedIn**: The system suggests connections, but only *you* decide who gets to send messages.
 
 ### Search syntax (UI)
 
@@ -274,11 +343,11 @@ sequenceDiagram
 - `check_my_messages(project_key, agent_name, since_ts?, urgent_only?, include_bodies?, limit?)` returns recent messages, preserving thread_id where available.
 - `acknowledge_message(project_key, agent_name, message_id)` marks acknowledgements.
 
-4) Avoid conflicts with claims (leases)
+4) Avoid conflicts with file reservations (leases)
 
-- `claim_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON claim artifacts in Git; conflicts are reported if overlapping active exclusives exist.
+- `claim_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON reservation artifacts in Git; conflicts are reported if overlapping active exclusives exist.
 - `release_claims(project_key, agent_name, paths[])` releases active leases. JSON artifacts remain for audit history.
-- Optional: install a pre-commit hook in your code repo that blocks commits conflicting with other agents’ active exclusive claims.
+- Optional: install a pre-commit hook in your code repo that blocks commits conflicting with other agents' active exclusive file reservations.
 
 ```mermaid
 sequenceDiagram
@@ -319,9 +388,9 @@ sequenceDiagram
   - Image references (file path or data URI) are converted to WebP; small images embed inline when policy allows
   - Non-absolute paths resolve relative to the project repo root
   - Stored under `attachments/<xx>/<sha1>.webp` and referenced by relative path in frontmatter
-- Claims
-  - TTL-based; exclusive means “please don’t modify overlapping surfaces” for others until expiry or release
-  - Conflict detection is per exact path pattern; shared claims can coexist, exclusive conflicts are surfaced
+- File Reservations
+  - TTL-based; exclusive means "please don't modify overlapping surfaces" for others until expiry or release
+  - Conflict detection is per exact path pattern; shared reservations can coexist, exclusive conflicts are surfaced
   - JSON artifacts remain in Git for audit even after release (DB tracks release_ts)
 - Search
   - External-content FTS virtual table and triggers index subject/body on insert/update/delete
@@ -352,7 +421,7 @@ Goal: make coordination “just work” without spam across unrelated agents. Th
 ### Policies (per agent)
 
 - `open`: accept any targeted messages in the project.
-- `auto` (default): allow messages when there is obvious shared context (e.g., same thread participants; recent overlapping active claims; recent prior direct contact within a TTL); otherwise requires a contact request.
+- `auto` (default): allow messages when there is obvious shared context (e.g., same thread participants; recent overlapping active file reservations; recent prior direct contact within a TTL); otherwise requires a contact request.
 - `contacts_only`: require an approved contact link first.
 - `block_all`: reject all new contacts (errors with CONTACT_BLOCKED).
 
@@ -367,7 +436,7 @@ Use `set_contact_policy(project_key, agent_name, policy)` to update.
 ### Auto-allow heuristics (no explicit request required)
 
 - Same thread: replies or messages to thread participants are allowed.
-- Recent overlapping claims: if sender and recipient hold active claims in the project, messaging is allowed.
+- Recent overlapping file reservations: if sender and recipient hold active file reservations in the project, messaging is allowed.
 - Recent prior contact: a sliding TTL allows follow-ups between the same pair.
 
 These heuristics minimize friction while preventing cold spam.
@@ -383,7 +452,7 @@ When two repos represent the same underlying project (e.g., `frontend` and `back
      - `request_contact(project_key="/abs/path/backend", from_agent="GreenCastle", to_agent="BlueLake", reason="API contract changes")`
    - In `frontend`, `BlueLake` calls:
      - `respond_contact(project_key="/abs/path/backend", to_agent="BlueLake", from_agent="GreenCastle", accept=true)`
-   - After approval, messages can be exchanged; in default `auto` policy the server allows follow-up threads/claims-based coordination without re-requesting.
+   - After approval, messages can be exchanged; in default `auto` policy the server allows follow-up threads/reservation-based coordination without re-requesting.
 
 Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is on by default (CONTACT_ENFORCEMENT_ENABLED=true) but is designed to be non-blocking in obvious collaboration contexts.
 
@@ -445,12 +514,12 @@ sequenceDiagram
 - `resource://views/urgent-unread/{agent}{?project,limit}`: high/urgent importance messages where `read_ts` is null
 - `resource://views/ack-required/{agent}{?project,limit}`: messages with `ack_required=true` where `ack_ts` is null
 
-## Claims and the optional pre-commit guard
+## File Reservations and the optional pre-commit guard
 
-Exclusive claims are advisory but visible and auditable:
+Exclusive file reservations are advisory but visible and auditable:
 
-- A claim JSON is written to `claims/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
-- The pre-commit guard scans active exclusive claims and blocks commits that touch conflicting paths held by another agent
+- A reservation JSON is written to `claims/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
+- The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
 - Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who “owns” the commit
 
 Install the guard into a code repo (conceptual tool call):
@@ -578,7 +647,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 {"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name":"BlueLake"}}}
 ```
 
-2) Claim edit surface (optional)
+2) Reserve edit surface (optional)
 
 ```json
 {"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","paths":["app/api/*.py"],"ttl_seconds":3600,"exclusive":true}}}
@@ -600,7 +669,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 {"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/frontend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"}}}
 ```
 
-2. Backend agent claims `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
+2. Backend agent reserves `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
 
 ```json
 {"method":"tools/call","params":{"name":"claim_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths_list":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
@@ -625,7 +694,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 {"method":"tools/call","params":{"name":"summarize_thread","arguments":{"project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true}}}
 ```
 
-6. Pre-commit guard is installed on the backend repo to protect exclusive claims:
+6. Pre-commit guard is installed on the backend repo to protect exclusive file reservations:
 
 ```json
 {"method":"tools/call","params":{"name":"install_precommit_guard","arguments":{"project_key":"/abs/path/backend","code_repo_path":"/abs/path/backend"}}}
@@ -684,7 +753,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp/ \
 - **HTTP-only FastMCP**: Streamable HTTP is the modern remote transport; SSE is legacy; STDIO is not exposed here by design
 - **Git + Markdown**: Human-auditable, diffable artifacts that fit developer workflows (inbox/outbox mental model)
 - **SQLite + FTS5**: Efficient indexing/search with minimal ops footprint
-- **Advisory claims**: Make intent explicit and reviewable; optional guard enforces claims at commit time
+- **Advisory file reservations**: Make intent explicit and reviewable; optional guard enforces reservations at commit time
 - **WebP attachments**: Compact images by default; inline embedding keeps small diagrams in context
   - Optional: keep original binaries and dedup manifest under `attachments/` for audit and reuse
 
@@ -729,7 +798,7 @@ Send a message (auto-convert images to WebP; inline small ones):
 }
 ```
 
-Claim a surface for editing:
+Reserve a surface for editing:
 
 ```json
 {
@@ -833,7 +902,7 @@ if __name__ == "__main__":
 - "sender_name not registered"
   - Create the agent first with `create_agent`, or check the `project_key` you’re using matches the sender’s project
 - Pre-commit hook blocks commits
-  - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive claims; inspect `.git/hooks/pre-commit`
+  - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive file reservations; inspect `.git/hooks/pre-commit`
 - Inline images didn’t embed
   - Ensure `convert_images=true`, `image_embed_policy="auto"` or `inline`, and the resulting WebP size is below `inline_max_bytes`
 - Message not found
@@ -844,9 +913,9 @@ if __name__ == "__main__":
 ## FAQ
 
 - Why Git and SQLite together?
-  - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn’t.
-- Are claims enforced?
-  - Claims are advisory at the server layer; the optional pre-commit hook adds local enforcement at commit time.
+  - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn't.
+- Are file reservations enforced?
+  - File reservations are advisory at the server layer; the optional pre-commit hook adds local enforcement at commit time.
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
@@ -887,7 +956,7 @@ if __name__ == "__main__":
 | `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
-| `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | Claims for a project |
+| `resource://claims/{slug}{?active_only}` | `slug`, `active_only?` | `list[claim]` | File reservations for a project |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |
@@ -945,11 +1014,11 @@ See `TODO.md` for the in-progress task list, including:
 - Filesystem archive and Git integration hardening (locks, authoring, commits)
 - Agent identity workflow polish (uniqueness, activity tracking)
 - Messaging enhancements (replies, read/ack semantics, urgent-only)
-- Claims/leases (overlap detection, releases, resources)
-- Resources for inbox, thread, message, claims
+- File reservations/leases (overlap detection, releases, resources)
+- Resources for inbox, thread, message, file reservations
 - Search UI and thread summaries
 - Config/auth/CLI and health endpoints
-- Tests for archive, claims, search, CLI
+- Tests for archive, file reservations, search, CLI
 
 ---
 
@@ -1050,7 +1119,7 @@ See `.github/workflows/ci.yml`.
 
 ## Agent Onboarding Guide
 
-This quick guide shows how to register an agent, claim paths, send a message, and acknowledge.
+This quick guide shows how to register an agent, reserve file paths, send a message, and acknowledge.
 
 1) Start the server
 
@@ -1075,9 +1144,9 @@ Example JSON-RPC payload (abbreviated):
 {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"ensure_project","arguments":{"human_key":"/abs/path/backend"}}}
 ```
 
-3) Claim a path for focused work (optional but recommended)
+3) Reserve a path for focused work (optional but recommended)
 
-- Use `claim_paths` to create an exclusive claim on your working surface.
+- Use `claim_paths` to create an exclusive reservation on your working surface.
 - Renew with `renew_claims` before expiry.
 - Release with `release_claims` when done.
 

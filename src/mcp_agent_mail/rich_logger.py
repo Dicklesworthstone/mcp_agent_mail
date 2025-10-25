@@ -178,13 +178,13 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
     table.add_column("Value", style="white", overflow="fold")
 
     # Tool name
-    table.add_row("Tool", f"[bold green]{ctx.tool_name}[/bold green]")
+    table.add_row("Tool", f"[bold green]{ctx.tool_name}[/bold green]")  # We control tool names
 
     # Context info
     if ctx.agent:
-        table.add_row("Agent", f"[magenta]{ctx.agent}[/magenta]")
+        table.add_row("Agent", f"[magenta]{escape(ctx.agent)}[/magenta]")  # User data, needs escape
     if ctx.project:
-        table.add_row("Project", f"[cyan]{ctx.project}[/cyan]")
+        table.add_row("Project", f"[cyan]{escape(ctx.project)}[/cyan]")  # User data, needs escape
 
     # Timing
     table.add_row("Started", ctx.timestamp)
@@ -199,7 +199,7 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
         else:
             error_msg = str(ctx.error) if ctx.error else "Unknown error"
             table.add_row("Status", "[bold red]✗ FAILED[/bold red]")
-            table.add_row("Error", f"[red]{error_msg[:100]}[/red]")
+            table.add_row("Error", f"[red]{escape(error_msg[:100])}[/red]")  # External error messages, needs escape
 
     return table
 
@@ -397,17 +397,17 @@ def create_startup_panel(config: dict[str, Any]) -> Panel:
 
     # Add configuration branches
     for section, values in config.items():
-        section_branch = tree.add(f"[bold cyan]{section}[/bold cyan]")
+        section_branch = tree.add(f"[bold cyan]{section}[/bold cyan]")  # We control section names
         if isinstance(values, dict):
             for key, value in values.items():
                 # Mask sensitive values
                 if "token" in key.lower() or "secret" in key.lower() or "password" in key.lower():
                     display_value = "***" if value else "[dim]not set[/dim]"
                 else:
-                    display_value = str(value)
-                section_branch.add(f"[yellow]{key}[/yellow]: [white]{display_value}[/white]")
+                    display_value = escape(str(value))  # User's .env data, needs escape
+                section_branch.add(f"[yellow]{key}[/yellow]: [white]{display_value}[/white]")  # We control keys
         else:
-            section_branch.add(f"[white]{str(values)}[/white]")
+            section_branch.add(f"[white]{escape(str(values))}[/white]")  # User data, needs escape
 
     return Panel(
         tree,

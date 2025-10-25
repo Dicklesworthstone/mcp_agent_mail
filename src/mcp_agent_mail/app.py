@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -23,11 +24,12 @@ from sqlalchemy import asc, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
+from . import rich_logger
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
-from .models import Agent, AgentLink, Claim, Message, MessageRecipient, Project
+from .models import Agent, AgentLink, Claim, Message, MessageRecipient, Project, ProjectSiblingSuggestion
 from .storage import (
     AsyncFileLock,
     ensure_archive,
@@ -37,7 +39,6 @@ from .storage import (
     write_message_bundle,
 )
 from .utils import generate_agent_name, sanitize_agent_name, slugify
-from . import rich_logger
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +485,333 @@ async def _get_project_by_identifier(identifier: str) -> Project:
         if not project:
             raise NoResultFound(f"Project '{identifier}' not found.")
         return project
+
+
+# --- Project sibling suggestion helpers -----------------------------------------------------
+
+_PROJECT_PROFILE_FILENAMES: tuple[str, ...] = (
+    "README.md",
+    "Readme.md",
+    "readme.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Claude.md",
+    "agents/README.md",
+    "docs/README.md",
+    "docs/overview.md",
+)
+_PROJECT_PROFILE_MAX_TOTAL_CHARS = 6000
+_PROJECT_PROFILE_PER_FILE_CHARS = 1800
+_PROJECT_SIBLING_REFRESH_TTL = timedelta(hours=12)
+_PROJECT_SIBLING_REFRESH_LIMIT = 3
+
+
+def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
+    if a_id == b_id:
+        raise ValueError("Project pair must reference distinct projects.")
+    return (a_id, b_id) if a_id < b_id else (b_id, a_id)
+
+
+async def _read_file_preview(path: Path, *, max_chars: int) -> str:
+    def _read() -> str:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as handle:
+                data = handle.read(max_chars + 1024)
+        except Exception:
+            return ""
+        return (data or "").strip()[:max_chars]
+
+    return await asyncio.to_thread(_read)
+
+
+async def _build_project_profile(
+    project: Project,
+    agent_names: list[str],
+) -> str:
+    pieces: list[str] = [
+        f"Identifier: {project.human_key}",
+        f"Slug: {project.slug}",
+        f"Agents: {', '.join(agent_names) if agent_names else 'None registered'}",
+    ]
+
+    base_path = Path(project.human_key)
+    if base_path.exists():
+        total_chars = 0
+        seen_files: set[Path] = set()
+        for rel_name in _PROJECT_PROFILE_FILENAMES:
+            candidate = base_path / rel_name
+            if candidate in seen_files or not candidate.exists() or not candidate.is_file():
+                continue
+            preview = await _read_file_preview(candidate, max_chars=_PROJECT_PROFILE_PER_FILE_CHARS)
+            if not preview:
+                continue
+            pieces.append(f"===== {rel_name} =====\n{preview}")
+            seen_files.add(candidate)
+            total_chars += len(preview)
+            if total_chars >= _PROJECT_PROFILE_MAX_TOTAL_CHARS:
+                break
+    return "\n\n".join(pieces)
+
+
+def _heuristic_project_similarity(project_a: Project, project_b: Project) -> tuple[float, str]:
+    slug_ratio = SequenceMatcher(None, project_a.slug, project_b.slug).ratio()
+    human_ratio = SequenceMatcher(None, project_a.human_key, project_b.human_key).ratio()
+    shared_prefix = 0.0
+    try:
+        prefix_a = Path(project_a.human_key).name.lower()
+        prefix_b = Path(project_b.human_key).name.lower()
+        shared_prefix = SequenceMatcher(None, prefix_a, prefix_b).ratio()
+    except Exception:
+        shared_prefix = 0.0
+
+    score = max(slug_ratio, human_ratio, shared_prefix)
+    reasons: list[str] = []
+    if slug_ratio > 0.6:
+        reasons.append(f"Slugs are similar ({slug_ratio:.2f})")
+    if human_ratio > 0.6:
+        reasons.append(f"Human keys align ({human_ratio:.2f})")
+    parent_a = Path(project_a.human_key).parent
+    parent_b = Path(project_b.human_key).parent
+    if parent_a == parent_b:
+        score = max(score, 0.85)
+        reasons.append("Projects share the same parent directory")
+    if not reasons:
+        reasons.append("Heuristic comparison found limited overlap; treating as weak relation")
+    return min(max(score, 0.0), 1.0), ", ".join(reasons)
+
+
+async def _score_project_pair(
+    project_a: Project,
+    profile_a: str,
+    project_b: Project,
+    profile_b: str,
+) -> tuple[float, str]:
+    settings = get_settings()
+    heuristic_score, heuristic_reason = _heuristic_project_similarity(project_a, project_b)
+
+    if not settings.llm.enabled:
+        return heuristic_score, heuristic_reason
+
+    system_prompt = (
+        "You are an expert analyst who maps whether two software projects are tightly related parts "
+        "of the same overall product. Score relationship strength from 0.0 (unrelated) to 1.0 "
+        "(same initiative with tightly coupled scope)."
+    )
+    user_prompt = (
+        "Return strict JSON with keys: score (float 0-1), rationale (<=120 words).\n"
+        "Focus on whether these projects represent collaborating slices of the same product.\n\n"
+        f"Project A Profile:\n{profile_a}\n\nProject B Profile:\n{profile_b}"
+    )
+
+    try:
+        completion = await complete_system_user(system_prompt, user_prompt, max_tokens=400)
+        payload = completion.content.strip()
+        data = json.loads(payload)
+        score = float(data.get("score", heuristic_score))
+        rationale = str(data.get("rationale", "")).strip() or heuristic_reason
+        return min(max(score, 0.0), 1.0), rationale
+    except Exception as exc:
+        logger.debug("project_sibling.llm_failed", exc_info=exc)
+        return heuristic_score, heuristic_reason + " (LLM fallback)"
+
+
+async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLING_REFRESH_LIMIT) -> None:
+    await ensure_schema()
+    async with get_session() as session:
+        projects = (await session.execute(select(Project))).scalars().all()
+        if len(projects) < 2:
+            return
+
+        agents_rows = await session.execute(select(Agent.project_id, Agent.name))
+        agent_map: dict[int, list[str]] = defaultdict(list)
+        for proj_id, name in agents_rows.fetchall():
+            agent_map[int(proj_id)].append(name)
+
+        existing_rows = (await session.execute(select(ProjectSiblingSuggestion))).scalars().all()
+        existing_map: dict[tuple[int, int], ProjectSiblingSuggestion] = {}
+        for suggestion in existing_rows:
+            pair = _canonical_project_pair(suggestion.project_a_id, suggestion.project_b_id)
+            existing_map[pair] = suggestion
+
+        now = datetime.now(timezone.utc)
+        to_evaluate: list[tuple[Project, Project, ProjectSiblingSuggestion | None]] = []
+        for idx, project_a in enumerate(projects):
+            if project_a.id is None:
+                continue
+            for project_b in projects[idx + 1 :]:
+                if project_b.id is None:
+                    continue
+                pair = _canonical_project_pair(project_a.id, project_b.id)
+                suggestion = existing_map.get(pair)
+                if suggestion is None:
+                    to_evaluate.append((project_a, project_b, None))
+                else:
+                    age = now - suggestion.evaluated_ts
+                    if suggestion.status == "dismissed" and age < timedelta(days=7):
+                        continue
+                    if age >= _PROJECT_SIBLING_REFRESH_TTL and len(to_evaluate) < max_pairs:
+                        to_evaluate.append((project_a, project_b, suggestion))
+            if len(to_evaluate) >= max_pairs:
+                break
+
+        if not to_evaluate:
+            return
+
+        updated = False
+        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:
+            profile_a = await _build_project_profile(project_a, agent_map.get(project_a.id or -1, []))
+            profile_b = await _build_project_profile(project_b, agent_map.get(project_b.id or -1, []))
+            score, rationale = await _score_project_pair(project_a, profile_a, project_b, profile_b)
+
+            pair = _canonical_project_pair(project_a.id or 0, project_b.id or 0)
+            record = existing_map.get(pair) if suggestion is None else suggestion
+            if record is None:
+                record = ProjectSiblingSuggestion(
+                    project_a_id=pair[0],
+                    project_b_id=pair[1],
+                    score=score,
+                    rationale=rationale,
+                    status="suggested",
+                )
+                session.add(record)
+                existing_map[pair] = record
+            else:
+                record.score = score
+                record.rationale = rationale
+                # Preserve user decisions
+                if record.status not in {"confirmed", "dismissed"}:
+                    record.status = "suggested"
+            record.evaluated_ts = now
+            updated = True
+
+        if updated:
+            await session.commit()
+
+
+async def get_project_sibling_data() -> dict[int, dict[str, list[dict[str, Any]]]]:
+    await ensure_schema()
+    async with get_session() as session:
+        rows = await session.execute(
+            text(
+                """
+                SELECT s.id, s.project_a_id, s.project_b_id, s.score, s.status, s.rationale,
+                       s.evaluated_ts, pa.slug AS slug_a, pa.human_key AS human_a,
+                       pb.slug AS slug_b, pb.human_key AS human_b
+                FROM project_sibling_suggestions s
+                JOIN projects pa ON pa.id = s.project_a_id
+                JOIN projects pb ON pb.id = s.project_b_id
+                ORDER BY s.score DESC
+                """
+            )
+        )
+        result_map: dict[int, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: {"confirmed": [], "suggested": []})
+
+        for row in rows.fetchall():
+            suggestion_id = int(row[0])
+            a_id = int(row[1])
+            b_id = int(row[2])
+            entry_base = {
+                "suggestion_id": suggestion_id,
+                "score": float(row[3] or 0.0),
+                "status": row[4],
+                "rationale": row[5] or "",
+                "evaluated_ts": str(row[6]) if row[6] else None,
+            }
+            a_info = {"id": a_id, "slug": row[7], "human_key": row[8]}
+            b_info = {"id": b_id, "slug": row[9], "human_key": row[10]}
+
+            for current, other in ((a_info, b_info), (b_info, a_info)):
+                bucket = result_map[current["id"]]
+                entry = {**entry_base, "peer": other}
+                if entry["status"] == "confirmed":
+                    bucket["confirmed"].append(entry)
+                elif entry["status"] != "dismissed":
+                    bucket["suggested"].append(entry)
+
+        return result_map
+
+
+async def update_project_sibling_status(project_id: int, other_id: int, status: str) -> dict[str, Any]:
+    normalized_status = status.lower()
+    if normalized_status not in {"confirmed", "dismissed", "suggested"}:
+        raise ValueError("Invalid status")
+
+    await ensure_schema()
+    async with get_session() as session:
+        pair = _canonical_project_pair(project_id, other_id)
+        suggestion = (
+            await session.execute(
+                select(ProjectSiblingSuggestion).where(
+                    ProjectSiblingSuggestion.project_a_id == pair[0],
+                    ProjectSiblingSuggestion.project_b_id == pair[1],
+                )
+            )
+        ).scalars().first()
+
+        if suggestion is None:
+            # Create a baseline suggestion via refresh for this specific pair
+            project_a_obj = await session.get(Project, pair[0])
+            project_b_obj = await session.get(Project, pair[1])
+            projects = [proj for proj in (project_a_obj, project_b_obj) if proj is not None]
+            if len(projects) != 2:
+                raise NoResultFound("Project pair not found")
+            project_map = {proj.id: proj for proj in projects if proj.id is not None}
+            agents_rows = await session.execute(
+                select(Agent.project_id, Agent.name).where(
+                    or_(Agent.project_id == pair[0], Agent.project_id == pair[1])
+                )
+            )
+            agent_map: dict[int, list[str]] = defaultdict(list)
+            for proj_id, name in agents_rows.fetchall():
+                agent_map[int(proj_id)].append(name)
+            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))
+            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))
+            score, rationale = await _score_project_pair(project_map[pair[0]], profile_a, project_map[pair[1]], profile_b)
+            suggestion = ProjectSiblingSuggestion(
+                project_a_id=pair[0],
+                project_b_id=pair[1],
+                score=score,
+                rationale=rationale,
+                status="suggested",
+            )
+            session.add(suggestion)
+            await session.flush()
+
+        now = datetime.now(timezone.utc)
+        suggestion.status = normalized_status
+        suggestion.evaluated_ts = now
+        if normalized_status == "confirmed":
+            suggestion.confirmed_ts = now
+            suggestion.dismissed_ts = None
+        elif normalized_status == "dismissed":
+            suggestion.dismissed_ts = now
+            suggestion.confirmed_ts = None
+
+        await session.commit()
+
+        project_a_obj = await session.get(Project, suggestion.project_a_id)
+        project_b_obj = await session.get(Project, suggestion.project_b_id)
+        project_lookup = {
+            proj.id: proj
+            for proj in (project_a_obj, project_b_obj)
+            if proj is not None and proj.id is not None
+        }
+
+        def _project_payload(proj_id: int) -> dict[str, Any]:
+            proj = project_lookup.get(proj_id)
+            if proj is None:
+                return {"id": proj_id, "slug": "", "human_key": ""}
+            return {"id": proj.id, "slug": proj.slug, "human_key": proj.human_key}
+
+        return {
+            "id": suggestion.id,
+            "status": suggestion.status,
+            "score": suggestion.score,
+            "rationale": suggestion.rationale,
+            "project_a": _project_payload(suggestion.project_a_id),
+            "project_b": _project_payload(suggestion.project_b_id),
+            "evaluated_ts": str(suggestion.evaluated_ts) if suggestion.evaluated_ts else None,
+        }
 
 
 async def _agent_name_exists(project: Project, name: str) -> bool:
@@ -3008,7 +3336,7 @@ def build_mcp_server() -> FastMCP:
         reason: str = "macro-claim",
         auto_release: bool = False,
     ) -> dict[str, Any]:
-        """Claim a set of paths and optionally release them at the end of the workflow."""
+        """Reserve a set of file paths and optionally release them at the end of the workflow."""
 
         # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
         from fastmcp.tools.tool import FunctionTool
@@ -3482,11 +3810,11 @@ def build_mcp_server() -> FastMCP:
         reason: str = "",
     ) -> dict[str, Any]:
         """
-        Request advisory claims (leases) on project-relative paths/globs.
+        Request advisory file reservations (leases) on project-relative paths/globs.
 
         Semantics
         ---------
-        - Conflicts are reported if an overlapping active exclusive claim exists held by another agent
+        - Conflicts are reported if an overlapping active exclusive reservation exists held by another agent
         - Glob matching is symmetric (`fnmatchcase(a,b)` or `fnmatchcase(b,a)`), including exact matches
         - When granted, a JSON artifact is written under `claims/<sha1(path)>.json` and the DB is updated
         - TTL must be >= 60 seconds (enforced by the server settings/policy)
@@ -3494,13 +3822,13 @@ def build_mcp_server() -> FastMCP:
         Do / Don't
         ----------
         Do:
-        - Claim before starting edits on a surface to signal intent to other agents.
+        - Reserve files before starting edits to signal intent to other agents.
         - Use specific, minimal patterns (e.g., `app/api/*.py`) instead of broad globs.
         - Set a realistic TTL and renew with `renew_claims` if you need more time.
 
         Don't:
-        - Claim the entire repository or very broad patterns (e.g., `**/*`) unless absolutely necessary.
-        - Hold long-lived exclusive claims when you are not actively editing.
+        - Reserve the entire repository or very broad patterns (e.g., `**/*`) unless absolutely necessary.
+        - Hold long-lived exclusive reservations when you are not actively editing.
         - Ignore conflicts; resolve them by coordinating with holders or waiting for expiry.
 
         Parameters
@@ -3613,11 +3941,11 @@ def build_mcp_server() -> FastMCP:
         claim_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """
-        Release active claims held by an agent.
+        Release active file reservations held by an agent.
 
         Behavior
         --------
-        - If both `paths` and `claim_ids` are omitted, all active claims for the agent are released
+        - If both `paths` and `claim_ids` are omitted, all active reservations for the agent are released
         - Otherwise, restricts release to matching ids and/or path patterns
         - JSON artifacts stay in Git for audit; DB records get `released_ts`
 
@@ -3628,11 +3956,11 @@ def build_mcp_server() -> FastMCP:
 
         Idempotency
         -----------
-        - Safe to call repeatedly. Releasing an already-released (or non-existent) claim is a no-op.
+        - Safe to call repeatedly. Releasing an already-released (or non-existent) reservation is a no-op.
 
         Examples
         --------
-        Release all active claims for agent:
+        Release all active reservations for agent:
         ```json
         {"jsonrpc":"2.0","id":"13","method":"tools/call","params":{"name":"release_claims","arguments":{
           "project_key":"/abs/path/backend","agent_name":"GreenCastle"
@@ -3710,20 +4038,20 @@ def build_mcp_server() -> FastMCP:
         claim_ids: Optional[list[int]] = None,
     ) -> dict[str, Any]:
         """
-        Extend expiry for active claims held by an agent without reissuing them.
+        Extend expiry for active file reservations held by an agent without reissuing them.
 
         Parameters
         ----------
         project_key : str
             Project slug or human key.
         agent_name : str
-            Agent identity who owns the claims.
+            Agent identity who owns the reservations.
         extend_seconds : int
             Seconds to extend from the later of now or current expiry (min 60s).
         paths : Optional[list[str]]
             Restrict renewals to matching path patterns.
         claim_ids : Optional[list[int]]
-            Restrict renewals to matching claim ids.
+            Restrict renewals to matching reservation ids.
 
         Returns
         -------
@@ -5011,15 +5339,20 @@ def build_mcp_server() -> FastMCP:
                     MessageRecipient.agent_id == agent_obj.id,
                     cast(Any, Message.ack_required).is_(True),
                     cast(Any, MessageRecipient.ack_ts).is_(None),
-                    Message.created_ts < cutoff,
                 )
                 .order_by(asc(Message.created_ts))
-                .limit(limit)
+                .limit(limit * 5)
             )
             for msg, kind in rows.all():
-                payload = _message_to_dict(msg, include_body=False)
-                payload["kind"] = kind
-                out.append(payload)
+                created = msg.created_ts
+                if getattr(created, "tzinfo", None) is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created <= cutoff:
+                    payload = _message_to_dict(msg, include_body=False)
+                    payload["kind"] = kind
+                    out.append(payload)
+                    if len(out) >= limit:
+                        break
         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
 
     @mcp.resource("resource://mailbox/{agent}", mime_type="application/json")

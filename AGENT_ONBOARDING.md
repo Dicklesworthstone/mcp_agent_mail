@@ -222,7 +222,112 @@ Before messaging an agent for the first time, you may want to request approval:
 
 **Note:** Contact policies are configurable. By default, agents can message each other without approval.
 
-### Workflow 4: Claiming Files Before Editing
+### Workflow 3.5: Discovering Related Projects
+
+#### What You'll See
+
+The web dashboard intelligently identifies projects that might be related—like `/data/projects/my-app-backend` and `/data/projects/my-app-frontend`. These appear as **suggestion cards** on the Projects page with:
+
+- 🎯 **Confidence scores** (how likely they're related)
+- 💬 **AI explanations** (why they might belong together)
+- ✅ **Confirm Link** button (accept the relationship)
+- ✖️ **Dismiss** button (hide the suggestion)
+
+#### How It Works
+
+The system analyzes multiple signals:
+
+1. **Pattern matching**: Compares project names and directory structures
+2. **AI analysis** (when enabled): Reads `README.md`, `AGENTS.md`, and other docs to understand each project's purpose
+3. **Smart ranking**: Orders suggestions by confidence with clear rationales
+
+#### Important: Discovery ≠ Authorization
+
+> 💡 **Key Concept**: Confirming a sibling link updates your **UI navigation**, not your **messaging permissions**.
+
+**What happens when you confirm:**
+- ✅ Both projects show interactive badges for quick navigation
+- ✅ You can easily jump between related codebases
+- ❌ Agents **cannot** automatically message across projects
+
+**Why the separation?**
+
+Agent Mail uses **agent-centric routing** — every message delivery requires explicit permission:
+
+```
+Agent A sends message → System finds Agent B → Checks AgentLink → ✓ Delivers or ✗ Blocks
+```
+
+This ensures:
+- **Security**: No surprise cross-project deliveries
+- **Transparency**: Clear audit trail of who can message whom
+- **Control**: You approve every communication path
+
+**Why not auto-authorize with AI?**
+If we let the LLM automatically grant messaging permissions based on project similarity, we'd:
+- Risk misrouting messages to unintended recipients
+- Bypass your contact policies without oversight
+- Create hidden routing paths that are hard to audit
+- Potentially connect wrong projects with similar names
+
+Instead, we split the problem:
+- **Discovery** (AI-powered): "These projects look related" → Safe, read-only
+- **Authorization** (human/agent-controlled): "Agent A can message Agent B" → Explicit approval required
+
+#### The Complete Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. System suggests relationship (AI discovers patterns)     │
+│    "my-app-frontend" ↔ "my-app-backend"                     │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. You confirm in UI (one-click acceptance)                 │
+│    → Badges appear on both project cards                    │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. Agent requests contact (explicit permission request)     │
+│    request_contact(from_agent, to_agent, to_project)        │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. You approve contact (authorize messaging)                │
+│    respond_contact(accept=true)                             │
+└────────────────┬────────────────────────────────────────────┘
+                 ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Messages flow (agents can now communicate)               │
+│    AgentLink established → Messages delivered               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Think of it like your phone's contact list**:
+- Discovery = "People you may know" suggestions
+- Authorization = Actually adding them to your contacts
+
+#### Your Next Steps
+
+When you see a sibling suggestion you agree with:
+
+1. **Confirm the link** in the UI (updates navigation badges)
+2. **Run the contact workflow** so agents can actually communicate:
+   ```json
+   {
+     "tool": "request_contact",
+     "arguments": {
+       "project_key": "/data/projects/my-app-frontend",
+       "from_agent": "FrontendDev",
+       "to_agent": "BackendDev",
+       "to_project": "/data/projects/my-app-backend",
+       "reason": "Need to coordinate API changes"
+     }
+   }
+   ```
+3. **Approve the request** to establish the messaging link
+
+### Workflow 4: Reserving Files Before Editing
 
 Signal your intent to edit files to avoid conflicts:
 
@@ -241,11 +346,11 @@ Signal your intent to edit files to avoid conflicts:
 ```
 
 **Best practices:**
-- Claim specific paths, not broad globs like `**/*`
+- Reserve specific paths, not broad globs like `**/*`
 - Set realistic TTL (time to live) - default is 1 hour (3600s)
 - Use `exclusive: true` when you need write access
 - Use `exclusive: false` for read-only observation
-- Release claims when done with `release_claims()`
+- Release reservations when done with `release_claims()`
 
 ### Workflow 5: Searching Messages
 
@@ -360,20 +465,20 @@ Project 'my-project' not found
 2. Wrong project key - ensure both agents use the same `project_key`
 3. Message was sent but not fetched - check `since_ts` parameter in `fetch_inbox()`
 
-### Pitfall 5: Claim Conflicts
+### Pitfall 5: File Reservation Conflicts
 
 **Error message:**
 ```
-Conflict: 'FrontendDev' holds exclusive claim on 'app/api/*.py' until 2025-10-25T12:00:00
+Conflict: 'FrontendDev' holds exclusive reservation on 'app/api/*.py' until 2025-10-25T12:00:00
 ```
 
-**Problem:** Another agent has claimed the files you want to edit.
+**Problem:** Another agent has reserved the files you want to edit.
 
 **Solutions:**
-1. Wait for the claim to expire
+1. Wait for the reservation to expire
 2. Coordinate with the holder via messages
-3. Use `resource://claims/{project}?active_only=true` to see all active claims
-4. Claim more specific paths to avoid overlaps
+3. Use `resource://claims/{project}?active_only=true` to see all active reservations
+4. Reserve more specific paths to avoid overlaps
 
 ## Project Boundaries
 
@@ -394,7 +499,7 @@ Agents:
 - Simple setup
 - Agents can easily coordinate
 - Shared message threads
-- Claims work across all code
+- File reservations work across all code
 
 **Cons:**
 - Shared namespace (all agents see all messages)
@@ -431,7 +536,7 @@ Bootstrap a project session in one call:
 **What this does:**
 1. Ensures project exists
 2. Registers your agent
-3. Claims specified paths
+3. Reserves specified file paths
 4. Fetches your inbox
 5. Returns all results in one call
 
@@ -475,7 +580,7 @@ Configure how other agents can reach you:
 
 **Policies:**
 - `open` - Anyone can message you without approval
-- `auto` - Auto-approve contacts with claim overlap or same thread
+- `auto` - Auto-approve contacts with reservation overlap or same thread
 - `contacts_only` - Only approved contacts can message you
 - `block_all` - No incoming messages allowed
 
@@ -486,7 +591,7 @@ If you encounter issues:
 1. **Check error messages** - They now include helpful details about what went wrong
 2. **Verify agent names** - Use `resource://agents/{project}` to see registered names
 3. **Check project boundaries** - Ensure all agents use the same `project_key`
-4. **Review claims** - Use `resource://claims/{project}?active_only=true` to see conflicts
+4. **Review file reservations** - Use `resource://claims/{project}?active_only=true` to see conflicts
 5. **Search messages** - Use `search_messages()` to find related discussions
 
 ## Complete Example: Two Agents Coordinating
@@ -520,7 +625,7 @@ If you encounter issues:
   "body_md": "The /api/users endpoint is ready for integration."
 }}
 
-// Step 5: Claim files before editing
+// Step 5: Reserve files before editing
 {"tool": "claim_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "BackendDev",
@@ -552,7 +657,7 @@ If you encounter issues:
   "body_md": "Great! I'll update the UI to use the new endpoint."
 }}
 
-// Step 5: Claim frontend files
+// Step 5: Reserve frontend files
 {"tool": "claim_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "FrontendDev",
@@ -568,7 +673,7 @@ If you encounter issues:
 - `resource://agents/{project_key}` - List agents in a project (RECOMMENDED for discovery)
 - `resource://project/{project_key}` - Project details including agents
 - `resource://projects` - List all projects
-- `resource://claims/{project_key}?active_only=true` - Active claims
+- `resource://claims/{project_key}?active_only=true` - Active file reservations
 - `resource://inbox/{project_key}/{agent_name}` - Agent's inbox
 - `resource://outbox/{project_key}/{agent_name}` - Agent's sent messages
 - `resource://message/{message_id}` - Single message details
@@ -577,7 +682,7 @@ If you encounter issues:
 
 1. **Try the Quick Start workflow** above to get familiar with basic operations
 2. **Experiment with messaging** - Send messages between agents
-3. **Practice claiming files** - Use claims to signal editing intent
+3. **Practice reserving files** - Use file reservations to signal editing intent
 4. **Explore thread summaries** - Use `summarize_thread()` for long discussions
 5. **Set up contact policies** - Configure how agents can reach you
 
