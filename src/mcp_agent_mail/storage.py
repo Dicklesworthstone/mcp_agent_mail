@@ -1202,69 +1202,88 @@ async def get_historical_inbox_snapshot(
             for part in inbox_path.split("/"):
                 tree = tree / part
 
-            # Iterate through message files
-            for item in tree:
-                if item.type == "blob" and item.name.endswith(".md"):
-                    # Parse filename: YYYY-MM-DDTHH-MM-SSZ__subject-slug__id.md
-                    # or variations like: date__subject__id.md
-                    parts = item.name.rsplit("__", 2)
+            # Recursively traverse inbox subdirectories (YYYY/MM/) to find message files
+            def traverse_tree(subtree, depth=0):
+                """Recursively traverse git tree looking for .md files"""
+                if depth > 3:  # Safety limit: inbox/YYYY/MM is 2 levels, add buffer
+                    return
 
-                    if len(parts) >= 2:
-                        date_str = parts[0]
-                        subject_slug = parts[1] if len(parts) >= 2 else "no-subject"
-                        msg_id = parts[2].replace(".md", "") if len(parts) == 3 else "unknown"
+                for item in subtree:
+                    if item.type == "blob" and item.name.endswith(".md"):
+                        # Parse filename: YYYY-MM-DDTHH-MM-SSZ__subject-slug__id.md
+                        parts = item.name.rsplit("__", 2)
 
-                        # Convert slug back to readable subject
-                        subject = subject_slug.replace("-", " ").replace("_", " ").title()
+                        if len(parts) >= 2:
+                            date_str = parts[0]
+                            # Handle both 2-part and 3-part filenames
+                            if len(parts) == 3:
+                                subject_slug = parts[1]
+                                msg_id = parts[2].replace(".md", "")
+                            else:
+                                # 2-part filename: date__subject.md
+                                subject_slug = parts[1].replace(".md", "")
+                                msg_id = "unknown"
 
-                        # Read file content to get From field and other metadata
-                        from_agent = "unknown"
-                        importance = "normal"
+                            # Convert slug back to readable subject
+                            subject = subject_slug.replace("-", " ").replace("_", " ").title()
 
-                        try:
-                            blob_content = item.data_stream.read().decode('utf-8', errors='ignore')
+                            # Read file content to get From field and other metadata
+                            from_agent = "unknown"
+                            importance = "normal"
 
-                            # Parse JSON frontmatter (format: ---json\n{...}\n---)
-                            if blob_content.startswith('---json\n') or blob_content.startswith('---json\r\n'):
-                                # Find the closing --- delimiter
-                                end_marker = blob_content.find('\n---\n', 8)
-                                if end_marker == -1:
-                                    end_marker = blob_content.find('\r\n---\r\n', 8)
+                            try:
+                                blob_content = item.data_stream.read().decode('utf-8', errors='ignore')
 
-                                if end_marker > 0:
-                                    # Extract JSON between markers
-                                    json_start = 8 if blob_content.startswith('---json\n') else 10
-                                    json_str = blob_content[json_start:end_marker]
+                                # Parse JSON frontmatter (format: ---json\n{...}\n---)
+                                if blob_content.startswith('---json\n') or blob_content.startswith('---json\r\n'):
+                                    # Find the closing --- delimiter
+                                    end_marker = blob_content.find('\n---\n', 8)
+                                    if end_marker == -1:
+                                        end_marker = blob_content.find('\r\n---\r\n', 8)
 
-                                    try:
-                                        metadata = json.loads(json_str)
-                                        # Extract sender from 'from' field
-                                        if 'from' in metadata:
-                                            from_agent = str(metadata['from'])
-                                        # Extract importance
-                                        if 'importance' in metadata:
-                                            importance = str(metadata['importance'])
-                                        # Extract actual subject
-                                        if 'subject' in metadata:
-                                            actual_subject = str(metadata['subject']).strip()
-                                            if actual_subject:
-                                                subject = actual_subject
-                                    except (json.JSONDecodeError, KeyError, TypeError):
-                                        pass  # Use defaults if JSON parsing fails
+                                    if end_marker > 0:
+                                        # Extract JSON between markers
+                                        json_start = 8 if blob_content.startswith('---json\n') else 10
+                                        json_str = blob_content[json_start:end_marker]
 
-                        except Exception:
-                            pass  # Use defaults if parsing fails
+                                        try:
+                                            metadata = json.loads(json_str)
+                                            # Extract sender from 'from' field
+                                            if 'from' in metadata:
+                                                from_agent = str(metadata['from'])
+                                            # Extract importance
+                                            if 'importance' in metadata:
+                                                importance = str(metadata['importance'])
+                                            # Extract actual subject
+                                            if 'subject' in metadata:
+                                                actual_subject = str(metadata['subject']).strip()
+                                                if actual_subject:
+                                                    subject = actual_subject
+                                        except (json.JSONDecodeError, KeyError, TypeError):
+                                            pass  # Use defaults if JSON parsing fails
 
-                        messages.append({
-                            "id": msg_id,
-                            "subject": subject,
-                            "date": date_str,
-                            "from": from_agent,
-                            "importance": importance,
-                        })
+                            except Exception:
+                                pass  # Use defaults if parsing fails
 
+                            messages.append({
+                                "id": msg_id,
+                                "subject": subject,
+                                "date": date_str,
+                                "from": from_agent,
+                                "importance": importance,
+                            })
+
+                            if len(messages) >= limit:
+                                return  # Stop when we hit the limit
+
+                    elif item.type == "tree":
+                        # Recursively traverse subdirectory
+                        traverse_tree(item, depth + 1)
                         if len(messages) >= limit:
-                            break
+                            return  # Stop when we hit the limit
+
+            # Start recursive traversal
+            traverse_tree(tree)
 
         except (KeyError, AttributeError):
             # Inbox directory didn't exist at that time

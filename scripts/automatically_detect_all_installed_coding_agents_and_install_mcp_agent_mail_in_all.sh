@@ -66,7 +66,7 @@ if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
   fi
 fi
 
-echo "==> Ensuring archive storage root"
+printf "%b\n" "${_b}${_cyn}==> Ensuring archive storage root${_rst}"
 # Read STORAGE_ROOT from settings and expand to absolute path
 eval "$(uv run python - <<'PY'
 from mcp_agent_mail.config import get_settings
@@ -80,9 +80,9 @@ PY
 )"
 
 if [[ -d "${_STORAGE_ROOT}" ]]; then
-  echo "Storage root exists: ${_STORAGE_ROOT}"
+  printf "%b\n" "${_grn}Storage root exists:${_rst} ${_STORAGE_ROOT}"
 else
-  echo "Storage root not found: ${_STORAGE_ROOT_RAW} -> ${_STORAGE_ROOT}"
+  printf "%b\n" "${_ylw}Storage root not found:${_rst} ${_STORAGE_ROOT_RAW} -> ${_STORAGE_ROOT}"
   # Reuse non-interactive flag if provided
   if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
     _create_ans="y"
@@ -91,9 +91,9 @@ else
   fi
   if [[ "${_create_ans}" == "y" || "${_create_ans}" == "Y" ]]; then
     mkdir -p "${_STORAGE_ROOT}"
-    echo "Created storage root at: ${_STORAGE_ROOT}"
+    printf "%b\n" "${_grn}Created storage root at:${_rst} ${_STORAGE_ROOT}"
   else
-    echo "Skipping creation of storage root. Server will initialize it on first write."
+    printf "%b\n" "${_ylw}Skipping:${_rst} will initialize on first server write."
   fi
 fi
 
