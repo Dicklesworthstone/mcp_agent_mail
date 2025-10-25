@@ -532,7 +532,14 @@ function unifiedInboxManager() {
     get uniqueRecipients() {
       const recipients = new Set();
       this.allMessages.forEach(m => {
-        m.recipients.split(',').forEach(r => recipients.add(r.trim()));
+        if (m.recipients) {  // Only process non-empty recipients
+          m.recipients.split(',').forEach(r => {
+            const trimmed = r.trim();
+            if (trimmed) {  // Only add non-empty strings
+              recipients.add(trimmed);
+            }
+          });
+        }
       });
       return [...recipients].sort();
     },
@@ -546,8 +553,8 @@ function unifiedInboxManager() {
       this.filteredMessages = [...this.allMessages];
       this.filterMessages();
 
-      // Setup keyboard shortcuts
-      document.addEventListener('keydown', (e) => {
+      // Setup keyboard shortcuts with proper cleanup
+      this._keydownHandler = (e) => {
         // Cmd/Ctrl + K for search
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
           e.preventDefault();
@@ -575,7 +582,9 @@ function unifiedInboxManager() {
         if (e.key === 'Escape' && this.selectedMessage) {
           this.selectedMessage = null;
         }
-      });
+      };
+
+      document.addEventListener('keydown', this._keydownHandler);
 
       // Update keyboard shortcut display based on platform
       const shortcutKey = document.querySelector('.shortcut-key');
@@ -590,6 +599,13 @@ function unifiedInboxManager() {
       // Auto-select first message if in split view
       if (this.viewMode === 'split' && this.filteredMessages.length > 0) {
         this.selectMessage(this.filteredMessages[0]);
+      }
+    },
+
+    destroy() {
+      // Cleanup event listeners to prevent memory leaks
+      if (this._keydownHandler) {
+        document.removeEventListener('keydown', this._keydownHandler);
       }
     },
 
@@ -623,7 +639,12 @@ function unifiedInboxManager() {
 
       // Recipient filter
       if (this.filters.recipient) {
-        filtered = filtered.filter(msg => msg.recipients.includes(this.filters.recipient));
+        filtered = filtered.filter(msg => {
+          if (!msg.recipients) return false;
+          // Split and trim to match how we build uniqueRecipients
+          const recipientList = msg.recipients.split(',').map(r => r.trim());
+          return recipientList.includes(this.filters.recipient);
+        });
       }
 
       // Importance filter
@@ -652,6 +673,11 @@ function unifiedInboxManager() {
       }
 
       this.filteredMessages = filtered;
+
+      // Clear selected message if it's no longer in filtered results
+      if (this.selectedMessage && !filtered.find(m => m.id === this.selectedMessage.id)) {
+        this.selectedMessage = null;
+      }
 
       // Re-render icons
       this.$nextTick(() => {
@@ -684,6 +710,12 @@ function unifiedInboxManager() {
     },
 
     selectMessage(msg) {
+      // Handle null/undefined gracefully
+      if (!msg) {
+        this.selectedMessage = null;
+        return;
+      }
+
       this.selectedMessage = msg;
 
       // Render markdown body
@@ -691,19 +723,26 @@ function unifiedInboxManager() {
         const bodyEl = document.getElementById('message-body-' + msg.id);
         if (bodyEl && msg.body_md) {
           // Configure marked for better rendering
-          marked.setOptions({
-            breaks: true,
-            gfm: true,
-            headerIds: true,
-            mangle: false
-          });
+          if (typeof marked !== 'undefined') {
+            marked.setOptions({
+              breaks: true,
+              gfm: true,
+              headerIds: true,
+              mangle: false
+            });
 
-          bodyEl.innerHTML = marked.parse(msg.body_md);
+            bodyEl.innerHTML = marked.parse(msg.body_md);
+          } else {
+            // Fallback if marked.js fails to load
+            bodyEl.textContent = msg.body_md;
+          }
 
           // Highlight code blocks
-          bodyEl.querySelectorAll('pre code').forEach((block) => {
-            Prism.highlightElement(block);
-          });
+          if (typeof Prism !== 'undefined') {
+            bodyEl.querySelectorAll('pre code').forEach((block) => {
+              Prism.highlightElement(block);
+            });
+          }
 
           // Add copy buttons to code blocks
           bodyEl.querySelectorAll('pre').forEach((pre) => {

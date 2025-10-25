@@ -88,12 +88,7 @@ json_validate() {
   if command -v jq >/dev/null 2>&1; then
     jq empty "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
   else
-    python - <<PY >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
-import json,sys
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    json.load(f)
-PY
-    "$file"
+    python -c 'import json,sys; json.load(open(sys.argv[1],"r",encoding="utf-8"))' "$file" >/dev/null 2>&1 || { log_err "Invalid JSON: $file"; return 1; }
   fi
 }
 
@@ -140,6 +135,15 @@ update_env_var() {
     echo "${key}=${value}" > "$env_file"
   fi
   set_secure_file "$env_file"
+}
+
+# Confirmation prompt honoring AUTO_YES and TTY; usage: confirm "Message?" || exit 1
+confirm() {
+  local msg="$1"
+  if [[ "${AUTO_YES}" == "1" ]]; then return 0; fi
+  if [[ ! -t 0 ]]; then return 1; fi
+  read -r -p "${msg} [y/N] " _ans || return 1
+  [[ "${_ans}" == "y" || "${_ans}" == "Y" ]]
 }
 
 

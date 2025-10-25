@@ -1,36 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Color styles (best-effort)
-if command -v tput >/dev/null 2>&1 && [[ -t 1 ]]; then
-  _b=$(tput bold); _dim=$(tput dim); _red=$(tput setaf 1); _grn=$(tput setaf 2); _ylw=$(tput setaf 3); _blu=$(tput setaf 4); _mag=$(tput setaf 5); _cyn=$(tput setaf 6); _rst=$(tput sgr0)
+# Source shared helpers
+ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
+if [[ -f "${ROOT_DIR}/scripts/lib.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${ROOT_DIR}/scripts/lib.sh"
 else
-  _b=""; _dim=""; _red=""; _grn=""; _ylw=""; _blu=""; _mag=""; _cyn=""; _rst=""
+  echo "FATAL: scripts/lib.sh not found" >&2
+  exit 1
 fi
+init_colors
+setup_traps
+parse_common_flags "$@"
+require_cmd uv
+require_cmd curl
 
-printf "%b\n" "${_b}${_cyn}==> MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents${_rst}"
+log_step "MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents"
 echo
 echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.gemini and generate per-agent MCP configs."
 echo "It will also create scripts/run_server_with_token.sh to start the server with a bearer token."
 echo
-# Detect non-interactive mode regardless of argument position
-_auto_yes=0
-for _a in "$@"; do [[ "$_a" == "--yes" ]] && _auto_yes=1; done
-if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
-  _ans="y"
-else
-  read -r -p "Proceed? [y/N] " _ans
-fi
-if [[ "${_ans:-}" != "y" && "${_ans:-}" != "Y" ]]; then
-  echo "Aborted."
-  exit 1
-fi
+if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
-ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT_DIR"
 
 # Ensure token reuse across integrations during one run
-if [[ -z "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
+if [[ -z "${INTEGRATION_BEARER_TOKEN:-}" || "${REGENERATE_TOKEN}" == "1" ]]; then
   if [[ -f .env ]]; then
     EXISTING=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
   else
@@ -47,26 +43,16 @@ import secrets; print(secrets.token_hex(32))
 PY
 )
     fi
-    echo "Generated bearer token for this integration session."
+    log_ok "Generated bearer token for this integration session."
   fi
 fi
 
 # Persist token to .env for consistency across tools (non-destructive)
 if [[ -n "${INTEGRATION_BEARER_TOKEN:-}" ]]; then
-  if [[ -f .env ]]; then
-    if grep -q '^HTTP_BEARER_TOKEN=' .env; then
-      # Update in place
-      cp .env .env.bak.$(date +%s)
-      sed -E -i "s/^HTTP_BEARER_TOKEN=.*/HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}/" .env
-    else
-      echo "HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}" >> .env
-    fi
-  else
-    echo "HTTP_BEARER_TOKEN=${INTEGRATION_BEARER_TOKEN}" > .env
-  fi
+  update_env_var HTTP_BEARER_TOKEN "${INTEGRATION_BEARER_TOKEN}"
 fi
 
-printf "%b\n" "${_b}${_cyn}==> Ensuring archive storage root${_rst}"
+log_step "Ensuring archive storage root"
 # Read STORAGE_ROOT from settings and expand to absolute path
 eval "$(uv run python - <<'PY'
 from mcp_agent_mail.config import get_settings
@@ -80,24 +66,19 @@ PY
 )"
 
 if [[ -d "${_STORAGE_ROOT}" ]]; then
-  printf "%b\n" "${_grn}Storage root exists:${_rst} ${_STORAGE_ROOT}"
+  log_ok "Storage root exists: ${_STORAGE_ROOT}"
 else
-  printf "%b\n" "${_ylw}Storage root not found:${_rst} ${_STORAGE_ROOT_RAW} -> ${_STORAGE_ROOT}"
-  # Reuse non-interactive flag if provided
-  if [[ "${_auto_yes}" == "1" || "${AUTO_YES:-}" == "1" ]]; then
-    _create_ans="y"
+  log_warn "Storage root not found: ${_STORAGE_ROOT_RAW} -> ${_STORAGE_ROOT}"
+  if confirm "Create storage root now?"; then
+    run_cmd mkdir -p "${_STORAGE_ROOT}"
+    set_secure_dir "${_STORAGE_ROOT}"
+    log_ok "Created storage root at: ${_STORAGE_ROOT}"
   else
-    read -r -p "Create storage root now? [y/N] " _create_ans || _create_ans="n"
-  fi
-  if [[ "${_create_ans}" == "y" || "${_create_ans}" == "Y" ]]; then
-    mkdir -p "${_STORAGE_ROOT}"
-    printf "%b\n" "${_grn}Created storage root at:${_rst} ${_STORAGE_ROOT}"
-  else
-    printf "%b\n" "${_ylw}Skipping:${_rst} will initialize on first server write."
+    log_warn "Skipping: will initialize on first server write."
   fi
 fi
 
-printf "%b\n" "${_b}${_cyn}==> Detecting installed agents and applying integrations${_rst}"
+log_step "Detecting installed agents and applying integrations"
 
 # Parse optional --project-dir to tell integrators where to write client configs
 TARGET_DIR=""
@@ -118,7 +99,7 @@ HAS_CODEX=0;  [[ -d "${HOME}/.codex"  ]] && HAS_CODEX=1
 HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
 HAS_GEMINI=0; [[ -d "${HOME}/.gemini" ]] && HAS_GEMINI=1
 
-printf "%b\n" "${_cyn}Found:${_rst} claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI}"
+_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI}"
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
@@ -141,10 +122,14 @@ if [[ $HAS_GEMINI -eq 1 ]]; then
 fi
 
 echo
-printf "%b\n" "${_b}${_cyn}==> Summary${_rst}"
+log_step "Summary"
 MASKED_TOKEN="${INTEGRATION_BEARER_TOKEN:0:6}********${INTEGRATION_BEARER_TOKEN: -4}"
-printf "%b\n" "${_grn}Bearer token (masked):${_rst} ${MASKED_TOKEN}"
-printf "%b\n" "${_grn}Run server with:${_rst} scripts/run_server_with_token.sh"
+if [[ "${SHOW_TOKEN}" == "1" ]]; then
+  _print "Token: ${INTEGRATION_BEARER_TOKEN}"
+else
+  _print "Bearer token (masked): ${MASKED_TOKEN}"
+fi
+_print "Run server with: scripts/run_server_with_token.sh"
 if [[ -n "${TARGET_DIR}" ]]; then
   echo "Client configs were written under: ${TARGET_DIR} (e.g., ${TARGET_DIR}/.claude/settings.json)"
 fi
