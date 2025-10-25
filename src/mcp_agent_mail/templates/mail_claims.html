@@ -20,20 +20,34 @@
 <div class="space-y-6 animate-fade-in">
   <!-- File Reservations Header -->
   <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
-    <div class="flex items-center justify-between">
-      <div class="flex items-center gap-4">
-        <div class="w-16 h-16 bg-gradient-to-br from-warning-500 to-warning-700 rounded-xl flex items-center justify-center shadow-medium">
-          <i data-lucide="lock" class="w-8 h-8 text-white"></i>
+    <div class="flex items-start justify-between">
+      <div class="flex items-start gap-4 flex-1">
+        <div class="w-16 h-16 bg-gradient-to-br from-warning-500 to-warning-700 rounded-xl flex items-center justify-center shadow-medium flex-shrink-0">
+          <i data-lucide="shield-alert" class="w-8 h-8 text-white"></i>
         </div>
-        <div>
-          <h1 class="text-3xl font-bold text-slate-900 dark:text-white">File Reservations</h1>
-          <p class="text-slate-600 dark:text-slate-400">
-            Resource coordination and locking
-            {% if file_reservations %}
-              <span class="text-slate-400 dark:text-slate-500">•</span>
-              <span class="font-medium">{{ file_reservations|length }} reservation{{ 's' if file reservations|length != 1 else '' }}</span>
-            {% endif %}
+        <div class="flex-1">
+          <h1 class="text-3xl font-bold text-slate-900 dark:text-white mb-2">File Reservations</h1>
+          <p class="text-slate-600 dark:text-slate-400 mb-3">
+            When agents want to edit files, they can "reserve" them to signal their intent to other agents.
           </p>
+
+          <!-- Advisory System Explanation Banner -->
+          <div class="flex items-start gap-2 p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg text-sm">
+            <i data-lucide="info" class="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5"></i>
+            <div class="text-blue-900 dark:text-blue-100">
+              <strong>Advisory system:</strong> Reservations are <em>signals</em>, not hard locks.
+              Agents can still edit files, but they'll see warnings if conflicts exist.
+              <span class="inline-block mt-1">
+                Install a <a href="/mail/archive/guide#enforcement" class="underline font-medium hover:text-blue-700 dark:hover:text-blue-300">pre-commit hook</a> to enforce reservations at commit time.
+              </span>
+            </div>
+          </div>
+
+          {% if file_reservations %}
+            <div class="mt-3 text-sm text-slate-600 dark:text-slate-400">
+              <span class="font-medium text-slate-900 dark:text-white">{{ file_reservations|length }}</span> active reservation{{ 's' if file_reservations|length != 1 else '' }}
+            </div>
+          {% endif %}
         </div>
       </div>
     </div>
@@ -133,16 +147,79 @@
 
   {% else %}
     <!-- Empty State -->
-    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
-      <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
-        <i data-lucide="shield-off" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+    <div class="bg-white dark:bg-slate-800 rounded-xl p-12 shadow-soft border border-slate-200 dark:border-slate-700">
+      <div class="max-w-2xl mx-auto">
+        <!-- Icon -->
+        <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
+          <i data-lucide="file-lock" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
+        </div>
+
+        <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3 text-center">
+          No Active Reservations
+        </h3>
+
+        <p class="text-slate-600 dark:text-slate-400 text-center mb-8">
+          File reservations help agents coordinate who's working on what files to avoid conflicts.
+        </p>
+
+        <!-- How it works section -->
+        <div class="bg-slate-50 dark:bg-slate-900 rounded-xl p-6 mb-6">
+          <h4 class="font-semibold text-slate-900 dark:text-white mb-4 flex items-center gap-2">
+            <i data-lucide="lightbulb" class="w-5 h-5 text-warning-500"></i>
+            How File Reservations Work
+          </h4>
+
+          <div class="space-y-4">
+            <div class="flex items-start gap-3">
+              <div class="w-8 h-8 bg-primary-100 dark:bg-primary-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+                <span class="text-sm font-bold text-primary-600 dark:text-primary-400">1</span>
+              </div>
+              <div>
+                <div class="font-medium text-slate-900 dark:text-white mb-1">Agent reserves a file</div>
+                <div class="text-sm text-slate-600 dark:text-slate-400">
+                  Agent calls <code class="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 rounded text-xs font-mono">file_reservation_paths(paths=["src/api.py"])</code>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-3">
+              <div class="w-8 h-8 bg-primary-100 dark:bg-primary-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+                <span class="text-sm font-bold text-primary-600 dark:text-primary-400">2</span>
+              </div>
+              <div>
+                <div class="font-medium text-slate-900 dark:text-white mb-1">Other agents see the reservation</div>
+                <div class="text-sm text-slate-600 dark:text-slate-400">
+                  They'll get warnings if they try to edit the same file (and automatic messaging is blocked)
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-3">
+              <div class="w-8 h-8 bg-primary-100 dark:bg-primary-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+                <span class="text-sm font-bold text-primary-600 dark:text-primary-400">3</span>
+              </div>
+              <div>
+                <div class="font-medium text-slate-900 dark:text-white mb-1">Reservation expires or is released</div>
+                <div class="text-sm text-slate-600 dark:text-slate-400">
+                  Reservations auto-expire (typically 1 hour) or agents can manually release them
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Important notice about advisory nature -->
+        <div class="bg-gradient-to-br from-amber-50 to-orange-50 dark:from-amber-900/20 dark:to-orange-900/20 border border-amber-200 dark:border-amber-800 rounded-xl p-6">
+          <div class="flex items-start gap-3">
+            <i data-lucide="alert-triangle" class="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5"></i>
+            <div class="text-sm text-amber-900 dark:text-amber-100">
+              <strong>Important:</strong> File reservations are <strong>advisory only</strong>.
+              They're signals to help coordination, not hard locks. To <em>enforce</em> reservations
+              and block conflicting commits, install the optional pre-commit hook in your code repository.
+            </div>
+          </div>
+        </div>
       </div>
-      <h3 class="text-2xl font-semibold text-slate-900 dark:text-white mb-3">
-        No file reservations found
-      </h3>
-      <p class="text-slate-600 dark:text-slate-400 max-w-md mx-auto">
-        File reservations will appear here when agents request resource locks for coordination.
-      </p>
     </div>
   {% endif %}
 </div>
