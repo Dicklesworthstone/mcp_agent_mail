@@ -40,6 +40,12 @@ print(f"export _HTTP_PATH='{s.http.path}'")
 PY
 )"
 
+# Validate Python eval output (Bug 15)
+if [[ -z "${_HTTP_HOST}" || -z "${_HTTP_PORT}" || -z "${_HTTP_PATH}" ]]; then
+  log_err "Failed to detect HTTP endpoint from settings (Python eval failed)"
+  exit 1
+fi
+
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 log_ok "Detected MCP HTTP endpoint: ${_URL}"
 
@@ -122,14 +128,22 @@ fi
 LOCAL_CODEX_DIR="${TARGET_DIR}/.codex"
 mkdir -p "$LOCAL_CODEX_DIR"
 LOCAL_TOML="${LOCAL_CODEX_DIR}/config.toml"
-backup_file "$LOCAL_TOML"
-cat > "$LOCAL_TOML" <<TOML
+
+# Bug 2 fix: Backup before writing, use write_atomic
+if [[ -f "$LOCAL_TOML" ]]; then
+  backup_file "$LOCAL_TOML"
+fi
+
+write_atomic "$LOCAL_TOML" <<TOML
 # Project-local Codex MCP configuration
 [mcp_servers.mcp_agent_mail]
 transport = "http"
 url = "${_URL}"
 # headers can be added if needed; localhost allowed without Authorization
 TOML
+
+# Bug 1 fix: Ensure secure permissions
+set_secure_file "$LOCAL_TOML" || log_warn "Failed to set permissions on ${LOCAL_TOML}"
 
 echo "Done."
 
@@ -139,12 +153,27 @@ if [[ $_rc -ne 0 ]]; then
 else
   _AUTH_ARGS=()
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-  _HUMAN_KEY="${TARGET_DIR}"
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"name\":\"${USER:-codex}\",\"task_description\":\"setup\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
+
+  # Bug 6 fix: Use json_escape_string to safely escape variables
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
+  _AGENT_ESCAPED=$(json_escape_string "${USER:-codex}")
+
+  # ensure_project - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project (server may be starting)"
+  fi
+
+  # register_agent - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Registered agent on server"
+  else
+    log_warn "Failed to register agent (server may be starting)"
+  fi
 fi
 

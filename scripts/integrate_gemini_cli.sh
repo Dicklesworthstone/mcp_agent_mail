@@ -39,6 +39,12 @@ print(f"export _HTTP_PATH='{s.http.path}'")
 PY
 )"
 
+# Validate Python eval output (Bug 15)
+if [[ -z "${_HTTP_HOST}" || -z "${_HTTP_PORT}" || -z "${_HTTP_PATH}" ]]; then
+  log_err "Failed to detect HTTP endpoint from settings (Python eval failed)"
+  exit 1
+fi
+
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 _TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
 if [[ -z "${_TOKEN}" && -f .env ]]; then
@@ -94,8 +100,13 @@ echo "==> Installing user-level Gemini MCP config (best-effort)"
 HOME_GEMINI_DIR="${HOME}/.gemini"
 mkdir -p "$HOME_GEMINI_DIR"
 HOME_GEMINI_JSON="${HOME_GEMINI_DIR}/mcp.json"
-backup_file "$HOME_GEMINI_JSON"
-cat > "$HOME_GEMINI_JSON" <<JSON
+
+# Bug 2 fix: Backup before writing, use write_atomic
+if [[ -f "$HOME_GEMINI_JSON" ]]; then
+  backup_file "$HOME_GEMINI_JSON"
+fi
+
+write_atomic "$HOME_GEMINI_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
@@ -105,6 +116,9 @@ cat > "$HOME_GEMINI_JSON" <<JSON
   }
 }
 JSON
+
+# Bug 1 fix: Ensure secure permissions
+set_secure_file "$HOME_GEMINI_JSON" || log_warn "Failed to set permissions on ${HOME_GEMINI_JSON}"
 log_step "Attempt readiness check (bounded)"
 if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
   _rc=0; log_ok "Server readiness OK."
@@ -118,13 +132,28 @@ if [[ $_rc -ne 0 ]]; then
 else
   _AUTH_ARGS=()
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-  _HUMAN_KEY="${TARGET_DIR}"
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"gemini-cli\",\"model\":\"gemini\",\"name\":\"${USER:-gemini}\",\"task_description\":\"setup\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
+
+  # Bug 6 fix: Use json_escape_string to safely escape variables
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
+  _AGENT_ESCAPED=$(json_escape_string "${USER:-gemini}")
+
+  # ensure_project - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project (server may be starting)"
+  fi
+
+  # register_agent - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"gemini-cli\",\"model\":\"gemini\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Registered agent on server"
+  else
+    log_warn "Failed to register agent (server may be starting)"
+  fi
 fi
 
 log_step "Registering MCP server in Gemini (user scope)"
