@@ -49,7 +49,8 @@
       <div class="flex items-center gap-2">
         <button @click="refresh()"
                 class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md"
-                data-tippy-content="Refresh inbox">
+                data-tippy-content="Refresh inbox"
+                aria-label="Refresh inbox">
           <i data-lucide="refresh-cw" class="w-4 h-4" :class="{ 'animate-spin': isRefreshing }"></i>
           <span class="hidden sm:inline">Refresh</span>
         </button>
@@ -63,21 +64,26 @@
           <span class="text-sm text-slate-600 dark:text-slate-400" x-text="selectedMessages.length + ' selected'"></span>
           <button @click="markSelectedAsRead()"
                   class="px-3 py-2 bg-success-100 dark:bg-success-900/30 hover:bg-success-200 dark:hover:bg-success-800/40 text-success-700 dark:text-success-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-medium"
-                  data-tippy-content="Mark selected as read">
+                  data-tippy-content="Mark selected as read"
+                  aria-label="Mark selected messages as read">
             <i data-lucide="check" class="w-4 h-4"></i>
             <span class="hidden sm:inline">Mark Read</span>
           </button>
           <button @click="clearSelection()"
                   class="px-3 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm"
-                  data-tippy-content="Clear selection">
+                  data-tippy-content="Clear selection"
+                  aria-label="Clear selection">
             <i data-lucide="x" class="w-4 h-4"></i>
           </button>
         </div>
 
-        <button onclick="showToast('Mark all read coming soon!', 'info')"
-                class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-all duration-300 flex items-center gap-2 btn-ripple shadow-md hover:shadow-lg">
+        <button disabled
+                class="px-4 py-2 bg-slate-300 dark:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
+                data-tippy-content="Coming soon - Mark all messages as read at once"
+                aria-label="Mark All Read (Coming Soon)">
           <i data-lucide="check-check" class="w-4 h-4"></i>
           <span class="hidden sm:inline">Mark All Read</span>
+          <span class="absolute -top-1.5 -right-1.5 px-1.5 py-0.5 bg-amber-500 text-white text-[10px] font-bold rounded-full shadow-sm">Soon</span>
         </button>
       </div>
     </div>

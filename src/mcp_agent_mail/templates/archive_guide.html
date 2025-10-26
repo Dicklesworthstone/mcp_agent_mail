@@ -14,33 +14,31 @@
 
 {% block content %}
 <div class="animate-fade-in">
-  <!-- Hero Section -->
-  <div class="relative overflow-hidden rounded-3xl bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-600 p-12 mb-8 shadow-glow">
-    <div class="absolute inset-0 bg-black opacity-10"></div>
+  <!-- Hero Section - Tasteful Redesign -->
+  <div class="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-900 to-slate-800 dark:from-slate-800 dark:to-slate-900 p-8 mb-8 shadow-lg border border-slate-700">
     <div class="relative z-10">
       <div class="flex items-center gap-4 mb-6">
-        <div class="w-20 h-20 bg-white/20 backdrop-blur-sm rounded-2xl flex items-center justify-center shadow-xl">
-          <i data-lucide="git-branch" class="w-10 h-10 text-white"></i>
+        <div class="w-16 h-16 bg-primary-600 rounded-xl flex items-center justify-center shadow-lg">
+          <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
         </div>
         <div>
           <h1 class="text-4xl md:text-5xl font-bold text-white mb-2">
             Git Archive
           </h1>
-          <p class="text-xl text-white/90 font-medium">
+          <p class="text-xl text-slate-300 font-medium">
             Your Complete Message History, Version-Controlled
           </p>
         </div>
       </div>
-      <p class="text-lg text-white/80 max-w-3xl">
+      <p class="text-lg text-slate-400 max-w-3xl">
         Every message, file reservation, and agent profile is automatically committed to a Git repository,
         providing an immutable audit trail with cryptographic integrity. Access it via standard Git tools
         or explore it right here in the UI.
       </p>
     </div>
 
-    <!-- Decorative elements -->
-    <div class="absolute -bottom-12 -right-12 w-64 h-64 bg-white/10 rounded-full blur-3xl"></div>
-    <div class="absolute -top-12 -left-12 w-48 h-48 bg-white/10 rounded-full blur-2xl"></div>
+    <!-- Subtle accent gradient -->
+    <div class="absolute top-0 right-0 w-96 h-96 bg-gradient-to-br from-primary-500/10 to-purple-500/10 rounded-full blur-3xl pointer-events-none"></div>
   </div>
 
   <!-- Dual Storage Explainer -->
@@ -165,7 +163,7 @@
 
     <!-- Local Access -->
     <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300">
-      <div class="bg-gradient-to-r from-indigo-500 to-purple-600 p-6">
+      <div class="bg-gradient-to-r from-slate-700 to-slate-600 dark:from-slate-800 dark:to-slate-700 p-6">
         <div class="flex items-center gap-3 mb-2">
           <div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
             <i data-lucide="terminal" class="w-6 h-6 text-white"></i>
@@ -259,7 +257,7 @@
 
     <!-- UI Features -->
     <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300" x-data="{ selectedProject: '' }">
-      <div class="bg-gradient-to-r from-purple-500 to-pink-600 p-6">
+      <div class="bg-gradient-to-r from-slate-700 to-slate-600 dark:from-slate-800 dark:to-slate-700 p-6">
         <div class="flex items-center gap-3 mb-2">
           <div class="w-12 h-12 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
             <i data-lucide="layout-grid" class="w-6 h-6 text-white"></i>
@@ -391,7 +389,7 @@
   <div class="bg-white dark:bg-slate-800 rounded-2xl shadow-soft border-2 border-slate-200 dark:border-slate-700 overflow-hidden">
     <div class="p-8">
       <div class="flex items-center gap-3 mb-6">
-        <div class="w-14 h-14 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-md">
+        <div class="w-14 h-14 bg-primary-600 rounded-xl flex items-center justify-center shadow-md">
           <i data-lucide="shield-check" class="w-7 h-7 text-white"></i>
         </div>
         <div>

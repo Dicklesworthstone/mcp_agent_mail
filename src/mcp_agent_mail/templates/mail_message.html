@@ -18,15 +18,21 @@
 
 {% block header_actions %}
 <div class="flex items-center gap-2">
-  <button onclick="showToast('Reply feature coming soon!', 'info')"
-          class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+  <button disabled
+          class="px-4 py-2 text-sm font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
+          data-tippy-content="Coming soon - Reply to this message"
+          aria-label="Reply (Coming Soon)">
     <i data-lucide="reply" class="w-4 h-4"></i>
     Reply
+    <span class="absolute -top-1 -right-1 px-1 py-0.5 bg-amber-500 text-white text-[9px] font-bold rounded-full shadow-sm">Soon</span>
   </button>
-  <button onclick="showToast('Forward feature coming soon!', 'info')"
-          class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-2">
+  <button disabled
+          class="px-4 py-2 text-sm font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
+          data-tippy-content="Coming soon - Forward this message"
+          aria-label="Forward (Coming Soon)">
     <i data-lucide="forward" class="w-4 h-4"></i>
     Forward
+    <span class="absolute -top-1 -right-1 px-1 py-0.5 bg-amber-500 text-white text-[9px] font-bold rounded-full shadow-sm">Soon</span>
   </button>
 </div>
 {% endblock %}

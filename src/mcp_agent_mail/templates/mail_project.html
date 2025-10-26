@@ -46,16 +46,12 @@
 {% block content %}
 <div class="space-y-8 page-transition">
   <!-- Project Hero Header -->
-  <div class="relative overflow-hidden bg-gradient-to-br from-white via-primary-50/30 to-purple-50/30 dark:from-slate-800 dark:via-slate-800/90 dark:to-slate-800 rounded-3xl p-10 shadow-large border border-slate-200/50 dark:border-slate-700/50">
-    <!-- Decorative gradient blobs -->
-    <div class="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-primary-500/20 to-purple-500/20 rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute bottom-0 left-0 w-48 h-48 bg-gradient-to-tr from-pink-500/10 to-orange-500/10 rounded-full blur-3xl pointer-events-none"></div>
-
-    <div class="relative flex items-start justify-between">
+  <div class="relative overflow-hidden bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-start justify-between">
       <div class="flex-1">
         <div class="flex items-center gap-4 mb-4">
-          <div class="w-20 h-20 bg-gradient-to-br from-primary-500 to-primary-700 rounded-2xl flex items-center justify-center shadow-large float">
-            <i data-lucide="git-branch" class="w-10 h-10 text-white"></i>
+          <div class="w-16 h-16 bg-primary-600 rounded-xl flex items-center justify-center shadow-md">
+            <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
           </div>
           <div>
             <h1 class="text-4xl font-bold text-slate-900 dark:text-white mb-2">
@@ -67,8 +63,8 @@
                 <span class="font-mono">{{ project.slug }}</span>
               </div>
               <span class="text-slate-300 dark:text-slate-600">•</span>
-              <div class="flex items-center gap-1.5 px-3 py-1 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 rounded-full font-medium">
-                <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
+              <div class="flex items-center gap-1.5 px-3 py-1 bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 rounded-full font-medium text-xs">
+                <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
                 <span>Active</span>
               </div>
             </div>
@@ -76,6 +72,9 @@
         </div>
       </div>
     </div>
+
+    <!-- Subtle accent -->
+    <div class="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-primary-500/5 to-purple-500/5 rounded-full blur-3xl pointer-events-none"></div>
   </div>
 
   <!-- Enhanced Search Section -->
@@ -84,7 +83,7 @@
 
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-3">
-        <div class="w-12 h-12 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
+        <div class="w-12 h-12 bg-primary-600 rounded-xl flex items-center justify-center shadow-md">
           <i data-lucide="search" class="w-6 h-6 text-white"></i>
         </div>
         <div>

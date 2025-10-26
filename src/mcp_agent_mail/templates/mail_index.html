@@ -66,7 +66,7 @@
         <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Total Projects</p>
         <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">{{ projects|length }}</p>
         <p class="text-sm text-slate-500 dark:text-slate-500">
-          <span class="text-success-600 dark:text-success-400 font-medium">+0%</span> from last month
+          Currently active
         </p>
       </div>
     </div>
@@ -82,8 +82,8 @@
       </div>
       <div class="space-y-2">
         <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Active Agents</p>
-        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">0</p>
-        <p class="text-sm text-slate-500 dark:text-slate-500">Across all projects</p>
+        <p class="text-4xl font-bold text-slate-400 dark:text-slate-500 stat-number">—</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Metrics coming soon</p>
       </div>
     </div>
 
@@ -98,8 +98,8 @@
       </div>
       <div class="space-y-2">
         <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Total Messages</p>
-        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">0</p>
-        <p class="text-sm text-slate-500 dark:text-slate-500">Exchanged today</p>
+        <p class="text-4xl font-bold text-slate-400 dark:text-slate-500 stat-number">—</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Metrics coming soon</p>
       </div>
     </div>
   </div>
@@ -453,10 +453,13 @@
         </div>
       </div>
 
-      <button onclick="showToast('Create project feature coming soon!', 'info')"
-              class="px-8 py-4 bg-gradient-to-r from-primary-600 to-primary-700 hover:from-primary-700 hover:to-primary-800 text-white font-semibold rounded-xl shadow-large hover:shadow-glow transition-all duration-300 flex items-center gap-3 btn-ripple glow-on-hover transform hover:scale-105">
+      <button disabled
+              class="px-8 py-4 bg-slate-300 dark:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-xl shadow-large flex items-center gap-3 opacity-70 cursor-not-allowed relative"
+              data-tippy-content="Coming soon - Create projects through the UI"
+              aria-label="Create Your First Project (Coming Soon)">
         <i data-lucide="plus-circle" class="w-5 h-5"></i>
         <span>Create Your First Project</span>
+        <span class="absolute -top-2 -right-2 px-2 py-1 bg-amber-500 text-white text-xs font-bold rounded-full shadow-md">Coming Soon</span>
       </button>
     </div>
   {% endif %}

@@ -492,7 +492,6 @@ def _message_frontmatter(
         "attachments": attachments,
     }
 
-
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
     slug = slugify(human_key)
