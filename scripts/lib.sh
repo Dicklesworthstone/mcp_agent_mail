@@ -135,9 +135,17 @@ run_cmd() {
 #   - Project files: local_claude_settings.json.TIMESTAMP.bak
 backup_file() {
   local file="$1"
+
+  # Validate input
+  if [[ -z "$file" ]]; then
+    echo "ERROR: backup_file called with empty file path" >&2
+    return 1
+  fi
+
   if [[ ! -f "$file" ]]; then
     return 0  # Nothing to backup
   fi
+
   if [[ "${DRY_RUN}" == "1" ]]; then
     _print "[dry-run] backup ${file}"
     return 0
@@ -145,11 +153,16 @@ backup_file() {
 
   # Create backup directory at project root
   local backup_dir="backup_config_files"
-  mkdir -p "$backup_dir"
+  if ! mkdir -p "$backup_dir"; then
+    echo "ERROR: Failed to create backup directory ${backup_dir}" >&2
+    return 1
+  fi
 
   # Create unique backup name that encodes path information
   local backup_name
-  if [[ "$file" == "$HOME"* ]]; then
+  # Check if file is under HOME (require trailing slash to avoid false prefix matches)
+  # Also validate HOME is non-empty to avoid matching everything
+  if [[ -n "$HOME" && "$file" == "$HOME/"* ]]; then
     # HOME directory file - use relative path from HOME
     local rel_path="${file#$HOME/}"
     rel_path="${rel_path//\//_}"  # Replace / with _
@@ -165,9 +178,9 @@ backup_file() {
     backup_name="local_${sanitized}"
   fi
 
-  # Create backup with timestamp BEFORE .bak extension
+  # Create backup with timestamp (nanoseconds for uniqueness) BEFORE .bak extension
   local timestamp
-  timestamp=$(date +%Y%m%d_%H%M%S)
+  timestamp=$(date +%Y%m%d_%H%M%S_%N)
   local backup_path="${backup_dir}/${backup_name}.${timestamp}.bak"
 
   # Copy with error handling
