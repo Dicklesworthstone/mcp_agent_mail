@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -135,4 +138,28 @@ async def test_http_readiness_endpoint(isolated_env):
         r = await client.get("/health/readiness")
         assert r.status_code in (200, 503)
 
+
+@pytest.mark.asyncio
+async def test_http_lock_status_endpoint(isolated_env):
+    server = build_mcp_server()
+    settings = _config.get_settings()
+    app = build_http_app(settings, server)
+
+    storage_root = Path(settings.storage.root).expanduser().resolve()
+    storage_root.mkdir(parents=True, exist_ok=True)
+    lock_path = storage_root / ".archive.lock"
+    lock_path.touch()
+    metadata_path = storage_root / ".archive.lock.owner.json"
+    metadata_path.write_text(json.dumps({"pid": 999_999, "created_ts": time.time() - 400}), encoding="utf-8")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/mail/api/locks")
+        assert resp.status_code == 200
+        payload = resp.json()
+        locks = payload.get("locks", [])
+        assert any(item.get("path") == str(lock_path) for item in locks)
+        entry = next(item for item in locks if item.get("path") == str(lock_path))
+        assert entry.get("metadata", {}).get("pid") == 999_999
+        assert entry.get("stale_suspected") is True
 
