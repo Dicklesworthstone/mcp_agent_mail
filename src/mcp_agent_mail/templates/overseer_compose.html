@@ -380,7 +380,8 @@ Please investigate the following:
             Cancel
           </button>
           <button @click="confirmSend()" type="button"
-                  class="px-4 py-2 text-sm font-medium bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-100 rounded-lg transition-colors">
+                  :disabled="sending"
+                  class="px-4 py-2 text-sm font-medium bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
             Confirm & Send
           </button>
         </div>
@@ -504,6 +505,10 @@ function overseerComposer() {
     },
 
     async confirmSend() {
+      // CRITICAL: Guard against double-clicks during modal transition or network request
+      // Without this, rapid clicks during the 300ms x-transition can send duplicate messages
+      if (this.sending) return;
+
       this.showConfirmModal = false;
       this.sending = true;
 
@@ -587,6 +592,13 @@ function overseerComposer() {
       else {
         event.preventDefault();
         const currentIndex = Array.from(focusableElements).indexOf(document.activeElement);
+
+        // Edge case: if focus somehow escaped the modal, recover by focusing first element
+        if (currentIndex === -1) {
+          firstElement.focus();
+          return;
+        }
+
         const nextIndex = event.shiftKey ? currentIndex - 1 : currentIndex + 1;
         if (nextIndex >= 0 && nextIndex < focusableElements.length) {
           focusableElements[nextIndex].focus();

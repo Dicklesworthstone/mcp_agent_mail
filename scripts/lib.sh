@@ -89,8 +89,8 @@ write_atomic() {
   local tmp
   tmp="${target}.tmp.$$"
 
-  # Set up cleanup trap for temp file
-  trap 'rm -f "$tmp" 2>/dev/null' EXIT INT TERM
+  # Set up cleanup trap for temp file (double quotes = expand now, not at trap execution)
+  trap "rm -f \"$tmp\" 2>/dev/null" EXIT INT TERM
 
   # Create temp file with secure permissions (600)
   umask 077
@@ -128,17 +128,41 @@ json_validate() {
 }
 
 # Escape a string for safe embedding in JSON
-# Usage: escaped=$(json_escape_string "$raw_string")
+# Usage: escaped=$(json_escape_string "$raw_string") || exit 1
+# Returns: JSON-escaped string WITH quotes (e.g., "value")
+# Exits with error if escaping fails
 json_escape_string() {
   local raw="$1"
+  local result
+
   if command -v jq >/dev/null 2>&1; then
     # Use jq for proper JSON escaping
-    jq -n --arg str "$raw" '$str'
+    if ! result=$(jq -n --arg str "$raw" '$str' 2>&1); then
+      echo "ERROR: jq failed to escape JSON string" >&2
+      return 1
+    fi
   elif command -v python >/dev/null 2>&1; then
-    python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw"
+    if ! result=$(python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw" 2>&1); then
+      echo "ERROR: python failed to escape JSON string" >&2
+      return 1
+    fi
+  elif command -v uv >/dev/null 2>&1; then
+    if ! result=$(uv run python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw" 2>&1); then
+      echo "ERROR: uv python failed to escape JSON string" >&2
+      return 1
+    fi
   else
-    uv run python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw"
+    echo "ERROR: No JSON escaping tool available (need jq, python, or uv)" >&2
+    return 1
   fi
+
+  # Validate result is non-empty
+  if [[ -z "$result" ]]; then
+    echo "ERROR: JSON escaping produced empty result" >&2
+    return 1
+  fi
+
+  echo "$result"
 }
 
 # Set file permissions to 600 with error checking
@@ -247,6 +271,7 @@ backup_file() {
   fi
 
   # Create unique backup name that encodes path information
+  # Sanitize glob metacharacters to prevent find pattern matching issues
   local backup_name
   # Check if file is under HOME (require trailing slash to avoid false prefix matches)
   # Also validate HOME is non-empty to avoid matching everything
@@ -254,10 +279,24 @@ backup_file() {
     # HOME directory file - use relative path from HOME
     local rel_path="${file#$HOME/}"
     rel_path="${rel_path//\//_}"  # Replace / with _
+    # Sanitize glob metacharacters: * ? [ ] { }
+    rel_path="${rel_path//\*/STAR}"
+    rel_path="${rel_path//\?/QMARK}"
+    rel_path="${rel_path//\[/LBRACK}"
+    rel_path="${rel_path//\]/RBRACK}"
+    rel_path="${rel_path//\{/LBRACE}"
+    rel_path="${rel_path//\}/RBRACE}"
     backup_name="home_${rel_path}"
   else
     # Non-HOME path (project-local or absolute)
     local sanitized="${file//\//_}"  # Replace / with _
+    # Sanitize glob metacharacters: * ? [ ] { }
+    sanitized="${sanitized//\*/STAR}"
+    sanitized="${sanitized//\?/QMARK}"
+    sanitized="${sanitized//\[/LBRACK}"
+    sanitized="${sanitized//\]/RBRACK}"
+    sanitized="${sanitized//\{/LBRACE}"
+    sanitized="${sanitized//\}/RBRACE}"
     # Remove leading dots and underscores
     while [[ "$sanitized" == .* ]] || [[ "$sanitized" == _* ]]; do
       sanitized="${sanitized#.}"
@@ -313,7 +352,8 @@ update_env_var() {
   if [[ "${DRY_RUN}" == "1" ]]; then _print "[dry-run] set ${key} in .env"; return 0; fi
 
   local tmp="${env_file}.tmp.$$"
-  trap 'rm -f "$tmp" 2>/dev/null' EXIT INT TERM
+  # Double quotes = expand now, not at trap execution
+  trap "rm -f \"$tmp\" 2>/dev/null" EXIT INT TERM
 
   if [[ -f "$env_file" ]]; then
     backup_file "$env_file"
@@ -365,7 +405,8 @@ update_env_var() {
   fi
 
   trap - EXIT INT TERM
-  set_secure_file "$env_file" || log_warn "Failed to set secure permissions on ${env_file}"
+  # Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+  set_secure_file "$env_file" || true
 }
 
 # Confirmation prompt honoring AUTO_YES and TTY; usage: confirm "Message?" || exit 1
