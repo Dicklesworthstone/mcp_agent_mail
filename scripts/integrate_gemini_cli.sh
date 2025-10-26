@@ -118,7 +118,8 @@ write_atomic "$HOME_GEMINI_JSON" <<JSON
 JSON
 
 # Bug 1 fix: Ensure secure permissions
-set_secure_file "$HOME_GEMINI_JSON" || log_warn "Failed to set permissions on ${HOME_GEMINI_JSON}"
+# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+set_secure_file "$HOME_GEMINI_JSON" || true
 log_step "Attempt readiness check (bounded)"
 if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
   _rc=0; log_ok "Server readiness OK."
@@ -134,8 +135,9 @@ else
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
   # Bug 6 fix: Use json_escape_string to safely escape variables
-  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-gemini}")
+  # Issue #7 fix: Validate escaping succeeded
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
+  _AGENT_ESCAPED=$(json_escape_string "${USER:-gemini}") || { log_err "Failed to escape agent name"; exit 1; }
 
   # ensure_project - Bug 16 fix: add logging
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \

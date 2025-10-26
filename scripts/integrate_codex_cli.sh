@@ -143,7 +143,8 @@ url = "${_URL}"
 TOML
 
 # Bug 1 fix: Ensure secure permissions
-set_secure_file "$LOCAL_TOML" || log_warn "Failed to set permissions on ${LOCAL_TOML}"
+# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+set_secure_file "$LOCAL_TOML" || true
 
 echo "Done."
 
@@ -155,8 +156,9 @@ else
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
   # Bug 6 fix: Use json_escape_string to safely escape variables
-  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-codex}")
+  # Issue #7 fix: Validate escaping succeeded
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
+  _AGENT_ESCAPED=$(json_escape_string "${USER:-codex}") || { log_err "Failed to escape agent name"; exit 1; }
 
   # ensure_project - Bug 16 fix: add logging
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \

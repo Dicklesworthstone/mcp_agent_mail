@@ -112,7 +112,8 @@ write_atomic "$SETTINGS_PATH" <<JSON
 }
 JSON
 json_validate "$SETTINGS_PATH" || log_warn "Invalid JSON in ${SETTINGS_PATH}"
-set_secure_file "$SETTINGS_PATH" || log_warn "Failed to set permissions on ${SETTINGS_PATH}"
+# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+set_secure_file "$SETTINGS_PATH" || true
 
 # Also write to settings.local.json to ensure Claude Code picks it up when local overrides are used
 LOCAL_SETTINGS_PATH="${CLAUDE_DIR}/settings.local.json"
@@ -145,7 +146,8 @@ write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
 }
 JSON
 json_validate "$LOCAL_SETTINGS_PATH" || log_warn "Invalid JSON in ${LOCAL_SETTINGS_PATH}"
-set_secure_file "$LOCAL_SETTINGS_PATH" || log_warn "Failed to set permissions on ${LOCAL_SETTINGS_PATH}"
+# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+set_secure_file "$LOCAL_SETTINGS_PATH" || true
 
 # Update global user-level ~/.claude/settings.json to ensure CLI picks up MCP (non-destructive merge)
 HOME_CLAUDE_DIR="${HOME}/.claude"
@@ -202,7 +204,8 @@ JSON
 fi
 
 # Bug 1 fix: Ensure secure permissions
-set_secure_file "$HOME_SETTINGS_PATH" || log_warn "Failed to set permissions on ${HOME_SETTINGS_PATH}"
+# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
+set_secure_file "$HOME_SETTINGS_PATH" || true
 
 # Create run helper script with token
 log_step "Creating run helper script with token"
@@ -242,8 +245,9 @@ else
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
   # Bug 6 fix: Use json_escape_string to safely escape variables
-  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
-  _AGENT_ESCAPED=$(json_escape_string "${_AGENT}")
+  # Issue #7 fix: Validate escaping succeeded
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
+  _AGENT_ESCAPED=$(json_escape_string "${_AGENT}") || { log_err "Failed to escape agent name"; exit 1; }
 
   # ensure_project - Bug 16 fix: add logging
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
