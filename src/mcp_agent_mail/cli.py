@@ -221,7 +221,7 @@ def clear_and_reset_everything(
                 console.print(f"  • {path}")
         else:
             console.print("  • (no SQLite files detected)")
-        console.print(f"  • All contents inside {storage_root} (excluding .git)")
+        console.print(f"  • All contents inside {storage_root} (including .git)")
         console.print()
         if not typer.confirm("Proceed?"):
             raise typer.Exit(code=1)
@@ -236,12 +236,10 @@ def clear_and_reset_everything(
         except Exception as exc:  # pragma: no cover - filesystem failures
             console.print(f"[red]Failed to delete {path}: {exc}[/]")
 
-    # Wipe storage root contents (preserve .git directory if present)
+    # Wipe storage root contents completely (including .git directory)
     deleted_storage: list[Path] = []
     if storage_root.exists():
         for child in storage_root.iterdir():
-            if child.name == ".git":
-                continue
             try:
                 if child.is_dir():
                     shutil.rmtree(child)
