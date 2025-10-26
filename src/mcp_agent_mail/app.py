@@ -2638,6 +2638,29 @@ def build_mcp_server() -> FastMCP:
                 ) from err
 
             if unknown_local or unknown_external:
+                # Optionally auto-register missing local recipients
+                if get_settings().contact_enforcement_enabled and auto_contact_if_blocked:
+                    # Best effort: try to register any unknown local recipients with sane defaults
+                    newly_registered: set[str] = set()
+                    for missing in list(unknown_local):
+                        try:
+                            _ = await _get_or_create_agent(
+                                project,
+                                missing,
+                                sender.program,
+                                sender.model,
+                                sender.task_description,
+                                settings,
+                            )
+                            newly_registered.add(missing)
+                        except Exception:
+                            pass
+                    unknown_local.difference_update(newly_registered)
+                    # Re-run routing for any that were registered
+                    if newly_registered:
+                        from contextlib import suppress
+                        with suppress(_ContactBlocked):
+                            await _route(list(newly_registered), "to")
                 parts: list[str] = []
                 data_payload: dict[str, Any] = {}
                 if unknown_local:
@@ -2999,6 +3022,11 @@ def build_mcp_server() -> FastMCP:
         to_project: Optional[str] = None,
         reason: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
+        # Optional quality-of-life flags; ignored by clients that don't pass them
+        register_if_missing: bool = False,
+        program: Optional[str] = None,
+        model: Optional[str] = None,
+        task_description: Optional[str] = None,
     ) -> dict[str, Any]:
         """Request contact approval to message another agent.
 
@@ -3025,6 +3053,7 @@ def build_mcp_server() -> FastMCP:
             Time to live for the contact approval request (default: 7 days).
         """
         project = await _get_project_by_identifier(project_key)
+        settings = get_settings()
         a = await _get_agent(project, from_agent)
         # Allow explicit external addressing in to_agent as project:<slug>#<Name>
         target_project = project
@@ -3040,7 +3069,21 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 target_project = project
                 target_name = to_agent
-        b = await _get_agent(target_project, target_name)
+        try:
+            b = await _get_agent(target_project, target_name)
+        except NoResultFound:
+            if register_if_missing and validate_agent_name_format(target_name):
+                # Create the missing target identity using provided metadata (best effort)
+                b = await _get_or_create_agent(
+                    target_project,
+                    target_name,
+                    program or "unknown",
+                    model or "unknown",
+                    task_description or "",
+                    settings,
+                )
+            else:
+                raise
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds))
         async with get_session() as s:

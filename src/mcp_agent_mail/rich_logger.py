@@ -24,7 +24,8 @@ from rich.text import Text
 from rich.tree import Tree
 
 # Global console instance for logging
-console = Console(stderr=True, force_terminal=True, width=120)
+# Auto-detect terminal width for gorgeous, full-width panels by default
+console = Console(stderr=True, force_terminal=True)
 
 
 @dataclass
@@ -282,13 +283,7 @@ def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
 
 def _render_panel_to_text(panel: Panel) -> str:
     """Render a Rich panel to plain text (no ANSI color codes)."""
-    capture_console = Console(
-        stderr=True,
-        force_terminal=True,
-        width=120,
-        record=True,
-        color_system=None,
-    )
+    capture_console = Console(stderr=True, force_terminal=True, record=True, color_system=None)
     capture_console.print(panel)
     capture_console.print()
     return capture_console.export_text(clear=True)
