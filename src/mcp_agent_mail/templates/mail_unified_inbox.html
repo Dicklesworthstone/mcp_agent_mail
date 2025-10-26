@@ -34,10 +34,11 @@
         class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 focus:ring-2 focus:ring-primary-500/20"
         autocomplete="off"
         id="unified-search"
+        aria-label="Search all messages"
       />
       <div class="absolute inset-y-0 right-0 pr-3 flex items-center gap-2">
         <template x-if="searchQuery">
-          <button @click="searchQuery = ''; filterMessages()" class="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Clear search">
+          <button @click="searchQuery = ''; filterMessages()" class="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" aria-label="Clear search">
             <i data-lucide="x" class="w-4 h-4 text-slate-500"></i>
           </button>
         </template>
@@ -63,13 +64,13 @@
       <button @click="switchToSplitView()"
               :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
               class="p-2 rounded transition-colors"
-              title="Split view (Gmail style)">
+              aria-label="Split view (Gmail style)">
         <i data-lucide="columns-2" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
       </button>
       <button @click="viewMode = 'list'"
               :class="viewMode === 'list' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
               class="p-2 rounded transition-colors"
-              title="List view only">
+              aria-label="List view only">
         <i data-lucide="list" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
       </button>
     </div>
@@ -184,7 +185,7 @@
                    updateIndeterminate();
                  "
                  class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer"
-                 title="Select all">
+                 aria-label="Select all messages">
           <template x-if="selectedMessages.length > 0">
             <div class="flex items-center gap-2 text-sm animate-slide-in">
               <span class="font-semibold text-primary-600 dark:text-primary-400" x-text="selectedMessages.length + ' selected'"></span>
@@ -251,10 +252,11 @@
                      'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900': !selectedMessage || selectedMessage.id !== msg.id,
                      'font-semibold': !msg.read
                    }"
-                   class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group"
+                   class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-inset"
                    :style="`animation-delay: ${Math.min(index * 0.02, 0.5)}s;`"
                    tabindex="0"
-                   role="button">
+                   role="button"
+                   :aria-label="'Message from ' + msg.sender + ': ' + msg.subject">
 
                 <div class="flex items-start gap-3">
                   <!-- Checkbox -->
@@ -329,12 +331,12 @@
               <i data-lucide="inbox" class="w-10 h-10 text-slate-400 dark:text-slate-500"></i>
             </div>
             <h3 class="text-xl font-semibold text-slate-900 dark:text-white mb-2">
-              <template x-if="searchQuery || filtersActive">No messages found</template>
-              <template x-if="!searchQuery && !filtersActive">Your inbox is empty</template>
+              <template x-if="searchQuery || filtersActive">No matching messages</template>
+              <template x-if="!searchQuery && !filtersActive">Your unified inbox is empty</template>
             </h3>
             <p class="text-sm text-slate-600 dark:text-slate-400 max-w-sm mb-4">
-              <template x-if="searchQuery || filtersActive">Try adjusting your search or filters</template>
-              <template x-if="!searchQuery && !filtersActive">Messages from your AI agents will appear here</template>
+              <template x-if="searchQuery || filtersActive">No messages match your current search query or filter criteria. Try broadening your search terms or clearing the active filters to see all messages.</template>
+              <template x-if="!searchQuery && !filtersActive">Messages from all your AI agents across all projects will appear here automatically when they're received. This unified view helps you stay on top of all agent communications in one place.</template>
             </p>
             <template x-if="searchQuery || filtersActive">
               <button @click="clearFilters(); searchQuery = ''; filterMessages()"
@@ -523,6 +525,7 @@
           x-model="searchQuery"
           placeholder="Filter projects..."
           class="pl-10 pr-4 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 rounded-lg text-sm text-slate-900 dark:text-white placeholder-slate-500 w-64"
+          aria-label="Filter projects"
         />
       </div>
       {% endif %}
@@ -572,8 +575,9 @@
          x-transition
          class="text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
       <i data-lucide="search-x" class="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-3"></i>
-      <p class="text-slate-600 dark:text-slate-400">No projects found</p>
-      <button @click="searchQuery = ''" class="mt-3 text-primary-600 dark:text-primary-400 text-sm hover:underline">
+      <p class="text-slate-600 dark:text-slate-400 font-medium mb-1">No projects found</p>
+      <p class="text-sm text-slate-500 dark:text-slate-500 mb-3">No project names match your search query</p>
+      <button @click="searchQuery = ''" class="mt-2 text-primary-600 dark:text-primary-400 text-sm hover:underline">
         Clear search
       </button>
     </div>

@@ -87,6 +87,7 @@
           value="{{ q }}"
           placeholder='Try: subject:login body:"api key"'
           class="w-full pl-12 pr-4 py-4 bg-slate-50 dark:bg-slate-900 border-2 border-slate-300 dark:border-slate-600 rounded-xl text-lg text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all duration-200"
+          aria-label="Search messages"
           autofocus
         />
         <input type="hidden" id="scope" name="scope" x-model="scope" />
@@ -182,11 +183,11 @@
     </div>
     <div class="mt-2 flex items-center gap-2">
       <span class="text-slate-500 text-sm">Add token:</span>
-      <select id="tokenField" class="border rounded-md px-2 py-1 text-sm">
+      <select id="tokenField" class="border rounded-md px-2 py-1 text-sm" aria-label="Token field type">
         <option value="subject">Subject</option>
         <option value="body">Body</option>
       </select>
-      <input id="tokenValue" class="border rounded-md px-2 py-1 text-sm" placeholder="keyword or phrase" />
+      <input id="tokenValue" class="border rounded-md px-2 py-1 text-sm" placeholder="keyword or phrase" aria-label="Token value" />
       <button type="button" id="addTokenBtn" class="px-2 py-1 rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200 text-sm">Add</button>
     </div>
     {% endif %}

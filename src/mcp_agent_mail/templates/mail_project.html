@@ -124,6 +124,7 @@
           placeholder="Search by subject, body, or use filters like subject:keyword..."
           class="w-full pl-14 pr-4 py-4 bg-slate-50 dark:bg-slate-900 border-2 border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 font-medium"
           autocomplete="off"
+          aria-label="Search project messages"
         />
         <input type="hidden" id="scope" name="scope" x-model="scope" />
         <input type="hidden" id="order" name="order" x-model="order" />
@@ -287,8 +288,8 @@
         <div class="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
           <i data-lucide="search-x" class="w-8 h-8 text-slate-400"></i>
         </div>
-        <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2">No messages found</h3>
-        <p class="text-sm text-slate-600 dark:text-slate-400">Try adjusting your search terms or filters</p>
+        <h3 class="text-lg font-semibold text-slate-900 dark:text-white mb-2">No matching messages</h3>
+        <p class="text-sm text-slate-600 dark:text-slate-400">No messages in this project match your search criteria. Try using different keywords, checking for typos, or broadening your search terms.</p>
       </div>
     {% endif %}
   </div>
@@ -347,7 +348,8 @@
               <button onclick="copyToClipboard(this.dataset.agentName, 'Agent name copied!')"
                       data-agent-name="{{ a.name }}"
                       class="p-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md"
-                      data-tippy-content="Copy agent name">
+                      data-tippy-content="Copy agent name"
+                      aria-label="Copy agent name">
                 <i data-lucide="copy" class="w-4 h-4"></i>
               </button>
             </div>

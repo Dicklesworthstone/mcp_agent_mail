@@ -76,7 +76,8 @@
             <i data-lucide="search" class="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400"></i>
             <input type="text" x-model="recipientSearch"
                    placeholder="Search agents..."
-                   class="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+                   class="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all"
+                   aria-label="Search agents">
           </div>
         </div>
       </div>
@@ -102,7 +103,8 @@
           <!-- No search results -->
           <div x-show="recipientSearch && filteredRecipientsCount() === 0" x-transition class="text-center py-8">
             <i data-lucide="search-x" class="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-3"></i>
-            <p class="text-sm text-slate-600 dark:text-slate-400">No agents found</p>
+            <p class="text-sm font-medium text-slate-600 dark:text-slate-400 mb-1">No matching agents</p>
+            <p class="text-xs text-slate-500 dark:text-slate-500">No agent names match your search query</p>
           </div>
 
         {% else %}
