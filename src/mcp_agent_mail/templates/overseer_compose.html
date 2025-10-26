@@ -135,23 +135,20 @@
           <!-- View mode toggle -->
           <div class="flex items-center gap-1 p-0.5 bg-slate-100 dark:bg-slate-900 rounded-lg">
             <button type="button" @click="viewMode = 'write'"
-                    :class="viewMode === 'write' ? 'bg-white dark:bg-slate-800 shadow-sm' : ''"
                     class="px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5"
-                    :class="viewMode === 'write' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+                    :class="viewMode === 'write' ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
               <i data-lucide="edit-3" class="w-3.5 h-3.5"></i>
               Write
             </button>
             <button type="button" @click="viewMode = 'preview'"
-                    :class="viewMode === 'preview' ? 'bg-white dark:bg-slate-800 shadow-sm' : ''"
                     class="px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5"
-                    :class="viewMode === 'preview' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+                    :class="viewMode === 'preview' ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
               <i data-lucide="eye" class="w-3.5 h-3.5"></i>
               Preview
             </button>
             <button type="button" @click="viewMode = 'split'"
-                    :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm' : ''"
                     class="px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5"
-                    :class="viewMode === 'split' ? 'text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+                    :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
               <i data-lucide="columns" class="w-3.5 h-3.5"></i>
               Split
             </button>
@@ -186,32 +183,32 @@
           <!-- Markdown Toolbar -->
           <div class="flex flex-wrap items-center gap-0.5 p-1.5 bg-slate-100 dark:bg-slate-900 rounded-t-lg border border-b-0 border-slate-200 dark:border-slate-700">
             <button type="button" @click="insertMarkdown('**', '**', 'bold text')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Bold">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Bold" aria-label="Insert bold text">
               <i data-lucide="bold" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <button type="button" @click="insertMarkdown('*', '*', 'italic text')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Italic">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Italic" aria-label="Insert italic text">
               <i data-lucide="italic" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <button type="button" @click="insertMarkdown('`', '`', 'code')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Code">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Code" aria-label="Insert inline code">
               <i data-lucide="code" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <div class="w-px h-5 bg-slate-300 dark:bg-slate-600 mx-1"></div>
             <button type="button" @click="insertMarkdown('## ', '', 'Heading')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Heading">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Heading" aria-label="Insert heading">
               <i data-lucide="heading" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <button type="button" @click="insertList('- ', 'List item')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="List">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="List" aria-label="Insert list">
               <i data-lucide="list" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <button type="button" @click="insertMarkdown('[', '](url)', 'link text')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Link">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Link" aria-label="Insert link">
               <i data-lucide="link" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <button type="button" @click="insertMarkdown('```\n', '\n```', 'code block')"
-                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Code Block">
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Code Block" aria-label="Insert code block">
               <i data-lucide="file-code" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
             </button>
             <div class="flex-1"></div>
