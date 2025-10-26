@@ -568,7 +568,7 @@
     </div>
 
     <!-- No search results -->
-    <div x-show="searchQuery && !Array.from(document.querySelectorAll('[x-show]')).some(el => el.style.display !== 'none' && el !== $el)"
+    <div x-show="searchQuery && $el.previousElementSibling && Array.from($el.previousElementSibling.querySelectorAll('a[x-show]')).every(el => el.style.display === 'none')"
          x-transition
          class="text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
       <i data-lucide="search-x" class="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-3"></i>

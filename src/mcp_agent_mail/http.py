@@ -1118,67 +1118,67 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             like_pat = "%" + "%".join(like_terms) + "%" if like_terms else ""
             return fts, like_pat, like_scope, tokens
 
-    @fastapi_app.get("/mail/api/locks", response_class=JSONResponse)
-    async def mail_lock_status() -> JSONResponse:
-        """Return metadata about active archive locks for observability."""
+        @fastapi_app.get("/mail/api/locks", response_class=JSONResponse)
+        async def mail_lock_status() -> JSONResponse:
+            """Return metadata about active archive locks for observability."""
 
-        settings_local = get_settings()
-        root = Path(settings_local.storage.root).expanduser().resolve()
-        locks: list[dict[str, Any]] = []
-        if root.exists():
-            now = time.time()
-            for lock_path in sorted(root.rglob("*.lock"), key=lambda p: str(p)):
-                metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
-                if not lock_path.exists():  # pragma: no cover - guard against raced removal
-                    continue
-                if lock_path.name != ".archive.lock" and not metadata_path.exists():
-                    continue
+            settings_local = get_settings()
+            root = Path(settings_local.storage.root).expanduser().resolve()
+            locks: list[dict[str, Any]] = []
+            if root.exists():
+                now = time.time()
+                for lock_path in sorted(root.rglob("*.lock"), key=lambda p: str(p)):
+                    metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
+                    if not lock_path.exists():  # pragma: no cover - guard against raced removal
+                        continue
+                    if lock_path.name != ".archive.lock" and not metadata_path.exists():
+                        continue
 
-                info: dict[str, Any] = {
-                    "path": str(lock_path),
-                    "metadata_path": str(metadata_path) if metadata_path.exists() else None,
-                    "status": "held",
-                }
+                    info: dict[str, Any] = {
+                        "path": str(lock_path),
+                        "metadata_path": str(metadata_path) if metadata_path.exists() else None,
+                        "status": "held",
+                    }
 
-                with contextlib.suppress(Exception):
-                    stat = lock_path.stat()
-                    info["size"] = stat.st_size
-                    info["modified_ts"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+                    with contextlib.suppress(Exception):
+                        stat = lock_path.stat()
+                        info["size"] = stat.st_size
+                        info["modified_ts"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
 
-                metadata: dict[str, Any] = {}
-                if metadata_path.exists():
-                    try:
-                        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        metadata = {}
+                    metadata: dict[str, Any] = {}
+                    if metadata_path.exists():
+                        try:
+                            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            metadata = {}
 
-                info["metadata"] = metadata
+                    info["metadata"] = metadata
 
-                pid_val = metadata.get("pid")
-                pid_int: int | None = None
-                with contextlib.suppress(Exception):
-                    pid_int = int(pid_val)
-                info["owner_pid"] = pid_int
-                info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
+                    pid_val = metadata.get("pid")
+                    pid_int: int | None = None
+                    with contextlib.suppress(Exception):
+                        pid_int = int(pid_val)
+                    info["owner_pid"] = pid_int
+                    info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
 
-                created_ts = metadata.get("created_ts") if isinstance(metadata, dict) else None
-                if isinstance(created_ts, (int, float)):
-                    info["created_ts"] = datetime.fromtimestamp(created_ts, tz=timezone.utc).isoformat()
-                    info["age_seconds"] = max(0.0, now - float(created_ts))
-                else:
-                    info["created_ts"] = None
-                    info["age_seconds"] = None
+                    created_ts = metadata.get("created_ts") if isinstance(metadata, dict) else None
+                    if isinstance(created_ts, (int, float)):
+                        info["created_ts"] = datetime.fromtimestamp(created_ts, tz=timezone.utc).isoformat()
+                        info["age_seconds"] = max(0.0, now - float(created_ts))
+                    else:
+                        info["created_ts"] = None
+                        info["age_seconds"] = None
 
-                stale_threshold = AsyncFileLock(lock_path)._stale_timeout
-                info["stale_timeout_seconds"] = stale_threshold
-                age_val = info.get("age_seconds")
-                info["stale_suspected"] = (
-                    bool(metadata) and not info["owner_alive"] and isinstance(age_val, (int, float)) and age_val >= stale_threshold
-                )
+                    stale_threshold = AsyncFileLock(lock_path)._stale_timeout
+                    info["stale_timeout_seconds"] = stale_threshold
+                    age_val = info.get("age_seconds")
+                    info["stale_suspected"] = (
+                        bool(metadata) and not info["owner_alive"] and isinstance(age_val, (int, float)) and age_val >= stale_threshold
+                    )
 
-                locks.append(info)
+                    locks.append(info)
 
-        return JSONResponse({"locks": locks})
+            return JSONResponse({"locks": locks})
 
     @fastapi_app.get("/mail", response_class=HTMLResponse)
     async def mail_unified_inbox() -> HTMLResponse:
