@@ -9,20 +9,39 @@ from fastmcp import Client
 
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.utils import slugify
 
 
 @pytest.mark.asyncio
 async def test_tooling_directory_and_metrics_populate(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        project_key = Path.cwd().as_posix()
+        project_result = await client.call_tool("ensure_project", {"human_key": project_key})
+        project_data = project_result.data or {}
+        project_slug = project_data.get("slug") or slugify(project_key)
+
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
+            {"project_key": project_slug, "program": "codex", "model": "gpt-5"},
         )
+
+        project_blocks = await client.read_resource(f"resource://project/{project_slug}")
+        assert project_blocks and project_blocks[0].text
+        project_payload = json.loads(project_blocks[0].text)
+        agents = project_payload.get("agents") or []
+        assert agents, "Expected at least one agent after registration"
+        agent_name = agents[0]["name"]
+
         await client.call_tool(
             "send_message",
-            {"project_key": "Backend", "sender_name": "Alpha", "to": ["Alpha"], "subject": "Ping", "body_md": "x"},
+            {
+                "project_key": project_slug,
+                "sender_name": agent_name,
+                "to": [agent_name],
+                "subject": "Ping",
+                "body_md": "x",
+            },
         )
         # Directory
         blocks = await client.read_resource("resource://tooling/directory")
@@ -38,16 +57,29 @@ async def test_tooling_directory_and_metrics_populate(isolated_env):
 async def test_tooling_recent_filters(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        project_key = Path.cwd().as_posix()
+        project_result = await client.call_tool("ensure_project", {"human_key": project_key})
+        project_data = project_result.data or {}
+        project_slug = project_data.get("slug") or slugify(project_key)
+
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
+            {"project_key": project_slug, "program": "codex", "model": "gpt-5"},
         )
+
+        project_blocks = await client.read_resource(f"resource://project/{project_slug}")
+        assert project_blocks and project_blocks[0].text
+        project_payload = json.loads(project_blocks[0].text)
+        agents = project_payload.get("agents") or []
+        assert agents, "Expected at least one agent after registration"
+        agent_name = agents[0]["name"]
         await client.call_tool(
             "health_check",
             {},
         )
-        blocks = await client.read_resource("resource://tooling/recent/60?agent=Alpha&project=Backend")
+        blocks = await client.read_resource(
+            f"resource://tooling/recent/60?agent={agent_name}&project={project_slug}"
+        )
         assert blocks and blocks[0].text
         import json as _json
         data = _json.loads(blocks[0].text)
