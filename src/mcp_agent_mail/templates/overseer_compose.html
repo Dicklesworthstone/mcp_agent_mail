@@ -49,8 +49,8 @@
           <div>
             <h2 class="text-lg font-semibold text-slate-900 dark:text-white">
               Recipients
-              <span class="ml-2 text-sm font-normal text-slate-500 dark:text-slate-400">
-                (<span x-text="selectedRecipients.length"></span> selected)
+              <span class="ml-2 text-sm font-normal" :class="selectedRecipients.length > 100 ? 'text-red-600 dark:text-red-400' : 'text-slate-500 dark:text-slate-400'">
+                (<span x-text="selectedRecipients.length"></span> / 100 selected)
               </span>
             </h2>
             <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Select which agents should receive this message</p>
@@ -429,6 +429,7 @@ function overseerComposer() {
 
     canSend() {
       return this.selectedRecipients.length > 0 &&
+             this.selectedRecipients.length <= 100 &&
              this.subject.trim() &&
              this.subject.length <= 200 &&
              this.body.trim() &&
