@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
+
 import pytest
 from fastmcp import Client
 
+from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
 
 
@@ -57,3 +62,20 @@ async def test_tooling_recent_filters(isolated_env):
                 assert e["agent"] == "Alpha"
 
 
+@pytest.mark.asyncio
+async def test_tooling_locks_resource(isolated_env):
+    server = build_mcp_server()
+    settings = _config.get_settings()
+    storage_root = Path(settings.storage.root).expanduser().resolve()
+    storage_root.mkdir(parents=True, exist_ok=True)
+    lock_path = storage_root / ".archive.lock"
+    lock_path.touch()
+    metadata_path = storage_root / ".archive.lock.owner.json"
+    metadata_path.write_text(json.dumps({"pid": 999_999, "created_ts": time.time() - 500}), encoding="utf-8")
+
+    async with Client(server) as client:
+        blocks = await client.read_resource("resource://tooling/locks")
+        assert blocks
+        payload = json.loads(blocks[0].text or "{}")
+        assert payload.get("summary", {}).get("total") == 1
+        assert any(item.get("path") == str(lock_path) for item in payload.get("locks", []))

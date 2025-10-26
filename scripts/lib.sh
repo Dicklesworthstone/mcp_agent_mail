@@ -73,17 +73,44 @@ require_cmd() {
 write_atomic() {
   local target="$1"; shift || true
   local dir; dir=$(dirname "$target")
-  mkdir -p "$dir"
+
+  # Create directory with error checking
+  if ! mkdir -p "$dir"; then
+    echo "ERROR: Failed to create directory ${dir}" >&2
+    return 1
+  fi
+
   if [[ "${DRY_RUN}" == "1" ]]; then
     _print "[dry-run] write ${target}"
     cat >/dev/null # consume stdin
     return 0
   fi
+
   local tmp
   tmp="${target}.tmp.$$"
+
+  # Set up cleanup trap for temp file
+  trap 'rm -f "$tmp" 2>/dev/null' EXIT INT TERM
+
+  # Create temp file with secure permissions (600)
   umask 077
-  cat >"$tmp"
-  mv "$tmp" "$target"
+  if ! cat >"$tmp"; then
+    echo "ERROR: Failed to write temp file ${tmp}" >&2
+    rm -f "$tmp" 2>/dev/null
+    trap - EXIT INT TERM
+    return 1
+  fi
+
+  # Atomic move
+  if ! mv "$tmp" "$target"; then
+    echo "ERROR: Failed to move ${tmp} to ${target}" >&2
+    rm -f "$tmp" 2>/dev/null
+    trap - EXIT INT TERM
+    return 1
+  fi
+
+  # Clear trap after successful completion
+  trap - EXIT INT TERM
 }
 
 # JSON validate via jq or Python
@@ -100,9 +127,70 @@ json_validate() {
   fi
 }
 
-set_secure_file() { [[ "${DRY_RUN}" == "1" ]] && { _print "[dry-run] chmod 600 $1"; return 0; }; chmod 600 "$1" 2>/dev/null || true; }
-set_secure_exec() { [[ "${DRY_RUN}" == "1" ]] && { _print "[dry-run] chmod 700 $1"; return 0; }; chmod 700 "$1" 2>/dev/null || true; }
-set_secure_dir() { [[ "${DRY_RUN}" == "1" ]] && { _print "[dry-run] chmod 700 $1"; return 0; }; chmod 700 "$1" 2>/dev/null || true; }
+# Escape a string for safe embedding in JSON
+# Usage: escaped=$(json_escape_string "$raw_string")
+json_escape_string() {
+  local raw="$1"
+  if command -v jq >/dev/null 2>&1; then
+    # Use jq for proper JSON escaping
+    jq -n --arg str "$raw" '$str'
+  elif command -v python >/dev/null 2>&1; then
+    python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw"
+  else
+    uv run python -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$raw"
+  fi
+}
+
+# Set file permissions to 600 with error checking
+set_secure_file() {
+  local file="$1"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] chmod 600 ${file}"
+    return 0
+  fi
+  if [[ ! -e "$file" ]]; then
+    log_warn "Cannot chmod: file does not exist: ${file}"
+    return 1
+  fi
+  if ! chmod 600 "$file" 2>/dev/null; then
+    log_warn "Failed to chmod 600 ${file} (permissions/readonly filesystem?)"
+    return 1
+  fi
+}
+
+# Set file permissions to 700 (executable) with error checking
+set_secure_exec() {
+  local file="$1"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] chmod 700 ${file}"
+    return 0
+  fi
+  if [[ ! -e "$file" ]]; then
+    log_warn "Cannot chmod: file does not exist: ${file}"
+    return 1
+  fi
+  if ! chmod 700 "$file" 2>/dev/null; then
+    log_warn "Failed to chmod 700 ${file} (permissions/readonly filesystem?)"
+    return 1
+  fi
+}
+
+# Set directory permissions to 700 with error checking
+set_secure_dir() {
+  local dir="$1"
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] chmod 700 ${dir}"
+    return 0
+  fi
+  if [[ ! -d "$dir" ]]; then
+    log_warn "Cannot chmod: directory does not exist: ${dir}"
+    return 1
+  fi
+  if ! chmod 700 "$dir" 2>/dev/null; then
+    log_warn "Failed to chmod 700 ${dir} (permissions/readonly filesystem?)"
+    return 1
+  fi
+}
 
 # Readiness polling: host, port, path, tries, delay_seconds
 readiness_poll() {
@@ -190,24 +278,94 @@ backup_file() {
   fi
 
   _print "Backed up ${file} to ${backup_path}"
+
+  # Cleanup old backups (keep last 10 for this file pattern)
+  cleanup_old_backups "$backup_dir" "$backup_name" 10
+}
+
+# Cleanup old backup files, keeping only the most recent N
+# Usage: cleanup_old_backups <backup_dir> <backup_pattern> <keep_count>
+cleanup_old_backups() {
+  local backup_dir="$1"
+  local backup_pattern="$2"
+  local keep_count="${3:-10}"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] cleanup old backups matching ${backup_pattern}"
+    return 0
+  fi
+
+  # Find all backups matching this pattern, sort by timestamp (newest first), delete old ones
+  # Pattern: ${backup_pattern}.TIMESTAMP.bak
+  local old_backups
+  old_backups=$(find "$backup_dir" -maxdepth 1 -name "${backup_pattern}.*.bak" -type f 2>/dev/null | sort -r | tail -n +$((keep_count + 1)))
+
+  if [[ -n "$old_backups" ]]; then
+    while IFS= read -r old_backup; do
+      rm -f "$old_backup" 2>/dev/null && _print "Removed old backup: ${old_backup}"
+    done <<< "$old_backups"
+  fi
 }
 
 # Update or append env var in .env atomically (backup first)
 update_env_var() {
   local key="$1"; local value="$2"; local env_file=".env"
   if [[ "${DRY_RUN}" == "1" ]]; then _print "[dry-run] set ${key} in .env"; return 0; fi
+
+  local tmp="${env_file}.tmp.$$"
+  trap 'rm -f "$tmp" 2>/dev/null' EXIT INT TERM
+
   if [[ -f "$env_file" ]]; then
     backup_file "$env_file"
+
+    # Use atomic write: read old file, modify, write to temp, move
     if grep -q "^${key}=" "$env_file"; then
-      sed -E -i "s/^${key}=.*/${key}=${value}/" "$env_file"
+      # Replace existing key
+      umask 077
+      if ! sed -E "s/^${key}=.*/${key}=${value}/" "$env_file" > "$tmp"; then
+        rm -f "$tmp" 2>/dev/null
+        trap - EXIT INT TERM
+        echo "ERROR: Failed to update ${key} in ${env_file}" >&2
+        return 1
+      fi
     else
-      echo "${key}=${value}" >> "$env_file"
+      # Append new key
+      umask 077
+      if ! { cat "$env_file"; echo "${key}=${value}"; } > "$tmp"; then
+        rm -f "$tmp" 2>/dev/null
+        trap - EXIT INT TERM
+        echo "ERROR: Failed to append ${key} to ${env_file}" >&2
+        return 1
+      fi
+    fi
+
+    # Atomic move
+    if ! mv "$tmp" "$env_file"; then
+      rm -f "$tmp" 2>/dev/null
+      trap - EXIT INT TERM
+      echo "ERROR: Failed to move temp file to ${env_file}" >&2
+      return 1
     fi
   else
+    # Create new file
     umask 077
-    echo "${key}=${value}" > "$env_file"
+    if ! echo "${key}=${value}" > "$tmp"; then
+      rm -f "$tmp" 2>/dev/null
+      trap - EXIT INT TERM
+      echo "ERROR: Failed to create ${env_file}" >&2
+      return 1
+    fi
+
+    if ! mv "$tmp" "$env_file"; then
+      rm -f "$tmp" 2>/dev/null
+      trap - EXIT INT TERM
+      echo "ERROR: Failed to move temp file to ${env_file}" >&2
+      return 1
+    fi
   fi
-  set_secure_file "$env_file"
+
+  trap - EXIT INT TERM
+  set_secure_file "$env_file" || log_warn "Failed to set secure permissions on ${env_file}"
 }
 
 # Confirmation prompt honoring AUTO_YES and TTY; usage: confirm "Message?" || exit 1

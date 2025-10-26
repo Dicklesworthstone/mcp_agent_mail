@@ -40,6 +40,12 @@ print(f"export _HTTP_PATH='{s.http.path}'")
 PY
 )"
 
+# Validate Python eval output (Bug 15)
+if [[ -z "${_HTTP_HOST}" || -z "${_HTTP_PORT}" || -z "${_HTTP_PATH}" ]]; then
+  log_err "Failed to detect HTTP endpoint from settings (Python eval failed)"
+  exit 1
+fi
+
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 log_ok "Detected MCP HTTP endpoint: ${_URL}"
 
@@ -69,14 +75,19 @@ CLAUDE_DIR="${TARGET_DIR}/.claude"
 SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
 mkdir -p "$CLAUDE_DIR"
 
-# Derive defaults for hooks without prompting
-_PROJ="backend"
+# Derive project name from TARGET_DIR (Bug 14 fix - was hardcoded to "backend")
+_PROJ=$(basename "$TARGET_DIR")
 _AGENT="${USER:-user}"
+log_ok "Using project name: ${_PROJ}, agent name: ${_AGENT}"
 
-backup_file "$SETTINGS_PATH"
-  log_step "Writing MCP server config and hooks"
-  AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
-  write_atomic "$SETTINGS_PATH" <<JSON
+# Backup existing file if it exists (Bug 5 fix - backup BEFORE creating empty file)
+if [[ -f "$SETTINGS_PATH" ]]; then
+  backup_file "$SETTINGS_PATH"
+fi
+
+log_step "Writing MCP server config and hooks"
+AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
+write_atomic "$SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
@@ -100,13 +111,16 @@ backup_file "$SETTINGS_PATH"
   }
 }
 JSON
-  json_validate "$SETTINGS_PATH" || true
-  set_secure_file "$SETTINGS_PATH"
+json_validate "$SETTINGS_PATH" || log_warn "Invalid JSON in ${SETTINGS_PATH}"
+set_secure_file "$SETTINGS_PATH" || log_warn "Failed to set permissions on ${SETTINGS_PATH}"
 
-  # Also write to settings.local.json to ensure Claude Code picks it up when local overrides are used
-  LOCAL_SETTINGS_PATH="${CLAUDE_DIR}/settings.local.json"
+# Also write to settings.local.json to ensure Claude Code picks it up when local overrides are used
+LOCAL_SETTINGS_PATH="${CLAUDE_DIR}/settings.local.json"
+if [[ -f "$LOCAL_SETTINGS_PATH" ]]; then
   backup_file "$LOCAL_SETTINGS_PATH"
-  write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
+fi
+
+write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
@@ -130,25 +144,51 @@ JSON
   }
 }
 JSON
-  json_validate "$LOCAL_SETTINGS_PATH" || true
-  set_secure_file "$LOCAL_SETTINGS_PATH"
+json_validate "$LOCAL_SETTINGS_PATH" || log_warn "Invalid JSON in ${LOCAL_SETTINGS_PATH}"
+set_secure_file "$LOCAL_SETTINGS_PATH" || log_warn "Failed to set permissions on ${LOCAL_SETTINGS_PATH}"
 
-  # Update global user-level ~/.claude/settings.json to ensure CLI picks up MCP (non-destructive merge)
-  HOME_CLAUDE_DIR="${HOME}/.claude"
-  mkdir -p "$HOME_CLAUDE_DIR"
-  HOME_SETTINGS_PATH="${HOME_CLAUDE_DIR}/settings.json"
-  if [[ ! -f "$HOME_SETTINGS_PATH" ]]; then
-    echo '{ "mcpServers": {} }' > "$HOME_SETTINGS_PATH"
-  fi
+# Update global user-level ~/.claude/settings.json to ensure CLI picks up MCP (non-destructive merge)
+HOME_CLAUDE_DIR="${HOME}/.claude"
+mkdir -p "$HOME_CLAUDE_DIR"
+HOME_SETTINGS_PATH="${HOME_CLAUDE_DIR}/settings.json"
+
+# Bug 5 fix: Backup BEFORE creating empty file, and only if file exists
+if [[ -f "$HOME_SETTINGS_PATH" ]]; then
   backup_file "$HOME_SETTINGS_PATH"
-  if command -v jq >/dev/null 2>&1; then
-    TMP_MERGE="${HOME_SETTINGS_PATH}.tmp.$(date +%s)"
-    jq --arg url "${_URL}" --arg token "${_TOKEN}" \
+else
+  # Create minimal starting point
+  umask 077  # Bug 1 fix: secure permissions
+  echo '{ "mcpServers": {} }' > "$HOME_SETTINGS_PATH"
+fi
+
+# Bug 3, 9 fix: Proper temp file handling with nanosecond timestamp and error checking
+if command -v jq >/dev/null 2>&1; then
+  TMP_MERGE="${HOME_SETTINGS_PATH}.tmp.$$.$(date +%s_%N)"  # Bug 9 fix: add PID and nanoseconds
+  trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
+
+  umask 077  # Bug 1 fix: secure permissions for temp file
+  if jq --arg url "${_URL}" --arg token "${_TOKEN}" \
       '.mcpServers = (.mcpServers // {}) | .mcpServers["mcp-agent-mail"] = {"type":"http","url":$url,"headers":{"Authorization": ("Bearer " + $token)}}' \
-      "$HOME_SETTINGS_PATH" > "$TMP_MERGE" && mv "$TMP_MERGE" "$HOME_SETTINGS_PATH"
+      "$HOME_SETTINGS_PATH" > "$TMP_MERGE"; then
+    # Bug 3 fix: Check mv separately
+    if mv "$TMP_MERGE" "$HOME_SETTINGS_PATH"; then
+      log_ok "Updated ${HOME_SETTINGS_PATH} with jq merge"
+    else
+      log_err "Failed to move merged settings to ${HOME_SETTINGS_PATH}"
+      rm -f "$TMP_MERGE" 2>/dev/null
+      trap - EXIT INT TERM
+      exit 1
+    fi
   else
-    # Fallback: overwrite with minimal config
-    cat > "$HOME_SETTINGS_PATH" <<JSON
+    log_err "jq merge failed for ${HOME_SETTINGS_PATH}"
+    rm -f "$TMP_MERGE" 2>/dev/null
+    trap - EXIT INT TERM
+    exit 1
+  fi
+  trap - EXIT INT TERM
+else
+  # Fallback: use write_atomic for secure atomic write
+  write_atomic "$HOME_SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
@@ -159,7 +199,10 @@ JSON
   }
 }
 JSON
-  fi
+fi
+
+# Bug 1 fix: Ensure secure permissions
+set_secure_file "$HOME_SETTINGS_PATH" || log_warn "Failed to set permissions on ${HOME_SETTINGS_PATH}"
 
 # Create run helper script with token
 log_step "Creating run helper script with token"
@@ -197,15 +240,28 @@ if [[ $_curl_rc -ne 0 ]]; then
 else
   _AUTH_ARGS=()
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-  _HUMAN_KEY="${TARGET_DIR}"
-  # ensure_project
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":\"${_HUMAN_KEY}\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
-  # register_agent
-  curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":\"${_HUMAN_KEY}\",\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":\"${_AGENT}\",\"task_description\":\"setup\"}}}" \
-    "${_URL}" >/dev/null 2>&1 || true
+
+  # Bug 6 fix: Use json_escape_string to safely escape variables
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}")
+  _AGENT_ESCAPED=$(json_escape_string "${_AGENT}")
+
+  # ensure_project - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project (server may be starting)"
+  fi
+
+  # register_agent - Bug 16 fix: add logging
+  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Registered agent on server"
+  else
+    log_warn "Failed to register agent (server may be starting)"
+  fi
 fi
 
 log_ok "==> Done."; _print "Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."

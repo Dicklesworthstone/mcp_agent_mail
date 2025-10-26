@@ -37,6 +37,7 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
     AsyncFileLock,
+    collect_lock_status,
     ensure_archive,
     get_agent_communication_graph,
     get_archive_tree,
@@ -992,7 +993,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         return JSONResponse(response_body, status_code=status_code, headers=headers)
 
     # ----- Simple SSR Mail UI -----
-    try:
+    def _register_mail_ui() -> None:
         import bleach  # type: ignore
         import markdown2  # type: ignore
 
@@ -1123,62 +1124,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             """Return metadata about active archive locks for observability."""
 
             settings_local = get_settings()
-            root = Path(settings_local.storage.root).expanduser().resolve()
-            locks: list[dict[str, Any]] = []
-            if root.exists():
-                now = time.time()
-                for lock_path in sorted(root.rglob("*.lock"), key=lambda p: str(p)):
-                    metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
-                    if not lock_path.exists():  # pragma: no cover - guard against raced removal
-                        continue
-                    if lock_path.name != ".archive.lock" and not metadata_path.exists():
-                        continue
-
-                    info: dict[str, Any] = {
-                        "path": str(lock_path),
-                        "metadata_path": str(metadata_path) if metadata_path.exists() else None,
-                        "status": "held",
-                    }
-
-                    with contextlib.suppress(Exception):
-                        stat = lock_path.stat()
-                        info["size"] = stat.st_size
-                        info["modified_ts"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-
-                    metadata: dict[str, Any] = {}
-                    if metadata_path.exists():
-                        try:
-                            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            metadata = {}
-
-                    info["metadata"] = metadata
-
-                    pid_val = metadata.get("pid")
-                    pid_int: int | None = None
-                    with contextlib.suppress(Exception):
-                        pid_int = int(pid_val)
-                    info["owner_pid"] = pid_int
-                    info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
-
-                    created_ts = metadata.get("created_ts") if isinstance(metadata, dict) else None
-                    if isinstance(created_ts, (int, float)):
-                        info["created_ts"] = datetime.fromtimestamp(created_ts, tz=timezone.utc).isoformat()
-                        info["age_seconds"] = max(0.0, now - float(created_ts))
-                    else:
-                        info["created_ts"] = None
-                        info["age_seconds"] = None
-
-                    stale_threshold = AsyncFileLock(lock_path)._stale_timeout
-                    info["stale_timeout_seconds"] = stale_threshold
-                    age_val = info.get("age_seconds")
-                    info["stale_suspected"] = (
-                        bool(metadata) and not info["owner_alive"] and isinstance(age_val, (int, float)) and age_val >= stale_threshold
-                    )
-
-                    locks.append(info)
-
-            return JSONResponse({"locks": locks})
+            payload = collect_lock_status(settings_local)
+            return JSONResponse(payload)
 
     @fastapi_app.get("/mail", response_class=HTMLResponse)
     async def mail_unified_inbox() -> HTMLResponse:
@@ -2059,30 +2006,37 @@ The human's guidance supersedes all other priorities.
                         raise HTTPException(status_code=500, detail="Failed to create message")
                     message_id = message_row[0]
 
-                    # Insert recipients
-                    valid_recipients = []
-                    for recipient_name in recipients:
-                        # Get recipient agent ID
-                        recipient_row = (
-                            await session.execute(
-                                text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
-                                {"pid": project_id, "name": recipient_name}
-                            )
-                        ).fetchone()
+                    # Insert recipients (optimized: bulk SELECT + bulk INSERT instead of N+1 queries)
+                    # Build SQL with proper parameter expansion for IN clause
+                    placeholders = ", ".join([f":name_{i}" for i in range(len(recipients))])
+                    params = {"pid": project_id}
+                    params.update({f"name_{i}": name for i, name in enumerate(recipients)})
 
-                        if recipient_row:
-                            await session.execute(
-                                text("""
-                                    INSERT INTO message_recipients (message_id, agent_id, kind)
-                                    VALUES (:mid, :aid, :kind)
-                                """),
-                                {
-                                    "mid": message_id,
-                                    "aid": recipient_row[0],
-                                    "kind": "to"
-                                }
-                            )
-                            valid_recipients.append(recipient_name)
+                    # Single query to get all valid recipient IDs
+                    recipient_rows = await session.execute(
+                        text(f"SELECT id, name FROM agents WHERE project_id = :pid AND name IN ({placeholders})"),
+                        params
+                    )
+                    recipient_map = {row[1]: row[0] for row in recipient_rows.fetchall()}  # name -> id mapping
+
+                    # Build valid recipients list (only those that exist)
+                    valid_recipients = [name for name in recipients if name in recipient_map]
+
+                    # Bulk insert all message_recipients (single executemany call)
+                    if valid_recipients:
+                        # Prepare bulk insert params
+                        insert_params = [
+                            {"mid": message_id, "aid": recipient_map[name], "kind": "to"}
+                            for name in valid_recipients
+                        ]
+                        # Use executemany for bulk insert
+                        await session.execute(
+                            text("""
+                                INSERT INTO message_recipients (message_id, agent_id, kind)
+                                VALUES (:mid, :aid, :kind)
+                            """),
+                            insert_params
+                        )
 
                     # If no valid recipients found, rollback and error
                     if not valid_recipients:
@@ -2488,6 +2442,9 @@ The human's guidance supersedes all other priorities.
                     "error": f"Unable to retrieve historical snapshot: {e!s}"
                 })
 
+
+    try:
+        _register_mail_ui()
     except Exception as exc:
         # templates/Jinja may be missing in some environments; UI remains optional
         with contextlib.suppress(Exception):

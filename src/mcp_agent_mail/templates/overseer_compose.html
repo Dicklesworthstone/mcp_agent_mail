@@ -4,7 +4,8 @@
 
 {% block breadcrumbs %}
 <nav class="flex items-center gap-2 text-sm">
-  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors flex items-center gap-1">
+    <i data-lucide="home" class="w-3.5 h-3.5"></i>
     Projects
   </a>
   <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
@@ -50,7 +51,7 @@
             <h2 class="text-lg font-semibold text-slate-900 dark:text-white">
               Recipients
               <span class="ml-2 text-sm font-normal" :class="selectedRecipients.length > 100 ? 'text-red-600 dark:text-red-400' : 'text-slate-500 dark:text-slate-400'">
-                (<span x-text="selectedRecipients.length"></span> / 100 selected)
+                (<span x-text="selectedRecipients.length"></span> of 100 max)
               </span>
             </h2>
             <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Select which agents should receive this message</p>
@@ -333,7 +334,9 @@ Please investigate the following:
 
   <!-- Send Confirmation Modal -->
   <template x-if="showConfirmModal">
-    <div class="fixed inset-0 z-[150] flex items-center justify-center p-4" @click.self="showConfirmModal = false">
+    <div class="fixed inset-0 z-[150] flex items-center justify-center p-4"
+         @click.self="showConfirmModal = false"
+         @keydown.escape.window="showConfirmModal = false">
       <div x-show="showConfirmModal"
            x-transition:enter="transition ease-out duration-200"
            x-transition:enter-start="opacity-0"
@@ -344,6 +347,8 @@ Please investigate the following:
            x-transition:enter="transition ease-out duration-300"
            x-transition:enter-start="opacity-0 scale-95"
            x-transition:enter-end="opacity-100 scale-100"
+           x-init="$nextTick(() => $el.querySelector('button[type=button]:last-of-type').focus())"
+           @keydown.tab.prevent="trapModalFocus($event)"
            class="relative w-full max-w-md bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
 
         <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
@@ -542,17 +547,52 @@ function overseerComposer() {
         this.toastMessage = error.message || 'An unexpected error occurred. Please try again.';
         this.showToast = true;
 
+        // Reset sending state ONLY on error so user can retry
+        // On success, we keep sending=true to prevent duplicate sends during 2s redirect
+        this.sending = false;
+
         setTimeout(() => {
           this.showToast = false;
         }, 6000);
       } finally {
-        this.sending = false;
+        // Don't reset sending here - on success we're about to redirect anyway
+        // On error, it's already reset in catch block above
         if (typeof lucide !== 'undefined') {
           try {
             lucide.createIcons();
           } catch (e) {
             console.warn('Failed to render icons:', e);
           }
+        }
+      }
+    },
+
+    trapModalFocus(event) {
+      // Get all focusable elements within the modal
+      const focusableSelectors = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+      const modal = event.currentTarget;
+      const focusableElements = modal.querySelectorAll(focusableSelectors);
+
+      if (focusableElements.length === 0) return;
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+
+      // If shift+tab on first element, wrap to last
+      if (event.shiftKey && document.activeElement === firstElement) {
+        lastElement.focus();
+      }
+      // If tab on last element, wrap to first
+      else if (!event.shiftKey && document.activeElement === lastElement) {
+        firstElement.focus();
+      }
+      // Otherwise allow default tab behavior within the modal
+      else {
+        event.preventDefault();
+        const currentIndex = Array.from(focusableElements).indexOf(document.activeElement);
+        const nextIndex = event.shiftKey ? currentIndex - 1 : currentIndex + 1;
+        if (nextIndex >= 0 && nextIndex < focusableElements.length) {
+          focusableElements[nextIndex].focus();
         }
       }
     }

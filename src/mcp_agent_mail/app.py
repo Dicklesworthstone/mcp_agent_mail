@@ -32,6 +32,7 @@ from .llm import complete_system_user
 from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, Project, ProjectSiblingSuggestion
 from .storage import (
     AsyncFileLock,
+    collect_lock_status,
     ensure_archive,
     process_attachments,
     write_agent_profile,
@@ -4855,6 +4856,13 @@ def build_mcp_server() -> FastMCP:
             "generated_at": _iso(datetime.now(timezone.utc)),
             "tools": _tool_metrics_snapshot(),
         }
+
+    @mcp.resource("resource://tooling/locks", mime_type="application/json")
+    def tooling_locks_resource() -> dict[str, Any]:
+        """Return lock metadata from the shared archive storage."""
+
+        settings_local = get_settings()
+        return collect_lock_status(settings_local)
 
     @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
     def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:

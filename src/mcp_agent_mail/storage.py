@@ -146,6 +146,7 @@ class AsyncFileLock:
         )
         return True
 
+
     def _write_metadata(self) -> None:
         payload = {
             "pid": self._pid,
@@ -170,6 +171,79 @@ class AsyncFileLock:
 
 async def _to_thread(func, /, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def collect_lock_status(settings: Settings) -> dict[str, Any]:
+    """Return structured metadata about active archive locks."""
+
+    root = Path(settings.storage.root).expanduser().resolve()
+    locks: list[dict[str, Any]] = []
+    summary = {"total": 0, "active": 0, "stale": 0, "metadata_missing": 0}
+
+    if root.exists():
+        now = time.time()
+        for lock_path in sorted(root.rglob("*.lock"), key=lambda p: str(p)):
+            metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
+            if not lock_path.exists():
+                continue
+            metadata_present = metadata_path.exists()
+            if lock_path.name != ".archive.lock" and not metadata_present:
+                continue
+
+            info: dict[str, Any] = {
+                "path": str(lock_path),
+                "metadata_path": str(metadata_path) if metadata_present else None,
+                "status": "held",
+                "metadata_present": metadata_present,
+                "category": "archive" if lock_path.name == ".archive.lock" else "custom",
+            }
+
+            with contextlib.suppress(Exception):
+                stat = lock_path.stat()
+                info["size"] = stat.st_size
+                info["modified_ts"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+
+            metadata: dict[str, Any] = {}
+            if metadata_present:
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception:
+                    metadata = {}
+            info["metadata"] = metadata
+
+            pid_val = metadata.get("pid")
+            pid_int: int | None = None
+            with contextlib.suppress(Exception):
+                pid_int = int(pid_val)
+            info["owner_pid"] = pid_int
+            info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
+
+            created_ts = metadata.get("created_ts") if isinstance(metadata, dict) else None
+            if isinstance(created_ts, (int, float)):
+                info["created_ts"] = datetime.fromtimestamp(created_ts, tz=timezone.utc).isoformat()
+                info["age_seconds"] = max(0.0, now - float(created_ts))
+            else:
+                info["created_ts"] = None
+                info["age_seconds"] = None
+
+            stale_threshold = AsyncFileLock(lock_path)._stale_timeout
+            info["stale_timeout_seconds"] = stale_threshold
+            age_val = info.get("age_seconds")
+            is_stale = bool(metadata) and not info["owner_alive"] and isinstance(age_val, (int, float)) and age_val >= stale_threshold
+            info["stale_suspected"] = is_stale
+
+            summary["total"] += 1
+
+            if is_stale:
+                summary["stale"] += 1
+            elif info["owner_alive"]:
+                summary["active"] += 1
+            if not metadata_present:
+                summary["metadata_missing"] += 1
+
+            locks.append(info)
+
+    return {"locks": locks, "summary": summary}
 
 
 async def ensure_archive_root(settings: Settings) -> tuple[Path, Repo]:
