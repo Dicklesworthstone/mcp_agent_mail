@@ -24,8 +24,9 @@ from rich.text import Text
 from rich.tree import Tree
 
 # Global console instance for logging
-# Auto-detect terminal width for gorgeous, full-width panels by default
-console = Console(stderr=True, force_terminal=True)
+# Force truecolor to ensure vivid themes and consistent styling in real TTYs
+# and exec'd foreground runs; enable soft wrap for wide panels.
+console = Console(stderr=True, force_terminal=True, color_system="truecolor", soft_wrap=True)
 
 
 @dataclass

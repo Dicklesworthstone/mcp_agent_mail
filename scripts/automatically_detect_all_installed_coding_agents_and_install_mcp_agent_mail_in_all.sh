@@ -163,5 +163,21 @@ echo "All done."
 
 # Exact restart behavior requested: kill 8765/tcp and start server in foreground with full output
 log_step "Restarting server on port 8765 and showing live output"
-sudo fuser -k 8765/tcp || true
+# Gracefully stop any user-owned processes listening on 8765, then start fresh
+if command -v fuser >/dev/null 2>&1; then
+  # Attempt to list PIDs; ignore errors; only kill if owned by current user
+  PIDS=$(fuser -n tcp 8765 2>/dev/null | sed -E 's/.*: *//' | tr ' ' '\n' | awk 'NF') || PIDS=""
+  if [[ -n "$PIDS" ]]; then
+    for pid in $PIDS; do
+      owner=$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}')
+      if [[ "$owner" == "$(id -un)" ]]; then
+        kill -TERM "$pid" 2>/dev/null || true
+      else
+        log_warn "Port 8765 in use by PID $pid owned by $owner; skipping"
+      fi
+    done
+    # Give processes a moment to exit cleanly
+    sleep 0.5
+  fi
+fi
 exec ./scripts/run_server_with_token.sh

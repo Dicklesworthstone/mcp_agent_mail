@@ -145,7 +145,7 @@ def _choose_best_available_model(preferred: str) -> str:
 
     # Alias unsupported placeholder to sensible defaults by provider key presence
     if env.get("OPENAI_API_KEY"):
-        return "gpt-4o-mini"
+        return "gpt-5-mini"
     if env.get("GOOGLE_API_KEY"):
         return "gemini-1.5-flash"
     if env.get("ANTHROPIC_API_KEY"):
@@ -159,7 +159,7 @@ def _choose_best_available_model(preferred: str) -> str:
         return "xai/grok-2-mini"
     if env.get("OPENROUTER_API_KEY"):
         # OpenRouter requires qualified model ids; choose a widely available one
-        return "openrouter/openai/gpt-4o-mini"
+        return "openrouter/openai/gpt-5-mini"
     return preferred
 
 

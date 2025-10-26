@@ -2542,6 +2542,20 @@ def build_mcp_server() -> FastMCP:
                             unknown_external[label].append(candidate.strip() or candidate)
                             continue
 
+                    # Alternate explicit format: <AgentName>@<project-identifier>
+                    if not explicit_override and "@" in candidate:
+                        name_part, project_part = candidate.split("@", 1)
+                        if name_part.strip() and project_part.strip():
+                            try:
+                                target_project_override = await _get_project_by_identifier(project_part.strip())
+                                target_project_label = target_project_override.human_key or target_project_override.slug
+                                agent_fragment = name_part
+                                explicit_override = True
+                            except Exception:
+                                label = project_part.strip() or "(invalid project)"
+                                unknown_external[label].append(candidate.strip() or candidate)
+                                continue
+
                     display_value, key_candidates, canonical = _normalize(agent_fragment)
                     if not key_candidates or not canonical:
                         if explicit_override:
@@ -3663,7 +3677,11 @@ def build_mcp_server() -> FastMCP:
         # Aliases for compatibility
         agent_name: Optional[str] = None,
         to_agent: Optional[str] = None,
-        **extra: Any,
+        register_if_missing: bool = False,
+        program: Optional[str] = None,
+        model: Optional[str] = None,
+        task_description: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
 
@@ -3671,8 +3689,6 @@ def build_mcp_server() -> FastMCP:
         real_requester = (requester or agent_name or "").strip()
         real_target = (target or to_agent or "").strip()
         target_project_key = (to_project or "").strip()
-        if extra:
-            await ctx.debug(f"macro_contact_handshake ignoring extra arguments: {sorted(extra.keys())}")
         if not real_requester or not real_target:
             raise ToolExecutionError(
                 "INVALID_ARGUMENT",
@@ -3692,6 +3708,14 @@ def build_mcp_server() -> FastMCP:
         }
         if target_project_key:
             request_payload["to_project"] = target_project_key
+        if register_if_missing:
+            request_payload["register_if_missing"] = True
+        if program:
+            request_payload["program"] = program
+        if model:
+            request_payload["model"] = model
+        if task_description:
+            request_payload["task_description"] = task_description
         request_tool_result = await request_tool.run(request_payload)
         request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
 
@@ -3720,6 +3744,7 @@ def build_mcp_server() -> FastMCP:
                     "to": [real_target],
                     "subject": welcome_subject,
                     "body_md": welcome_body,
+                    "thread_id": thread_id,
                 })
                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
             except ToolExecutionError as exc:

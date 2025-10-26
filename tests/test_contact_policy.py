@@ -8,6 +8,7 @@ from fastmcp import Client
 
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.utils import slugify
 
 
 @pytest.mark.asyncio
@@ -239,3 +240,79 @@ async def test_macro_contact_handshake_welcome(isolated_env):
             assert welcome.get("deliveries")
 
 
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_registers_missing_target(isolated_env):
+    backend = "/data/projects/backend"
+    frontend = "/data/projects/frontend"
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": backend})
+        await client.call_tool("ensure_project", {"human_key": frontend})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": backend, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend,
+                "requester": "BlueLake",
+                "target": "RedDog",
+                "to_project": frontend,
+                "register_if_missing": True,
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "task_description": "auto-created via handshake",
+                "auto_accept": True,
+            },
+        )
+
+        agents_blocks = await client.read_resource(f"resource://agents/{slugify(frontend)}")
+        raw = agents_blocks[0].text if agents_blocks else "{}"
+        data = json.loads(raw)
+        names = {agent.get("name") for agent in data.get("agents", [])}
+        assert "RedDog" in names
+
+
+@pytest.mark.asyncio
+async def test_send_message_supports_at_address(isolated_env):
+    backend = "/data/projects/smartedgar_mcp"
+    frontend = "/data/projects/smartedgar_mcp_frontend"
+    frontend_slug = slugify(frontend)
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": backend})
+        await client.call_tool("ensure_project", {"human_key": frontend})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": backend, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": frontend, "program": "codex", "model": "gpt-5", "name": "PinkDog"},
+        )
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend,
+                "requester": "BlueLake",
+                "target": "PinkDog",
+                "to_project": frontend,
+                "auto_accept": True,
+            },
+        )
+
+        response = await client.call_tool(
+            "send_message",
+            {
+                "project_key": backend,
+                "sender_name": "BlueLake",
+                "to": [f"PinkDog@{frontend_slug}"],
+                "subject": "AT Route",
+                "body_md": "hello",
+            },
+        )
+        deliveries = response.data.get("deliveries") or []
+        assert deliveries and any(item.get("project") == frontend for item in deliveries)

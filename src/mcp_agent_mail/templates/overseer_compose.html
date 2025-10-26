@@ -284,7 +284,8 @@ Please investigate the following:
       <div class="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-4 text-xs space-y-2">
         <p class="font-semibold text-slate-900 dark:text-white">🚨 MESSAGE FROM HUMAN OVERSEER</p>
         <p class="text-slate-700 dark:text-slate-300">This message is from a human operator overseeing this project. Please prioritize the instructions below over your current tasks.</p>
-        <p class="text-slate-600 dark:text-slate-400">You should: 1) Pause current work, 2) Complete the request below, 3) Resume original plans afterward.</p>
+        <p class="text-slate-600 dark:text-slate-400">You should: 1) Temporarily pause your current work, 2) Complete the request described below, 3) Resume your original plans afterward (unless modified by these instructions).</p>
+        <p class="text-slate-600 dark:text-slate-400 font-medium">The human's guidance supersedes all other priorities.</p>
       </div>
     </div>
 
@@ -505,7 +506,9 @@ function overseerComposer() {
       this.sending = true;
 
       try {
-        const response = await fetch('/mail/{{ project.slug }}/overseer/send', {
+        // Use properly escaped project slug for URL safety
+        const projectSlug = {{ project.slug | tojson }};
+        const response = await fetch(`/mail/${projectSlug}/overseer/send`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -529,7 +532,7 @@ function overseerComposer() {
         this.showToast = true;
 
         setTimeout(() => {
-          window.location.href = '/mail/{{ project.slug }}';
+          window.location.href = `/mail/${projectSlug}`;
         }, 2000);
 
       } catch (error) {

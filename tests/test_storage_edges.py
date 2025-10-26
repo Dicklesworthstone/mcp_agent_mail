@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.storage import AsyncFileLock
 
 
 @pytest.mark.asyncio
@@ -100,4 +104,23 @@ async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, 
         )
         assert res2.data.get("deliveries")
 
+
+@pytest.mark.asyncio
+async def test_async_file_lock_recovers_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_ENVIRONMENT", "development")
+    lock_path = tmp_path / ".archive.lock"
+    lock_path.touch()
+    stale_time = time.time() - 120
+    os.utime(lock_path, (stale_time, stale_time))
+    metadata_path = tmp_path / f"{lock_path.name}.owner.json"
+    metadata_path.write_text(json.dumps({"pid": 999_999, "created_ts": stale_time}))
+
+    lock = AsyncFileLock(lock_path, timeout_seconds=0.1, stale_timeout_seconds=1.0)
+    async with lock:
+        current = json.loads(metadata_path.read_text())
+        assert current.get("pid") == os.getpid()
+
+    # Metadata should be cleaned up after release
+    assert not metadata_path.exists()
+    assert not lock_path.exists()
 
