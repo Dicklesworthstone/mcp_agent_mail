@@ -1255,9 +1255,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 # Log error but return empty messages list to avoid breaking the UI
                 import logging
                 logging.error(f"Error fetching unified inbox data: {e}", exc_info=True)
-
+            
             return await _render("mail_unified_inbox.html", messages=messages, projects=projects)
-
+        
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
             """Projects list view (moved from /mail)"""
