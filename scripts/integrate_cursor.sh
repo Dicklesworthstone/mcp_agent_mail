@@ -100,15 +100,11 @@ cat > "$HOME_CURSOR_JSON" <<JSON
   }
 }
 JSON
-log_step "Attempt readiness check (non-blocking)"
-set +e
-curl -fsS --connect-timeout 1 --max-time 2 --retry 0 "http://${_HTTP_HOST}:${_HTTP_PORT}/health/readiness" >/dev/null 2>&1
-_rc=$?
-set -e
-if [[ $_rc -eq 0 ]]; then
-  log_ok "Server readiness OK."
+log_step "Attempt readiness check (bounded)"
+if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
+  _rc=0; log_ok "Server readiness OK."
 else
-  log_warn "Server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
+  _rc=1; log_warn "Server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
 fi
 
 log_step "Bootstrapping project and agent on server"

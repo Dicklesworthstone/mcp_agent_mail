@@ -80,6 +80,30 @@ fi
 
 log_step "Detecting installed agents and applying integrations"
 
+# Start a temporary server in background to allow integrators to bootstrap
+log_step "Starting temporary server (background) for bootstrap"
+eval "$(uv run python - <<'PY'
+from mcp_agent_mail.config import get_settings
+s = get_settings()
+print(f"export _HTTP_HOST='{s.http.host}'")
+print(f"export _HTTP_PORT='{s.http.port}'")
+print(f"export _HTTP_PATH='{s.http.path}'")
+PY
+)"
+_ready_now=1
+if ! readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
+  _ready_now=0
+fi
+if [[ "${_ready_now}" != "1" ]]; then
+  start_server_background
+  # Wait a bit longer the first time to allow env spin-up
+  if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 20 0.5; then
+    _print "Temporary server is ready for bootstrap."
+  else
+    log_warn "Temporary server not ready; proceeding without bootstrap."
+  fi
+fi
+
 # Parse optional --project-dir to tell integrators where to write client configs
 TARGET_DIR=""
 _argv=("$@")

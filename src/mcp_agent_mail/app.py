@@ -535,6 +535,7 @@ _PROJECT_PROFILE_MAX_TOTAL_CHARS = 6000
 _PROJECT_PROFILE_PER_FILE_CHARS = 1800
 _PROJECT_SIBLING_REFRESH_TTL = timedelta(hours=12)
 _PROJECT_SIBLING_REFRESH_LIMIT = 3
+_PROJECT_SIBLING_MIN_SUGGESTION_SCORE = 0.92
 
 
 def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
@@ -777,7 +778,7 @@ async def get_project_sibling_data() -> dict[int, dict[str, list[dict[str, Any]]
                 entry = {**entry_base, "peer": other}
                 if entry["status"] == "confirmed":
                     bucket["confirmed"].append(entry)
-                elif entry["status"] != "dismissed":
+                elif entry["status"] != "dismissed" and float(entry_base["score"]) >= _PROJECT_SIBLING_MIN_SUGGESTION_SCORE:
                     bucket["suggested"].append(entry)
 
         return result_map
@@ -3615,15 +3616,20 @@ def build_mcp_server() -> FastMCP:
         auto_accept: bool = False,
         welcome_subject: Optional[str] = None,
         welcome_body: Optional[str] = None,
+        to_project: Optional[str] = None,
         # Aliases for compatibility
         agent_name: Optional[str] = None,
         to_agent: Optional[str] = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
 
         # Resolve aliases
         real_requester = (requester or agent_name or "").strip()
         real_target = (target or to_agent or "").strip()
+        target_project_key = (to_project or "").strip()
+        if extra:
+            await ctx.debug(f"macro_contact_handshake ignoring extra arguments: {sorted(extra.keys())}")
         if not real_requester or not real_target:
             raise ToolExecutionError(
                 "INVALID_ARGUMENT",
@@ -3634,29 +3640,35 @@ def build_mcp_server() -> FastMCP:
 
         from fastmcp.tools.tool import FunctionTool
         request_tool = cast(FunctionTool, cast(Any, request_contact))
-        request_tool_result = await request_tool.run({
+        request_payload: dict[str, Any] = {
             "project_key": project_key,
             "from_agent": real_requester,
             "to_agent": real_target,
             "reason": reason,
             "ttl_seconds": ttl_seconds,
-        })
+        }
+        if target_project_key:
+            request_payload["to_project"] = target_project_key
+        request_tool_result = await request_tool.run(request_payload)
         request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
 
         response_result = None
         if auto_accept:
             respond_tool = cast(FunctionTool, cast(Any, respond_contact))
-            respond_tool_result = await respond_tool.run({
-                "project_key": project_key,
+            respond_payload: dict[str, Any] = {
+                "project_key": target_project_key or project_key,
                 "to_agent": real_target,
                 "from_agent": real_requester,
                 "accept": True,
                 "ttl_seconds": ttl_seconds,
-            })
+            }
+            if target_project_key:
+                respond_payload["from_project"] = project_key
+            respond_tool_result = await respond_tool.run(respond_payload)
             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
         welcome_result = None
-        if welcome_subject and welcome_body:
+        if welcome_subject and welcome_body and not target_project_key:
             try:
                 send_tool = cast(FunctionTool, cast(Any, send_message))
                 send_tool_result = await send_tool.run({

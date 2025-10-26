@@ -1118,15 +1118,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         @fastapi_app.get("/mail", response_class=HTMLResponse)
         async def mail_unified_inbox() -> HTMLResponse:
-            """Unified inbox showing ALL messages across ALL projects (Gmail-style)"""
+            """Unified inbox showing ALL messages across ALL projects (Gmail-style) + Projects below"""
             from datetime import datetime, timezone
 
             await ensure_schema()
+            await refresh_project_sibling_suggestions()
+            sibling_map = await get_project_sibling_data()
+
             messages = []
+            projects = []
 
             try:
                 async with get_session() as session:
-                    # Fetch all messages with project and agent information
+                    # Fetch recent messages with sender/project and computed recipient list
+                    # Avoid DISTINCT within GROUP_CONCAT for SQLite by using a subquery
                     query = text("""
                         SELECT
                             m.id,
@@ -1135,16 +1140,25 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             m.created_ts,
                             m.importance,
                             m.thread_id,
-                            sender.name as sender_name,
-                            p.slug as project_slug,
-                            p.human_key as project_name,
-                            GROUP_CONCAT(DISTINCT recipient.name, ', ') as recipients
+                            sender.name AS sender_name,
+                            p.slug AS project_slug,
+                            p.human_key AS project_name,
+                            COALESCE(
+                                (
+                                    SELECT GROUP_CONCAT(name, ', ')
+                                    FROM (
+                                        SELECT DISTINCT recip2.name AS name
+                                        FROM message_recipients mr2
+                                        JOIN agents recip2 ON recip2.id = mr2.agent_id
+                                        WHERE mr2.message_id = m.id
+                                        ORDER BY name
+                                    )
+                                ),
+                                ''
+                            ) AS recipients
                         FROM messages m
                         JOIN agents sender ON m.sender_id = sender.id
                         JOIN projects p ON m.project_id = p.id
-                        LEFT JOIN message_recipients mr ON m.id = mr.message_id
-                        LEFT JOIN agents recipient ON mr.agent_id = recipient.id
-                        GROUP BY m.id
                         ORDER BY m.created_ts DESC
                         LIMIT 500
                     """)
@@ -1204,16 +1218,34 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             "sender": r[6],
                             "project_slug": r[7],
                             "project_name": r[8],
-                            "recipients": r[9] or "",
+                            "recipients": ", ".join(part.strip() for part in (r[9] or "").split(",") if part.strip()),
                             "read": False  # TODO: Implement read tracking
                         })
+
+                    # Fetch all projects with sibling data
+                    rows = await session.execute(
+                        text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                    )
+                    for r in rows.fetchall():
+                        project_id = int(r[0])
+                        siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
+                        projects.append(
+                            {
+                                "id": project_id,
+                                "slug": r[1],
+                                "human_key": r[2],
+                                "created_at": str(r[3]),
+                                "confirmed_siblings": siblings.get("confirmed", []),
+                                "suggested_siblings": siblings.get("suggested", []),
+                            }
+                        )
 
             except Exception as e:
                 # Log error but return empty messages list to avoid breaking the UI
                 import logging
-                logging.error(f"Error fetching unified inbox messages: {e}", exc_info=True)
+                logging.error(f"Error fetching unified inbox data: {e}", exc_info=True)
 
-            return await _render("mail_unified_inbox.html", messages=messages)
+            return await _render("mail_unified_inbox.html", messages=messages, projects=projects)
 
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
@@ -1850,28 +1882,33 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 # Remove duplicate recipients while preserving order
                 recipients = list(dict.fromkeys(recipients))
 
-                # Add Human Overseer preamble
+                # Add Human Overseer preamble (pure markdown for cross-renderer compatibility)
                 preamble = """---
 
-<div align="center" style="background: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%); padding: 20px; border-radius: 12px; margin: 20px 0;">
+🚨 MESSAGE FROM HUMAN OVERSEER 🚨
 
-# 🚨 MESSAGE FROM HUMAN OVERSEER 🚨
-
-</div>
-
-**This message is from a human operator overseeing this project.** Please prioritize the instructions below over your current tasks.
+This message is from a human operator overseeing this project. Please prioritize the instructions below over your current tasks.
 
 You should:
-1. **Temporarily pause** your current work
-2. **Complete the request** described below
-3. **Resume your original plans** afterward (unless modified by these instructions)
+1. Temporarily pause your current work
+2. Complete the request described below
+3. Resume your original plans afterward (unless modified by these instructions)
 
-**The human's guidance supersedes all other priorities.**
+The human's guidance supersedes all other priorities.
 
 ---
 
 """
                 full_body = preamble + body_md
+
+                # Validate combined length (preamble + user message)
+                if len(full_body) > 50000:
+                    preamble_length = len(preamble)
+                    max_user_length = 50000 - preamble_length
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Message body too long ({len(body_md)} characters). Maximum is {max_user_length} characters to accommodate the overseer preamble ({preamble_length} characters)."
+                    )
 
                 # Get project
                 async with get_session() as session:
@@ -1933,8 +1970,15 @@ You should:
                         if not overseer_row:
                             raise HTTPException(status_code=500, detail="Failed to create HumanOverseer agent")
 
-                # Extract overseer_id for use later
-                overseer_id = overseer_row[0]
+                    # Update activity timestamp for HumanOverseer on every send
+                    overseer_id = overseer_row[0]
+                    await session.execute(
+                        text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
+                        {"ts": datetime.now(timezone.utc), "id": overseer_id}
+                    )
+                    await session.commit()
+
+                # Extract overseer_id for use later (already extracted above in session context)
 
                 # Create message in database (in a new session)
                 from datetime import datetime, timezone
