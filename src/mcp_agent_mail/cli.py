@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,7 @@ import uvicorn
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import asc, desc, func, select
+from sqlalchemy.engine import make_url
 
 from .app import build_mcp_server
 from .config import get_settings
@@ -177,6 +179,85 @@ def typecheck() -> None:
     console.rule("[bold]Running Type Checker[/bold]")
     _run_command(["uvx", "ty", "check"])
     console.print("[green]Type check complete.[/]")
+
+
+def _resolve_path(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
+    return path
+
+
+@app.command("clear-and-reset-everything")
+def clear_and_reset_everything(
+    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
+) -> None:
+    """
+    Delete the SQLite database (including WAL/SHM) and wipe all storage-root contents.
+    """
+    settings = get_settings()
+    db_url = settings.database.url
+
+    database_files: list[Path] = []
+    try:
+        url = make_url(db_url)
+        if url.get_backend_name().startswith("sqlite"):
+            database = url.database or ""
+            if not database:
+                console.print("[yellow]Warning:[/] SQLite database path is empty; nothing to delete.")
+            else:
+                db_path = _resolve_path(database)
+                database_files.append(db_path)
+                database_files.append(Path(f"{db_path}-wal"))
+                database_files.append(Path(f"{db_path}-shm"))
+    except Exception as exc:  # pragma: no cover - defensive
+        console.print(f"[red]Failed to parse database URL '{db_url}': {exc}[/]")
+
+    storage_root = _resolve_path(settings.storage.root)
+
+    if not force:
+        console.print("[bold yellow]This will irreversibly delete:[/]")
+        if database_files:
+            for path in database_files:
+                console.print(f"  • {path}")
+        else:
+            console.print("  • (no SQLite files detected)")
+        console.print(f"  • All contents inside {storage_root} (excluding .git)")
+        console.print()
+        if not typer.confirm("Proceed?"):
+            raise typer.Exit(code=1)
+
+    # Remove database files
+    deleted_db_files: list[Path] = []
+    for path in database_files:
+        try:
+            if path.exists():
+                path.unlink()
+                deleted_db_files.append(path)
+        except Exception as exc:  # pragma: no cover - filesystem failures
+            console.print(f"[red]Failed to delete {path}: {exc}[/]")
+
+    # Wipe storage root contents (preserve .git directory if present)
+    deleted_storage: list[Path] = []
+    if storage_root.exists():
+        for child in storage_root.iterdir():
+            if child.name == ".git":
+                continue
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+                deleted_storage.append(child)
+            except Exception as exc:  # pragma: no cover
+                console.print(f"[red]Failed to remove {child}: {exc}[/]")
+    else:
+        console.print(f"[yellow]Storage root {storage_root} does not exist; nothing to remove.[/]")
+
+    console.print("[green]✓ Reset complete.[/]")
+    if deleted_db_files:
+        console.print(f"[dim]Removed database files:[/] {', '.join(str(p) for p in deleted_db_files)}")
+    if deleted_storage:
+        console.print(f"[dim]Cleared storage root entries:[/] {', '.join(str(p.name) for p in deleted_storage)}")
 
 
 @app.command("migrate")

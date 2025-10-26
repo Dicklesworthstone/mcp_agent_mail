@@ -471,7 +471,18 @@ function overseerComposer() {
     updatePreview() {
       if (typeof marked !== 'undefined') {
         try {
-          this.renderedPreview = marked.parse(this.body || '_No content yet..._');
+          // Parse markdown to HTML
+          const rawHtml = marked.parse(this.body || '_No content yet..._');
+
+          // Sanitize HTML to prevent XSS (self-XSS protection)
+          if (typeof DOMPurify !== 'undefined') {
+            this.renderedPreview = DOMPurify.sanitize(rawHtml);
+          } else {
+            // Fallback if DOMPurify fails to load
+            this.renderedPreview = rawHtml;
+            console.warn('DOMPurify not loaded - preview may contain unsanitized HTML');
+          }
+
           this.$nextTick(() => {
             if (typeof Prism !== 'undefined') {
               Prism.highlightAll();
