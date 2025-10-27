@@ -1,4 +1,8 @@
-# mcp-agent-mail
+# MCP Agent Mail
+
+![Agent Mail Showcase](screenshots/output/agent_mail_showcase.gif)
+
+> "It's like gmail for your coding agents!"
 
 A mail-like coordination layer for coding agents, exposed as an HTTP-only FastMCP server. It gives agents memorable identities, an inbox/outbox, searchable message history, and voluntary file reservation "leases" to avoid stepping on each other.
 
@@ -23,6 +27,69 @@ This project provides a lightweight, interoperable layer so agents can:
 - Inspect a directory of active agents, programs/models, and activity
 
 It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
+
+## TLDR Quickstart
+
+Clone the repo, set up and install with uv in a python 3.14 venv (install uv if you don't have it already), and then run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh`. This will automatically set things up for your various installed coding agent tools and start the MCP server on port 8765. If you want to run the MCP server again in the future, simply run `scripts/run_server_with_token.sh`:
+
+```bash
+# Install uv (if you don't have it already)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+
+# Clone the repo
+git clone https://github.com/Dicklesworthstone/mcp_agent_mail
+cd mcp-agent-mail
+
+# Create a Python 3.14 virtual environment and install dependencies
+uv python install 3.14
+uv venv -p 3.14
+source .venv/bin/activate
+uv sync
+
+# Detect installed coding agents, integrate, and start the MCP server on port 8765
+scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh
+
+# Later, to run the MCP server again with the same token
+scripts/run_server_with_token.sh
+
+# Now, simply launch Codex-CLI or Claude Code or other agent tools in other consoles; they should have the mail tool available. See below for a ready-made chunk of text you can add to the end of your existing AGENTS.md or CLAUDE.md files to help your agents better utilize the new tools.
+```
+
+## Ready-Made Blurb to Add to Your AGENTS.md or CLAUDE.md Files:
+```
+## MCP Agent Mail — coordination for multi-agent workflows
+
+What it is
+- A mail-like layer that lets coding agents coordinate asynchronously via MCP tools and resources.
+- Provides identities, inbox/outbox, searchable threads, and advisory file reservations, with human-auditable artifacts in Git.
+
+Why it's useful
+- Prevents agents from stepping on each other with explicit file reservations (leases) for files/globs.
+- Keeps communication out of your token budget by storing messages in a per-project archive.
+- Offers quick reads (`resource://inbox/...`, `resource://thread/...`) and macros that bundle common flows.
+
+How to use effectively
+1) Same repository
+   - Register an identity: call `ensure_project`, then `register_agent` using this repo's absolute path as `project_key`.
+   - Reserve files before you edit: `reserve_file_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)` to signal intent and avoid conflict.
+   - Communicate with threads: use `send_message(..., thread_id="FEAT-123")`; check inbox with `fetch_inbox` and acknowledge with `acknowledge_message`.
+   - Read fast: `resource://inbox/{Agent}?project=<abs-path>&limit=20` or `resource://thread/{id}?project=<abs-path>&include_bodies=true`.
+   - Tip: set `AGENT_NAME` in your environment so the pre-commit guard can block commits that conflict with others' active exclusive file reservations.
+
+2) Across different repos in one project (e.g., Next.js frontend + FastAPI backend)
+   - Option A (single project bus): register both sides under the same `project_key` (shared key/path). Keep reservation patterns specific (e.g., `frontend/**` vs `backend/**`).
+   - Option B (separate projects): each repo has its own `project_key`; use `macro_contact_handshake` or `request_contact`/`respond_contact` to link agents, then message directly. Keep a shared `thread_id` (e.g., ticket key) across repos for clean summaries/audits.
+
+Macros vs granular tools
+- Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`.
+- Use granular tools when you need control: `register_agent`, `reserve_file_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
+
+Common pitfalls
+- "from_agent not registered": always `register_agent` in the correct `project_key` first.
+- "CLAIM_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
+- Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
+```
 
 ## Core ideas (at a glance)
 

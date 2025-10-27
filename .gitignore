@@ -209,3 +209,7 @@ storage.sqlite3-shm
 storage.sqlite3-wal
 storage.sqlite3.old
 *.bak.*
+screenshots/gif_canvas_frames
+screenshots/gif_canvas_frames_2k
+screenshots/renamed
+screenshots/gif_frames

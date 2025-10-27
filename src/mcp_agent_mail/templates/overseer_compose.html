@@ -71,7 +71,7 @@
         </div>
 
         <!-- Search bar for recipients (if many agents) -->
-        <div x-show="{{ agents|length }} > 6" class="mt-4">
+        <div x-show="agents.length > 6" class="mt-4">
           <div class="relative">
             <i data-lucide="search" class="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400"></i>
             <input type="text" x-model="recipientSearch"
@@ -87,9 +87,9 @@
         {% if agents %}
           <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {% for agent in agents %}
-              <label x-show="!recipientSearch || {{ agent.name | tojson }}.toLowerCase().includes(recipientSearch.toLowerCase())"
+              <label x-show="!recipientSearch || '{{ agent.name|replace('\\', '\\\\')|replace("'", "\\'") }}'.toLowerCase().includes(recipientSearch.toLowerCase())"
                      class="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 cursor-pointer transition-colors"
-                     :class="selectedRecipients.includes({{ agent.name | tojson }}) ? 'ring-2 ring-primary-500 bg-primary-50 dark:bg-primary-900/20' : ''">
+                     :class="selectedRecipients.includes('{{ agent.name|replace('\\', '\\\\')|replace("'", "\\'") }}') ? 'ring-2 ring-primary-500 bg-primary-50 dark:bg-primary-900/20' : ''">
                 <input type="checkbox"
                        value="{{ agent.name }}"
                        x-model="selectedRecipients"

@@ -84,67 +84,9 @@ def serve_http(
     resolved_port = port or settings.http.port
     resolved_path = path or settings.http.path
 
-    # Display startup banner
-    if settings.tools_log_enabled:
-        from . import rich_logger
-        config_dict = {
-            "Server": {
-                "Environment": settings.environment,
-                "Endpoint": f"http://{resolved_host}:{resolved_port}{resolved_path}",
-                "Database": settings.database.url,
-                "Storage": settings.storage.root,
-            },
-            "Logging": {
-                "Tools Log": "ENABLED",
-                "Log Level": settings.log_level,
-                "Rich Enabled": "yes" if settings.log_rich_enabled else "no",
-                "JSON Format": "yes" if settings.log_json_enabled else "no",
-                "Request Log": "yes" if settings.http.request_log_enabled else "no",
-            },
-            "Security": {
-                "Bearer Auth": "ENABLED" if settings.http.bearer_token else "disabled",
-                "JWT Auth": "ENABLED" if settings.http.jwt_enabled else "disabled",
-                "RBAC": "ENABLED" if settings.http.rbac_enabled else "disabled",
-                "Localhost Bypass": "yes" if settings.http.allow_localhost_unauthenticated else "no",
-            },
-            "Features": {
-                "Rate Limiting": "ENABLED" if settings.http.rate_limit_enabled else "disabled",
-                "CORS": "ENABLED" if settings.cors.enabled else "disabled",
-                "OTEL": "ENABLED" if settings.http.otel_enabled else "disabled",
-                "LLM": "ENABLED" if settings.llm.enabled else "disabled",
-                "File Reservations Cleanup": "ENABLED" if settings.file_reservations_cleanup_enabled else "disabled",
-            },
-        }
-        panel = rich_logger.create_startup_panel(config_dict)
-        console.print()
-        console.print(panel)
-        console.print()
-        rich_logger.log_info("🚀 Verbose logging is ENABLED - all MCP tool calls will be displayed in detail")
-        console.print()
-    else:
-        from rich.panel import Panel
-        from rich.table import Table
-        from rich.text import Text
-        t = Table(show_header=False, box=None)
-        t.add_row("Environment", Text(settings.environment, style="bold white"))
-        t.add_row("Endpoint", Text(f"http://{resolved_host}:{resolved_port}{resolved_path}", style="bold green"))
-        t.add_row("DB URL", Text(settings.database.url, style="cyan"))
-        t.add_row("Storage", Text(settings.storage.root, style="magenta"))
-        flags: list[str] = []
-        if settings.http.rate_limit_enabled:
-            flags.append("rate-limit")
-        if settings.http.bearer_token:
-            flags.append("bearer-auth")
-        if settings.cors.enabled:
-            flags.append("CORS")
-        if settings.http.otel_enabled:
-            flags.append("OTEL")
-        if settings.http.request_log_enabled:
-            flags.append("req-log")
-        if settings.tools_log_enabled:
-            flags.append("tools-log")
-        t.add_row("Features", Text(", ".join(flags) or "(none)", style="yellow"))
-        console.print(Panel(t, title="MCP Agent Mail — HTTP", border_style="blue"))
+    # Display awesome startup banner with database stats
+    from . import rich_logger
+    rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
 
     server = build_mcp_server()
     app = build_http_app(settings, server)

@@ -10,7 +10,6 @@ import importlib
 import json
 import logging
 import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -996,13 +995,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     def _register_mail_ui() -> None:
         import bleach  # type: ignore
         import markdown2  # type: ignore
-        
+
         try:
             from bleach.css_sanitizer import CSSSanitizer  # type: ignore
         except Exception:  # tinycss2 may be missing; degrade gracefully
             CSSSanitizer = None  # type: ignore
         from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
-        
+
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(
             loader=FileSystemLoader(str(templates_root)),
@@ -1068,12 +1067,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             strip=True,
             css_sanitizer=_css_sanitizer,
         )
-        
+
         async def _render(name: str, **ctx) -> HTMLResponse:
             tpl = env.get_template(name)
             html = await tpl.render_async(**ctx)
             return HTMLResponse(html)
-        
+
         def _parse_fts_query(
             raw: str, scope_preference: str | None = None
         ) -> tuple[str, str, str, list[dict[str, str]]]:
@@ -1090,10 +1089,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             like_terms: list[str] = []
             like_scope = scope_pref
             tokens: list[dict[str, str]] = []
-        
+
             def _quote(s: str) -> str:
                 return '"' + s.replace('"', '""') + '"'
-        
+
             for p in parts:
                 key = None
                 val = p
@@ -1118,27 +1117,26 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             fts = " AND ".join(exprs) if exprs else ""
             like_pat = "%" + "%".join(like_terms) + "%" if like_terms else ""
             return fts, like_pat, like_scope, tokens
-        
+
         @fastapi_app.get("/mail/api/locks", response_class=JSONResponse)
         async def mail_lock_status() -> JSONResponse:
             """Return metadata about active archive locks for observability."""
-        
+
             settings_local = get_settings()
             payload = collect_lock_status(settings_local)
             return JSONResponse(payload)
-        
+
         @fastapi_app.get("/mail", response_class=HTMLResponse)
         async def mail_unified_inbox() -> HTMLResponse:
             """Unified inbox showing ALL messages across ALL projects (Gmail-style) + Projects below"""
-            from datetime import datetime, timezone
-        
+
             await ensure_schema()
             await refresh_project_sibling_suggestions()
             sibling_map = await get_project_sibling_data()
-        
+
             messages = []
             projects = []
-        
+
             try:
                 async with get_session() as session:
                     # Fetch recent messages with sender/project and computed recipient list
@@ -1173,33 +1171,33 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ORDER BY m.created_ts DESC
                         LIMIT 500
                     """)
-        
+
                     rows = await session.execute(query)
-        
+
                     for r in rows.fetchall():
                         # Extract excerpt from body (first 150 chars, stripped of markdown)
                         body = r[2] or ""
                         excerpt = body[:150].replace('#', '').replace('*', '').replace('`', '').strip()
                         if len(body) > 150:
                             excerpt += "..."
-        
+
                         # Format created timestamp with robust timezone handling
                         created_ts = r[3]
                         if isinstance(created_ts, str):
                             created_dt = datetime.fromisoformat(created_ts.replace('Z', '+00:00'))
                         else:
                             created_dt = created_ts
-        
+
                         # Normalize to timezone-aware UTC (SQLite may yield naive datetimes)
                         if created_dt.tzinfo is None:
                             created_dt = created_dt.replace(tzinfo=timezone.utc)
                         else:
                             created_dt = created_dt.astimezone(timezone.utc)
-        
+
                         # Relative time calculation
                         now = datetime.now(timezone.utc)
                         delta = now - created_dt
-        
+
                         # Handle future dates (clock skew, testing, etc.)
                         if delta.days < 0 or (delta.days == 0 and delta.seconds < 0):
                             created_relative = "Just now"  # Treat future dates as current
@@ -1215,7 +1213,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             created_relative = f"{delta.seconds // 60}m ago"
                         else:
                             created_relative = "Just now"
-        
+
                         messages.append({
                             "id": r[0],
                             "subject": r[1] or "(No subject)",
@@ -1232,7 +1230,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             "recipients": ", ".join(part.strip() for part in (r[9] or "").split(",") if part.strip()),
                             "read": False  # TODO: Implement read tracking
                         })
-        
+
                     # Fetch all projects with sibling data
                     rows = await session.execute(
                         text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
@@ -1250,14 +1248,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 "suggested_siblings": siblings.get("suggested", []),
                             }
                         )
-        
+
             except Exception as e:
                 # Log error but return empty messages list to avoid breaking the UI
                 import logging
                 logging.error(f"Error fetching unified inbox data: {e}", exc_info=True)
-        
+
             return await _render("mail_unified_inbox.html", messages=messages, projects=projects)
-        
+
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
             """Projects list view (moved from /mail)"""
@@ -1283,7 +1281,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         }
                     )
             return await _render("mail_index.html", projects=projects)
-        
+
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
         async def mail_project(
             project: str,
@@ -1372,7 +1370,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 tokens=tokens if q and q.strip() else [],
                 results=matched_messages,
             )
-        
+
         @fastapi_app.post("/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
         async def update_project_sibling(project_id: int, other_id: int, request: Request) -> JSONResponse:
             try:
@@ -1382,13 +1380,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             action = str(payload.get("action", "")).lower()
             if action not in {"confirm", "dismiss", "reset"}:
                 return JSONResponse({"error": "Invalid action"}, status_code=status.HTTP_400_BAD_REQUEST)
-        
+
             target_status = {
                 "confirm": "confirmed",
                 "dismiss": "dismissed",
                 "reset": "suggested",
             }[action]
-        
+
             try:
                 suggestion = await update_project_sibling_status(project_id, other_id, target_status)
             except ValueError as exc:
@@ -1406,9 +1404,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return JSONResponse(
                     {"error": "Unable to update sibling status"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
-        
+
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
-        
+
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
         async def unified_inbox(limit: int = 100, filter_importance: str | None = None) -> HTMLResponse:
             """Unified inbox showing messages from all active agents across all projects."""
@@ -1443,7 +1441,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ),
                         {"pid": proj_id},
                     )
-        
+
                     agents_list = []
                     for ar in agents_query.fetchall():
                         agents_list.append(
@@ -1455,7 +1453,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 "last_active": str(ar[4]) if ar[4] else None,
                             }
                         )
-        
+
                     if agents_list:  # Only include projects with agents
                         projects_data.append(
                             {
@@ -1466,17 +1464,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 "agents": agents_list,
                             }
                         )
-        
+
                 # Get recent messages across all projects with thread information
                 # Build WHERE clause safely using parameterized queries
                 importance_conditions = []
                 query_params = {"lim": limit}
-        
+
                 if filter_importance and filter_importance.lower() in ["urgent", "high"]:
                     importance_conditions.append("m.importance IN ('urgent', 'high')")
-        
+
                 where_clause = "WHERE " + " AND ".join(importance_conditions) if importance_conditions else "WHERE 1=1"
-        
+
                 messages_query = await session.execute(
                     text(
                         f"""
@@ -1518,7 +1516,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ),
                     query_params,
                 )
-        
+
                 messages = []
                 for r in messages_query.fetchall():
                     messages.append(
@@ -1536,7 +1534,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             "thread_count": int(r[10] or 0),
                         }
                     )
-        
+
             return await _render(
                 "mail_unified_inbox.html",
                 projects=projects_data,
@@ -1545,7 +1543,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 total_messages=len(messages),
                 filter_importance=filter_importance or "",
             )
-        
+
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
         async def mail_inbox(project: str, agent: str, limit: int = 50, page: int = 1) -> HTMLResponse:
             await ensure_schema()
@@ -1604,7 +1602,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 next_page=page + 1,
                 prev_page=page - 1 if page > 1 else None,
             )
-        
+
         @fastapi_app.get("/mail/{project}/message/{mid}", response_class=HTMLResponse)
         async def mail_message(project: str, mid: int) -> HTMLResponse:
             await ensure_schema()
@@ -1657,7 +1655,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             )
             if body_html:
                 body_html = _html_cleaner.clean(body_html)
-        
+
             # Get commit SHA for provenance badge
             commit_sha = None
             try:
@@ -1666,7 +1664,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 commit_sha = await get_message_commit_sha(archive, mid)
             except Exception:
                 pass  # Commit SHA is optional
-        
+
             return await _render(
                 "mail_message.html",
                 project={"slug": prow[1], "human_key": prow[2]},
@@ -1689,7 +1687,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         async def mark_selected_messages_read(project: str, agent: str, request: Request) -> JSONResponse:
             """Mark specific messages as read for an agent."""
             await ensure_schema()
-            from datetime import datetime, timezone
 
             try:
                 # Parse request body
@@ -1769,13 +1766,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception as exc:
                 import traceback
                 traceback.print_exc()
-                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {str(exc)}")
+                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {exc!s}") from exc
 
         @fastapi_app.post("/mail/{project}/inbox/{agent}/mark-all-read")
         async def mark_all_messages_read(project: str, agent: str) -> JSONResponse:
             """Mark all messages for an agent as read."""
             await ensure_schema()
-            from datetime import datetime, timezone
 
             try:
                 async with get_session() as session:
@@ -1832,7 +1828,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception as exc:
                 import traceback
                 traceback.print_exc()
-                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {str(exc)}")
+                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {exc!s}") from exc
 
         @fastapi_app.get("/mail/{project}/thread/{thread_id}", response_class=HTMLResponse)
         async def mail_thread(project: str, thread_id: str) -> HTMLResponse:
@@ -2012,7 +2008,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 results=results,
                 boost=bool(boost),
             )
-        
+
         # File reservations and attachments views
         @fastapi_app.get("/mail/{project}/file_reservations", response_class=HTMLResponse)
         async def mail_claims(project: str) -> HTMLResponse:
@@ -2046,7 +2042,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     for r in rows.fetchall()
                 ]
             return await _render("mail_claims.html", project={"slug": prow[1], "human_key": prow[2]}, file_reservations=file_reservations)
-        
+
         @fastapi_app.get("/mail/{project}/attachments", response_class=HTMLResponse)
         async def mail_attachments(project: str) -> HTMLResponse:
             await ensure_schema()
@@ -2074,9 +2070,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
             return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
-        
+
         # ========== Human Overseer Routes ==========
-        
+
         @fastapi_app.get("/mail/{project}/overseer/compose", response_class=HTMLResponse)
         async def overseer_compose(project: str) -> HTMLResponse:
             """Display Human Overseer message composer."""
@@ -2091,7 +2087,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 ).fetchone()
                 if not prow:
                     return await _render("error.html", message="Project not found")
-        
+
                 # Get all agents for this project
                 pid = int(prow[0])
                 agent_rows = await session.execute(
@@ -2099,18 +2095,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     {"pid": pid}
                 )
                 agents = [{"name": r[0]} for r in agent_rows.fetchall()]
-        
+
             return await _render(
                 "overseer_compose.html",
                 project={"slug": prow[1], "human_key": prow[2]},
                 agents=agents
             )
-        
+
         @fastapi_app.post("/mail/{project}/overseer/send")
         async def overseer_send(project: str, request: Request) -> JSONResponse:
             """Send message from Human Overseer to selected agents."""
             await ensure_schema()
-        
+
             try:
                 # Parse request body
                 request_body = await request.json()
@@ -2118,7 +2114,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 subject: str = request_body.get("subject", "").strip()
                 body_md: str = request_body.get("body_md", "").strip()
                 thread_id: str | None = request_body.get("thread_id")
-        
+
                 # Comprehensive validation
                 if not recipients:
                     raise HTTPException(status_code=400, detail="At least one recipient is required")
@@ -2132,29 +2128,29 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     raise HTTPException(status_code=400, detail="Message body is required")
                 if len(body_md) > 50000:
                     raise HTTPException(status_code=400, detail="Message body too long (maximum 50,000 characters)")
-        
+
                 # Remove duplicate recipients while preserving order
                 recipients = list(dict.fromkeys(recipients))
-        
+
                 # Add Human Overseer preamble (pure markdown for cross-renderer compatibility)
                 preamble = """---
-        
+
         🚨 MESSAGE FROM HUMAN OVERSEER 🚨
-        
+
         This message is from a human operator overseeing this project. Please prioritize the instructions below over your current tasks.
-        
+
         You should:
         1. Temporarily pause your current work
         2. Complete the request described below
         3. Resume your original plans afterward (unless modified by these instructions)
-        
+
         The human's guidance supersedes all other priorities.
-        
+
         ---
-        
+
         """
                 full_body = preamble + body_md
-        
+
                 # Validate combined length (preamble + user message)
                 if len(full_body) > 50000:
                     preamble_length = len(preamble)
@@ -2163,7 +2159,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         status_code=400,
                         detail=f"Message body too long ({len(body_md)} characters). Maximum is {max_user_length} characters to accommodate the overseer preamble ({preamble_length} characters)."
                     )
-        
+
                 # Single atomic transaction for all database operations
                 from datetime import datetime, timezone
                 async with get_session() as session:
@@ -2176,12 +2172,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ).fetchone()
                     if not prow:
                         raise HTTPException(status_code=404, detail="Project not found")
-        
+
                     # Extract project info consistently
                     project_id = int(prow[0])
                     project_slug = prow[1]
                     project_human_key = prow[2]
-        
+
                     # Get or create "HumanOverseer" agent (with race condition protection)
                     overseer_name = "HumanOverseer"
                     overseer_row = (
@@ -2190,7 +2186,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             {"pid": project_id, "name": overseer_name}
                         )
                     ).fetchone()
-        
+
                     if not overseer_row:
                         # Create HumanOverseer agent (use INSERT OR IGNORE to handle race conditions)
                         await session.execute(
@@ -2209,7 +2205,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             }
                         )
                         # Don't commit yet - wait until message is successfully created and written to Git
-        
+
                         # Fetch the agent (whether we just created it or another request did)
                         overseer_row = (
                             await session.execute(
@@ -2217,16 +2213,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 {"pid": project_id, "name": overseer_name}
                             )
                         ).fetchone()
-        
+
                         if not overseer_row:
                             raise HTTPException(status_code=500, detail="Failed to create HumanOverseer agent")
-        
+
                     # Extract overseer_id for later use
                     overseer_id = overseer_row[0]
                     # Insert message into database
                     message_id = None
                     now = datetime.now(timezone.utc)
-        
+
                     result = await session.execute(
                         text("""
                             INSERT INTO messages (project_id, sender_id, subject, body_md, importance, thread_id, created_ts, ack_required)
@@ -2248,23 +2244,23 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     if not message_row:
                         raise HTTPException(status_code=500, detail="Failed to create message")
                     message_id = message_row[0]
-        
+
                     # Insert recipients (optimized: bulk SELECT + bulk INSERT instead of N+1 queries)
                     # Build SQL with proper parameter expansion for IN clause
                     placeholders = ", ".join([f":name_{i}" for i in range(len(recipients))])
                     params = {"pid": project_id}
                     params.update({f"name_{i}": name for i, name in enumerate(recipients)})
-        
+
                     # Single query to get all valid recipient IDs
                     recipient_rows = await session.execute(
                         text(f"SELECT id, name FROM agents WHERE project_id = :pid AND name IN ({placeholders})"),
                         params
                     )
                     recipient_map = {row[1]: row[0] for row in recipient_rows.fetchall()}  # name -> id mapping
-        
+
                     # Build valid recipients list (only those that exist)
                     valid_recipients = [name for name in recipients if name in recipient_map]
-        
+
                     # Bulk insert all message_recipients (single executemany call)
                     if valid_recipients:
                         # Prepare bulk insert params
@@ -2280,7 +2276,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             """),
                             insert_params
                         )
-        
+
                     # If no valid recipients found, rollback and error
                     if not valid_recipients:
                         await session.rollback()
@@ -2288,12 +2284,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             status_code=400,
                             detail=f"None of the specified recipients exist in this project. Available agents can be seen at /mail/{project_slug}"
                         )
-        
+
                     # Write to Git archive BEFORE committing to database (for transaction consistency)
                     from .storage import ensure_archive, write_message_bundle
                     settings = get_settings()
                     archive = await ensure_archive(settings, project_slug)
-        
+
                     # Build message dict for Git
                     message_dict = {
                         "id": message_id,
@@ -2310,7 +2306,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         "created": now.isoformat(),
                         "attachments": []
                     }
-        
+
                     try:
                         # Write message bundle (canonical + outbox + inboxes) to Git
                         await write_message_bundle(
@@ -2329,36 +2325,36 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             status_code=500,
                             detail=f"Failed to write message to Git archive: {git_error!s}"
                         ) from git_error
-        
+
                     # Update HumanOverseer activity timestamp (after successful Git write, before commit)
                     await session.execute(
                         text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
                         {"ts": now, "id": overseer_id}
                     )
-        
+
                     # Commit all changes atomically: agent creation/update + message + recipients
                     await session.commit()
-        
+
                 return JSONResponse({
                     "success": True,
                     "message_id": message_id,
                     "recipients": valid_recipients,
                     "sent_at": now.isoformat()
                 })
-        
+
             except HTTPException:
                 raise
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"Failed to send message: {e!s}") from e
-        
+
         # ========== Archive Visualization Routes ==========
-        
+
         def _validate_project_slug(slug: str) -> bool:
             """Validate project slug format to prevent path traversal."""
             import re
-        
+
             # Slugs should only contain lowercase letters, numbers, hyphens, underscores
             # No path separators or relative path components
             if not slug:
@@ -2369,18 +2365,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return False
             # Should match safe slug pattern
             return bool(re.match(r"^[a-z0-9_-]+$", slug, re.IGNORECASE))
-        
+
         @fastapi_app.get("/mail/archive/guide", response_class=HTMLResponse)
         async def archive_guide() -> HTMLResponse:
             """Display the archive access guide and overview."""
             settings = get_settings()
             storage_root = str(Path(settings.storage.root).expanduser().resolve())
-        
+
             # Get basic stats
             from pathlib import Path as P
-        
+
             from git import Repo as GitRepo
-        
+
             repo_root = P(storage_root)
             if (repo_root / ".git").exists():
                 try:
@@ -2390,17 +2386,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     total_commits = "10,000+" if commit_count == 10000 else f"{commit_count:,}"
                     last_commit = next(repo.iter_commits(max_count=1), None)
                     last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
-        
+
                     # Count projects (with limit for performance)
                     projects_dir = repo_root / "projects"
                     if projects_dir.exists():
                         # Use islice to avoid loading all dirs into memory
                         from itertools import islice
-        
+
                         project_count = sum(1 for p in islice(projects_dir.iterdir(), 100) if p.is_dir())
                     else:
                         project_count = 0
-        
+
                     # Estimate size with timeout (run blocking 'du' in a worker thread)
                     import asyncio as _asyncio
                     import subprocess as _subprocess
@@ -2412,7 +2408,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 text=True,
                                 timeout=5.0,
                             )
-        
+
                         result = await _asyncio.to_thread(_run_du)
                         repo_size = result.stdout.split()[0] if getattr(result, "returncode", 1) == 0 else "Unknown"
                     except (_subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
@@ -2431,12 +2427,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 project_count = 0
                 repo_size = "0 MB"
                 last_commit_time = "Never"
-        
+
             # Get list of projects for picker
             async with get_session() as session:
                 rows = await session.execute(text("SELECT slug, human_key FROM projects ORDER BY human_key"))
                 projects = [{"slug": r[0], "human_key": r[1]} for r in rows.fetchall()]
-        
+
             return await _render(
                 "archive_guide.html",
                 storage_root=storage_root,
@@ -2446,37 +2442,37 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 last_commit_time=last_commit_time,
                 projects=projects,
             )
-        
+
         @fastapi_app.get("/mail/archive/activity", response_class=HTMLResponse)
         async def archive_activity(limit: int = 50) -> HTMLResponse:
             """Display recent commits across all projects."""
             # Validate and cap limit to prevent DoS
             limit = max(1, min(limit, 500))  # Between 1 and 500
-        
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
-        
+
             from git import Repo as GitRepo
-        
+
             if not (repo_root / ".git").exists():
                 return await _render("archive_activity.html", commits=[])
-        
+
             repo = GitRepo(str(repo_root))
             commits = await get_recent_commits(repo, limit=limit)
-        
+
             return await _render("archive_activity.html", commits=commits)
-        
+
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
             """Display detailed commit information with diffs."""
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
-        
+
             from git import Repo as GitRepo
-        
+
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
-        
+
             try:
                 repo = GitRepo(str(repo_root))
                 commit = await get_commit_detail(repo, sha)
@@ -2487,22 +2483,22 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception:
                 # Don't leak error details
                 return await _render("error.html", message="Commit not found")
-        
+
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
             """Display communication timeline with Mermaid.js visualization."""
             # Validate project slug if provided
             if project and not _validate_project_slug(project):
                 return await _render("error.html", message="Invalid project identifier")
-        
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
-        
+
             from git import Repo as GitRepo
-        
+
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
-        
+
             # Default to first project if not specified
             if not project:
                 async with get_session() as session:
@@ -2513,7 +2509,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         project = row[0]
                     else:
                         return await _render("error.html", message="No projects found")
-        
+
             # Get project name
             project_name = project
             async with get_session() as session:
@@ -2522,66 +2518,66 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 ).fetchone()
                 if row:
                     project_name = row[0]
-        
+
             repo = GitRepo(str(repo_root))
             commits = await get_timeline_commits(repo, project, limit=100)
-        
+
             return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
-        
+
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
             """Browse archive files and directories."""
             if not project:
                 # Show project selector - requires project parameter
                 return await _render("error.html", message="Please select a project to browse")
-        
+
             # Validate project slug
             if not _validate_project_slug(project):
                 return await _render("error.html", message="Invalid project identifier")
-        
+
             settings = get_settings()
             archive = await ensure_archive(settings, project)
             tree = await get_archive_tree(archive, path)
-        
+
             return await _render("archive_browser.html", tree=tree, project=project, path=path)
-        
+
         @fastapi_app.get("/mail/archive/browser/{project}/file")
         async def archive_browser_file(project: str, path: str) -> JSONResponse:
             """Get file content from archive."""
             # Validate project slug
             if not _validate_project_slug(project):
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
-        
+
             try:
                 settings = get_settings()
                 archive = await ensure_archive(settings, project)
                 content = await get_file_content(archive, path)
-        
+
                 if content is None:
                     raise HTTPException(status_code=404, detail="File not found")
-        
+
                 return JSONResponse(content=content)
             except ValueError as err:
                 # Path validation errors
                 raise HTTPException(status_code=400, detail="Invalid file path") from err
             except Exception as err:
                 raise HTTPException(status_code=404, detail="File not found") from err
-        
+
         @fastapi_app.get("/mail/archive/network", response_class=HTMLResponse)
         async def archive_network(project: str | None = None) -> HTMLResponse:
             """Display agent communication network graph."""
             # Validate project slug if provided
             if project and not _validate_project_slug(project):
                 return await _render("error.html", message="Invalid project identifier")
-        
+
             settings = get_settings()
             repo_root = Path(settings.storage.root).expanduser().resolve()
-        
+
             from git import Repo as GitRepo
-        
+
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
-        
+
             # Default to first project
             if not project:
                 async with get_session() as session:
@@ -2592,7 +2588,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         project = row[0]
                     else:
                         return await _render("error.html", message="No projects found")
-        
+
             # Get project name
             project_name = project
             async with get_session() as session:
@@ -2601,19 +2597,19 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 ).fetchone()
                 if row:
                     project_name = row[0]
-        
+
             repo = GitRepo(str(repo_root))
             graph = await get_agent_communication_graph(repo, project, limit=200)
-        
+
             return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
-        
+
         @fastapi_app.get("/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
             """Get list of agents for a project."""
             # Validate project slug
             if not _validate_project_slug(project):
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
-        
+
             async with get_session() as session:
                 # Get project ID
                 proj_result = await session.execute(
@@ -2623,16 +2619,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 prow = proj_result.fetchone()
                 if not prow:
                     raise HTTPException(status_code=404, detail="Project not found")
-        
+
                 # Get agents for this project
                 agents_result = await session.execute(
                     text("SELECT name FROM agents WHERE project_id = :pid ORDER BY name"),
                     {"pid": prow[0]}
                 )
                 agents = [r[0] for r in agents_result.fetchall()]
-        
+
             return JSONResponse({"agents": agents})
-        
+
         @fastapi_app.get("/mail/archive/time-travel", response_class=HTMLResponse)
         async def archive_time_travel() -> HTMLResponse:
             """Display time-travel interface."""
@@ -2640,34 +2636,34 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             async with get_session() as session:
                 rows = await session.execute(text("SELECT slug FROM projects ORDER BY human_key"))
                 projects = [r[0] for r in rows.fetchall()]
-        
+
             return await _render("archive_time_travel.html", projects=projects)
-        
+
         @fastapi_app.get("/mail/archive/time-travel/snapshot")
         async def archive_time_travel_snapshot(project: str, agent: str, timestamp: str) -> JSONResponse:
             """Get historical inbox snapshot."""
             # Validate project slug
             if not _validate_project_slug(project):
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
-        
+
             # Validate agent name (alphanumeric only)
             if not agent or not re.match(r"^[A-Za-z0-9]+$", agent):
                 raise HTTPException(status_code=400, detail="Invalid agent name format")
-        
+
             # Validate timestamp format (basic ISO 8601 check)
             if not timestamp or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", timestamp):
                 raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO 8601 format (YYYY-MM-DDTHH:MM)")
-        
+
             try:
                 # Get project archive
                 settings = get_settings()
                 repo = await ensure_archive(settings, project)
-        
+
                 # Get historical snapshot
                 snapshot = await get_historical_inbox_snapshot(repo, agent, timestamp, limit=200)
-        
+
                 return JSONResponse(snapshot)
-        
+
             except Exception as e:
                 # Log error but return empty result rather than failing
                 structlog.get_logger("archive").warning(
@@ -2684,8 +2680,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     "requested_time": timestamp,
                     "error": f"Unable to retrieve historical snapshot: {e!s}"
                 })
-        
-        
+
+
     try:
         _register_mail_ui()
     except Exception as exc:

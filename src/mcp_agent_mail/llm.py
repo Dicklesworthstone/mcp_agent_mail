@@ -124,11 +124,10 @@ async def _ensure_initialized() -> None:
 
         _setup_callbacks()
 
-        # Router optional; direct completion works if Router is unavailable
-        try:
-            _router = litellm.Router()
-        except Exception:
-            _router = None
+        # Skip Router initialization - we use direct litellm.completion() calls.
+        # Router is designed for load balancing across multiple deployments with a model_list,
+        # but we're just using single API keys, so direct completion is simpler and works fine.
+        _router = None
 
 
 def _choose_best_available_model(preferred: str) -> str:

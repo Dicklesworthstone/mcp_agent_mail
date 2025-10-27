@@ -18,13 +18,10 @@ from rich import box
 from rich.align import Align
 from rich.columns import Columns
 from rich.console import Console, Group
-from rich.layout import Layout
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
-from rich.pretty import Pretty
 from rich.rule import Rule
-from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -455,13 +452,13 @@ def tool_call_logger(
 
 def log_info(message: str, **kwargs) -> None:
     """Log an informational message with Rich formatting."""
-    text = Text(f"ℹ️  {message}", style="bold bright_cyan")
+    text = Text(f"ℹ️  {message}", style="bold bright_cyan")  # noqa: RUF001
     if kwargs:
         details = _safe_json_format(kwargs, max_length=500)
         syntax = Syntax(details, "json", theme="dracula", line_numbers=False, word_wrap=True)
         panel = Panel(
             syntax,
-            title="[bold bright_cyan]ℹ️  Details[/bold bright_cyan]",
+            title="[bold bright_cyan]ℹ️  Details[/bold bright_cyan]",  # noqa: RUF001
             border_style="bright_cyan",
             box=box.ROUNDED,
             padding=(0, 1),
@@ -668,7 +665,7 @@ def log_message_with_metadata(
         header = Text(f"❌ {message}", style="bold bright_red")
         border_style = "bright_red"
     else:
-        header = Text(f"ℹ️  {message}", style="bold bright_cyan")
+        header = Text(f"ℹ️  {message}", style="bold bright_cyan")  # noqa: RUF001
         border_style = "bright_cyan"
 
     components.append(header)
@@ -707,3 +704,185 @@ def log_message_with_metadata(
     group = Group(*components)
     console.print(group)
     console.print()
+
+
+def display_startup_banner(settings: Any, host: str, port: int, path: str) -> None:
+    """Display an awesome startup banner with ASCII art, database stats, and Rich showcase."""
+    from rich import box
+    from rich.syntax import Syntax
+
+    console.print()
+    console.print()
+
+    # ASCII Art Mail Logo
+    mail_art = """
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃                                                                      ┃
+    ┃     ███╗   ███╗ ██████╗██████╗     ███╗   ███╗ █████╗ ██╗██╗         ┃
+    ┃     ████╗ ████║██╔════╝██╔══██╗    ████╗ ████║██╔══██╗██║██║         ┃
+    ┃     ██╔████╔██║██║     ██████╔╝    ██╔████╔██║███████║██║██║         ┃
+    ┃     ██║╚██╔╝██║██║     ██╔═══╝     ██║╚██╔╝██║██╔══██║██║██║         ┃
+    ┃     ██║ ╚═╝ ██║╚██████╗██║         ██║ ╚═╝ ██║██║  ██║██║███████╗    ┃
+    ┃     ╚═╝     ╚═╝ ╚═════╝╚═╝         ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝╚══════╝    ┃
+    ┃                                                                      ┃
+    ┃               📬  Agent Coordination via Message Passing  📨         ┃
+    ┃                                                                      ┃
+    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+    """
+
+    console.print(Text(mail_art, style="bold bright_cyan"))
+    console.print()
+
+    # Get database statistics
+    db_stats = _get_database_stats()
+
+    # Create two-column layout: Server Config + Database Stats
+    server_table = Table(
+        box=box.ROUNDED,
+        border_style="bright_blue",
+        show_header=True,
+        header_style="bold bright_white on bright_blue",
+        title="[bold bright_yellow]🚀 Server Configuration[/bold bright_yellow]",
+        padding=(0, 1),
+    )
+    server_table.add_column("Setting", style="bold bright_cyan", width=18)
+    server_table.add_column("Value", style="white", overflow="fold")
+
+    server_table.add_row("🌍 Environment", f"[bold bright_green]{settings.environment}[/bold bright_green]")
+    server_table.add_row("🔗 Endpoint", f"[bold bright_magenta]http://{host}:{port}{path}[/bold bright_magenta]")
+    server_table.add_row("💾 Database", f"[dim]{settings.database.url}[/dim]")
+    server_table.add_row("📁 Storage", f"[dim]{settings.storage.root}[/dim]")
+    server_table.add_row(
+        "🔒 Auth",
+        "[bold bright_green]ENABLED[/bold bright_green]" if settings.http.bearer_token else "[dim]disabled[/dim]"
+    )
+    server_table.add_row(
+        "📝 Tool Logging",
+        "[bold bright_green]ENABLED[/bold bright_green]" if settings.tools_log_enabled else "[dim]disabled[/dim]"
+    )
+
+    # Database stats table
+    stats_table = Table(
+        box=box.ROUNDED,
+        border_style="bright_magenta",
+        show_header=True,
+        header_style="bold bright_white on bright_magenta",
+        title="[bold bright_yellow]📊 Database Statistics[/bold bright_yellow]",
+        padding=(0, 1),
+    )
+    stats_table.add_column("Resource", style="bold bright_cyan", width=18)
+    stats_table.add_column("Count", style="bright_yellow", justify="right")
+
+    stats_table.add_row("📦 Projects", f"[bold bright_green]{db_stats['projects']}[/bold bright_green]")
+    stats_table.add_row("🤖 Agents", f"[bold bright_green]{db_stats['agents']}[/bold bright_green]")
+    stats_table.add_row("📬 Messages", f"[bold bright_green]{db_stats['messages']}[/bold bright_green]")
+    stats_table.add_row("🔐 File Reservations", f"[bold bright_green]{db_stats['file_reservations']}[/bold bright_green]")
+    stats_table.add_row("🔗 Contact Links", f"[bold bright_green]{db_stats['contact_links']}[/bold bright_green]")
+
+    # Display tables side by side
+    columns = Columns([server_table, stats_table], equal=True, expand=True)
+    console.print(columns)
+    console.print()
+
+    # Sample JSON with syntax highlighting (showcase!)
+    sample_json = {
+        "stats": db_stats,
+    }
+
+    json_str = _safe_json_format(sample_json)
+    syntax = Syntax(
+        json_str,
+        "json",
+        theme="dracula",
+        line_numbers=False,
+        word_wrap=True,
+        background_color="default",
+    )
+
+    showcase_panel = Panel(
+        syntax,
+        title="[bold bright_white on bright_green]Stats Showcase[/bold bright_white on bright_green]",
+        border_style="bright_green",
+        box=box.DOUBLE,
+        padding=(1, 2),
+    )
+    console.print(showcase_panel)
+    console.print()
+
+    # Success message
+    if settings.tools_log_enabled:
+        success_msg = Text()
+        success_msg.append("✅ ", style="bold bright_green")
+        success_msg.append("Rich Logging ENABLED", style="bold bright_white")
+        success_msg.append(" — All MCP tool calls will be displayed with ", style="white")
+        success_msg.append("beautiful panels", style="bold bright_cyan")
+        success_msg.append(", ", style="white")
+        success_msg.append("syntax highlighting", style="bold bright_magenta")
+        success_msg.append(", and ", style="white")
+        success_msg.append("performance metrics", style="bold bright_yellow")
+        success_msg.append("! 🎨✨", style="white")
+
+        console.print(Panel(
+            Align.center(success_msg),
+            border_style="bright_green",
+            box=box.HEAVY,
+            padding=(0, 2),
+        ))
+
+    console.print()
+    console.print(Rule(style="bright_blue", characters="═"))
+    console.print()
+
+
+def _get_database_stats() -> dict[str, int]:
+    """Get database statistics for startup banner."""
+    try:
+        import asyncio
+
+        from sqlalchemy import func, select
+
+        from .db import get_session
+        from .models import Agent, AgentLink, FileReservation, Message, Project
+
+        async def fetch_stats() -> dict[str, int]:
+            try:
+                async with get_session() as session:
+                    projects = await session.scalar(select(func.count()).select_from(Project))
+                    agents = await session.scalar(select(func.count()).select_from(Agent))
+                    messages = await session.scalar(select(func.count()).select_from(Message))
+                    file_reservations = await session.scalar(select(func.count()).select_from(FileReservation))
+                    contact_links = await session.scalar(select(func.count()).select_from(AgentLink))
+
+                    return {
+                        "projects": projects or 0,
+                        "agents": agents or 0,
+                        "messages": messages or 0,
+                        "file_reservations": file_reservations or 0,
+                        "contact_links": contact_links or 0,
+                    }
+            except Exception:
+                return {
+                    "projects": 0,
+                    "agents": 0,
+                    "messages": 0,
+                    "file_reservations": 0,
+                    "contact_links": 0,
+                }
+
+        # Try to get stats, but don't fail startup if DB isn't ready
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(fetch_stats())
+        except RuntimeError:
+            # No event loop, create one
+            return asyncio.run(fetch_stats())
+
+    except Exception:
+        # If anything fails, return zeros
+        return {
+            "projects": 0,
+            "agents": 0,
+            "messages": 0,
+            "file_reservations": 0,
+            "contact_links": 0,
+        }

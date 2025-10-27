@@ -15,27 +15,12 @@
 
 {% block header_actions %}
 <div class="flex items-center gap-3">
-  <!-- Human Overseer - Prominent CTA Button -->
+  <!-- Human Overseer - Primary Action -->
   <a href="/mail/{{ project.slug }}/overseer/compose"
-     class="group relative inline-flex items-center gap-2.5 px-5 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-semibold rounded-lg shadow-md hover:shadow-xl transform hover:scale-105 transition-all duration-200 overflow-hidden"
-     aria-label="Send message as Human Overseer">
-    <!-- Shimmer effect -->
-    <div class="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-1000 bg-gradient-to-r from-transparent via-white/20 to-transparent"></div>
-
-    <!-- Icon with pulsing animation -->
-    <div class="relative">
-      <i data-lucide="megaphone" class="w-5 h-5"></i>
-      <span class="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
-        <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-white"></span>
-      </span>
-    </div>
-
-    <!-- Text -->
-    <span class="relative text-sm whitespace-nowrap">Human Overseer</span>
-
-    <!-- Arrow icon -->
-    <i data-lucide="arrow-right" class="w-4 h-4 relative group-hover:translate-x-0.5 transition-transform"></i>
+     class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-700 text-white font-semibold rounded-lg shadow-sm hover:shadow-md transition-all duration-200"
+     aria-label="Send high-priority message as Human Overseer">
+    <i data-lucide="megaphone" class="w-4 h-4"></i>
+    <span class="text-sm">Human Overseer</span>
   </a>
 
   <!-- Divider -->
@@ -100,7 +85,7 @@
 
   <!-- Enhanced Search Section -->
   <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700"
-       x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ (q is not none and q != '')|tojson }} }">
+       x-data="{ scope: '{{ (scope or '')|replace('\\', '\\\\')|replace("'", "\\'") }}', order: '{{ (order or 'relevance')|replace('\\', '\\\\')|replace("'", "\\'") }}', query: '{{ (q or '')|replace('\\', '\\\\')|replace("'", "\\'") }}', isExpanded: {{ 'true' if (q is not none and q != '') else 'false' }} }">
 
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-3">
