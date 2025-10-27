@@ -17,7 +17,7 @@
 {% endblock %}
 
 {% block content %}
-<div class="space-y-6 animate-fade-in" x-data="{ scope: '{{ (scope or '')|replace('\\', '\\\\')|replace("'", "\\'") }}', order: '{{ (order or 'relevance')|replace('\\', '\\\\')|replace("'", "\\'") }}', showHelp: false }">
+<div class="space-y-6 animate-fade-in" x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, showHelp: false }">
   <!-- Search Header -->
   <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
     <div class="flex items-center justify-between mb-6">

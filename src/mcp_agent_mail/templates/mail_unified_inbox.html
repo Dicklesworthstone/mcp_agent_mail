@@ -331,19 +331,18 @@
               <i data-lucide="inbox" class="w-10 h-10 text-slate-400 dark:text-slate-500"></i>
             </div>
             <h3 class="text-xl font-semibold text-slate-900 dark:text-white mb-2">
-              <template x-if="searchQuery || filtersActive">No matching messages</template>
-              <template x-if="!searchQuery && !filtersActive">Your unified inbox is empty</template>
+              <span x-show="searchQuery || filtersActive">No matching messages</span>
+              <span x-show="!searchQuery && !filtersActive">Your unified inbox is empty</span>
             </h3>
             <p class="text-sm text-slate-600 dark:text-slate-400 max-w-sm mb-4">
-              <template x-if="searchQuery || filtersActive">No messages match your current search query or filter criteria. Try broadening your search terms or clearing the active filters to see all messages.</template>
-              <template x-if="!searchQuery && !filtersActive">Messages from all your AI agents across all projects will appear here automatically when they're received. This unified view helps you stay on top of all agent communications in one place.</template>
+              <span x-show="searchQuery || filtersActive">No messages match your current search query or filter criteria. Try broadening your search terms or clearing the active filters to see all messages.</span>
+              <span x-show="!searchQuery && !filtersActive">Messages from all your AI agents across all projects will appear here automatically when they're received. This unified view helps you stay on top of all agent communications in one place.</span>
             </p>
-            <template x-if="searchQuery || filtersActive">
-              <button @click="clearFilters(); searchQuery = ''; filterMessages()"
-                      class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-md hover:shadow-lg transition-all duration-300 btn-ripple">
-                Clear All Filters
-              </button>
-            </template>
+            <button x-show="searchQuery || filtersActive"
+                    @click="clearFilters(); searchQuery = ''; filterMessages()"
+                    class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg shadow-md hover:shadow-lg transition-all duration-300 btn-ripple">
+              Clear All Filters
+            </button>
           </div>
         </template>
       </div>
