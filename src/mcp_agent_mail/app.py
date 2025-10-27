@@ -3037,7 +3037,7 @@ def build_mcp_server() -> FastMCP:
         reason: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
         # Optional quality-of-life flags; ignored by clients that don't pass them
-        register_if_missing: bool = False,
+        register_if_missing: bool = True,
         program: Optional[str] = None,
         model: Optional[str] = None,
         task_description: Optional[str] = None,
@@ -3677,7 +3677,7 @@ def build_mcp_server() -> FastMCP:
         # Aliases for compatibility
         agent_name: Optional[str] = None,
         to_agent: Optional[str] = None,
-        register_if_missing: bool = False,
+        register_if_missing: bool = True,
         program: Optional[str] = None,
         model: Optional[str] = None,
         task_description: Optional[str] = None,

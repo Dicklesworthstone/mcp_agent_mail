@@ -63,7 +63,7 @@
              class="flex items-center gap-2 border-l border-slate-300 dark:border-slate-600 pl-2 ml-2">
           <span class="text-sm text-slate-600 dark:text-slate-400" x-text="selectedMessages.length + ' selected'"></span>
           <button @click="markSelectedAsRead()"
-                  class="px-3 py-2 bg-success-100 dark:bg-success-900/30 hover:bg-success-200 dark:hover:bg-success-800/40 text-success-700 dark:text-success-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-medium"
+                  class="px-3 py-2 bg-green-100 dark:bg-green-900/30 hover:bg-green-200 dark:hover:bg-green-800/40 text-green-700 dark:text-green-300 rounded-lg transition-colors flex items-center gap-1.5 text-sm font-medium"
                   data-tippy-content="Mark selected as read"
                   aria-label="Mark selected messages as read">
             <i data-lucide="check" class="w-4 h-4"></i>
@@ -77,13 +77,13 @@
           </button>
         </div>
 
-        <button disabled
-                class="px-4 py-2 bg-slate-300 dark:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
-                data-tippy-content="Coming soon - Mark all messages as read at once"
-                aria-label="Mark All Read (Coming Soon)">
-          <i data-lucide="check-check" class="w-4 h-4"></i>
+        <button @click="markAllAsRead()"
+                :disabled="isRefreshing"
+                class="px-4 py-2 bg-success-600 hover:bg-success-500 dark:bg-success-600 dark:hover:bg-success-500 text-white rounded-lg transition-all duration-200 flex items-center gap-2 shadow-sm hover:shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                data-tippy-content="Mark all messages as read"
+                aria-label="Mark All Read">
+          <i data-lucide="check-check" class="w-4 h-4" :class="{ 'animate-spin': isRefreshing }"></i>
           <span class="hidden sm:inline">Mark All Read</span>
-          <span class="absolute -top-1.5 -right-1.5 px-1.5 py-0.5 bg-amber-500 text-white text-[10px] font-bold rounded-full shadow-sm">Soon</span>
         </button>
       </div>
     </div>
@@ -201,10 +201,13 @@
                       <span x-text="item.created"></span>
                     </div>
                     <template x-if="item.thread_id">
-                      <div class="flex items-center gap-1.5">
-                        <i data-lucide="message-circle" class="w-4 h-4"></i>
-                        <span class="font-mono text-xs" x-text="item.thread_id"></span>
-                      </div>
+                      <a :href="`/mail/{{ project.slug }}/thread/${item.thread_id}`"
+                         @click.stop
+                         class="flex items-center gap-1.5 px-2 py-1 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-md transition-colors">
+                        <i data-lucide="messages-square" class="w-3.5 h-3.5"></i>
+                        <span class="font-mono text-xs font-medium">Thread</span>
+                        <span class="font-mono text-xs opacity-75" x-text="'#' + item.thread_id"></span>
+                      </a>
                     </template>
                   </div>
                 </div>
@@ -415,12 +418,131 @@
         window.location.reload();
       },
 
-      markSelectedAsRead() {
+      async markSelectedAsRead() {
         if (this.selectedMessages.length === 0) return;
 
-        // In real implementation, make API calls to mark messages as read
-        window.showToast(`Marked ${this.selectedMessages.length} message(s) as read`, 'success');
-        this.clearSelection();
+        const count = this.selectedMessages.length;
+        const confirmMsg = `Mark ${count} selected message${count !== 1 ? 's' : ''} as read?`;
+        if (!confirm(confirmMsg)) return;
+
+        try {
+          const projectSlug = {{ project.slug | tojson }};
+          const agentName = {{ agent | tojson }};
+
+          const response = await fetch(`/mail/${projectSlug}/inbox/${agentName}/mark-read`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              message_ids: this.selectedMessages
+            })
+          });
+
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || error.error || `Server error: ${response.status}`);
+          }
+
+          const result = await response.json();
+          const markedCount = result.marked_count || 0;
+
+          if (typeof window.showToast === 'function') {
+            window.showToast(
+              `Successfully marked ${markedCount} message${markedCount !== 1 ? 's' : ''} as read`,
+              'success'
+            );
+          } else {
+            alert(`Successfully marked ${markedCount} message${markedCount !== 1 ? 's' : ''} as read`);
+          }
+
+          this.clearSelection();
+
+          // Reload to show updated state
+          setTimeout(() => {
+            window.location.reload();
+          }, 1000);
+
+        } catch (error) {
+          console.error('Failed to mark messages as read:', error);
+
+          if (typeof window.showToast === 'function') {
+            window.showToast(
+              `Failed to mark messages as read: ${error.message}`,
+              'error'
+            );
+          } else {
+            alert(`Failed to mark messages as read: ${error.message}`);
+          }
+        }
+      },
+
+      async markAllAsRead() {
+        if (this.isRefreshing) return;
+
+        const confirmMsg = 'Are you sure you want to mark all messages as read? This cannot be undone.';
+        if (!confirm(confirmMsg)) return;
+
+        this.isRefreshing = true;
+        try {
+          const projectSlug = {{ project.slug | tojson }};
+          const agentName = {{ agent | tojson }};
+
+          const response = await fetch(`/mail/${projectSlug}/inbox/${agentName}/mark-all-read`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          });
+
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || error.error || `Server error: ${response.status}`);
+          }
+
+          const result = await response.json();
+          const count = result.marked_count || 0;
+
+          // Handle case where there were no unread messages
+          if (count === 0) {
+            if (typeof window.showToast === 'function') {
+              window.showToast('No unread messages to mark as read', 'info');
+            } else {
+              alert('No unread messages to mark as read');
+            }
+            this.isRefreshing = false;
+            return;
+          }
+
+          // Show success message
+          if (typeof window.showToast === 'function') {
+            window.showToast(
+              `Successfully marked ${count} message${count !== 1 ? 's' : ''} as read`,
+              'success'
+            );
+          } else {
+            alert(`Successfully marked ${count} message${count !== 1 ? 's' : ''} as read`);
+          }
+
+          // Reload to show updated state
+          setTimeout(() => {
+            window.location.reload();
+          }, 1500);
+
+        } catch (error) {
+          console.error('Failed to mark all as read:', error);
+
+          if (typeof window.showToast === 'function') {
+            window.showToast(
+              `Failed to mark messages as read: ${error.message}`,
+              'error'
+            );
+          } else {
+            alert(`Failed to mark messages as read: ${error.message}`);
+          }
+
+          this.isRefreshing = false;
+        }
       }
     };
   }

@@ -1684,7 +1684,250 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 thread_items=thread_items,
                 commit_sha=commit_sha,
             )
-        
+
+        @fastapi_app.post("/mail/{project}/inbox/{agent}/mark-read")
+        async def mark_selected_messages_read(project: str, agent: str, request: Request) -> JSONResponse:
+            """Mark specific messages as read for an agent."""
+            await ensure_schema()
+            from datetime import datetime, timezone
+
+            try:
+                # Parse request body
+                request_body = await request.json()
+                message_ids: list[int] = request_body.get("message_ids", [])
+
+                if not message_ids:
+                    raise HTTPException(status_code=400, detail="No message IDs provided")
+
+                # Limit to prevent SQL parameter overflow (SQLite default limit is 999)
+                # Also prevents abuse - if someone wants to mark 1000+ messages, use "mark all"
+                if len(message_ids) > 500:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Too many messages selected ({len(message_ids)}). Maximum is 500. Use 'Mark All Read' instead."
+                    )
+
+                async with get_session() as session:
+                    # Get project
+                    prow = (
+                        await session.execute(
+                            text("SELECT id, slug FROM projects WHERE slug = :k OR human_key = :k"),
+                            {"k": project},
+                        )
+                    ).fetchone()
+                    if not prow:
+                        raise HTTPException(status_code=404, detail="Project not found")
+
+                    pid = int(prow[0])
+
+                    # Get agent
+                    arow = (
+                        await session.execute(
+                            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                            {"pid": pid, "name": agent},
+                        )
+                    ).fetchone()
+                    if not arow:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+
+                    aid = int(arow[0])
+
+                    # Mark specific messages as read
+                    now = datetime.now(timezone.utc)
+
+                    # Use IN clause with parameter binding
+                    placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
+                    params = {"aid": aid, "now": now}
+                    params.update({f"mid{i}": mid for i, mid in enumerate(message_ids)})
+
+                    result = await session.execute(
+                        text(
+                            f"""
+                            UPDATE message_recipients
+                            SET read_ts = :now
+                            WHERE agent_id = :aid
+                            AND message_id IN ({placeholders})
+                            AND read_ts IS NULL
+                            """
+                        ),
+                        params,
+                    )
+                    await session.commit()
+
+                    count = result.rowcount if result.rowcount is not None else 0
+
+                    return JSONResponse({
+                        "success": True,
+                        "marked_count": count,
+                        "requested_count": len(message_ids),
+                        "agent": agent,
+                        "project": prow[1],
+                    })
+
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {str(exc)}")
+
+        @fastapi_app.post("/mail/{project}/inbox/{agent}/mark-all-read")
+        async def mark_all_messages_read(project: str, agent: str) -> JSONResponse:
+            """Mark all messages for an agent as read."""
+            await ensure_schema()
+            from datetime import datetime, timezone
+
+            try:
+                async with get_session() as session:
+                    # Get project
+                    prow = (
+                        await session.execute(
+                            text("SELECT id, slug FROM projects WHERE slug = :k OR human_key = :k"),
+                            {"k": project},
+                        )
+                    ).fetchone()
+                    if not prow:
+                        raise HTTPException(status_code=404, detail="Project not found")
+
+                    pid = int(prow[0])
+
+                    # Get agent
+                    arow = (
+                        await session.execute(
+                            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                            {"pid": pid, "name": agent},
+                        )
+                    ).fetchone()
+                    if not arow:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+
+                    aid = int(arow[0])
+
+                    # Mark all unread messages as read
+                    now = datetime.now(timezone.utc)
+                    result = await session.execute(
+                        text(
+                            """
+                            UPDATE message_recipients
+                            SET read_ts = :now
+                            WHERE agent_id = :aid
+                            AND read_ts IS NULL
+                            """
+                        ),
+                        {"aid": aid, "now": now},
+                    )
+                    await session.commit()
+
+                    count = result.rowcount if result.rowcount is not None else 0
+
+                    return JSONResponse({
+                        "success": True,
+                        "marked_count": count,
+                        "agent": agent,
+                        "project": prow[1],
+                    })
+
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {str(exc)}")
+
+        @fastapi_app.get("/mail/{project}/thread/{thread_id}", response_class=HTMLResponse)
+        async def mail_thread(project: str, thread_id: str) -> HTMLResponse:
+            """Display all messages in a thread chronologically (Gmail-style conversation view).
+
+            NOTE: Currently loads ALL messages in thread without pagination.
+            For threads with 1000+ messages, consider adding LIMIT/OFFSET pagination.
+            """
+            await ensure_schema()
+            async with get_session() as session:
+                # Get project
+                prow = (
+                    await session.execute(
+                        text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                        {"k": project},
+                    )
+                ).fetchone()
+                if not prow:
+                    return await _render("error.html", message="Project not found")
+
+                pid = int(prow[0])
+
+                # Get all messages in this thread, ordered chronologically
+                # Include messages where thread_id matches OR message id matches (for thread starter)
+                try:
+                    thread_id_int = int(thread_id)
+                    rows = await session.execute(
+                        text(
+                            """
+                            SELECT m.id, m.subject, m.body_md, s.name, m.created_ts, m.importance, m.thread_id
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            WHERE m.project_id = :pid
+                            AND (m.thread_id = :tid OR m.id = :tid_int)
+                            ORDER BY m.created_ts ASC
+                            """
+                        ),
+                        {"pid": pid, "tid": thread_id, "tid_int": thread_id_int},
+                    )
+                except ValueError:
+                    # Not an integer, just use string thread_id
+                    rows = await session.execute(
+                        text(
+                            """
+                            SELECT m.id, m.subject, m.body_md, s.name, m.created_ts, m.importance, m.thread_id
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            WHERE m.project_id = :pid
+                            AND m.thread_id = :tid
+                            ORDER BY m.created_ts ASC
+                            """
+                        ),
+                        {"pid": pid, "tid": thread_id},
+                    )
+
+                messages = []
+                for r in rows.fetchall():
+                    # Convert markdown to HTML for each message
+                    body_html = ""
+                    if r[2]:  # body_md
+                        body_html = markdown2.markdown(
+                            r[2],
+                            extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"]
+                        )
+                        body_html = _html_cleaner.clean(body_html)
+
+                    messages.append({
+                        "id": r[0],
+                        "subject": r[1],
+                        "body_md": r[2],
+                        "body_html": body_html,
+                        "sender": r[3],
+                        "created": str(r[4]),
+                        "importance": r[5],
+                        "thread_id": r[6],
+                    })
+
+                if not messages:
+                    return await _render(
+                        "error.html",
+                        message=f"No messages found in thread '{thread_id}'. The thread may not exist or all messages may have been deleted."
+                    )
+
+                # Get unique subject (use first message's subject, with fallback)
+                thread_subject = messages[0]["subject"] if messages and messages[0]["subject"] else f"Thread {thread_id}"
+
+                return await _render(
+                    "mail_thread.html",
+                    project={"slug": prow[1], "human_key": prow[2]},
+                    thread_id=thread_id,
+                    thread_subject=thread_subject,
+                    messages=messages,
+                    message_count=len(messages),
+                )
+
         # Full-text search UI across subject/body using LIKE fallback (SQLite FTS handled elsewhere)
         @fastapi_app.get("/mail/{project}/search", response_class=HTMLResponse)
         async def mail_search(

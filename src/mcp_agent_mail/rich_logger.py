@@ -15,9 +15,16 @@ from datetime import datetime
 from typing import Any, Optional
 
 from rich import box
+from rich.align import Align
+from rich.columns import Columns
 from rich.console import Console, Group
+from rich.layout import Layout
+from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
+from rich.pretty import Pretty
+from rich.rule import Rule
+from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -66,13 +73,27 @@ def _safe_json_format(data: Any, max_length: int = 2000) -> str:
     return json_str
 
 
-def _create_syntax_panel(title: str, content: str, language: str = "json") -> Panel:
+def _create_syntax_panel(
+    title: str,
+    content: str,
+    language: str = "json",
+    theme: str = "monokai",
+    border_style: str = "cyan",
+    title_style: str = "bold cyan",
+) -> Panel:
     """Create a Rich Panel with syntax-highlighted content."""
-    syntax = Syntax(content, language, theme="monokai", line_numbers=False, word_wrap=True)
+    syntax = Syntax(
+        content,
+        language,
+        theme=theme,
+        line_numbers=False,
+        word_wrap=True,
+        background_color="default",
+    )
     return Panel(
         syntax,
-        title=f"[bold cyan]{title}[/bold cyan]",
-        border_style="cyan",
+        title=f"[{title_style}]{title}[/{title_style}]",
+        border_style=border_style,
         box=box.ROUNDED,
         padding=(0, 1),
     )
@@ -84,29 +105,49 @@ def _create_info_table(ctx: ToolCallContext) -> Table:
         show_header=False,
         box=box.SIMPLE,
         padding=(0, 1),
-        border_style="blue",
+        border_style="bright_blue",
+        show_edge=False,
     )
-    table.add_column("Key", style="bold yellow", width=20)
-    table.add_column("Value", style="white")
+    table.add_column("Icon", style="bold", width=3, no_wrap=True)
+    table.add_column("Key", style="bold bright_yellow", width=17)
+    table.add_column("Value", style="white", overflow="fold")
 
-    # Add rows
-    table.add_row("Tool Name", f"[bold green]{ctx.tool_name}[/bold green]")  # We control tool names
-    table.add_row("Timestamp", ctx.timestamp)
+    # Add rows with icons
+    table.add_row("🔧", "Tool", f"[bold bright_green]{ctx.tool_name}[/bold bright_green]")
+    table.add_row("🕐", "Timestamp", f"[dim]{ctx.timestamp}[/dim]")
 
     if ctx.project:
-        table.add_row("Project", f"[cyan]{escape(ctx.project)}[/cyan]")  # User data, needs escape
+        table.add_row("📦", "Project", f"[bright_cyan]{escape(ctx.project)}[/bright_cyan]")
 
     if ctx.agent:
-        table.add_row("Agent", f"[magenta]{escape(ctx.agent)}[/magenta]")  # User data, needs escape
+        table.add_row("🤖", "Agent", f"[bright_magenta]{escape(ctx.agent)}[/bright_magenta]")
 
     # Duration and status
     if ctx.end_time:
-        duration_color = "green" if ctx.duration_ms < 100 else "yellow" if ctx.duration_ms < 1000 else "red"
-        table.add_row("Duration", f"[{duration_color}]{ctx.duration_ms:.2f}ms[/{duration_color}]")
+        # Duration with gradient colors
+        if ctx.duration_ms < 50:
+            duration_style = "bold bright_green"
+            duration_icon = "⚡"
+        elif ctx.duration_ms < 100:
+            duration_style = "bold green"
+            duration_icon = "⚡"
+        elif ctx.duration_ms < 500:
+            duration_style = "bold yellow"
+            duration_icon = "⏱"
+        elif ctx.duration_ms < 1000:
+            duration_style = "bold bright_yellow"
+            duration_icon = "⏱"
+        else:
+            duration_style = "bold red"
+            duration_icon = "🐌"
 
-        status = "✓ SUCCESS" if ctx.success else "✗ ERROR"
-        status_color = "green" if ctx.success else "red"
-        table.add_row("Status", f"[{status_color} bold]{status}[/{status_color} bold]")
+        table.add_row(duration_icon, "Duration", f"[{duration_style}]{ctx.duration_ms:.2f}ms[/{duration_style}]")
+
+        # Status with visual indicator
+        if ctx.success:
+            table.add_row("✅", "Status", "[bold bright_green]SUCCESS[/bold bright_green]")
+        else:
+            table.add_row("❌", "Status", "[bold bright_red]FAILED[/bold bright_red]")
 
     return table
 
@@ -134,8 +175,16 @@ def _create_params_display(ctx: ToolCallContext) -> Panel | None:
     if not filtered_params:
         return None
 
+    # Use syntax highlighting for JSON-serializable data
     json_content = _safe_json_format(filtered_params)
-    return _create_syntax_panel("Input Parameters", json_content, "json")
+    return _create_syntax_panel(
+        "📥 Input Parameters",
+        json_content,
+        "json",
+        theme="dracula",
+        border_style="bright_blue",
+        title_style="bold bright_white",
+    )
 
 
 def _create_result_display(ctx: ToolCallContext) -> Panel:
@@ -155,54 +204,74 @@ def _create_result_display(ctx: ToolCallContext) -> Panel:
         json_content = _safe_json_format(error_info)
         return Panel(
             Syntax(json_content, "json", theme="monokai", line_numbers=False, word_wrap=True),
-            title="[bold red]Error Details[/bold red]",
-            border_style="red",
-            box=box.ROUNDED,
+            title="[bold bright_red]❌ Error Details[/bold bright_red]",
+            border_style="bright_red",
+            box=box.HEAVY,
             padding=(0, 1),
         )
 
-    # Format result based on type
+    # Format result with enhanced styling
     result_str = _safe_json_format(ctx.result)
-    return _create_syntax_panel("Result", result_str, "json")
+    return _create_syntax_panel(
+        "📤 Result",
+        result_str,
+        "json",
+        theme="dracula",
+        border_style="bright_green",
+        title_style="bold bright_white",
+    )
 
 
 def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
     """Create a compact summary table for tool calls."""
     table = Table(
-        box=box.HEAVY_HEAD,
-        border_style="bright_blue",
+        box=box.DOUBLE_EDGE,
+        border_style="bright_cyan",
         show_header=True,
         header_style="bold bright_white on bright_blue",
-        title="[bold bright_yellow]⚡ MCP Tool Call[/bold bright_yellow]",
+        title="[bold bright_yellow]⚡ MCP Tool Call Summary[/bold bright_yellow]",
         title_style="bold",
+        padding=(0, 1),
+        show_edge=True,
     )
 
-    table.add_column("Field", style="bold cyan", width=15)
+    table.add_column("Field", style="bold bright_cyan", width=15, no_wrap=True)
     table.add_column("Value", style="white", overflow="fold")
 
-    # Tool name
-    table.add_row("Tool", f"[bold green]{ctx.tool_name}[/bold green]")  # We control tool names
+    # Tool name with icon
+    table.add_row("🔧 Tool", f"[bold bright_green]{ctx.tool_name}[/bold bright_green]")
 
-    # Context info
+    # Context info with icons
     if ctx.agent:
-        table.add_row("Agent", f"[magenta]{escape(ctx.agent)}[/magenta]")  # User data, needs escape
+        table.add_row("🤖 Agent", f"[bright_magenta]{escape(ctx.agent)}[/bright_magenta]")
     if ctx.project:
-        table.add_row("Project", f"[cyan]{escape(ctx.project)}[/cyan]")  # User data, needs escape
+        table.add_row("📦 Project", f"[bright_cyan]{escape(ctx.project)}[/bright_cyan]")
 
-    # Timing
-    table.add_row("Started", ctx.timestamp)
+    # Timing with icon
+    table.add_row("🕐 Started", f"[dim]{ctx.timestamp}[/dim]")
 
     if ctx.end_time:
-        duration_color = "green" if ctx.duration_ms < 100 else "yellow" if ctx.duration_ms < 1000 else "red"
-        table.add_row("Duration", f"[{duration_color}]{ctx.duration_ms:.2f}ms[/{duration_color}]")
+        # Duration with gradient styling
+        if ctx.duration_ms < 50:
+            duration_display = f"[bold bright_green]⚡ {ctx.duration_ms:.2f}ms[/bold bright_green]"
+        elif ctx.duration_ms < 100:
+            duration_display = f"[bold green]⚡ {ctx.duration_ms:.2f}ms[/bold green]"
+        elif ctx.duration_ms < 500:
+            duration_display = f"[bold yellow]⏱ {ctx.duration_ms:.2f}ms[/bold yellow]"
+        elif ctx.duration_ms < 1000:
+            duration_display = f"[bold bright_yellow]⏱ {ctx.duration_ms:.2f}ms[/bold bright_yellow]"
+        else:
+            duration_display = f"[bold red]🐌 {ctx.duration_ms:.2f}ms[/bold red]"
 
-        # Status
+        table.add_row("⏱ Duration", duration_display)
+
+        # Status with enhanced visual indicator
         if ctx.success:
-            table.add_row("Status", "[bold green]✓ SUCCESS[/bold green]")
+            table.add_row("📊 Status", "[bold bright_green]✅ SUCCESS[/bold bright_green]")
         else:
             error_msg = str(ctx.error) if ctx.error else "Unknown error"
-            table.add_row("Status", "[bold red]✗ FAILED[/bold red]")
-            table.add_row("Error", f"[red]{escape(error_msg[:100])}[/red]")  # External error messages, needs escape
+            table.add_row("📊 Status", "[bold bright_red]❌ FAILED[/bold bright_red]")
+            table.add_row("⚠️  Error", f"[red]{escape(error_msg[:100])}[/red]")
 
     return table
 
@@ -212,6 +281,9 @@ def log_tool_call_start(ctx: ToolCallContext) -> None:
     # Create the main panel with all information
     components = []
 
+    # Add a rule separator for visual clarity
+    components.append(Rule(style="bright_blue"))
+
     # Add info table
     info_table = _create_info_table(ctx)
     components.append(info_table)
@@ -219,13 +291,15 @@ def log_tool_call_start(ctx: ToolCallContext) -> None:
     # Add parameters if present
     params_panel = _create_params_display(ctx)
     if params_panel:
+        components.append(Text())  # Spacer
         components.append(params_panel)
 
-    # Create main panel
+    # Create main panel with enhanced styling
     group = Group(*components)
     main_panel = Panel(
         group,
-        title="[bold white on blue]🚀 MCP TOOL CALL STARTED [/bold white on blue]",
+        title="[bold bright_white on bright_blue]🚀 MCP TOOL CALL STARTED[/bold bright_white on bright_blue]",
+        subtitle="[dim]Executing...[/dim]",
         border_style="bright_blue",
         box=box.DOUBLE,
         padding=(1, 2),
@@ -233,6 +307,7 @@ def log_tool_call_start(ctx: ToolCallContext) -> None:
 
     console.print()
     console.print(main_panel)
+    console.print()
 
 
 def log_tool_call_end(ctx: ToolCallContext) -> Optional[str]:
@@ -259,23 +334,44 @@ def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
     """Construct the Rich panel summarizing a completed tool call."""
     components = []
 
+    # Add a rule separator
+    if ctx.success:
+        components.append(Rule(style="bright_green", characters="═"))
+    else:
+        components.append(Rule(style="bright_red", characters="═"))
+
+    # Add summary table
     summary = _create_tool_call_summary_table(ctx)
     components.append(summary)
 
+    # Add spacer
+    components.append(Text())
+
+    # Add result panel
     result_panel = _create_result_display(ctx)
     components.append(result_panel)
 
+    # Determine title and styling based on success
     if ctx.success:
-        title = "[bold white on green]✓ MCP TOOL CALL COMPLETED [/bold white on green]"
+        title = "[bold bright_white on bright_green]✅ MCP TOOL CALL COMPLETED[/bold bright_white on bright_green]"
         border_style = "bright_green"
+        # Add performance indicator in subtitle
+        if ctx.duration_ms < 100:
+            subtitle = "[bold bright_green]⚡ Lightning Fast![/bold bright_green]"
+        elif ctx.duration_ms < 500:
+            subtitle = "[bold green]✓ Fast[/bold green]"
+        else:
+            subtitle = "[dim]Completed[/dim]"
     else:
-        title = "[bold white on red]✗ MCP TOOL CALL FAILED [/bold white on red]"
+        title = "[bold bright_white on bright_red]❌ MCP TOOL CALL FAILED[/bold bright_white on bright_red]"
         border_style = "bright_red"
+        subtitle = "[bold red]Please review error details above[/bold red]"
 
     group = Group(*components)
     return Panel(
         group,
         title=title,
+        subtitle=subtitle,
         border_style=border_style,
         box=box.DOUBLE,
         padding=(1, 2),
@@ -359,10 +455,17 @@ def tool_call_logger(
 
 def log_info(message: str, **kwargs) -> None:
     """Log an informational message with Rich formatting."""
-    text = Text(f"INFO  {message}", style="bold cyan")
+    text = Text(f"ℹ️  {message}", style="bold bright_cyan")
     if kwargs:
         details = _safe_json_format(kwargs, max_length=500)
-        panel = Panel(details, border_style="cyan", box=box.ROUNDED)
+        syntax = Syntax(details, "json", theme="dracula", line_numbers=False, word_wrap=True)
+        panel = Panel(
+            syntax,
+            title="[bold bright_cyan]ℹ️  Details[/bold bright_cyan]",
+            border_style="bright_cyan",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
         console.print(text)
         console.print(panel)
     else:
@@ -371,10 +474,17 @@ def log_info(message: str, **kwargs) -> None:
 
 def log_warning(message: str, **kwargs) -> None:
     """Log a warning message with Rich formatting."""
-    text = Text(f"⚠  {message}", style="bold yellow")
+    text = Text(f"⚠️  {message}", style="bold bright_yellow")
     if kwargs:
         details = _safe_json_format(kwargs, max_length=500)
-        panel = Panel(details, border_style="yellow", box=box.ROUNDED)
+        syntax = Syntax(details, "json", theme="monokai", line_numbers=False, word_wrap=True)
+        panel = Panel(
+            syntax,
+            title="[bold bright_yellow]⚠️  Warning Details[/bold bright_yellow]",
+            border_style="bright_yellow",
+            box=box.HEAVY,
+            padding=(0, 1),
+        )
         console.print(text)
         console.print(panel)
     else:
@@ -383,7 +493,7 @@ def log_warning(message: str, **kwargs) -> None:
 
 def log_error(message: str, error: Optional[Exception] = None, **kwargs) -> None:
     """Log an error message with Rich formatting."""
-    text = Text(f"✗ {message}", style="bold red")
+    text = Text(f"❌ {message}", style="bold bright_red")
     console.print(text)
 
     if error or kwargs:
@@ -393,16 +503,30 @@ def log_error(message: str, error: Optional[Exception] = None, **kwargs) -> None
             error_data["error_message"] = str(error)
 
         details = _safe_json_format(error_data, max_length=500)
-        panel = Panel(details, border_style="red", box=box.ROUNDED, title="[bold red]Error Details[/bold red]")
+        syntax = Syntax(details, "json", theme="monokai", line_numbers=False, word_wrap=True)
+        panel = Panel(
+            syntax,
+            title="[bold bright_red]❌ Error Details[/bold bright_red]",
+            border_style="bright_red",
+            box=box.HEAVY,
+            padding=(0, 1),
+        )
         console.print(panel)
 
 
 def log_success(message: str, **kwargs) -> None:
     """Log a success message with Rich formatting."""
-    text = Text(f"✓ {message}", style="bold green")
+    text = Text(f"✅ {message}", style="bold bright_green")
     if kwargs:
         details = _safe_json_format(kwargs, max_length=500)
-        panel = Panel(details, border_style="green", box=box.ROUNDED)
+        syntax = Syntax(details, "json", theme="dracula", line_numbers=False, word_wrap=True)
+        panel = Panel(
+            syntax,
+            title="[bold bright_green]✅ Success Details[/bold bright_green]",
+            border_style="bright_green",
+            box=box.ROUNDED,
+            padding=(0, 1),
+        )
         console.print(text)
         console.print(panel)
     else:
@@ -411,26 +535,175 @@ def log_success(message: str, **kwargs) -> None:
 
 def create_startup_panel(config: dict[str, Any]) -> Panel:
     """Create a beautiful startup panel showing configuration."""
+    # Create main tree with enhanced styling
     tree = Tree("🚀 [bold bright_white]MCP Agent Mail Server[/bold bright_white]")
 
-    # Add configuration branches
+    # Add configuration branches with icons
+    icon_map = {
+        "environment": "🌍",
+        "server": "🖥️",
+        "database": "💾",
+        "storage": "📁",
+        "features": "✨",
+        "security": "🔒",
+        "logging": "📝",
+    }
+
     for section, values in config.items():
-        section_branch = tree.add(f"[bold cyan]{section}[/bold cyan]")  # We control section names
+        # Get icon for section
+        section_icon = icon_map.get(section.lower(), "⚙️")
+        section_branch = tree.add(f"{section_icon} [bold bright_cyan]{section}[/bold bright_cyan]")
+
         if isinstance(values, dict):
             for key, value in values.items():
                 # Mask sensitive values
                 if "token" in key.lower() or "secret" in key.lower() or "password" in key.lower():
-                    display_value = "***" if value else "[dim]not set[/dim]"
+                    display_value = "[dim red]●●●●●●●●[/dim red]" if value else "[dim]not set[/dim]"
+                    key_style = "bright_red"
                 else:
-                    display_value = escape(str(value))  # User's .env data, needs escape
-                section_branch.add(f"[yellow]{key}[/yellow]: [white]{display_value}[/white]")  # We control keys
+                    display_value = escape(str(value))
+                    key_style = "bright_yellow"
+
+                section_branch.add(f"[{key_style}]{key}[/{key_style}]: [white]{display_value}[/white]")
         else:
-            section_branch.add(f"[white]{escape(str(values))}[/white]")  # User data, needs escape
+            section_branch.add(f"[white]{escape(str(values))}[/white]")
 
     return Panel(
         tree,
-        title="[bold white on blue]Server Configuration[/bold white on blue]",
+        title="[bold bright_white on bright_blue]🚀 Server Configuration[/bold bright_white on bright_blue]",
+        subtitle="[dim]Ready to serve![/dim]",
         border_style="bright_blue",
         box=box.DOUBLE,
         padding=(1, 2),
     )
+
+
+def create_metadata_table(metadata: dict[str, Any], title: str = "Metadata") -> Table:
+    """Create a beautiful metadata table with icons and colors."""
+    table = Table(
+        title=f"[bold bright_cyan]{title}[/bold bright_cyan]",
+        box=box.ROUNDED,
+        border_style="bright_cyan",
+        show_header=True,
+        header_style="bold bright_white on bright_blue",
+        padding=(0, 1),
+    )
+
+    table.add_column("Property", style="bold bright_yellow", width=20)
+    table.add_column("Value", style="white", overflow="fold")
+
+    for key, value in metadata.items():
+        # Add visual indicators for different value types
+        if isinstance(value, bool):
+            display_value = "[bold bright_green]✓ True[/bold bright_green]" if value else "[dim]✗ False[/dim]"
+        elif isinstance(value, (int, float)):
+            display_value = f"[bright_cyan]{value}[/bright_cyan]"
+        elif value is None:
+            display_value = "[dim italic]null[/dim italic]"
+        else:
+            display_value = escape(str(value))
+
+        table.add_row(key, display_value)
+
+    return table
+
+
+def create_data_tree(data: dict[str, Any], root_label: str = "Data") -> Tree:
+    """Create a rich tree view for nested data structures."""
+    tree = Tree(f"[bold bright_white]{root_label}[/bold bright_white]")
+
+    def add_items(parent, items):
+        """Recursively add items to the tree."""
+        if isinstance(items, dict):
+            for key, value in items.items():
+                if isinstance(value, dict):
+                    branch = parent.add(f"[bold bright_cyan]{escape(str(key))}[/bold bright_cyan]")
+                    add_items(branch, value)
+                elif isinstance(value, list):
+                    branch = parent.add(f"[bold bright_magenta]{escape(str(key))}[/bold bright_magenta] [dim](list)[/dim]")
+                    for i, item in enumerate(value):
+                        if isinstance(item, (dict, list)):
+                            subbranch = branch.add(f"[dim]{i}[/dim]")
+                            add_items(subbranch, item)
+                        else:
+                            branch.add(f"[dim]{i}:[/dim] [white]{escape(str(item))}[/white]")
+                else:
+                    parent.add(f"[bright_yellow]{escape(str(key))}[/bright_yellow]: [white]{escape(str(value))}[/white]")
+        elif isinstance(items, list):
+            for i, item in enumerate(items):
+                if isinstance(item, (dict, list)):
+                    branch = parent.add(f"[dim]{i}[/dim]")
+                    add_items(branch, item)
+                else:
+                    parent.add(f"[dim]{i}:[/dim] [white]{escape(str(item))}[/white]")
+
+    add_items(tree, data)
+    return tree
+
+
+def log_message_with_metadata(
+    message: str,
+    metadata: dict[str, Any] | None = None,
+    body: str | None = None,
+    message_type: str = "info",
+) -> None:
+    """Log a rich message with optional metadata and body content.
+
+    Args:
+        message: The main message text
+        metadata: Optional dictionary of metadata to display
+        body: Optional body content (supports markdown)
+        message_type: Type of message ('info', 'success', 'warning', 'error')
+    """
+    components = []
+
+    # Add message header
+    if message_type == "success":
+        header = Text(f"✅ {message}", style="bold bright_green")
+        border_style = "bright_green"
+    elif message_type == "warning":
+        header = Text(f"⚠️  {message}", style="bold bright_yellow")
+        border_style = "bright_yellow"
+    elif message_type == "error":
+        header = Text(f"❌ {message}", style="bold bright_red")
+        border_style = "bright_red"
+    else:
+        header = Text(f"ℹ️  {message}", style="bold bright_cyan")
+        border_style = "bright_cyan"
+
+    components.append(header)
+
+    # Add metadata if present
+    if metadata:
+        components.append(Text())  # Spacer
+        metadata_table = create_metadata_table(metadata)
+        components.append(metadata_table)
+
+    # Add body if present
+    if body:
+        components.append(Text())  # Spacer
+        # Try to render as markdown first, fallback to plain text
+        try:
+            md_content = Markdown(body)
+            body_panel = Panel(
+                md_content,
+                title="[bold bright_white]Message Body[/bold bright_white]",
+                border_style=border_style,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        except Exception:
+            # Fallback to plain text
+            body_panel = Panel(
+                escape(body),
+                title="[bold bright_white]Message Body[/bold bright_white]",
+                border_style=border_style,
+                box=box.ROUNDED,
+                padding=(0, 1),
+            )
+        components.append(body_panel)
+
+    # Print everything
+    group = Group(*components)
+    console.print(group)
+    console.print()
