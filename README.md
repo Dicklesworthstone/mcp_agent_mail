@@ -14,9 +14,9 @@ Status: Under active development. The design is captured in detail in `project_i
 
 Modern projects often run multiple coding agents at once (backend, frontend, scripts, infra). Without a shared coordination fabric, agents:
 
-- Overwrite each other’s edits or panic on unexpected diffs
+- Overwrite each other's edits or panic on unexpected diffs
 - Miss critical context from parallel workstreams
-- Require humans to “liaison” messages across tools and teams
+- Require humans to "liaison" messages across tools and teams
 
 This project provides a lightweight, interoperable layer so agents can:
 
@@ -26,7 +26,7 @@ This project provides a lightweight, interoperable layer so agents can:
 - Declare advisory file reservations (leases) on files/globs to signal intent
 - Inspect a directory of active agents, programs/models, and activity
 
-It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
+It's designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
 
 ## TLDR Quickstart
 
@@ -109,15 +109,15 @@ Common pitfalls
 
 ## Integrating with Beads (dependency‑aware task planning)
 
-Beads is a lightweight, dependency‑aware issue database and CLI (command `bd`) that helps agents pick “ready work,” manage priorities, and track status. It pairs naturally with MCP Agent Mail: keep Beads as the task authority and use Agent Mail for conversation, decisions, file‑reservation signaling, and human‑auditable artifacts. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads is a lightweight, dependency‑aware issue database and CLI (command `bd`) that helps agents pick "ready work," manage priorities, and track status. It pairs naturally with MCP Agent Mail: keep Beads as the task authority and use Agent Mail for conversation, decisions, file‑reservation signaling, and human‑auditable artifacts. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
 
-Why it’s complementary
+Why it's complementary
 - **Separation of concerns**: Beads = tasks, priorities, dependencies; Agent Mail = messaging, threads, audit trail, file reservations.
 - **Non‑overlapping MCP roles**: You can mount both in your MCP client without transport conflicts (both expose MCP surfaces).
 - **Shared identifiers**: Use Beads issue ids (e.g., `bd-123`) as Mail `thread_id`s so search, summaries, and audits line up.
 
 Install Beads (Linux/macOS)
-- Option A (prebuilt): Download the latest release for your platform from the repository’s Releases page, place `bd` on your `PATH`, and `chmod +x` if needed. See: [steveyegge/beads](https://github.com/steveyegge/beads)
+- Option A (prebuilt): Download the latest release for your platform from the repository's Releases page, place `bd` on your `PATH`, and `chmod +x` if needed. See: [steveyegge/beads](https://github.com/steveyegge/beads)
 - Option B (from source):
   ```bash
   # Prereqs: Go toolchain (1.22+ recommended)
@@ -133,7 +133,7 @@ Here is a ready made blurb you can add to your AGENTS.md or CLAUDE.md files (pla
 
 ## Integrating with Beads (dependency‑aware task planning)
 
-Beads provides a lightweight, dependency‑aware issue database and a CLI (`bd`) for selecting “ready work,” setting priorities, and tracking status. It complements MCP Agent Mail’s messaging, audit trail, and file‑reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads provides a lightweight, dependency‑aware issue database and a CLI (`bd`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging, audit trail, and file‑reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
 
 Recommended conventions
 - **Single source of truth**: Use **Beads** for task status/priority/dependencies; use **Agent Mail** for conversation, decisions, and attachments (audit).
@@ -162,10 +162,10 @@ Mapping cheat‑sheet
 
 Event mirroring (optional automation)
 - On `bd update --status blocked`, send a high‑importance Mail message in thread `bd-###` describing the blocker.
-- On Mail “ACK overdue” for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
+- On Mail "ACK overdue" for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
 
 Pitfalls to avoid
-- Don’t create or manage tasks in Mail; treat Beads as the single task queue.
+- Don't create or manage tasks in Mail; treat Beads as the single task queue.
 - Always include `bd-###` in message `thread_id` to avoid ID drift across tools.
 
 ```
@@ -236,7 +236,7 @@ Global Git archive (STORAGE_ROOT)           SQLite (FTS5)
 The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, file reservations, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
 
 - Where it lives: built into the HTTP server in `mcp_agent_mail.http` under the `/mail` path.
-- Who it’s for: humans reviewing activity; agents should continue to use the MCP tools/resources API.
+- Who it's for: humans reviewing activity; agents should continue to use the MCP tools/resources API.
 
 ### Launching the Web UI
 
@@ -268,7 +268,7 @@ Auth notes:
 
 - `/mail/{project}` (Project overview + search + agents)
   - Rich search form with filters:
-    - Scope: subject/body/both, Order: relevance or time, optional “boost subject”.
+    - Scope: subject/body/both, Order: relevance or time, optional "boost subject".
     - Query tokens: supports `subject:foo`, `body:"multi word"`, quoted phrases, and bare terms.
     - Uses FTS5 bm25 scoring when available; otherwise falls back to SQL LIKE on subject/body with your chosen scope.
   - Results show subject, sender, created time, thread id, and a highlighted snippet when using FTS.
@@ -282,12 +282,12 @@ Auth notes:
 - `/mail/{project}/message/{id}` (Message detail)
   - Shows subject, sender, created time, importance, recipients (To/Cc/Bcc), thread messages.
   - Body rendering:
-    - If the server pre‑converted markdown to HTML, it’s sanitized with Bleach (limited tags/attributes, safe CSS via CSSSanitizer) and then displayed.
+    - If the server pre‑converted markdown to HTML, it's sanitized with Bleach (limited tags/attributes, safe CSS via CSSSanitizer) and then displayed.
     - Otherwise markdown is rendered client‑side with Marked + Prism for code highlighting.
   - Attachments are referenced from the message frontmatter (WebP files or inline data URIs).
 
 - `/mail/{project}/search?q=...` (Dedicated search page)
-  - Same query syntax as the project overview search, with a token “pill” UI for assembling/removing filters.
+  - Same query syntax as the project overview search, with a token "pill" UI for assembling/removing filters.
 
 - `/mail/{project}/file_reservations` (File Reservations list)
   - Displays active and historical file reservations (exclusive/shared, path pattern, timestamps, released/expired state).
@@ -496,7 +496,7 @@ Instead, we give you **discovery + control**:
 
 ### Search syntax (UI)
 
-The UI shares the same parsing as the API’s `_parse_fts_query`:
+The UI shares the same parsing as the API's `_parse_fts_query`:
 - Field filters: `subject:login`, `body:"api key"`
 - Phrase search: `"build plan"`
 - Combine terms: `login AND security` (FTS)
@@ -517,7 +517,7 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 - Templates live in `src/mcp_agent_mail/templates/` and are rendered by Jinja2.
 - Markdown is converted with `markdown2` on the server where possible; HTML is sanitized with Bleach (with CSS sanitizer when available).
 - Tailwind CSS, Lucide icons, Alpine.js, Marked, and Prism are loaded via CDN in `base.html` for a modern look without a frontend build step.
-- All rendering is server‑side; there’s no SPA router. Pages degrade cleanly without JavaScript.
+- All rendering is server‑side; there's no SPA router. Pages degrade cleanly without JavaScript.
 
 ### Security considerations
 
@@ -690,9 +690,9 @@ sequenceDiagram
 | `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?)` | Approve or deny a contact request |
 | `list_contacts(project_key, agent_name)` | List contact links for an agent |
 | `set_contact_policy(project_key, agent_name, policy)` | Set policy: `open`, `auto` (default), `contacts_only`, `block_all` |
-## Contact model and “consent-lite” messaging
+## Contact model and "consent-lite" messaging
 
-Goal: make coordination “just work” without spam across unrelated agents. The server enforces per-project isolation by default and adds an optional consent layer within a project so agents only contact relevant peers.
+Goal: make coordination "just work" without spam across unrelated agents. The server enforces per-project isolation by default and adds an optional consent layer within a project so agents only contact relevant peers.
 
 ### Isolation by project
 
@@ -710,7 +710,7 @@ Use `set_contact_policy(project_key, agent_name, policy)` to update.
 
 ### Request/approve contact
 
-- `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` creates or refreshes a pending link and sends a small ack_required “intro” message to the recipient.
+- `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` creates or refreshes a pending link and sends a small ack_required "intro" message to the recipient.
 - `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?)` approves or denies; approval grants messaging until expiry.
 - `list_contacts(project_key, agent_name)` surfaces current links.
 
@@ -787,7 +787,7 @@ Example (conceptual) resource read:
   - `include_bodies`: include markdown bodies in results
   - `limit`: max results (default 20)
 - `resource://message/{id}{?project}`: fetch one message; `project` optional if id is globally unique
-- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread’s messages; if `project` is omitted, the server auto-resolves only when the thread is uniquely identifiable to a single project (by numeric message id seed or thread key). Otherwise, pass `project` explicitly.
+- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread's messages; if `project` is omitted, the server auto-resolves only when the thread is uniquely identifiable to a single project (by numeric message id seed or thread key). Otherwise, pass `project` explicitly.
 
 ```mermaid
 sequenceDiagram
@@ -810,7 +810,7 @@ Exclusive file reservations are advisory but visible and auditable:
 
 - A reservation JSON is written to `file_reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
 - The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
-- Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who “owns” the commit
+- Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who "owns" the commit
 
 Install the guard into a code repo (conceptual tool call):
 
@@ -918,7 +918,7 @@ Common variables you may set:
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
 | `MESSAGING_AUTO_REGISTER_RECIPIENTS` | `true` | Automatically create missing local recipients during `send_message` and retry routing |
 | `MESSAGING_AUTO_HANDSHAKE_ON_BLOCK` | `true` | When contact policy blocks delivery, attempt a contact handshake (auto-accept) and retry |
-| `TOOLS_LOG_ENABLED` | `false` | Log tool invocations for debugging |
+| `TOOLS_LOG_ENABLED` | `true` | Log tool invocations for debugging |
 | `LOG_RICH_ENABLED` | `true` | Enable Rich console logging |
 | `LOG_INCLUDE_TRACE` | `false` | Include trace-level logs |
 | `TOOL_METRICS_EMIT_ENABLED` | `false` | Emit periodic tool usage metrics |
@@ -930,6 +930,7 @@ Common variables you may set:
 | `QUOTA_ATTACHMENTS_LIMIT_BYTES` | `0` | Max attachment storage per project (0=unlimited) |
 | `QUOTA_INBOX_LIMIT_COUNT` | `0` | Max inbox messages per agent (0=unlimited) |
 | `RETENTION_IGNORE_PROJECT_PATTERNS` | `demo,test*,testproj*,testproject,backendproj*,frontendproj*` | CSV of project patterns to ignore in retention/quota reports |
+| `AGENT_NAME_ENFORCEMENT_MODE` | `coerce` | Agent naming policy: `strict` (reject invalid names), `coerce` (auto-generate if invalid), `always_auto` (always auto-generate) |
 
 ## Development quick start
 
@@ -1112,9 +1113,7 @@ Send a message (auto-convert images to WebP; inline small ones):
       "to": ["BlueLake"],
       "subject": "Plan for /api/users",
       "body_md": "Here is the flow...\n\n![diagram](docs/flow.png)",
-      "convert_images": true,
-      "image_embed_policy": "auto",
-      "inline_max_bytes": 32768
+      "convert_images": true
     }
   }
 }
@@ -1141,7 +1140,7 @@ Reserve a surface for editing:
 
 ## Operational notes
 
-- One async session per request/task; don’t share across concurrent coroutines
+- One async session per request/task; don't share across concurrent coroutines
 - Use explicit loads in async code; avoid implicit lazy loads
 - Use async-friendly file operations when needed; Git operations are serialized with a file lock
 - Clean shutdown should dispose any async engines/resources (if introduced later)
@@ -1221,11 +1220,11 @@ if __name__ == "__main__":
 ## Troubleshooting
 
 - "sender_name not registered"
-  - Create the agent first with `create_agent`, or check the `project_key` you’re using matches the sender’s project
+  - Create the agent first with `create_agent`, or check the `project_key` you're using matches the sender's project
 - Pre-commit hook blocks commits
   - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive file reservations; inspect `.git/hooks/pre-commit`
-- Inline images didn’t embed
-  - Ensure `convert_images=true`, `image_embed_policy="auto"` or `inline`, and the resulting WebP size is below `inline_max_bytes`
+- Inline images didn't embed
+  - Ensure `convert_images=true` and the resulting WebP size is below `INLINE_IMAGE_MAX_BYTES` (default 65536 bytes / 64KB)
 - Message not found
   - Confirm the `project` disambiguation when using `resource://message/{id}`; ids are unique per project
 - Inbox empty but messages exist
@@ -1272,7 +1271,7 @@ if __name__ == "__main__":
 | `install_precommit_guard` | `install_precommit_guard(project_key: str, code_repo_path: str)` | `{hook}` | Install a Git pre-commit guard in a target repo |
 | `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{removed}` | Remove the guard from a repo |
 | `file_reservation_paths` | `file_reservation_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
-| `release_file_reservations` | `release_file_reservations(project_key: str, agent_name: str, paths?: list[str], file_reservation_ids?: list[int])` | `{released, released_at}` | Releases agent’s active file reservations |
+| `release_file_reservations` | `release_file_reservations(project_key: str, agent_name: str, paths?: list[str], file_reservation_ids?: list[int])` | `{released, released_at}` | Releases agent's active file reservations |
 | `renew_file_reservations` | `renew_file_reservations(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], file_reservation_ids?: list[int])` | `{renewed, file reservations[]}` | Extend TTL of existing file reservations |
 
 ### Resources
@@ -1303,9 +1302,9 @@ if __name__ == "__main__":
 ### Client Integration Guide
 
 1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
-2. **Scope tools per workflow.** When the agent enters a new phase (e.g., “Messaging Lifecycle”), remount only the cluster’s tools in your MCP client. This mirrors the workflow macros already provided and prevents “tool overload.”
+2. **Scope tools per workflow.** When the agent enters a new phase (e.g., "Messaging Lifecycle"), remount only the cluster's tools in your MCP client. This mirrors the workflow macros already provided and prevents "tool overload."
 3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
-4. **Fallback to macros for smaller models.** If you’re routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
+4. **Fallback to macros for smaller models.** If you're routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
 5. **Show recent actions.** Read `resource://tooling/recent` to display the last few successful tool invocations relevant to the agent/project when building UI hints.
 
 See `examples/client_bootstrap.py` for a runnable reference implementation that applies the guidance above.
@@ -1359,7 +1358,7 @@ See `TODO.md` for the in-progress task list, including:
 
 ---
 
-If you’re building with or contributing to this project, please read `project_idea_and_guide.md` for full design context and the motivation behind these decisions. Contributions that preserve the clean, HTTP-only FastMCP approach and the Git+SQLite dual persistence model are welcome.
+If you're building with or contributing to this project, please read `project_idea_and_guide.md` for full design context and the motivation behind these decisions. Contributions that preserve the clean, HTTP-only FastMCP approach and the Git+SQLite dual persistence model are welcome.
 
 ## Deployment quick notes
 
