@@ -123,7 +123,8 @@ HAS_CODEX=0;  [[ -d "${HOME}/.codex"  ]] && HAS_CODEX=1
 HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
 HAS_GEMINI=0; [[ -d "${HOME}/.gemini" ]] && HAS_GEMINI=1
 
-_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI}"
+HAS_OPENCODE=0; command -v opencode >/dev/null 2>&1 && HAS_OPENCODE=1; [[ -d "${HOME}/.opencode" ]] && HAS_OPENCODE=1
+_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI} opencode=${HAS_OPENCODE}"
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
@@ -143,6 +144,20 @@ fi
 if [[ $HAS_GEMINI -eq 1 ]]; then
   echo "-- Integrating Gemini CLI..."
   bash "${ROOT_DIR}/scripts/integrate_gemini_cli.sh" --yes "$@" || echo "(warn) Gemini integration reported a non-fatal issue"
+fi
+
+# Best-effort integrations (no strict detection available)
+echo "-- Integrating Cline (best effort)..."
+bash "${ROOT_DIR}/scripts/integrate_cline.sh" --yes "$@" || echo "(warn) Cline integration reported a non-fatal issue"
+
+echo "-- Integrating Windsurf (best effort)..."
+bash "${ROOT_DIR}/scripts/integrate_windsurf.sh" --yes "$@" || echo "(warn) Windsurf integration reported a non-fatal issue"
+
+if [[ $HAS_OPENCODE -eq 1 ]]; then
+  echo "-- Integrating OpenCode (helpers for JSON-RPC)..."
+  bash "${ROOT_DIR}/scripts/integrate_opencode.sh" --yes "$@" || echo "(warn) OpenCode integration reported a non-fatal issue"
+else
+  echo "-- Skipping OpenCode: not detected (install opencode to enable)."
 fi
 
 echo
