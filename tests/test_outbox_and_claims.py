@@ -51,23 +51,23 @@ async def test_renew_claims_extends_expiry_and_updates_artifact(isolated_env):
 
         # Renew by +60 seconds
         ren = await client.call_tool(
-            "renew_claims",
+            "renew_file_reservations",
             {"project_key": "Backend", "agent_name": "Holder", "extend_seconds": 60, "paths": ["docs/*.md"]},
         )
         assert ren.data.get("renewed", 0) >= 1
-        renewals = ren.data.get("claims") or []
+        renewals = ren.data.get("file_reservations") or []
         renewed = renewals[0]
         after = renewed.get("new_expires_ts")
         assert isinstance(after, str) and after > before
 
         # Also confirm JSON artifact on disk reflects updated expires_ts
-        # The artifact is stored by sha1(path_pattern).json under claims/
+        # The artifact is stored by sha1(path_pattern).json under file_reservations/
         import hashlib
         import json
         from pathlib import Path
 
         settings = get_settings()
-        storage_root = Path(settings.storage.root).expanduser().resolve() / "backend" / "claims"
+        storage_root = Path(settings.storage.root).expanduser().resolve() / "backend" / "file_reservations"
         digest = hashlib.sha1("docs/*.md".encode("utf-8")).hexdigest()
         artifact = storage_root / f"{digest}.json"
         data = json.loads(artifact.read_text(encoding="utf-8"))
