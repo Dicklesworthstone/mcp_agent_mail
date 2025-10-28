@@ -930,7 +930,7 @@ Common variables you may set:
 | `QUOTA_ATTACHMENTS_LIMIT_BYTES` | `0` | Max attachment storage per project (0=unlimited) |
 | `QUOTA_INBOX_LIMIT_COUNT` | `0` | Max inbox messages per agent (0=unlimited) |
 | `RETENTION_IGNORE_PROJECT_PATTERNS` | `demo,test*,testproj*,testproject,backendproj*,frontendproj*` | CSV of project patterns to ignore in retention/quota reports |
-| `AGENT_NAME_ENFORCEMENT_MODE` | `coerce` | Agent naming policy: `strict` (reject invalid names), `coerce` (auto-generate if invalid), `always_auto` (always auto-generate) |
+| `AGENT_NAME_ENFORCEMENT_MODE` | `coerce` | Agent naming policy: `strict` (reject invalid adjective+noun names), `coerce` (auto-generate if invalid), `always_auto` (always auto-generate) |
 
 ## Development quick start
 
@@ -1220,11 +1220,11 @@ if __name__ == "__main__":
 ## Troubleshooting
 
 - "sender_name not registered"
-  - Create the agent first with `create_agent`, or check the `project_key` you're using matches the sender's project
+  - Create the agent first with `register_agent` or `create_agent_identity`, or check the `project_key` you're using matches the sender's project
 - Pre-commit hook blocks commits
   - Set `AGENT_NAME` to your agent identity; release or wait for conflicting exclusive file reservations; inspect `.git/hooks/pre-commit`
 - Inline images didn't embed
-  - Ensure `convert_images=true` and the resulting WebP size is below `INLINE_IMAGE_MAX_BYTES` (default 65536 bytes / 64KB)
+  - Ensure `convert_images=true`; images are automatically inlined if the compressed WebP size is below the server's `INLINE_IMAGE_MAX_BYTES` threshold (default 64KB). Larger images are stored as attachments instead.
 - Message not found
   - Confirm the `project` disambiguation when using `resource://message/{id}`; ids are unique per project
 - Inbox empty but messages exist
@@ -1261,7 +1261,7 @@ if __name__ == "__main__":
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int)` | `{message_id, read, read_at}` | Per-recipient read receipt |
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
-| `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, file_reservation_paths?: list[str], file_reservation_reason?: str, file_reservation_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, file reservations, inbox}` | Orchestrates ensure→register→optional file reservation→inbox fetch |
+| `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, file_reservation_paths?: list[str], file_reservation_reason?: str, file_reservation_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, file_reservations, inbox}` | Orchestrates ensure→register→optional file reservation→inbox fetch |
 | `macro_prepare_thread` | `macro_prepare_thread(project_key: str, thread_id: str, program: str, model: str, agent_name?: str, task_description?: str, register_if_missing?: bool, include_examples?: bool, inbox_limit?: int, include_inbox_bodies?: bool, llm_mode?: bool, llm_model?: str)` | `{project, agent, thread, inbox}` | Bundles registration, thread summary, and inbox context |
 | `macro_file_reservation_cycle` | `macro_file_reservation_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{file reservations, released}` | File Reservation + optionally release surfaces around a focused edit block |
 | `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester: str, target: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
@@ -1283,7 +1283,7 @@ if __name__ == "__main__":
 | `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
 | `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
-| `resource://tooling/recent{?agent,project,window_seconds}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
+| `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations for a project |
@@ -1297,7 +1297,6 @@ if __name__ == "__main__":
 | `resource://views/urgent-unread/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | High/urgent importance messages not yet read |
 | `resource://views/ack-required/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | Pending acknowledgements for an agent |
 | `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}` | listed | `{project, agent, ttl_minutes, count, messages[]}` | Ack-required older than TTL without ack |
-| `resource://views/ack-required/{agent}{?project,limit}` | listed | `{project, agent, count, messages[]}` | Pending acknowledgements for an agent |
 
 ### Client Integration Guide
 
@@ -1305,7 +1304,7 @@ if __name__ == "__main__":
 2. **Scope tools per workflow.** When the agent enters a new phase (e.g., "Messaging Lifecycle"), remount only the cluster's tools in your MCP client. This mirrors the workflow macros already provided and prevents "tool overload."
 3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
 4. **Fallback to macros for smaller models.** If you're routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
-5. **Show recent actions.** Read `resource://tooling/recent` to display the last few successful tool invocations relevant to the agent/project when building UI hints.
+5. **Show recent actions.** Read `resource://tooling/recent/60?agent=<name>&project=<slug>` (adjust window as needed) to display the last few successful tool invocations relevant to the agent/project.
 
 See `examples/client_bootstrap.py` for a runnable reference implementation that applies the guidance above.
 
@@ -1316,7 +1315,7 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
     "select active cluster (e.g. messaging)",
     "mount tools listed in cluster.tools plus macros if model size <= S",
     "optional: resources/read -> resource://tooling/metrics for dashboard display",
-    "optional: resources/read -> resource://tooling/recent?agent=<name>&project=<slug> for UI hints"
+    "optional: resources/read -> resource://tooling/recent/60?agent=<name>&project=<slug> for UI hints"
   ]
 }
 ```
