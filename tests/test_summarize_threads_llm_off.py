@@ -18,18 +18,18 @@ async def test_summarize_threads_without_llm_path(isolated_env, monkeypatch):
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "x", "model": "y", "name": "Author"},
+            {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"},
         )
         # Create thread messages
         m1 = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Author",
-                "to": ["Author"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "T1",
                 "body_md": "- TODO one",
                 "thread_id": "T-1",
@@ -40,8 +40,8 @@ async def test_summarize_threads_without_llm_path(isolated_env, monkeypatch):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Author",
-                "to": ["Author"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "T2",
                 "body_md": "- ACTION go",
                 "thread_id": "T-1",

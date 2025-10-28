@@ -23,7 +23,7 @@ def _seed_backend() -> None:
     asyncio.run(_seed())
 
 
-def test_cli_claims_list_and_active(tmp_path: Path, isolated_env):
+def test_cli_file_reservations_list_and_active(tmp_path: Path, isolated_env):
     _seed_backend()
     runner = CliRunner()
     # file_reservations list (no reservations yet)

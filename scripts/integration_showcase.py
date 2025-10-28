@@ -5,7 +5,7 @@ Extremely verbose, standalone integration walk-through for mcp-agent-mail.
 This script does **not** rely on pytest. Instead, it spins up an in-memory FastMCP
 server instance and drives realistic multi-agent workflows across multiple projects.
 The output leans heavily on Rich so humans (or supervising agents) can follow every
-step: environment bootstrap, project setup, identity registration, claims, contact
+step: environment bootstrap, project setup, identity registration, file reservations, contact
 handshakes, messaging, acknowledgements, and search/summarisation flows.
 
 Usage
@@ -286,7 +286,7 @@ async def run() -> None:
             Markdown(
                 """\
 **Goal:** Demonstrate end-to-end agent collaboration spanning
-- a shared backend repo (co-edit claim flow),
+- a shared backend repo (co-edit file reservation flow),
 - a sibling frontend repo (cross-project contact & messaging),
 - and an unrelated data project (isolation sanity check).
 
@@ -454,7 +454,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         # ------------------------------------------------------------------ #
         console.print(Rule("Backend collaboration: coordinating file reservations & messaging", style="yellow"))
 
-        claim_result = await stepper.call_tool(
+        reservation_result = await stepper.call_tool(
             actor=agents["blue"].codename,
             project_label=projects["backend"].label,
             tool="file_reservation_paths",
@@ -468,8 +468,8 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
                 "reason": "Implementing session token hardening.",
             },
         )
-        claim_payload = claim_result.data
-        console.print(Panel(_syntax_blob(claim_payload), title="Active file reservation ledger", border_style="yellow"))
+        reservation_payload = reservation_result.data
+        console.print(Panel(_syntax_blob(reservation_payload), title="Active file reservation ledger", border_style="yellow"))
 
         conflict_attempt = await stepper.call_tool(
             actor=agents["green"].codename,

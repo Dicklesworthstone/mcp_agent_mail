@@ -20,8 +20,8 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
-        for name in ("Alpha", "Beta"):
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        for name in ("GreenCastle", "BlueLake"):
             await client.call_tool(
                 "register_agent",
                 {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": name},
@@ -29,14 +29,14 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
 
         # Beta blocks all
         await client.call_tool(
-            "set_contact_policy", {"project_key": "Backend", "agent_name": "Beta", "policy": "block_all"}
+            "set_contact_policy", {"project_key": "Backend", "agent_name": "BlueLake", "policy": "block_all"}
         )
-        r1 = await client.call_tool(
+        r1 = await client.call_tool_mcp(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Hi",
                 "body_md": "ping",
             },
@@ -51,14 +51,14 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
         # Beta requires contacts_only
         await client.call_tool(
             "set_contact_policy",
-            {"project_key": "Backend", "agent_name": "Beta", "policy": "contacts_only"},
+            {"project_key": "Backend", "agent_name": "BlueLake", "policy": "contacts_only"},
         )
-        r2 = await client.call_tool(
+        r2 = await client.call_tool_mcp(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Hi",
                 "body_md": "ping",
             },
@@ -73,14 +73,14 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
         # Request and approve contact; then messaging should succeed
         await client.call_tool(
             "request_contact",
-            {"project_key": "Backend", "from_agent": "Alpha", "to_agent": "Beta", "reason": "work"},
+            {"project_key": "Backend", "from_agent": "GreenCastle", "to_agent": "BlueLake", "reason": "work"},
         )
         await client.call_tool(
             "respond_contact",
             {
                 "project_key": "Backend",
-                "to_agent": "Beta",
-                "from_agent": "Alpha",
+                "to_agent": "BlueLake",
+                "from_agent": "GreenCastle",
                 "accept": True,
             },
         )
@@ -88,8 +88,8 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Welcome",
                 "body_md": "hello",
             },
@@ -98,33 +98,33 @@ async def test_contact_blocked_and_contacts_only(isolated_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
-    # contacts_only with overlapping claims should auto-allow
+async def test_contact_auto_allows_file_reservation_overlap(isolated_env, monkeypatch):
+    # contacts_only with overlapping file reservations should auto-allow
     monkeypatch.setenv("CONTACT_ENFORCEMENT_ENABLED", "true")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Beta"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         await client.call_tool(
-            "set_contact_policy", {"project_key": "Backend", "agent_name": "Beta", "policy": "contacts_only"}
+            "set_contact_policy", {"project_key": "Backend", "agent_name": "BlueLake", "policy": "contacts_only"}
         )
 
-        # Overlapping claims: Alpha holds src/*, Beta holds src/app.py
+        # Overlapping file reservations: Alpha holds src/*, Beta holds src/app.py
         g1 = await client.call_tool(
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Alpha",
+                "agent_name": "GreenCastle",
                 "paths": ["src/*"],
                 "ttl_seconds": 600,
                 "exclusive": True,
@@ -135,7 +135,7 @@ async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Beta",
+                "agent_name": "BlueLake",
                 "paths": ["src/app.py"],
                 "ttl_seconds": 600,
                 "exclusive": True,
@@ -147,10 +147,10 @@ async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Heuristic",
-                "body_md": "claims overlap allows",
+                "body_md": "file reservations overlap allows",
             },
         )
         assert ok.data.get("deliveries")
@@ -160,11 +160,11 @@ async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
 async def test_cross_project_contact_and_delivery(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
-        await client.call_tool("ensure_project", {"human_key": "Frontend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool("ensure_project", {"human_key": "/frontend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         await client.call_tool(
             "register_agent",
@@ -173,14 +173,14 @@ async def test_cross_project_contact_and_delivery(isolated_env):
 
         await client.call_tool(
             "request_contact",
-            {"project_key": "Backend", "from_agent": "Alpha", "to_agent": "project:Frontend#BlueLake"},
+            {"project_key": "Backend", "from_agent": "GreenCastle", "to_agent": "project:Frontend#BlueLake"},
         )
         await client.call_tool(
             "respond_contact",
             {
                 "project_key": "Frontend",
                 "to_agent": "BlueLake",
-                "from_agent": "Alpha",
+                "from_agent": "GreenCastle",
                 "from_project": "Backend",
                 "accept": True,
             },
@@ -190,7 +190,7 @@ async def test_cross_project_contact_and_delivery(isolated_env):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
+                "sender_name": "GreenCastle",
                 "to": ["project:Frontend#BlueLake"],
                 "subject": "XProj",
                 "body_md": "hello",
@@ -210,7 +210,7 @@ async def test_cross_project_contact_and_delivery(isolated_env):
 async def test_macro_contact_handshake_welcome(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
@@ -224,8 +224,8 @@ async def test_macro_contact_handshake_welcome(isolated_env):
             "macro_contact_handshake",
             {
                 "project_key": "Backend",
-                "requester": "Alpha",
-                "target": "Beta",
+                "requester": "GreenCastle",
+                "target": "BlueLake",
                 "reason": "let's sync",
                 "auto_accept": True,
                 "welcome_subject": "Welcome",

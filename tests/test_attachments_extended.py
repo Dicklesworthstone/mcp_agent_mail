@@ -24,17 +24,17 @@ async def test_attachments_keep_originals_and_manifest(isolated_env, monkeypatch
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Artist"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         res = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Artist",
-                "to": ["Artist"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "Orig",
                 "body_md": "see",
                 "attachment_paths": [str(img_path)],
@@ -42,7 +42,7 @@ async def test_attachments_keep_originals_and_manifest(isolated_env, monkeypatch
         )
         assert res.data.get("deliveries")
         # Check originals and manifest presence
-        proj = Path(get_settings().storage.root).resolve() / "backend"
+        proj = Path(get_settings().storage.root).resolve() / "projects" / "backend"
         manifests = list((proj / "attachments" / "_manifests").glob("*.json"))
         assert manifests, "expected manifest json"
         originals = list((proj / "attachments" / "originals").rglob("*.*"))
@@ -63,18 +63,18 @@ async def test_attachment_inline_vs_file_threshold(isolated_env, monkeypatch):
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Artist"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         # Inline expected
         r_inline = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Artist",
-                "to": ["Artist"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "Inline",
                 "body_md": "body",
                 "attachment_paths": [str(img_path)],
@@ -91,8 +91,8 @@ async def test_attachment_inline_vs_file_threshold(isolated_env, monkeypatch):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Artist",
-                "to": ["Artist"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "File",
                 "body_md": "body",
                 "attachment_paths": [str(img_path)],

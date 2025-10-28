@@ -1648,7 +1648,7 @@ def build_mcp_server() -> FastMCP:
                 # Return a structured error payload that clients can surface directly
                 return {
                     "error": {
-                        "type": "CLAIM_CONFLICT",
+                        "type": "FILE_RESERVATION_CONFLICT",
                         "message": "Conflicting active file_reservations prevent message write.",
                         "conflicts": conflicts,
                     }
@@ -4380,7 +4380,7 @@ def build_mcp_server() -> FastMCP:
                     FileReservation.expires_ts > datetime.now(timezone.utc),
                 )
             )
-            existing_claims = existing_rows.all()
+            existing_reservations = existing_rows.all()
 
         granted: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
@@ -4388,7 +4388,7 @@ def build_mcp_server() -> FastMCP:
         async with AsyncFileLock(archive.lock_path):
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
-                for file_reservation_record, holder_name in existing_claims:
+                for file_reservation_record, holder_name in existing_reservations:
                     if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
                         conflicting_holders.append(
                             {
@@ -4422,7 +4422,7 @@ def build_mcp_server() -> FastMCP:
                         "expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
-                existing_claims.append((file_reservation, agent.name))
+                existing_reservations.append((file_reservation, agent.name))
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 

@@ -29,17 +29,17 @@ async def test_tooling_resources_and_recent(isolated_env):
 async def test_ack_views_resources(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Blue"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Blue",
-                "to": ["Blue"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "AckReq",
                 "body_md": "x",
                 "ack_required": True,
@@ -47,12 +47,12 @@ async def test_ack_views_resources(isolated_env):
         )
         # Views may be empty/non-empty; ensure they respond with JSON
         for uri in [
-            "resource://views/ack-required/Blue?project=Backend",
-            "resource://views/acks-stale/Blue?project=Backend",
-            "resource://views/ack-overdue/Blue?project=Backend",
-            "resource://views/urgent-unread/Blue?project=Backend",
-            "resource://mailbox/Blue?project=Backend",
-            "resource://outbox/Blue?project=Backend",
+            "resource://views/ack-required/BlueLake?project=Backend",
+            "resource://views/acks-stale/BlueLake?project=Backend",
+            "resource://views/ack-overdue/BlueLake?project=Backend",
+            "resource://views/urgent-unread/BlueLake?project=Backend",
+            "resource://mailbox/BlueLake?project=Backend",
+            "resource://outbox/BlueLake?project=Backend",
         ]:
             blocks = await client.read_resource(uri)
             assert blocks and isinstance(blocks[0].text, str)

@@ -15,19 +15,19 @@ from mcp_agent_mail.models import Agent, AgentLink, Project
 async def test_contact_auto_allow_same_thread(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Alpha"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Beta"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         # Tighten policy to require contact; enforcement enabled by default
         await client.call_tool(
             "set_contact_policy",
-            {"project_key": "Backend", "agent_name": "Beta", "policy": "contacts_only"},
+            {"project_key": "Backend", "agent_name": "BlueLake", "policy": "contacts_only"},
         )
 
         # Seed thread with ack-required message (bypasses enforcement)
@@ -35,8 +35,8 @@ async def test_contact_auto_allow_same_thread(isolated_env):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "ThreadSeed",
                 "body_md": "seed",
                 "ack_required": True,
@@ -55,7 +55,7 @@ async def test_contact_auto_allow_same_thread(isolated_env):
             {
                 "project_key": "Backend",
                 "message_id": seed_id,
-                "sender_name": "Beta",
+                "sender_name": "BlueLake",
                 "body_md": "ack",
             },
         )
@@ -66,8 +66,8 @@ async def test_contact_auto_allow_same_thread(isolated_env):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Beta"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Followup",
                 "body_md": "details",
                 "thread_id": str(thread_id),

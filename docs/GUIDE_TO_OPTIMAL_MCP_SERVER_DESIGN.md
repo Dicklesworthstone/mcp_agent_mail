@@ -24,7 +24,7 @@ Model Context Protocol (MCP) adoption has exploded across cloud, enterprise, and
 
 ## 3. Tool Portfolio Strategy
 
-1. **Segment by workflow cluster.** Organize tools by the dominant tasks they support (e.g., Infrastructure, Messaging, Claims). This mirrors how agents build mental models and keeps co-present tool counts low.citeturn0search0  
+1. **Segment by workflow cluster.** Organize tools by the dominant tasks they support (e.g., Infrastructure, Messaging, File Reservations). This mirrors how agents build mental models and keeps co-present tool counts low.citeturn0search0  
 2. **Annotate capabilities + complexity.** Add metadata such as `"capabilities": ["messaging", "write"]` and `"complexity": "high"`. Clients can hide high-complexity tools when routing small models or apply MemTool-style short-term memory trimming.citeturn0academia12turn0academia14  
 3. **Expose curated macro tools.** Provide workflow macros (e.g., `macro_start_session`, `macro_file_reservation_cycle`) that encapsulate multi-step flows but still return the underlying atomic results so advanced clients can opt out.  
 4. **Document I/O characteristics.** Include average response size and latency in tool documentation or a `resource://tooling/characteristics` feed to stop agents from binding to a tool that would overflow context windows.citeturn0search0
@@ -40,7 +40,7 @@ Model Context Protocol (MCP) adoption has exploded across cloud, enterprise, and
 
 **Server-side supports:**
 
-- **Capability gating:** Add a lightweight guard that checks for capability tokens on the MCP context (e.g., `allowed_capabilities=["claims"]`). Agents can request only the permissions they need, reducing accidental misuse.  
+- **Capability gating:** Add a lightweight guard that checks for capability tokens on the MCP context (e.g., `allowed_capabilities=["file_reservations"]`). Agents can request only the permissions they need, reducing accidental misuse.  
 - **Recent usage resource:** Surface `resource://tooling/recent?agent=X&project=Y` to help clients replay successful tool sequences.  
 - **Macro recommendations:** Return `next_actions` hints in macro responses (e.g., "Consider `file_reservation_paths` renew in 30 minutes") to combine deterministic workflows with agent autonomy.
 
@@ -53,7 +53,7 @@ Model Context Protocol (MCP) adoption has exploded across cloud, enterprise, and
 | Anti-pattern | Fix | Rationale |
 | --- | --- | --- |
 | Deeply nested JSON parameters | Flatten structure, use enums for mode switching | Performance drops as schema depth increases; some servers hit 20 levels.citeturn0search0 |
-| Ambiguous names (“search”, “run”) | Prefix with domain (`claims_search`, `repo_run_hook`) | Reduces namespace collisions noted across hundreds of servers.citeturn0search0 |
+| Ambiguous names (“search”, “run”) | Prefix with domain (`file_reservations_search`, `repo_run_hook`) | Reduces namespace collisions noted across hundreds of servers.citeturn0search0 |
 | Unlimited list params | Enforce bounds (e.g., `maxItems: 20`) | Prevents response explosions and denial-of-context attacks. |
 | Unbounded output (full PDFs) | Paginate via resource handles | Large outputs are a primary driver of tool-space interference.citeturn0search0 |
 

@@ -26,7 +26,7 @@ async def test_messaging_flow(isolated_env):
         assert health.data["status"] == "ok"
         assert health.data["environment"] == "test"
 
-        project = await client.call_tool("ensure_project", {"human_key": "Backend"})
+        project = await client.call_tool("ensure_project", {"human_key": "/backend"})
         assert project.data["slug"] == "backend"
 
         agent = await client.call_tool(
@@ -79,15 +79,16 @@ async def test_messaging_flow(isolated_env):
         message_file = next(iter((storage_root / "projects" / "backend" / "messages").rglob("*.md")))
         assert "Test" in message_file.read_text()
         repo = Repo(str(storage_root))
-        assert repo.head.commit.message.startswith("mail: BlueLake")
+        # Commit message is a rich panel; ensure the subject is captured
+        assert '"subject": "Test"' in repo.head.commit.message
 
 
 @pytest.mark.asyncio
-async def test_claim_conflicts_and_release(isolated_env):
+async def test_file_reservation_conflicts_and_release(isolated_env):
     server = build_mcp_server()
 
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "create_agent_identity",
             {
@@ -139,16 +140,16 @@ async def test_claim_conflicts_and_release(isolated_env):
         )
         assert release.data["released"] == 1
 
-        claims_resource = await client.read_resource("resource://file_reservations/backend")
-        assert "src/app.py" in claims_resource[0].text
+        file_reservations_resource = await client.read_resource("resource://file_reservations/backend")
+        assert "src/app.py" in file_reservations_resource[0].text
 
 
 @pytest.mark.asyncio
-async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
+async def test_file_reservation_enforcement_blocks_message_on_overlap(isolated_env):
     server = build_mcp_server()
 
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
@@ -168,8 +169,8 @@ async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
             },
         )
 
-        # Beta claims Alpha's inbox surface exclusively (overlap by pattern)
-        claim = await client.call_tool(
+        # Beta reserves Alpha's inbox surface exclusively (overlap by pattern)
+        reservation = await client.call_tool(
             "file_reservation_paths",
             {
                 "project_key": "Backend",
@@ -179,16 +180,16 @@ async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
                 "exclusive": True,
             },
         )
-        assert claim.data["granted"]
+        assert reservation.data["granted"]
 
         # Alpha tries to send a message to Alpha (self), which writes to agents/Alpha/inbox/YYYY/MM/...
-        # Expect CLAIM_CONFLICT error payload
+        # Expect FILE_RESERVATION_CONFLICT error payload
         resp = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Alpha"],
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
                 "subject": "Blocked",
                 "body_md": "hello",
             },
@@ -212,7 +213,7 @@ async def test_search_and_summarize(isolated_env):
     server = build_mcp_server()
 
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
@@ -229,7 +230,7 @@ async def test_search_and_summarize(isolated_env):
                 "sender_name": "BlueLake",
                 "to": ["BlueLake"],
                 "subject": "Plan",
-                "body_md": "- TODO: implement FTS\n- ACTION: review claims",
+                "body_md": "- TODO: implement FTS\n- ACTION: review file reservations",
             },
         )
         search = await client.call_tool(
@@ -260,7 +261,7 @@ async def test_attachment_conversion(isolated_env):
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
@@ -303,22 +304,22 @@ async def test_rich_logger_does_not_throw(isolated_env, monkeypatch):
     async with Client(server) as client:
         res = await client.call_tool("health_check", {})
         assert res.data["status"] == "ok"
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Logger",
+                "name": "PinkDog",
             },
         )
         await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Logger",
-                "to": ["Logger"],
+                "sender_name": "PinkDog",
+                "to": ["PinkDog"],
                 "subject": "Rich",
                 "body_md": "hello",
             },
@@ -340,14 +341,14 @@ async def test_server_level_attachment_policy_override(isolated_env, monkeypatch
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Photographer",
+                "name": "WhiteCat",
                 # leave attachments_policy default (auto)
             },
         )
@@ -355,8 +356,8 @@ async def test_server_level_attachment_policy_override(isolated_env, monkeypatch
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Photographer",
-                "to": ["Photographer"],
+                "sender_name": "WhiteCat",
+                "to": ["WhiteCat"],
                 "subject": "ServerOverride",
                 "body_md": "Here ![pic](%s)" % image_path,
                 "attachment_paths": [str(image_path)],
@@ -369,7 +370,7 @@ async def test_server_level_attachment_policy_override(isolated_env, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, monkeypatch):
+async def test_file_reservation_conflict_ttl_transition_allows_after_expiry(isolated_env, monkeypatch):
     # Ensure enforcement is enabled
     monkeypatch.setenv("FILE_RESERVATIONS_ENFORCEMENT_ENABLED", "true")
     from mcp_agent_mail import config as _config
@@ -378,14 +379,14 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
             {
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Alpha",
+                "name": "GreenCastle",
             },
         )
         await client.call_tool(
@@ -394,29 +395,29 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Beta",
+                "name": "BlueLake",
             },
         )
-        # Beta claims Alpha inbox surface, short TTL
-        claim = await client.call_tool(
+        # Beta reserves Alpha inbox surface, short TTL
+        reservation = await client.call_tool(
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Beta",
-                "paths": ["agents/Alpha/inbox/*/*/*.md"],
+                    "agent_name": "BlueLake",
+                    "paths": ["agents/GreenCastle/inbox/*/*/*.md"],
                 "ttl_seconds": 1,
                 "exclusive": True,
             },
         )
-        assert claim.data["granted"]
+        assert reservation.data["granted"]
 
         # Immediately blocked
         resp = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Alpha"],
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
                 "subject": "BlockedNow",
                 "body_md": "hello",
             },

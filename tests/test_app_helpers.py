@@ -53,7 +53,7 @@ async def test_tool_metrics_resource_populates_after_calls(isolated_env):
         # call a couple tools to increment metrics
         res = await client.call_tool("health_check", {})
         assert res.data["status"] == "ok"
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
 
         # tooling metrics resource
         metrics_blocks = await client.read_resource("resource://tooling/metrics")

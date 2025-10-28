@@ -53,7 +53,7 @@ async def test_http_jwt_rbac_and_rate_limit(monkeypatch):
         assert body.get("result", {}).get("structuredContent", {}).get("status") == "ok"
 
         # Reader cannot call write tool
-        r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "A", "to": ["B"], "subject": "x", "body_md": "y"}}))
+        r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "BlueLake", "to": ["RedStone"], "subject": "x", "body_md": "y"}}))
         assert r.status_code == 403
 
         # Rate limit triggers on second tools call within window

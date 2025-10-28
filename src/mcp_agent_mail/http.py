@@ -2011,7 +2011,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         # File reservations and attachments views
         @fastapi_app.get("/mail/{project}/file_reservations", response_class=HTMLResponse)
-        async def mail_claims(project: str) -> HTMLResponse:
+        async def mail_file_reservations(project: str) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
                 prow = (
@@ -2041,7 +2041,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     }
                     for r in rows.fetchall()
                 ]
-            return await _render("mail_claims.html", project={"slug": prow[1], "human_key": prow[2]}, file_reservations=file_reservations)
+            return await _render("mail_file_reservations.html", project={"slug": prow[1], "human_key": prow[2]}, file_reservations=file_reservations)
 
         @fastapi_app.get("/mail/{project}/attachments", response_class=HTMLResponse)
         async def mail_attachments(project: str) -> HTMLResponse:

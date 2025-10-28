@@ -13,17 +13,17 @@ async def test_macro_start_session(isolated_env):
         res = await client.call_tool(
             "macro_start_session",
             {
-                "human_key": "Backend",
+                "human_key": "/backend",
                 "program": "codex",
                 "model": "gpt-5",
                 "task_description": "macro",
-                "agent_name": "MacroUser",
+                "agent_name": "BlueLake",
                 "inbox_limit": 5,
             },
         )
         data = res.data
         assert data["project"]["slug"] == "backend"
-        assert data["agent"]["name"] == "MacroUser"
+        assert data["agent"]["name"] == "BlueLake"
         assert "file_reservations" in data and "inbox" in data
 
 
@@ -31,14 +31,14 @@ async def test_macro_start_session(isolated_env):
 async def test_macro_prepare_thread(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Author"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         m1 = await client.call_tool(
             "send_message",
-            {"project_key": "Backend", "sender_name": "Author", "to": ["Author"], "subject": "T", "body_md": "b", "thread_id": "TKT-1"},
+            {"project_key": "Backend", "sender_name": "BlueLake", "to": ["BlueLake"], "subject": "T", "body_md": "b", "thread_id": "TKT-1"},
         )
         _ = m1.data
         prep = await client.call_tool(
@@ -48,7 +48,7 @@ async def test_macro_prepare_thread(isolated_env):
                 "thread_id": "TKT-1",
                 "program": "codex",
                 "model": "gpt-5",
-                "agent_name": "Author",
+                "agent_name": "BlueLake",
                 "include_examples": True,
                 "inbox_limit": 5,
             },
@@ -59,19 +59,19 @@ async def test_macro_prepare_thread(isolated_env):
 
 
 @pytest.mark.asyncio
-async def test_macro_claim_cycle(isolated_env):
+async def test_macro_file_reservation_cycle(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Claimer"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         res = await client.call_tool(
             "macro_file_reservation_cycle",
             {
                 "project_key": "Backend",
-                "agent_name": "Claimer",
+                "agent_name": "GreenCastle",
                 "paths": ["src/*.py"],
                 "ttl_seconds": 60,
                 "exclusive": True,
@@ -84,19 +84,19 @@ async def test_macro_claim_cycle(isolated_env):
 
 
 @pytest.mark.asyncio
-async def test_renew_claims_extends_expiry(isolated_env):
+async def test_renew_file_reservations_extends_expiry(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Claimer"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         g = await client.call_tool(
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Claimer",
+                "agent_name": "GreenCastle",
                 "paths": ["src/app.py"],
                 "ttl_seconds": 60,
                 "exclusive": True,

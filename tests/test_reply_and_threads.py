@@ -10,8 +10,8 @@ from mcp_agent_mail.app import build_mcp_server
 async def test_reply_preserves_thread_and_subject_prefix(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
-        for n in ("A", "B"):
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        for n in ("GreenCastle", "BlueLake"):
             await client.call_tool(
                 "register_agent",
                 {"project_key": "Backend", "program": "x", "model": "y", "name": n},
@@ -19,15 +19,15 @@ async def test_reply_preserves_thread_and_subject_prefix(isolated_env):
         # Allow direct messaging without contact gating for this test
         await client.call_tool(
             "set_contact_policy",
-            {"project_key": "Backend", "agent_name": "B", "policy": "open"},
+            {"project_key": "Backend", "agent_name": "BlueLake", "policy": "open"},
         )
 
         orig = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "A",
-                "to": ["B"],
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
                 "subject": "Plan",
                 "body_md": "body",
             },
@@ -40,7 +40,7 @@ async def test_reply_preserves_thread_and_subject_prefix(isolated_env):
             {
                 "project_key": "Backend",
                 "message_id": mid,
-                "sender_name": "B",
+                "sender_name": "BlueLake",
                 "body_md": "ack",
             },
         )
@@ -54,7 +54,7 @@ async def test_reply_preserves_thread_and_subject_prefix(isolated_env):
             {
                 "project_key": "Backend",
                 "message_id": mid,
-                "sender_name": "B",
+                "sender_name": "BlueLake",
                 "body_md": "second",
                 "subject_prefix": "Re:",
             },

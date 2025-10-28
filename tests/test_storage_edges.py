@@ -27,10 +27,10 @@ async def test_data_uri_embed_without_conversion(isolated_env, monkeypatch):
         _config.clear_settings_cache()
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Inline"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         # Craft tiny red dot webp data URI
         payload = base64.b64encode(b"dummy").decode("ascii")
@@ -39,8 +39,8 @@ async def test_data_uri_embed_without_conversion(isolated_env, monkeypatch):
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Inline",
-                "to": ["Inline"],
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
                 "subject": "InlineImg",
                 "body_md": body,
                 "convert_images": False,
@@ -65,17 +65,17 @@ async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, 
         _config.clear_settings_cache()
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Photos"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         res = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Photos",
-                "to": ["Photos"],
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
                 "subject": "MissingPath",
                 "body_md": f"![x]({image_path})",
             },
@@ -90,14 +90,14 @@ async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, 
     async with Client(server2) as client2:
         await client2.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Photos"},
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
         )
         res2 = await client2.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Photos",
-                "to": ["Photos"],
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
                 "subject": "MissingPath2",
                 "body_md": f"![x]({image_path})",
             },

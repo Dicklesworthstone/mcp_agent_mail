@@ -36,10 +36,10 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
 
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "x", "model": "y", "name": "S"},
+            {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"},
         )
         # Seed a thread
         for i in range(2):
@@ -47,8 +47,8 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
                 "send_message",
                 {
                     "project_key": "Backend",
-                    "sender_name": "S",
-                    "to": ["S"],
+                    "sender_name": "BlueLake",
+                    "to": ["BlueLake"],
                     "subject": f"S{i}",
                     "body_md": "body",
                     "thread_id": "T-1",

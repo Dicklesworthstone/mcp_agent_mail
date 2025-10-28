@@ -10,10 +10,10 @@ from mcp_agent_mail.app import build_mcp_server
 async def test_summarize_threads_non_llm_mode_and_limit(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "Backend", "program": "x", "model": "y", "name": "S"},
+            {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"},
         )
         # Create messages under two threads
         for tid in ("T1", "T2"):
@@ -22,8 +22,8 @@ async def test_summarize_threads_non_llm_mode_and_limit(isolated_env):
                     "send_message",
                     {
                         "project_key": "Backend",
-                        "sender_name": "S",
-                        "to": ["S"],
+                        "sender_name": "BlueLake",
+                        "to": ["BlueLake"],
                         "subject": f"{tid}-{i}",
                         "body_md": f"body {tid} {i}",
                         "thread_id": tid,

@@ -18,7 +18,7 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     script = render_precommit_script(archive)
     assert "FILE_RESERVATIONS_DIR" in script and "AGENT_NAME" in script
 
-    # Initialize dummy repo and write a claim file that conflicts with staged file
+    # Initialize dummy repo and write a file_reservation artifact that conflicts with the staged file
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir(parents=True, exist_ok=True)
     proc_init = await asyncio.create_subprocess_exec("git", "init", cwd=str(repo_dir))

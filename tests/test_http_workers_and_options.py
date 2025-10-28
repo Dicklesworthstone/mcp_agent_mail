@@ -31,9 +31,9 @@ async def test_http_ack_ttl_worker_log_mode(isolated_env, monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         # Create one ack-required message so worker will warn
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "ensure_project", "arguments": {"human_key": "Backend"}}))
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "register_agent", "arguments": {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "A"}}))
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "A", "to": ["A"], "subject": "TTL", "body_md": "x", "ack_required": True}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "ensure_project", "arguments": {"human_key": "/backend"}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "register_agent", "arguments": {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "BlueLake", "to": ["BlueLake"], "subject": "TTL", "body_md": "x", "ack_required": True}}))
 
         # Allow at least one scan tick
         await asyncio.sleep(1.2)
@@ -43,8 +43,8 @@ async def test_http_ack_ttl_worker_log_mode(isolated_env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_http_ack_ttl_worker_claim_escalation(isolated_env, monkeypatch):
-    # Enable ack escalation to claim mode so worker writes a claim
+async def test_http_ack_ttl_worker_file_reservation_escalation(isolated_env, monkeypatch):
+    # Enable ack escalation to file_reservation mode so worker writes a file_reservation artifact
     monkeypatch.setenv("ACK_TTL_ENABLED", "true")
     monkeypatch.setenv("ACK_TTL_SECONDS", "0")
     monkeypatch.setenv("ACK_TTL_SCAN_INTERVAL_SECONDS", "1")
@@ -59,10 +59,10 @@ async def test_http_ack_ttl_worker_claim_escalation(isolated_env, monkeypatch):
     app = build_http_app(settings, server)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "ensure_project", "arguments": {"human_key": "Backend"}}))
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "register_agent", "arguments": {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "OpsBot"}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "ensure_project", "arguments": {"human_key": "/backend"}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "register_agent", "arguments": {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"}}))
         # Trigger ack-required to self to make overdue soon
-        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "OpsBot", "to": ["OpsBot"], "subject": "Overdue", "body_md": "x", "ack_required": True}}))
+        await client.post(settings.http.path, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "BlueLake", "to": ["BlueLake"], "subject": "Overdue", "body_md": "x", "ack_required": True}}))
         await asyncio.sleep(1.2)
         # Read file_reservations resource — should exist (best-effort)
         r = await client.post(settings.http.path, json=_rpc("resources/read", {"uri": "resource://file_reservations/backend"}))

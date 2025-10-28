@@ -30,7 +30,7 @@ Core idea, constraints, and assumptions
     Transport is Streamable HTTP only: we'll expose a single /mcp/ endpoint via FastMCP 2.0, which natively supports this and can run as a direct HTTP server or as an ASGI app behind Uvicorn.
     gofastmcp.com
 
-    Messages are GFM markdown persisted in Git (per project), plus SQLite metadata with FTS5 for search; Git commits on each message/claim update let us piggyback diffing, history, and blame.
+    Messages are GFM markdown persisted in Git (per project), plus SQLite metadata with FTS5 for search; Git commits on each message/file_reservation update let us piggyback diffing, history, and blame.
     SQLite
 
     Agents get ephemeral, memorable identities (e.g., GreenCastle) bound to program/model, inception time, project id, and task description; generated from adjective+noun sets. (You can swap in a library like unique-names-generator if you prefer.)
@@ -59,13 +59,13 @@ High-level architecture
                                                |   ├─ agents/<name>/     |
                                                |   │    inbox/outbox/... |
                                                |   ├─ messages/YYYY/MM   |
-                                               |   └─ claims/            |
+                                               |   └─ file_reservations/ |
                                                +-----+--------------------+
                                                      |
                                                      | indexes & metadata
                                                +-----v-------------------+
                                                | SQLite (FTS5)           |
-                                               |  agents/messages/claims |
+                                               |  agents/messages/file_reservations |
                                                +-------------------------+
 
 Key flows
@@ -76,7 +76,7 @@ Key flows
 
     Agent checks messages → check_my_messages(...) pulls unread/urgent since a timestamp, optionally includes bodies.
 
-    Avoiding conflicts → reserve_file_paths(...) creates TTL leases for files/globs with Git‑tracked claim files and DB rows; agents voluntarily honor leases before editing; conflicts are resolved at the MCP layer before the edit loop begins.
+    Avoiding conflicts → reserve_file_paths(...) creates TTL leases for files/globs with Git‑tracked file reservation artifacts and DB rows; agents voluntarily honor leases before editing; conflicts are resolved at the MCP layer before the edit loop begins.
 
 On transport choices (brief correction)
 
@@ -95,7 +95,7 @@ Tables (selected):
 
     message_recipients(message_id TEXT, agent_name TEXT, kind TEXT, read_ts INTEGER, ack_ts INTEGER, PRIMARY KEY(message_id,agent_name,kind))
 
-    claims(id TEXT PRIMARY KEY, project_id TEXT, agent_name TEXT, path TEXT, exclusive INTEGER, reason TEXT, created_ts INTEGER, expires_ts INTEGER, released_ts INTEGER)
+    file_reservations(id TEXT PRIMARY KEY, project_id TEXT, agent_name TEXT, path TEXT, exclusive INTEGER, reason TEXT, created_ts INTEGER, expires_ts INTEGER, released_ts INTEGER)
 
     fts_messages (FTS5 virtual table on subject, body_md with external content & triggers).
     SQLite+1
@@ -109,7 +109,7 @@ On‑disk layout (per project)
   agents/<AgentName>/inbox/YYYY/MM/<msg-id>.md
   agents/<AgentName>/outbox/YYYY/MM/<msg-id>.md
   messages/YYYY/MM/<msg-id>.md
-  claims/<sha1-of-path>.json
+    file_reservations/<sha1-of-path>.json
 
 Reasoning:
 
@@ -117,7 +117,7 @@ Reasoning:
 
     Per-recipient mailbox copies keep the Git UX intuitive (open agents/RedCat/inbox/... in an editor).
 
-    Claims are visible artifacts in Git history and easy to diff/review.
+    File reservations are visible artifacts in Git history and easy to diff/review.
 
 Message file format (GFM + YAML frontmatter)
 
@@ -152,13 +152,13 @@ attachments:
 
 File ownership & conflict avoidance
 
-    Leases (claims): reserve_file_paths(agent, ["app/api/*.py"], ttl=3600, exclusive=True, reason="migrations")
+    Leases (file reservations): reserve_file_paths(agent, ["app/api/*.py"], ttl=3600, exclusive=True, reason="migrations")
 
-        Returns conflicts if another active exclusive claim overlaps.
+        Returns conflicts if another active exclusive reservation overlaps.
 
-        Creates claims/<hash>.json and DB row with expires_ts; leases are advisory but visible to all agents. You can add a pre‑commit hook to enforce (future enhancement).
+        Creates file_reservations/<hash>.json and DB row with expires_ts; leases are advisory but visible to all agents. You can add a pre‑commit hook to enforce (future enhancement).
 
-    Strategy: optimistic editing inside a claimed surface; other agents respect TTL and either take shared claims (read/observe) or wait.
+    Strategy: optimistic editing inside a reserved surface; other agents respect TTL and either take shared reservations (read/observe) or wait.
 
     Git's own index locking won't help coordinate intent across agents; it only protects local writes. We surface intent explicitly with lease files and DB state.
     Stack Overflow
@@ -173,7 +173,7 @@ Security/ops
 
 Minimal Viable Server (HTTP‑only) — complete code
 
-This is a working baseline that implements identities, directory, messaging (with per‑recipient mailboxes), claims/leases, FTS search, and Git persistence. It uses Streamable HTTP only.
+This is a working baseline that implements identities, directory, messaging (with per‑recipient mailboxes), file_reservations/leases, FTS search, and Git persistence. It uses Streamable HTTP only.
 
 pyproject.toml
 
@@ -272,7 +272,7 @@ def _init_db():
       PRIMARY KEY(message_id, agent_name, kind),
       FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS claims(
+    CREATE TABLE IF NOT EXISTS file_reservations(
       id TEXT PRIMARY KEY,
       project_id TEXT,
       agent_name TEXT,
@@ -346,7 +346,7 @@ def _project_paths(slug: str) -> Dict[str, Path]:
         "root": root,
         "agents": root / "agents",
         "messages": root / "messages",
-        "claims": root / "claims",
+        "file_reservations": root / "file_reservations",
     }
 
 def _ensure_project_tree(slug: str):
@@ -598,7 +598,7 @@ def acknowledge_message(project_key: str, agent_name: str, message_id: str) -> D
 def reserve_file_paths(project_key: str, agent_name: str, paths: List[str], ttl_seconds: int=3600,
                 exclusive: bool=True, reason: str="") -> Dict[str, Any]:
     """
-    Request claims (leases) on project-relative paths/globs. Returns conflicts if any.
+    Request file reservations (leases) on project-relative paths/globs. Returns conflicts if any.
     """
     proj = _project_get_or_create(project_key)
     slug = proj["slug"]
@@ -615,27 +615,27 @@ def reserve_file_paths(project_key: str, agent_name: str, paths: List[str], ttl_
         conn = _db()
         try:
             # expire old leases
-            conn.execute("UPDATE claims SET released_ts=? WHERE released_ts IS NULL AND expires_ts < ?", (ts, ts))
+            conn.execute("UPDATE file_reservations SET released_ts=? WHERE released_ts IS NULL AND expires_ts < ?", (ts, ts))
             for path in paths:
-                # conflict if overlapping active claim exists and (exclusive OR theirs is exclusive)
+                # conflict if overlapping active file reservation exists and (exclusive OR theirs is exclusive)
                 rows = conn.execute("""
-                  SELECT agent_name, path, exclusive, expires_ts FROM claims
+                  SELECT agent_name, path, exclusive, expires_ts FROM file_reservations
                   WHERE project_id=? AND released_ts IS NULL AND expires_ts > ? AND path=?
                 """, (proj["id"], ts, path)).fetchall()
                 if rows:
-                    # if any existing claim is exclusive or we request exclusive, it's a conflict
+                    # if any existing file reservation is exclusive or we request exclusive, it's a conflict
                     if any(r["exclusive"] or exclusive for r in rows if r["agent_name"] != agent_name):
                         conflicts.append({"path": path, "holders": [dict(r) for r in rows]})
                         continue
                 cid = f"clm_{uuid.uuid4().hex[:10]}"
                 to_insert.append((cid, proj["id"], agent_name, path, int(exclusive), reason, ts, exp, None))
             for rec in to_insert:
-                conn.execute("INSERT INTO claims(id,project_id,agent_name,path,exclusive,reason,created_ts,expires_ts,released_ts) VALUES(?,?,?,?,?,?,?,?,?)", rec)
+                conn.execute("INSERT INTO file_reservations(id,project_id,agent_name,path,exclusive,reason,created_ts,expires_ts,released_ts) VALUES(?,?,?,?,?,?,?,?,?)", rec)
             conn.commit()
         finally:
             conn.close()
 
-        # write claim files and commit
+        # write file reservation artifacts and commit
         written = []
         for rec in to_insert:
             _, _, ag, path, ex, rsn, cts, ets, _ = rec
@@ -644,16 +644,16 @@ def reserve_file_paths(project_key: str, agent_name: str, paths: List[str], ttl_
                 "created": ISO(cts), "expires": ISO(ets)
             }
             h = hashlib.sha1(path.encode("utf-8")).hexdigest()
-            claim_file = ppaths["claims"] / f"{h}.json"
-            _write_json(claim_file, payload)
-            written.append(str(claim_file.relative_to(ppaths["root"])))
+            reservation_file = ppaths["file_reservations"] / f"{h}.json"
+            _write_json(reservation_file, payload)
+            written.append(str(reservation_file.relative_to(ppaths["root"])))
         if written:
-            _commit(repo, written, f"claim: {agent_name} {'exclusive' if exclusive else 'shared'} {len(written)} path(s)")
+            _commit(repo, written, f"file_reservation: {agent_name} {'exclusive' if exclusive else 'shared'} {len(written)} path(s)")
     return {"granted": [rec[3] for rec in to_insert], "conflicts": conflicts, "expires_ts": exp}
 
 @mcp.tool
-def release_claims(project_key: str, agent_name: str, paths: List[str]) -> Dict[str, Any]:
-    """Release active claims held by the agent on the given paths."""
+def release_file_reservations(project_key: str, agent_name: str, paths: List[str]) -> Dict[str, Any]:
+    """Release active file reservations held by the agent on the given paths."""
     conn = _db()
     proj = conn.execute("SELECT * FROM projects WHERE slug=? OR human_key=?", (_slug(project_key), project_key)).fetchone()
     if not proj: conn.close(); raise ValueError("project not found")
@@ -661,7 +661,7 @@ def release_claims(project_key: str, agent_name: str, paths: List[str]) -> Dict[
     updated = 0
     for p in paths:
         cur = conn.execute("""
-          UPDATE claims SET released_ts=?
+          UPDATE file_reservations SET released_ts=?
           WHERE project_id=? AND agent_name=? AND path=? AND released_ts IS NULL
         """, (ts, proj["id"], agent_name, p))
         updated += cur.rowcount
@@ -712,7 +712,7 @@ Tooling surface (current MVP)
 
     reserve_file_paths(project_key, agent_name, paths[], ttl_seconds=3600, exclusive=True, reason?)
 
-    release_claims(project_key, agent_name, paths[])
+    release_file_reservations(project_key, agent_name, paths[])
 
     search_messages(project_key, query, limit=20)
 
@@ -730,7 +730,7 @@ Design notes & extensions
 
     Pre-commit guard: Provide a small hook that calls reserve_file_paths before commits; fail the commit if an exclusive conflicting lease exists (future work).
 
-    Git integration with code repos: Today we keep a separate .mcp-mail repo per project; you can also embed under your code repo as a subdirectory or submodule if that's more convenient for humans reviewing the mail/claims alongside code.
+    Git integration with code repos: Today we keep a separate .mcp-mail repo per project; you can also embed under your code repo as a subdirectory or submodule if that's more convenient for humans reviewing the mail/file_reservations alongside code.
 
     Richer directory: Track per‑agent "recent changes" by scanning your code repo logs where commits include Author: {AgentName} <agent@local> or commit trailers like Agent: GreenCastle. (FastMCP provides client APIs; your build pipeline could also stamp these.)
     GitPython Documentation

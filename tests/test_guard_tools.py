@@ -14,7 +14,7 @@ async def test_install_and_uninstall_precommit_guard_tools(isolated_env, tmp_pat
     server = build_mcp_server()
 
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
         # Prepare an empty git repo
         repo_dir = tmp_path / "code"
         repo_dir.mkdir(parents=True, exist_ok=True)

@@ -10,11 +10,11 @@ from mcp_agent_mail.app import build_mcp_server
 async def test_empty_inbox_and_pagination(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "Backend"})
-        await client.call_tool("register_agent", {"project_key": "Backend", "program": "x", "model": "y", "name": "User"})
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool("register_agent", {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"})
 
         # Empty inbox
-        inbox = await client.call_tool("fetch_inbox", {"project_key": "Backend", "agent_name": "User", "limit": 5})
+        inbox = await client.call_tool("fetch_inbox", {"project_key": "Backend", "agent_name": "BlueLake", "limit": 5})
         assert isinstance(inbox.data, list) and len(inbox.data) == 0
 
         # Create 25 messages
@@ -23,15 +23,15 @@ async def test_empty_inbox_and_pagination(isolated_env):
                 "send_message",
                 {
                     "project_key": "Backend",
-                    "sender_name": "User",
-                    "to": ["User"],
+                    "sender_name": "BlueLake",
+                    "to": ["BlueLake"],
                     "subject": f"S{i}",
                     "body_md": "x",
                 },
             )
 
         # Pagination: fetch first 10
-        first = await client.call_tool("fetch_inbox", {"project_key": "Backend", "agent_name": "User", "limit": 10})
+        first = await client.call_tool("fetch_inbox", {"project_key": "Backend", "agent_name": "BlueLake", "limit": 10})
         items = list(first.data)
         assert len(items) == 10
         # Fetch next 10 using since_ts of last message in first page
@@ -42,7 +42,7 @@ async def test_empty_inbox_and_pagination(isolated_env):
         last_created = _get("created_ts", items[-1])
         next_page = await client.call_tool(
             "fetch_inbox",
-            {"project_key": "Backend", "agent_name": "User", "limit": 10, "since_ts": last_created},
+            {"project_key": "Backend", "agent_name": "BlueLake", "limit": 10, "since_ts": last_created},
         )
         assert len(list(next_page.data)) >= 10
 
