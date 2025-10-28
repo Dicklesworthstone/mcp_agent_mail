@@ -103,7 +103,7 @@ Macros vs granular tools
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
-- "CLAIM_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
+- "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 ```
 

@@ -202,7 +202,7 @@ async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
             payload = getattr(resp, "data", {})
         # Ensure error type and conflicts present
         assert isinstance(payload, dict)
-        assert payload.get("type") == "CLAIM_CONFLICT" or payload.get("error", {}).get("type") == "CLAIM_CONFLICT"
+        assert payload.get("type") == "FILE_RESERVATION_CONFLICT" or payload.get("error", {}).get("type") == "FILE_RESERVATION_CONFLICT"
         conflicts = payload.get("conflicts") or payload.get("error", {}).get("conflicts")
         assert conflicts and isinstance(conflicts, list)
 
@@ -425,7 +425,7 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
         if not payload and hasattr(resp, "data"):
             payload = getattr(resp, "data", {})
         assert isinstance(payload, dict)
-        assert payload.get("type") == "CLAIM_CONFLICT" or payload.get("error", {}).get("type") == "CLAIM_CONFLICT"
+        assert payload.get("type") == "FILE_RESERVATION_CONFLICT" or payload.get("error", {}).get("type") == "FILE_RESERVATION_CONFLICT"
 
         # Wait for TTL to expire and retry
         import asyncio as _asyncio
