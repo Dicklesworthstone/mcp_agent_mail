@@ -29,9 +29,9 @@ async def test_macro_start_session_with_file_reservation_paths(isolated_env):
                 "model": "sonnet-4.5",
                 "agent_name": "BlueLake",  # ← Must be adjective+noun format
                 "task_description": "Testing claims functionality",
-                "file_reservation_paths": ["src/**/*.py", "tests/**/*.py"],  # ← This triggers the shadowing
-                "claim_reason": "Testing macro_start_session with claims",
-                "claim_ttl_seconds": 7200,
+                "file_reservation_paths": ["src/**/*.py", "tests/**/*.py"],
+                "file_reservation_reason": "Testing macro_start_session with claims",
+                "file_reservation_ttl_seconds": 7200,
                 "inbox_limit": 10,
             },
         )
@@ -49,16 +49,16 @@ async def test_macro_start_session_with_file_reservation_paths(isolated_env):
         assert data["agent"]["program"] == "claude-code"
         assert data["agent"]["model"] == "sonnet-4.5"
 
-        # Verify claims were created (this is the critical part!)
-        assert "claims" in data
-        assert data["claims"] is not None
-        assert "granted" in data["claims"]
+        # Verify file reservations were created (this is the critical part!)
+        assert "file_reservations" in data
+        assert data["file_reservations"] is not None
+        assert "granted" in data["file_reservations"]
 
-        # Should have granted claims for both patterns
-        granted_claims = data["claims"]["granted"]
+        # Should have granted reservations for both patterns
+        granted_claims = data["file_reservations"]["granted"]
         assert len(granted_claims) == 2
 
-        # Verify claim details
+        # Verify reservation details
         reservation_paths = {claim["path_pattern"] for claim in granted_claims}
         assert "src/**/*.py" in reservation_paths
         assert "tests/**/*.py" in reservation_paths
@@ -97,9 +97,9 @@ async def test_macro_start_session_without_claims_still_works(isolated_env):
         assert data["project"]["slug"] == "test-project2"
         assert data["agent"]["name"] == "RedStone"
 
-        # claims should be empty dict when not requested (not None - function returns {"granted": [], "conflicts": []})
-        assert data["claims"] == {"granted": [], "conflicts": []}
-        assert len(data["claims"]["granted"]) == 0
+        # file_reservations should be empty dict when not requested (not None - function returns {"granted": [], "conflicts": []})
+        assert data["file_reservations"] == {"granted": [], "conflicts": []}
+        assert len(data["file_reservations"]["granted"]) == 0
 
         # Inbox should still be fetched
         assert "inbox" in data

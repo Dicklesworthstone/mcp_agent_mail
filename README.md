@@ -103,7 +103,7 @@ Macros vs granular tools
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
-- "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
+- "CLAIM_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 ```
 
@@ -260,11 +260,14 @@ Auth notes:
 
 ### Routes and what you can do
 
-- `/mail` (Projects index + Related Projects Discovery)
-  - Lists all projects (slug, human name, created time) from SQLite.
+- `/mail` (Unified inbox + Projects + Related Projects Discovery)
+  - Shows a unified, reverse‑chronological inbox of recent messages across all projects with excerpts, relative timestamps, sender/recipients, and project badges.
+  - Below the inbox, lists all projects (slug, human name, created time) with sibling suggestions.
   - Suggests **likely sibling projects** when two slugs appear to be parts of the same product (e.g., backend vs. frontend). Suggestions are ranked with heuristics and, when `LLM_ENABLED=true`, an LLM pass across key docs (`README.md`, `AGENTS.md`, etc.).
-  - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross-project messaging—agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
-  - Quick stats placeholders; click a project to drill in.
+  - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross‑project messaging—agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
+
+- `/mail/projects` (Projects index)
+  - Dedicated projects list view; click a project to drill in.
 
 - `/mail/{project}` (Project overview + search + agents)
   - Rich search form with filters:
@@ -564,7 +567,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
   "importance": "high",
   "ack_required": true,
   "attachments": [
-    {"type": "file", "media_type": "image/webp", "path": "attachments/2a/2a6f.../diagram.webp"}
+    {"type": "file", "media_type": "image/webp", "path": "projects/backend-abc123/attachments/2a/2a6f.../diagram.webp"}
   ]
 }
 ---
@@ -810,7 +813,7 @@ Exclusive file reservations are advisory but visible and auditable:
 
 - A reservation JSON is written to `file_reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
 - The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
-- Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who "owns" the commit
+- Agents must set `AGENT_NAME` so the guard knows who "owns" the commit
 
 Install the guard into a code repo (conceptual tool call):
 
@@ -1151,9 +1154,9 @@ Reserve a surface for editing:
   - HTTP-only (Streamable HTTP). Place behind a reverse proxy (e.g., NGINX) with TLS termination for production
 - Auth
   - Optional JWT (HS*/JWKS) via HTTP middleware; enable with `HTTP_JWT_ENABLED=true`
-  - Static Bearer token is supported only when JWT is disabled
+  - Static bearer token (`HTTP_BEARER_TOKEN`) is independent of JWT; when set, BearerAuth protects all routes (including UI). You may use it alone or together with JWT.
   - When JWKS is configured (`HTTP_JWT_JWKS_URL`), incoming JWTs must include a matching `kid` header; tokens without `kid` or with unknown `kid` are rejected
-  - Starter RBAC (reader vs writer) using role file reservation; see `HTTP_RBAC_*` settings
+  - Starter RBAC (reader vs writer) using role configuration; see `HTTP_RBAC_*` settings
 - Reverse proxy + TLS (minimal example)
   - NGINX location block:
     ```nginx
@@ -1263,8 +1266,8 @@ if __name__ == "__main__":
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
 | `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, file_reservation_paths?: list[str], file_reservation_reason?: str, file_reservation_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, file_reservations, inbox}` | Orchestrates ensure→register→optional file reservation→inbox fetch |
 | `macro_prepare_thread` | `macro_prepare_thread(project_key: str, thread_id: str, program: str, model: str, agent_name?: str, task_description?: str, register_if_missing?: bool, include_examples?: bool, inbox_limit?: int, include_inbox_bodies?: bool, llm_mode?: bool, llm_model?: str)` | `{project, agent, thread, inbox}` | Bundles registration, thread summary, and inbox context |
-| `macro_file_reservation_cycle` | `macro_file_reservation_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{file reservations, released}` | File Reservation + optionally release surfaces around a focused edit block |
-| `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester: str, target: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
+| `macro_file_reservation_cycle` | `macro_file_reservation_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{file_reservations, released}` | File Reservation + optionally release surfaces around a focused edit block |
+| `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester|agent_name: str, target|to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
 | `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool, llm_mode?: bool, llm_model?: str)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
 | `summarize_threads` | `summarize_threads(project_key: str, thread_ids: list[str], llm_mode?: bool, llm_model?: str, per_thread_limit?: int)` | `{threads[], aggregate}` | Digest across multiple threads (optional LLM refinement) |
@@ -1282,6 +1285,7 @@ if __name__ == "__main__":
 | `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
 | `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
 | `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
+| `resource://tooling/locks` | — | `{locks[], summary}` | Active archive locks and owners (debugging only) |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
@@ -1431,6 +1435,8 @@ The project exposes a developer CLI for common operations:
 - `list-projects [--include-agents]`: enumerate projects
 - `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
+- `clear-and-reset-everything [--force]`: DELETE the SQLite database (incl. WAL/SHM) and WIPE all contents under `STORAGE_ROOT` (including per-project Git archives). Use only when you intentionally want a clean slate.
+- `list-acks --project <key> --agent <name> [--limit N]`: list messages requiring acknowledgement for an agent where ack is missing
 - `acks pending <project> <agent> [--limit N]`: show pending acknowledgements for an agent
 - `acks remind <project> <agent> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold
 - `acks overdue <project> <agent> [--ttl-minutes N] [--limit N]`: list overdue ACKs beyond TTL
@@ -1446,6 +1452,9 @@ uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/ba
 
 # List pending acknowledgements for an agent
 uv run python -m mcp_agent_mail.cli acks pending /abs/path/backend BlueLake --limit 10
+
+# WARNING: Destructive reset (clean slate)
+uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 ```
 
 ## Continuous Integration

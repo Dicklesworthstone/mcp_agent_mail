@@ -26,7 +26,7 @@ Model Context Protocol (MCP) adoption has exploded across cloud, enterprise, and
 
 1. **Segment by workflow cluster.** Organize tools by the dominant tasks they support (e.g., Infrastructure, Messaging, Claims). This mirrors how agents build mental models and keeps co-present tool counts low.citeturn0search0  
 2. **Annotate capabilities + complexity.** Add metadata such as `"capabilities": ["messaging", "write"]` and `"complexity": "high"`. Clients can hide high-complexity tools when routing small models or apply MemTool-style short-term memory trimming.citeturn0academia12turn0academia14  
-3. **Expose curated macro tools.** Provide workflow macros (e.g., `macro_start_session`, `macro_claim_cycle`) that encapsulate multi-step flows but still return the underlying atomic results so advanced clients can opt out.  
+3. **Expose curated macro tools.** Provide workflow macros (e.g., `macro_start_session`, `macro_file_reservation_cycle`) that encapsulate multi-step flows but still return the underlying atomic results so advanced clients can opt out.  
 4. **Document I/O characteristics.** Include average response size and latency in tool documentation or a `resource://tooling/characteristics` feed to stop agents from binding to a tool that would overflow context windows.citeturn0search0
 
 **Checklist**  

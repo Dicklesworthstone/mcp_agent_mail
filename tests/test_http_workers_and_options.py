@@ -49,7 +49,7 @@ async def test_http_ack_ttl_worker_claim_escalation(isolated_env, monkeypatch):
     monkeypatch.setenv("ACK_TTL_SECONDS", "0")
     monkeypatch.setenv("ACK_TTL_SCAN_INTERVAL_SECONDS", "1")
     monkeypatch.setenv("ACK_ESCALATION_ENABLED", "true")
-    monkeypatch.setenv("ACK_ESCALATION_MODE", "claim")
+    monkeypatch.setenv("ACK_ESCALATION_MODE", "file_reservation")
     monkeypatch.setenv("ACK_ESCALATION_CLAIM_TTL_SECONDS", "60")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()

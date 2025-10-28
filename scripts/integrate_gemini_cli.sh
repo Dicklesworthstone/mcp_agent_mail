@@ -65,7 +65,7 @@ fi
 OUT_JSON="${TARGET_DIR}/gemini.mcp.json"
 backup_file "$OUT_JSON"
 if [[ -n "${_TOKEN}" ]]; then
-  AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+  AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
 else
   AUTH_HEADER_LINE=''
 fi

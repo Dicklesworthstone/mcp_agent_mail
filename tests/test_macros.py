@@ -24,7 +24,7 @@ async def test_macro_start_session(isolated_env):
         data = res.data
         assert data["project"]["slug"] == "backend"
         assert data["agent"]["name"] == "MacroUser"
-        assert "claims" in data and "inbox" in data
+        assert "file_reservations" in data and "inbox" in data
 
 
 @pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_macro_claim_cycle(isolated_env):
             {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "Claimer"},
         )
         res = await client.call_tool(
-            "macro_claim_cycle",
+            "macro_file_reservation_cycle",
             {
                 "project_key": "Backend",
                 "agent_name": "Claimer",
@@ -79,7 +79,7 @@ async def test_macro_claim_cycle(isolated_env):
             },
         )
         data = res.data
-        assert "claims" in data
+        assert "file_reservations" in data
     assert data.get("released") is not None
 
 

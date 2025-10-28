@@ -61,7 +61,7 @@ PY
   fi
   echo "Generated bearer token."
 fi
-AUTH_HEADER_LINE='        "Authorization": "Bearer ${_TOKEN}"'
+AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
 OUT_JSON="${TARGET_DIR}/cursor.mcp.json"
 backup_file "$OUT_JSON"
 write_atomic "$OUT_JSON" <<JSON

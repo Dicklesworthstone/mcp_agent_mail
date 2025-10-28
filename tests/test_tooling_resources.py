@@ -47,7 +47,7 @@ async def test_tooling_directory_and_metrics_populate(isolated_env):
         blocks = await client.read_resource("resource://tooling/directory")
         assert blocks
         body = blocks[0].text or ""
-        assert "messaging" in body or "claims" in body
+        assert "messaging" in body or "file_reservations" in body
         # Metrics
         blocks2 = await client.read_resource("resource://tooling/metrics")
         assert blocks2 and "tools" in (blocks2[0].text or "")

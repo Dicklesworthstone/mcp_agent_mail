@@ -477,7 +477,7 @@ Conflict: 'FrontendDev' holds exclusive reservation on 'app/api/*.py' until 2025
 **Solutions:**
 1. Wait for the reservation to expire
 2. Coordinate with the holder via messages
-3. Use `resource://claims/{project}?active_only=true` to see all active reservations
+3. Use `resource://file_reservations/{project}?active_only=true` to see all active reservations
 4. Reserve more specific paths to avoid overlaps
 
 ## Project Boundaries

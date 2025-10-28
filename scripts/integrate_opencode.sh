@@ -15,6 +15,7 @@ setup_traps
 parse_common_flags "$@"
 require_cmd uv
 require_cmd curl
+require_cmd jq
 
 log_step "OpenCode (sst/opencode) Integration (HTTP JSON-RPC helpers)"
 echo
@@ -97,50 +98,57 @@ uv run python -m mcp_agent_mail.cli serve-http "$@"
 SH
 set_secure_exec "$RUN_HELPER" || true
 
-# Create JSON-RPC curl wrapper for Mail
+# Create JSON-RPC curl wrapper for Mail (robust JSON building via jq)
 log_step "Creating scripts/mcp_mail_http.sh (curl wrapper)"
 WRAPPER="scripts/mcp_mail_http.sh"
 write_atomic "$WRAPPER" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+URL="${MCP_MAIL_URL:-http://127.0.0.1:8765/mcp}"
+AUTH=()
+if [[ -n "${HTTP_BEARER_TOKEN:-}" ]]; then
+  AUTH=( -H "Authorization: Bearer ${HTTP_BEARER_TOKEN}" )
+fi
+
 METHOD="${1:-}"
 shift || true
 
+usage() {
+  echo "Usage:" >&2
+  echo "  $0 resources/read '<resource-uri>'" >&2
+  echo "  $0 tools/call <name> '<arguments-json>'" >&2
+  echo "  # Back-compat: $0 tools/call '<params-json>'" >&2
+}
+
 if [[ -z "${METHOD}" ]]; then
-  echo "Usage: $0 <method> [json-or-uri]" >&2
-  echo "Examples:" >&2
-  echo "  $0 resources/read 'resource://inbox/BlueLake?project=/abs/path&limit=10'" >&2
-  echo "  $0 tools/call '{"name":"macro_start_session","arguments":{"human_key":"/abs/path"}}'" >&2
-  exit 2
+  usage; exit 2
 fi
 
-URL="${MCP_MAIL_URL:-http://127.0.0.1:8765/mcp}"
-AUTH=""
-if [[ -n "${HTTP_BEARER_TOKEN:-}" ]]; then
-  AUTH=( -H "Authorization: Bearer ${HTTP_BEARER_TOKEN}" )
-else
-  AUTH=()
-fi
-
-if [[ "${METHOD}" == "resources/read" ]]; then
-  URI="${1:-}"; [[ -z "${URI}" ]] && { echo "Missing resource URI" >&2; exit 2; }
-  DATA=$(cat <<JSON
-{ "jsonrpc": "2.0", "id": "1", "method": "resources/read", "params": { "uri": "${URI}" } }
-JSON
-)
-elif [[ "${METHOD}" == "tools/call" ]]; then
-  BODY_JSON="${1:-}"; [[ -z "${BODY_JSON}" ]] && { echo "Missing tools/call body JSON" >&2; exit 2; }
-  DATA=$(cat <<JSON
-{ "jsonrpc": "2.0", "id": "1", "method": "tools/call", "params": ${BODY_JSON} }
-JSON
-)
-else
-  echo "Unsupported method: ${METHOD}" >&2
-  exit 2
-fi
-
-curl -sS -X POST "${URL}" -H 'content-type: application/json' "${AUTH[@]}" -d "${DATA}"
+case "${METHOD}" in
+  resources/read)
+    URI="${1:-}"; [[ -z "${URI}" ]] && { echo "Missing resource URI" >&2; exit 2; }
+    jq -n --arg uri "$URI" '{jsonrpc:"2.0", id:"1", method:"resources/read", params:{uri:$uri}}' \
+      | curl -sS -X POST "$URL" -H 'content-type: application/json' "${AUTH[@]}" --data-binary @-
+    ;;
+  tools/call)
+    if [[ $# -ge 2 ]]; then
+      NAME="${1}"; shift
+      ARGS_JSON="${1}"; shift || true
+      jq -n --arg name "$NAME" --argjson arguments "$ARGS_JSON" '{jsonrpc:"2.0", id:"1", method:"tools/call", params:{name:$name, arguments:$arguments}}' \
+        | curl -sS -X POST "$URL" -H 'content-type: application/json' "${AUTH[@]}" --data-binary @-
+    elif [[ $# -eq 1 ]]; then
+      PARAMS_JSON="${1}"; shift || true
+      jq -n --argjson params "$PARAMS_JSON" '{jsonrpc:"2.0", id:"1", method:"tools/call", params:$params}' \
+        | curl -sS -X POST "$URL" -H 'content-type: application/json' "${AUTH[@]}" --data-binary @-
+    else
+      usage; exit 2
+    fi
+    ;;
+  *)
+    echo "Unsupported method: ${METHOD}" >&2; exit 2;
+    ;;
+esac
 SH
 set_secure_exec "$WRAPPER" || true
 

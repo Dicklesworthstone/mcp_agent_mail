@@ -1648,7 +1648,7 @@ def build_mcp_server() -> FastMCP:
                 # Return a structured error payload that clients can surface directly
                 return {
                     "error": {
-                        "type": "FILE_RESERVATION_CONFLICT",
+                        "type": "CLAIM_CONFLICT",
                         "message": "Conflicting active file_reservations prevent message write.",
                         "conflicts": conflicts,
                     }

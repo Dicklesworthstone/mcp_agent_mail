@@ -16,7 +16,7 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     settings = get_settings()
     archive = await ensure_archive(settings, "backend")
     script = render_precommit_script(archive)
-    assert "CLAIMS_DIR" in script and "AGENT_NAME" in script
+    assert "FILE_RESERVATIONS_DIR" in script and "AGENT_NAME" in script
 
     # Initialize dummy repo and write a claim file that conflicts with staged file
     repo_dir = tmp_path / "repo"
@@ -35,10 +35,10 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     )
     assert (await proc_add.wait()) == 0
 
-    # Write a conflicting claim in archive
-    claims_dir = archive.root / "claims"
-    claims_dir.mkdir(parents=True, exist_ok=True)
-    (claims_dir / "c.json").write_text(
+    # Write a conflicting file reservation in archive
+    reservations_dir = archive.root / "file_reservations"
+    reservations_dir.mkdir(parents=True, exist_ok=True)
+    (reservations_dir / "c.json").write_text(
         '{"agent":"Other","path_pattern":"agents/*/inbox/*/*/*.md","expires_ts":"2999-01-01T00:00:00+00:00"}\n',
         encoding="utf-8",
     )
@@ -58,7 +58,7 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     # Expect non-zero due to conflict and helpful message
     assert proc_hook.returncode != 0
     stderr_text = (stderr_bytes.decode("utf-8", "ignore") if stderr_bytes else "")
-    assert "Exclusive claim conflicts" in stderr_text or "exclusive claim" in stderr_text.lower()
+    assert "file_reservation" in stderr_text.lower() or "exclusive" in stderr_text.lower()
 
     # Uninstall guard path returns True and removes file
     removed = await uninstall_guard(repo_dir)
