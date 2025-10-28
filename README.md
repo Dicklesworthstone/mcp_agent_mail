@@ -1503,7 +1503,7 @@ Use `acknowledge_message` to record receipt; overdue ACKs may be surfaced by bac
 See also:
 - `resource://inbox/{agent}` for inbox browsing
 - `cli acks pending`/`overdue` for reminder views
-- `cli file reservations active/soon` for active file reservations
+- `cli file_reservations active/soon` for active file reservations
 
 ## Claude Code Integration (HTTP MCP + Hooks)
 
