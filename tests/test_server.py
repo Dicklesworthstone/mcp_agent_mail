@@ -130,7 +130,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         assert conflict.data["conflicts"]
 
         release = await client.call_tool(
-            "release_claims",
+            "release_file_reservations",
             {
                 "project_key": "Backend",
                 "agent_name": "Alpha",
@@ -139,7 +139,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         )
         assert release.data["released"] == 1
 
-        claims_resource = await client.read_resource("resource://claims/backend")
+        claims_resource = await client.read_resource("resource://file_reservations/backend")
         assert "src/app.py" in claims_resource[0].text
 
 

@@ -26,11 +26,11 @@ def _seed_backend() -> None:
 def test_cli_claims_list_and_active(tmp_path: Path, isolated_env):
     _seed_backend()
     runner = CliRunner()
-    # claims list (no claims yet)
-    res = runner.invoke(app, ["claims", "list", "Backend"])  # just ensure it runs
+    # file_reservations list (no reservations yet)
+    res = runner.invoke(app, ["file_reservations", "list", "Backend"])  # just ensure it runs
     assert res.exit_code == 0
     # active view
-    res2 = runner.invoke(app, ["claims", "active", "Backend", "--limit", "5"])  # runs even when empty
+    res2 = runner.invoke(app, ["file_reservations", "active", "Backend", "--limit", "5"])  # runs even when empty
     assert res2.exit_code == 0
 
 

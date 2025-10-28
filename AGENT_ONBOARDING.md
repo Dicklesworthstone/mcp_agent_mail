@@ -591,7 +591,7 @@ If you encounter issues:
 1. **Check error messages** - They now include helpful details about what went wrong
 2. **Verify agent names** - Use `resource://agents/{project}` to see registered names
 3. **Check project boundaries** - Ensure all agents use the same `project_key`
-4. **Review file reservations** - Use `resource://claims/{project}?active_only=true` to see conflicts
+4. **Review file reservations** - Use `resource://file_reservations/{project}?active_only=true` to see conflicts
 5. **Search messages** - Use `search_messages()` to find related discussions
 
 ## Complete Example: Two Agents Coordinating
@@ -673,7 +673,7 @@ If you encounter issues:
 - `resource://agents/{project_key}` - List agents in a project (RECOMMENDED for discovery)
 - `resource://project/{project_key}` - Project details including agents
 - `resource://projects` - List all projects
-- `resource://claims/{project_key}?active_only=true` - Active file reservations
+- `resource://file_reservations/{project_key}?active_only=true` - Active file reservations
 - `resource://inbox/{project_key}/{agent_name}` - Agent's inbox
 - `resource://outbox/{project_key}/{agent_name}` - Agent's sent messages
 - `resource://message/{message_id}` - Single message details

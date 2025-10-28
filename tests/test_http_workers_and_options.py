@@ -64,8 +64,8 @@ async def test_http_ack_ttl_worker_claim_escalation(isolated_env, monkeypatch):
         # Trigger ack-required to self to make overdue soon
         await client.post(settings.http.path, json=_rpc("tools/call", {"name": "send_message", "arguments": {"project_key": "Backend", "sender_name": "OpsBot", "to": ["OpsBot"], "subject": "Overdue", "body_md": "x", "ack_required": True}}))
         await asyncio.sleep(1.2)
-        # Read claims resource — should exist (best-effort)
-        r = await client.post(settings.http.path, json=_rpc("resources/read", {"uri": "resource://claims/backend"}))
+        # Read file_reservations resource — should exist (best-effort)
+        r = await client.post(settings.http.path, json=_rpc("resources/read", {"uri": "resource://file_reservations/backend"}))
         assert r.status_code in (200, 401, 403)
 
 

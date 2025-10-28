@@ -47,8 +47,8 @@ def test_cli_claims_soon_and_list_acks_and_remind(isolated_env):
     payload = _seed_with_ack()
     runner = CliRunner()
 
-    # claims soon should show table (smoke)
-    res_claims = runner.invoke(app, ["claims", "soon", "Backend", "--minutes", "5"])
+    # file_reservations soon should show table (smoke)
+    res_claims = runner.invoke(app, ["file_reservations", "soon", "Backend", "--minutes", "5"])
     assert res_claims.exit_code == 0
 
     # list-acks should render a table without error

@@ -1433,9 +1433,9 @@ The project exposes a developer CLI for common operations:
 - `list-projects [--include-agents]`: enumerate projects
 - `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
-- `acks pending --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
-- `acks remind --project <key> --agent <name> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold
-- `acks overdue --project <key> --agent <name> [--ttl-minutes N] [--limit N]`: list overdue ACKs beyond TTL
+- `acks pending <project> <agent> [--limit N]`: show pending acknowledgements for an agent
+- `acks remind <project> <agent> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold
+- `acks overdue <project> <agent> [--ttl-minutes N] [--limit N]`: list overdue ACKs beyond TTL
 - `file_reservations list <project> [--active-only/--no-active-only]`: list file reservations
 - `file_reservations active <project> [--limit N]`: list active file reservations
 - `file_reservations soon <project> [--minutes N]`: show file reservations expiring soon
@@ -1447,7 +1447,7 @@ Examples:
 uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/backend
 
 # List pending acknowledgements for an agent
-uv run python -m mcp_agent_mail.cli acks pending --project /abs/path/backend --agent BlueLake --limit 10
+uv run python -m mcp_agent_mail.cli acks pending /abs/path/backend BlueLake --limit 10
 ```
 
 ## Continuous Integration
@@ -1523,13 +1523,13 @@ Example `.claude/settings.json`:
   "hooks": {
     "SessionStart": [
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active backend" },
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 20" }
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending backend $USER --limit 20" }
     ],
     "PreToolUse": [
       { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon backend --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 10" } ] },
+      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending backend $USER --limit 10" } ] },
       { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list backend" } ] }
     ]
   }
