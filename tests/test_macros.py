@@ -104,7 +104,7 @@ async def test_renew_claims_extends_expiry(isolated_env):
         )
         assert g.data["granted"]
         r = await client.call_tool(
-            "renew_claims",
+            "renew_file_reservations",
             {
                 "project_key": "Backend",
                 "agent_name": "Claimer",

@@ -98,12 +98,12 @@ How to use effectively
    - Option B (separate projects): each repo has its own `project_key`; use `macro_contact_handshake` or `request_contact`/`respond_contact` to link agents, then message directly. Keep a shared `thread_id` (e.g., ticket key) across repos for clean summaries/audits.
 
 Macros vs granular tools
-- Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`.
+- Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`.
 - Use granular tools when you need control: `register_agent`, `file_reservation_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
-- "CLAIM_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
+- "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 ```
 
@@ -401,7 +401,7 @@ Resume the API implementation with REST.
 
 #### How Agents See Overseer Messages
 
-When agents check their inbox (via `list_inbox` or `resource://inbox/{name}`), overseer messages appear like any other message but with:
+When agents check their inbox (via `fetch_inbox` or `resource://inbox/{name}`), overseer messages appear like any other message but with:
 
 - **Sender**: `HumanOverseer`
 - **Importance**: `high` (displayed prominently)
@@ -600,7 +600,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 2) Send a message
 
-- `send_message(project_key, sender_name, to[], subject, body_md, cc?, bcc?, importance?, ack_required?, thread_id?, convert_images?)`
+- `send_message(project_key, sender_name, to[], subject, body_md, cc?, bcc?, attachment_paths?, convert_images?, importance?, ack_required?, thread_id?, auto_contact_if_blocked?)`
 - Writes a canonical message under `messages/YYYY/MM/`, an outbox copy for the sender, and inbox copies for each recipient; commits all artifacts.
 - Optionally converts images (local paths or data URIs) to WebP and embeds small ones inline.
 
@@ -628,8 +628,8 @@ sequenceDiagram
 
 4) Avoid conflicts with file reservations (leases)
 
-- `file_reservation_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON reservation artifacts in Git; conflicts are reported if overlapping active exclusives exist.
-- `release_file_reservations(project_key, agent_name, paths[])` releases active leases. JSON artifacts remain for audit history.
+- `file_reservation_paths(project_key, agent_name, paths[], ttl_seconds, exclusive, reason)` records an advisory lease in DB and writes JSON reservation artifacts in Git; conflicts are reported if overlapping active exclusives exist (reservations are still granted; conflicts are returned alongside grants).
+- `release_file_reservations(project_key, agent_name, paths? | file_reservation_ids?)` releases active leases (all if none specified). JSON artifacts remain for audit history.
 - Optional: install a pre-commit hook in your code repo that blocks commits conflicting with other agents' active exclusive file reservations.
 
 ```mermaid
@@ -642,14 +642,10 @@ sequenceDiagram
   Agent->>Server: call file_reservation_paths
   Server->>DB: expire old leases and check overlaps
   DB-->>Server: conflicts or grants
-  alt conflicts exist
-    Server-->>Agent: conflicts only
-  else no conflicts
-    Server->>DB: insert file reservation rows
-    Server->>Git: write file reservation JSON files
-    Server->>Git: commit
-    Server-->>Agent: granted paths
-  end
+  Server->>DB: insert file reservation rows
+  Server->>Git: write file reservation JSON files
+  Server->>Git: commit
+  Server-->>Agent: granted paths and any conflicts
 ```
 
 5) Search & summarize
@@ -913,7 +909,7 @@ Common variables you may set:
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
 | `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
 | `ACK_ESCALATION_ENABLED` | `false` | Enable escalation for overdue ACKs |
-| `ACK_ESCALATION_MODE` | `log` | `log` or `file reservation` escalation mode |
+| `ACK_ESCALATION_MODE` | `log` | `log` or `file_reservation` escalation mode |
 | `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation file reservations |
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
@@ -1240,7 +1236,7 @@ if __name__ == "__main__":
 - Why Git and SQLite together?
   - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn't.
 - Are file reservations enforced?
-  - File reservations are advisory at the server layer; the optional pre-commit hook adds local enforcement at commit time.
+  - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists (`FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true`, default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo.
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
@@ -1257,8 +1253,8 @@ if __name__ == "__main__":
 | `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
 | `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
-| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | Message dict | Writes canonical + inbox/outbox, converts images |
-| `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | Message dict | Preserves/creates thread, inherits flags |
+| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images |
+| `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | `{thread_id, reply_to, deliveries: list, count: int, attachments?}` | Preserves/creates thread, inherits flags |
 | `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int)` | Contact link dict | Request permission to message another agent |
 | `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int)` | Contact link dict | Approve or deny a contact request |
 | `list_contacts` | `list_contacts(project_key: str, agent_name: str)` | `list[dict]` | List contact links for an agent |
@@ -1273,8 +1269,8 @@ if __name__ == "__main__":
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
 | `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool, llm_mode?: bool, llm_model?: str)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
 | `summarize_threads` | `summarize_threads(project_key: str, thread_ids: list[str], llm_mode?: bool, llm_model?: str, per_thread_limit?: int)` | `{threads[], aggregate}` | Digest across multiple threads (optional LLM refinement) |
-| `install_precommit_guard` | `install_precommit_guard(project_key: str, code_repo_path: str)` | `{success, hook_path}` | Install a Git pre-commit guard in a target repo |
-| `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{success}` | Remove the guard from a repo |
+| `install_precommit_guard` | `install_precommit_guard(project_key: str, code_repo_path: str)` | `{hook}` | Install a Git pre-commit guard in a target repo |
+| `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{removed}` | Remove the guard from a repo |
 | `file_reservation_paths` | `file_reservation_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
 | `release_file_reservations` | `release_file_reservations(project_key: str, agent_name: str, paths?: list[str], file_reservation_ids?: list[int])` | `{released, released_at}` | Releases agent’s active file reservations |
 | `renew_file_reservations` | `renew_file_reservations(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], file_reservation_ids?: list[int])` | `{renewed, file reservations[]}` | Extend TTL of existing file reservations |
@@ -1440,9 +1436,9 @@ The project exposes a developer CLI for common operations:
 - `acks pending --project <key> --agent <name> [--limit N]`: show pending acknowledgements for an agent
 - `acks remind --project <key> --agent <name> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold
 - `acks overdue --project <key> --agent <name> [--ttl-minutes N] [--limit N]`: list overdue ACKs beyond TTL
-- `file reservations list <project> [--active-only/--no-active-only]`: list file reservations
-- `file reservations active <project> [--limit N]`: list active file reservations
-- `file reservations soon <project> [--minutes N]`: show file reservations expiring soon
+- `file_reservations list <project> [--active-only/--no-active-only]`: list file reservations
+- `file_reservations active <project> [--limit N]`: list active file reservations
+- `file_reservations soon <project> [--minutes N]`: show file reservations expiring soon
 
 Examples:
 
@@ -1526,15 +1522,15 @@ Example `.claude/settings.json`:
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations active --project backend" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active backend" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations soon --project backend --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon backend --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project backend --agent $USER --limit 10" } ] },
-      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations list --project backend" } ] }
+      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list backend" } ] }
     ]
   }
 }
