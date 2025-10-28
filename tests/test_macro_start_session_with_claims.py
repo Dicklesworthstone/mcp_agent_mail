@@ -1,4 +1,4 @@
-"""Test macro_start_session with reserve_file_paths parameter to prevent regression of the shadowing bug."""
+"""Test macro_start_session with file_reservation_paths parameter to prevent regression of the shadowing bug."""
 
 import pytest
 from fastmcp import Client
@@ -7,18 +7,17 @@ from mcp_agent_mail.app import build_mcp_server
 
 
 @pytest.mark.asyncio
-async def test_macro_start_session_with_reserve_file_paths(isolated_env):
+async def test_macro_start_session_with_file_reservation_paths(isolated_env):
     """
-    Test macro_start_session WITH reserve_file_paths parameter.
+    Test macro_start_session WITH file_reservation_paths parameter.
 
     This test specifically exercises the code path that was broken by the
-    globals().get("reserve_file_paths") bug (now fixed to use mcp.get_tool("reserve_file_paths")).
+    globals().get("file_reservation_paths") bug (now fixed to use mcp.get_tool("file_reservation_paths")).
 
-    The bug was: macro_start_session has a parameter named 'reserve_file_paths' which
-    shadowed the reserve_file_paths function. Using globals().get("reserve_file_paths") tried
-    to work around this but failed because reserve_file_paths isn't in the global scope.
+    The bug was: macro_start_session has a parameter named 'file_reservation_paths' which
+    shadowed the file_reservation_paths function. Using mcp.get_tool("file_reservation_paths") avoids global lookups.
 
-    The fix: Use mcp.get_tool("reserve_file_paths") to get the tool from the registry.
+    The fix: Use mcp.get_tool("file_reservation_paths") to get the tool from the registry.
     """
     server = build_mcp_server()
     async with Client(server) as client:
@@ -30,7 +29,7 @@ async def test_macro_start_session_with_reserve_file_paths(isolated_env):
                 "model": "sonnet-4.5",
                 "agent_name": "BlueLake",  # ← Must be adjective+noun format
                 "task_description": "Testing claims functionality",
-                "reserve_file_paths": ["src/**/*.py", "tests/**/*.py"],  # ← This triggers the shadowing
+                "file_reservation_paths": ["src/**/*.py", "tests/**/*.py"],  # ← This triggers the shadowing
                 "claim_reason": "Testing macro_start_session with claims",
                 "claim_ttl_seconds": 7200,
                 "inbox_limit": 10,
@@ -60,9 +59,9 @@ async def test_macro_start_session_with_reserve_file_paths(isolated_env):
         assert len(granted_claims) == 2
 
         # Verify claim details
-        reserve_file_paths = {claim["path_pattern"] for claim in granted_claims}
-        assert "src/**/*.py" in reserve_file_paths
-        assert "tests/**/*.py" in reserve_file_paths
+        reservation_paths = {claim["path_pattern"] for claim in granted_claims}
+        assert "src/**/*.py" in reservation_paths
+        assert "tests/**/*.py" in reservation_paths
 
         for claim in granted_claims:
             assert claim["exclusive"] is True
@@ -76,7 +75,7 @@ async def test_macro_start_session_with_reserve_file_paths(isolated_env):
 
 @pytest.mark.asyncio
 async def test_macro_start_session_without_claims_still_works(isolated_env):
-    """Verify that macro_start_session still works when reserve_file_paths is omitted."""
+    """Verify that macro_start_session still works when file_reservation_paths is omitted."""
     server = build_mcp_server()
     async with Client(server) as client:
         res = await client.call_tool(
@@ -87,7 +86,7 @@ async def test_macro_start_session_without_claims_still_works(isolated_env):
                 "model": "gpt-5",
                 "agent_name": "RedStone",  # ← Must be adjective+noun format
                 "task_description": "No claims test",
-                # reserve_file_paths intentionally omitted
+                # file_reservation_paths intentionally omitted
                 "inbox_limit": 5,
             },
         )

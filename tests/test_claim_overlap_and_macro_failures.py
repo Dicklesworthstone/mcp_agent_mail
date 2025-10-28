@@ -13,9 +13,9 @@ async def test_claim_overlap_conflict_path(isolated_env):
         await client.call_tool("ensure_project", {"human_key": "Backend"})
         await client.call_tool("register_agent", {"project_key": "Backend", "program": "p", "model": "m", "name": "Alpha"})
         await client.call_tool("register_agent", {"project_key": "Backend", "program": "p", "model": "m", "name": "Beta"})
-        res1 = await client.call_tool("reserve_file_paths", {"project_key": "Backend", "agent_name": "Alpha", "paths": ["src/**"], "exclusive": True, "ttl_seconds": 3600})
+        res1 = await client.call_tool("file_reservation_paths", {"project_key": "Backend", "agent_name": "Alpha", "paths": ["src/**"], "exclusive": True, "ttl_seconds": 3600})
         assert res1.data["granted"]
-        res2 = await client.call_tool("reserve_file_paths", {"project_key": "Backend", "agent_name": "Beta", "paths": ["src/app.py"], "exclusive": True, "ttl_seconds": 3600})
+        res2 = await client.call_tool("file_reservation_paths", {"project_key": "Backend", "agent_name": "Beta", "paths": ["src/app.py"], "exclusive": True, "ttl_seconds": 3600})
         # Advisory model: still granted but conflicts populated
         assert res2.data["granted"] and res2.data["conflicts"]
 

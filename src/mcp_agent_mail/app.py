@@ -2411,7 +2411,9 @@ def build_mcp_server() -> FastMCP:
                     "Call macro_contact_handshake(project_key, requester, target, auto_accept=true) to automate",
                 ]
                 attempted: list[str] = []
-                if auto_contact_if_blocked:
+                # Respect explicit flag or server default ergonomics
+                effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                if effective_auto_contact:
                     try:
                         from fastmcp.tools.tool import FunctionTool  # type: ignore
                         # Prefer a single handshake with auto_accept=true
@@ -2468,6 +2470,39 @@ def build_mcp_server() -> FastMCP:
                         "remedies": remedies,
                         "auto_contact_attempted": attempted,
                     }
+                    # Provide actionable sample calls
+                    try:
+                        if blocked_recipients:
+                            examples: list[dict[str, Any]] = []
+                            # Show a macro example for the first blocked recipient
+                            examples.append(
+                                {
+                                    "tool": "macro_contact_handshake",
+                                    "arguments": {
+                                        "project_key": project.human_key,
+                                        "requester": sender.name,
+                                        "target": blocked_recipients[0],
+                                        "auto_accept": True,
+                                        "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                    },
+                                }
+                            )
+                            # Also include direct request_contact examples
+                            for nm in blocked_recipients[:3]:
+                                examples.append(
+                                    {
+                                        "tool": "request_contact",
+                                        "arguments": {
+                                            "project_key": project.human_key,
+                                            "from_agent": sender.name,
+                                            "to_agent": nm,
+                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                        },
+                                    }
+                                )
+                            err_data["suggested_tool_calls"] = examples
+                    except Exception:
+                        pass
                     await ctx.error(f"{err_type}: {err_msg}")
                     raise ToolExecutionError(
                         err_type,
@@ -2652,8 +2687,8 @@ def build_mcp_server() -> FastMCP:
                 ) from err
 
             if unknown_local or unknown_external:
-                # Optionally auto-register missing local recipients
-                if get_settings().contact_enforcement_enabled and auto_contact_if_blocked:
+                # Auto-register missing local recipients if enabled
+                if getattr(settings_local, "messaging_auto_register_recipients", True):
                     # Best effort: try to register any unknown local recipients with sane defaults
                     newly_registered: set[str] = set()
                     for missing in list(unknown_local):
@@ -2675,15 +2710,91 @@ def build_mcp_server() -> FastMCP:
                         from contextlib import suppress
                         with suppress(_ContactBlocked):
                             await _route(list(newly_registered), "to")
-                parts: list[str] = []
+                # Attempt cross-project handshakes for unknown external recipients if allowed
+                attempted_external: list[str] = []
+                try:
+                    effective_auto_contact = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                    if effective_auto_contact and unknown_external:
+                        from fastmcp.tools.tool import FunctionTool  # type: ignore
+                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
+                        # Iterate over a copy since we may mutate/resolve entries
+                        for label, names in list(unknown_external.items()):
+                            try:
+                                target_proj = await _get_project_by_identifier(label)
+                            except Exception:
+                                continue
+                            for nm in list(names):
+                                try:
+                                    await handshake.run(
+                                        {
+                                            "project_key": project.human_key,
+                                            "requester": sender.name,
+                                            "target": nm,
+                                            "to_project": target_proj.human_key or target_proj.slug,
+                                            "reason": "auto-handshake by send_message",
+                                            "auto_accept": True,
+                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                            "register_if_missing": True,
+                                        }
+                                    )
+                                    attempted_external.append(f"{nm}@{label}")
+                                except Exception:
+                                    pass
+                        # Re-route any that we attempted to handshake for
+                        if attempted_external:
+                            from contextlib import suppress
+                            with suppress(_ContactBlocked):
+                                for item in attempted_external:
+                                    await _route([item], "to")
+                            # Purge unknown_external entries that now have approved links
+                            try:
+                                async with get_session() as scheck:
+                                    for label, names in list(unknown_external.items()):
+                                        try:
+                                            tproj = await _get_project_by_identifier(label)
+                                        except Exception:
+                                            continue
+                                        remaining: list[str] = []
+                                        for nm in list(names):
+                                            lookup_value = (nm or "").strip().lower()
+                                            rows = await scheck.execute(
+                                                select(AgentLink, Project, Agent)
+                                                .join(Project, Project.id == AgentLink.b_project_id)
+                                                .join(Agent, Agent.id == AgentLink.b_agent_id)
+                                                .where(
+                                                    AgentLink.a_project_id == project.id,
+                                                    AgentLink.a_agent_id == sender.id,
+                                                    AgentLink.status == "approved",
+                                                    Project.id == tproj.id,
+                                                    func.lower(Agent.name) == lookup_value,
+                                                )
+                                                .limit(1)
+                                            )
+                                            if rows.first() is None:
+                                                remaining.append(nm)
+                                        if remaining:
+                                            unknown_external[label] = remaining
+                                        else:
+                                            unknown_external.pop(label, None)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # If everything resolved after auto-actions, skip error path
+                still_unknown = bool(unknown_local) or any(v for v in unknown_external.values())
+                if not still_unknown:
+                    # All unknowns were resolved; continue to delivery
+                    pass
+                else:
+                    parts: list[str] = []
                 data_payload: dict[str, Any] = {}
-                if unknown_local:
+                if still_unknown and unknown_local:
                     missing_local = sorted({name for name in unknown_local if name})
                     parts.append(
                         f"local recipients {', '.join(missing_local)} are not registered in project '{project.human_key}'"
                     )
                     data_payload["unknown_local"] = missing_local
-                if unknown_external:
+                if still_unknown and unknown_external:
                     formatted_external = {
                         label: sorted({name for name in names if name})
                         for label, names in unknown_external.items()
@@ -2698,17 +2809,57 @@ def build_mcp_server() -> FastMCP:
                             "external recipients missing approved contact links: " + "; ".join(ext_parts)
                         )
                     data_payload["unknown_external"] = formatted_external
-                hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
-                parts.append(hint)
-                message = "Unable to send message — " + "; ".join(parts)
-                data_payload["hint"] = hint
-                await ctx.error(f"RECIPIENT_NOT_FOUND: {message}")
-                raise ToolExecutionError(
-                    "RECIPIENT_NOT_FOUND",
-                    message,
-                    recoverable=True,
-                    data=data_payload,
-                )
+                # Include auto actions we tried
+                if still_unknown and attempted_external:
+                    data_payload["auto_contact_attempted_external"] = attempted_external
+                if still_unknown:
+                    hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
+                    parts.append(hint)
+                    message = "Unable to send message — " + "; ".join(parts)
+                    data_payload["hint"] = hint
+                    # Provide concrete fix suggestions
+                    try:
+                        suggestions: list[dict[str, Any]] = []
+                        for name in data_payload.get("unknown_local", [])[:5]:
+                            suggestions.append(
+                                {
+                                    "tool": "register_agent",
+                                    "arguments": {
+                                        "project_key": project.human_key,
+                                        "name": name,
+                                        "program": sender.program,
+                                        "model": sender.model,
+                                        "task_description": sender.task_description,
+                                    },
+                                }
+                            )
+                        for label, names in (data_payload.get("unknown_external", {}) or {}).items():
+                            for nm in names[:5]:
+                                suggestions.append(
+                                    {
+                                        "tool": "macro_contact_handshake",
+                                        "arguments": {
+                                            "project_key": project.human_key,
+                                            "requester": sender.name,
+                                            "target": nm,
+                                            "to_project": label,
+                                            "auto_accept": True,
+                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                            "register_if_missing": True,
+                                        },
+                                    }
+                                )
+                        if suggestions:
+                            data_payload["suggested_tool_calls"] = suggestions
+                    except Exception:
+                        pass
+                    await ctx.error(f"RECIPIENT_NOT_FOUND: {message}")
+                    raise ToolExecutionError(
+                        "RECIPIENT_NOT_FOUND",
+                        message,
+                        recoverable=True,
+                        data=data_payload,
+                    )
 
         deliveries: list[dict[str, Any]] = []
         # Local deliver if any
@@ -3690,11 +3841,48 @@ def build_mcp_server() -> FastMCP:
         real_target = (target or to_agent or "").strip()
         target_project_key = (to_project or "").strip()
         if not real_requester or not real_target:
+            # Best-effort inference to honor "obvious intent"
+            try:
+                project = await _get_project_by_identifier(project_key)
+                # If requester missing and exactly one agent exists in project, assume that one
+                if not real_requester and project.id is not None:
+                    async with get_session() as s:
+                        rows = await s.execute(select(Agent.name).where(Agent.project_id == project.id))
+                        names = [str(row[0]).strip() for row in rows.fetchall() if (row and row[0])]
+                    if len(names) == 1:
+                        real_requester = names[0]
+                # If target missing and exactly two agents exist, infer the other
+                if not real_target and project.id is not None:
+                    async with get_session() as s2:
+                        rows2 = await s2.execute(select(Agent.name).where(Agent.project_id == project.id))
+                        names2 = [str(row[0]).strip() for row in rows2.fetchall() if (row and row[0])]
+                    if real_requester and len(names2) == 2 and real_requester in names2:
+                        real_target = next((n for n in names2 if n != real_requester), real_target)
+            except Exception:
+                pass
+        if not real_requester or not real_target:
             raise ToolExecutionError(
                 "INVALID_ARGUMENT",
                 "macro_contact_handshake requires requester/agent_name and target/to_agent",
                 recoverable=True,
-                data={"requester": requester, "agent_name": agent_name, "target": target, "to_agent": to_agent},
+                data={
+                    "requester": real_requester or requester,
+                    "agent_name": agent_name,
+                    "target": real_target or target,
+                    "to_agent": to_agent,
+                    "suggested_tool_calls": [
+                        {
+                            "tool": "macro_contact_handshake",
+                            "arguments": {
+                                "project_key": project_key,
+                                "requester": real_requester or "<your_agent>",
+                                "target": real_target or "<their_agent>",
+                                "auto_accept": True,
+                                "ttl_seconds": ttl_seconds,
+                            },
+                        }
+                    ],
+                },
             )
 
         from fastmcp.tools.tool import FunctionTool

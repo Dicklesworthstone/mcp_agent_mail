@@ -121,7 +121,7 @@ async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
 
         # Overlapping claims: Alpha holds src/*, Beta holds src/app.py
         g1 = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Alpha",
@@ -132,7 +132,7 @@ async def test_contact_auto_allows_claim_overlap(isolated_env, monkeypatch):
         )
         assert g1.data["granted"]
         g2 = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",

@@ -457,7 +457,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         claim_result = await stepper.call_tool(
             actor=agents["blue"].codename,
             project_label=projects["backend"].label,
-            tool="reserve_file_paths",
+            tool="file_reservation_paths",
             description="BlueLake stakes an exclusive file reservation on backend auth routes.",
             arguments={
                 "project_key": projects["backend"].human_key,
@@ -474,7 +474,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         conflict_attempt = await stepper.call_tool(
             actor=agents["green"].codename,
             project_label=projects["backend"].label,
-            tool="reserve_file_paths",
+            tool="file_reservation_paths",
             description="GreenStone attempts to reserve the same files to illustrate conflict detection.",
             arguments={
                 "project_key": projects["backend"].human_key,
@@ -489,7 +489,7 @@ Every tool call is narrated before execution, inputs/outputs are syntax highligh
         await stepper.call_tool(
             actor=agents["green"].codename,
             project_label=projects["backend"].label,
-            tool="reserve_file_paths",
+            tool="file_reservation_paths",
             description="GreenStone pivots to payment webhook files to avoid conflict.",
             arguments={
                 "project_key": projects["backend"].human_key,

@@ -108,7 +108,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         )
 
         result = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Alpha",
@@ -120,7 +120,7 @@ async def test_claim_conflicts_and_release(isolated_env):
         assert result.data["granted"][0]["path_pattern"] == "src/app.py"
 
         conflict = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",
@@ -170,7 +170,7 @@ async def test_claim_enforcement_blocks_message_on_overlap(isolated_env):
 
         # Beta claims Alpha's inbox surface exclusively (overlap by pattern)
         claim = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",
@@ -399,7 +399,7 @@ async def test_claim_conflict_ttl_transition_allows_after_expiry(isolated_env, m
         )
         # Beta claims Alpha inbox surface, short TTL
         claim = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {
                 "project_key": "Backend",
                 "agent_name": "Beta",

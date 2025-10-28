@@ -30,6 +30,22 @@ It’s designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini C
 
 ## TLDR Quickstart
 
+### One-line installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --yes
+```
+
+What this does:
+
+- Installs uv if missing and updates your PATH for this session
+- Creates a Python 3.14 virtual environment and installs dependencies with uv
+- Runs the auto-detect integration to wire up supported agent tools
+- Starts the MCP HTTP server on port 8765 and prints a masked bearer token
+- Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
+
+Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, or `--token <hex>`.
+
 Clone the repo, set up and install with uv in a python 3.14 venv (install uv if you don't have it already), and then run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh`. This will automatically set things up for your various installed coding agent tools and start the MCP server on port 8765. If you want to run the MCP server again in the future, simply run `scripts/run_server_with_token.sh`:
 
 ```bash
@@ -39,7 +55,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Clone the repo
 git clone https://github.com/Dicklesworthstone/mcp_agent_mail
-cd mcp-agent-mail
+cd mcp_agent_mail
 
 # Create a Python 3.14 virtual environment and install dependencies
 uv python install 3.14
@@ -72,7 +88,7 @@ Why it's useful
 How to use effectively
 1) Same repository
    - Register an identity: call `ensure_project`, then `register_agent` using this repo's absolute path as `project_key`.
-   - Reserve files before you edit: `reserve_file_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)` to signal intent and avoid conflict.
+   - Reserve files before you edit: `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)` to signal intent and avoid conflict.
    - Communicate with threads: use `send_message(..., thread_id="FEAT-123")`; check inbox with `fetch_inbox` and acknowledge with `acknowledge_message`.
    - Read fast: `resource://inbox/{Agent}?project=<abs-path>&limit=20` or `resource://thread/{id}?project=<abs-path>&include_bodies=true`.
    - Tip: set `AGENT_NAME` in your environment so the pre-commit guard can block commits that conflict with others' active exclusive file reservations.
@@ -83,12 +99,75 @@ How to use effectively
 
 Macros vs granular tools
 - Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_claim_cycle`, `macro_contact_handshake`.
-- Use granular tools when you need control: `register_agent`, `reserve_file_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
+- Use granular tools when you need control: `register_agent`, `file_reservation_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
 - "CLAIM_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
+```
+
+## Integrating with Beads (dependency‑aware task planning)
+
+Beads is a lightweight, dependency‑aware issue database and CLI (command `bd`) that helps agents pick “ready work,” manage priorities, and track status. It pairs naturally with MCP Agent Mail: keep Beads as the task authority and use Agent Mail for conversation, decisions, file‑reservation signaling, and human‑auditable artifacts. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+
+Why it’s complementary
+- **Separation of concerns**: Beads = tasks, priorities, dependencies; Agent Mail = messaging, threads, audit trail, file reservations.
+- **Non‑overlapping MCP roles**: You can mount both in your MCP client without transport conflicts (both expose MCP surfaces).
+- **Shared identifiers**: Use Beads issue ids (e.g., `bd-123`) as Mail `thread_id`s so search, summaries, and audits line up.
+
+Install Beads (Linux/macOS)
+- Option A (prebuilt): Download the latest release for your platform from the repository’s Releases page, place `bd` on your `PATH`, and `chmod +x` if needed. See: [steveyegge/beads](https://github.com/steveyegge/beads)
+- Option B (from source):
+  ```bash
+  # Prereqs: Go toolchain (1.22+ recommended)
+  git clone https://github.com/steveyegge/beads
+  cd beads
+  go build -o bd ./cmd/bd
+  sudo mv ./bd /usr/local/bin/
+  bd --help
+  ```
+Here is a ready made blurb you can add to your AGENTS.md or CLAUDE.md files (place below the previous blurb if you plan on using beads):
+
+```
+
+## Integrating with Beads (dependency‑aware task planning)
+
+Beads provides a lightweight, dependency‑aware issue database and a CLI (`bd`) for selecting “ready work,” setting priorities, and tracking status. It complements MCP Agent Mail’s messaging, audit trail, and file‑reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+
+Recommended conventions
+- **Single source of truth**: Use **Beads** for task status/priority/dependencies; use **Agent Mail** for conversation, decisions, and attachments (audit).
+- **Shared identifiers**: Use the Beads issue id (e.g., `bd-123`) as the Mail `thread_id` and prefix message subjects with `[bd-123]`.
+- **Reservations**: When starting a `bd-###` task, call `file_reservation_paths(...)` for the affected paths; include the issue id in the `reason` and release on completion.
+
+Typical flow (agents)
+1) **Pick ready work** (Beads)
+   - `bd ready --json` → choose one item (highest priority, no blockers)
+2) **Reserve edit surface** (Mail)
+   - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="bd-123")`
+3) **Announce start** (Mail)
+   - `send_message(..., thread_id="bd-123", subject="[bd-123] Start: <short title>", ack_required=true)`
+4) **Work and update**
+   - Reply in‑thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
+5) **Complete and release**
+   - `bd close bd-123 --reason "Completed"` (Beads is status authority)
+   - `release_file_reservations(project_key, agent_name, paths=["src/**"])`
+   - Final Mail reply: `[bd-123] Completed` with summary and links
+
+Mapping cheat‑sheet
+- **Mail `thread_id`** ↔ `bd-###`
+- **Mail subject**: `[bd-###] …`
+- **File reservation `reason`**: `bd-###`
+- **Commit messages (optional)**: include `bd-###` for traceability
+
+Event mirroring (optional automation)
+- On `bd update --status blocked`, send a high‑importance Mail message in thread `bd-###` describing the blocker.
+- On Mail “ACK overdue” for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
+
+Pitfalls to avoid
+- Don’t create or manage tasks in Mail; treat Beads as the single task queue.
+- Always include `bd-###` in message `thread_id` to avoid ID drift across tools.
+
 ```
 
 ## Core ideas (at a glance)
@@ -125,9 +204,9 @@ graph LR
   subgraph GitTree["Git tree"]
     GI1[agents/profile.json]
     GI2[agents/mailboxes/...]
-    GI3[messages/YYYY/MM/id.md]
-    GI4[file_reservations/sha1.json]
-    GA[attachments/xx/sha1.webp]
+    GI3[messages/YYYY/\nMM/\nid.md]
+    GI4[file_reservations/\nsha1.json]
+    GA[attachments/xx/\nsha1.webp]
   end
 
   G --- GI1
@@ -733,7 +812,7 @@ sequenceDiagram
 
 Exclusive file reservations are advisory but visible and auditable:
 
-- A reservation JSON is written to `file reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
+- A reservation JSON is written to `file_reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
 - The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
 - Agents should set `AGENT_NAME` (or rely on `GIT_AUTHOR_NAME`) so the guard knows who “owns” the commit
 
@@ -783,7 +862,7 @@ Common variables you may set:
 | `HTTP_JWT_ALGORITHMS` | `HS256` | CSV of allowed algs |
 | `HTTP_JWT_AUDIENCE` |  | Expected `aud` (optional) |
 | `HTTP_JWT_ISSUER` |  | Expected `iss` (optional) |
-| `HTTP_JWT_ROLE_CLAIM` | `role` | File Reservation name containing role(s) |
+| `HTTP_JWT_ROLE_CLAIM` | `role` | JWT claim name containing role(s) |
 | `HTTP_RBAC_ENABLED` | `true` | Enforce read-only vs tools RBAC |
 | `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
 | `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
@@ -841,6 +920,8 @@ Common variables you may set:
 | `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for auto-approved contacts (1 day) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
+| `MESSAGING_AUTO_REGISTER_RECIPIENTS` | `true` | Automatically create missing local recipients during `send_message` and retry routing |
+| `MESSAGING_AUTO_HANDSHAKE_ON_BLOCK` | `true` | When contact policy blocks delivery, attempt a contact handshake (auto-accept) and retry |
 | `TOOLS_LOG_ENABLED` | `false` | Log tool invocations for debugging |
 | `LOG_RICH_ENABLED` | `true` | Enable Rich console logging |
 | `LOG_INCLUDE_TRACE` | `false` | Include trace-level logs |
@@ -1233,8 +1314,7 @@ if __name__ == "__main__":
 
 See `examples/client_bootstrap.py` for a runnable reference implementation that applies the guidance above.
 
-```jsonc
-// Typical client bootstrap flow
+```json
 {
   "steps": [
     "resources/read -> resource://tooling/directory",

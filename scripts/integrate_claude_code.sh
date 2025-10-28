@@ -98,15 +98,15 @@ write_atomic "$SETTINGS_PATH" <<JSON
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations active --project ${_PROJ}" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations soon --project ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations soon --project ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tool": "reserve_file_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations list --project ${_PROJ}" } ] }
+      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations list --project ${_PROJ}" } ] }
     ]
   }
 }
@@ -132,15 +132,15 @@ write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
   },
   "hooks": {
     "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations active --project ${_PROJ}" },
+      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations active --project ${_PROJ}" },
       { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending --project ${_PROJ} --agent ${_AGENT} --limit 20" }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations soon --project ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations soon --project ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tool": "reserve_file_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file-reservations list --project ${_PROJ}" } ] }
+      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file reservations list --project ${_PROJ}" } ] }
     ]
   }
 }
@@ -208,14 +208,31 @@ fi
 set_secure_file "$HOME_SETTINGS_PATH" || true
 
 # Create run helper script with token
-log_step "Creating run helper script with token"
+log_step "Creating run helper script"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
-write_atomic "$RUN_HELPER" <<SH
+write_atomic "$RUN_HELPER" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
-export HTTP_BEARER_TOKEN="${_TOKEN}"
-uv run python -m mcp_agent_mail.cli serve-http "\$@"
+
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
+  if [[ -f .env ]]; then
+    HTTP_BEARER_TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
+  fi
+fi
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
+  if command -v uv >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN=$(uv run python - <<'PY'
+import secrets; print(secrets.token_hex(32))
+PY
+)
+  else
+    HTTP_BEARER_TOKEN="$(date +%s)_$(hostname)"
+  fi
+fi
+export HTTP_BEARER_TOKEN
+
+uv run python -m mcp_agent_mail.cli serve-http "$@"
 SH
 set_secure_exec "$RUN_HELPER"
 echo "Created $RUN_HELPER"

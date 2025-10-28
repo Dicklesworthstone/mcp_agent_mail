@@ -39,7 +39,7 @@ async def test_renew_claims_extends_expiry_and_updates_artifact(isolated_env):
         )
         # Create a short TTL claim
         res = await client.call_tool(
-            "reserve_file_paths",
+            "file_reservation_paths",
             {"project_key": "Backend", "agent_name": "Holder", "paths": ["docs/*.md"], "ttl_seconds": 2, "exclusive": True},
         )
         claim = (res.data.get("granted") or [])[0]

@@ -333,7 +333,7 @@ Signal your intent to edit files to avoid conflicts:
 
 ```json
 {
-  "tool": "reserve_file_paths",
+  "tool": "file_reservation_paths",
   "arguments": {
     "project_key": "/data/projects/my-project",
     "agent_name": "BackendDev",
@@ -626,7 +626,7 @@ If you encounter issues:
 }}
 
 // Step 5: Reserve files before editing
-{"tool": "reserve_file_paths", "arguments": {
+{"tool": "file_reservation_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "BackendDev",
   "paths": ["app/api/users.py"],
@@ -658,7 +658,7 @@ If you encounter issues:
 }}
 
 // Step 5: Reserve frontend files
-{"tool": "reserve_file_paths", "arguments": {
+{"tool": "file_reservation_paths", "arguments": {
   "project_key": "/data/projects/smartedgar",
   "agent_name": "FrontendDev",
   "paths": ["src/components/UserList.tsx"],
