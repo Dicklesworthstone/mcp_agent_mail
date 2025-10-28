@@ -1539,3 +1539,62 @@ Start the MCP HTTP server:
 ```bash
 uv run python -m mcp_agent_mail.cli serve-http
 ```
+
+## Cline Integration (HTTP MCP)
+
+Add our MCP server to Cline's MCP settings. Example project-local snippet you can import or copy (e.g., `cline.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
+    }
+  }
+}
+```
+
+Start the MCP HTTP server:
+
+```bash
+uv run python -m mcp_agent_mail.cli serve-http
+```
+
+## Windsurf Integration (HTTP MCP)
+
+Add our MCP server to Windsurf's MCP settings. Example project-local snippet you can import or copy (e.g., `windsurf.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
+    }
+  }
+}
+```
+
+Start the MCP HTTP server:
+
+```bash
+uv run python -m mcp_agent_mail.cli serve-http
+```
+
+## OpenCode (sst/opencode) Integration via Helper Script
+
+OpenCode is a terminal TUI; use the provided helper to call Agent Mail over HTTP JSON‑RPC from custom commands or shell.
+
+```bash
+# One-time setup (writes scripts/mcp_mail_http.sh)
+bash scripts/integrate_opencode.sh --yes
+
+# Read inbox (resource):
+bash scripts/mcp_mail_http.sh resources/read 'resource://inbox/BlueLake?project=/abs/path/backend&limit=10'
+
+# Start a session (tool):
+bash scripts/mcp_mail_http.sh tools/call '{"name":"macro_start_session","arguments":{"human_key":"/abs/path/backend"}}'
+```

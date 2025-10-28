@@ -784,6 +784,30 @@ def display_startup_banner(settings: Any, host: str, port: int, path: str) -> No
     console.print(columns)
     console.print()
 
+    # Prominent Web UI section
+    from rich.style import Style  # local import to avoid global dependency
+
+    ui_host_display = "localhost" if host in ("0.0.0.0", "::") else host
+    ui_url = f"http://{ui_host_display}:{port}/mail"
+
+    link_style = Style(bold=True, color="bright_cyan", link=ui_url)
+    ui_text = Text()
+    ui_text.append("Open the Web UI to view all agent messages:\n", style="bold bright_white")
+    ui_text.append(ui_url, style=link_style)
+    ui_text.append("\n\n", style="white")
+    ui_text.append("Tip: Per‑agent inbox: ", style="dim")
+    ui_text.append(f"http://{ui_host_display}:{port}/mail/{{project}}/inbox/{{agent}}", style="bright_magenta")
+
+    ui_panel = Panel(
+        Align.center(ui_text),
+        title="[bold bright_white on bright_blue]🌐 Web UI[/bold bright_white on bright_blue]",
+        border_style="bright_blue",
+        box=box.HEAVY,
+        padding=(1, 2),
+    )
+    console.print(ui_panel)
+    console.print()
+
     # Sample JSON with syntax highlighting (showcase!)
     sample_json = {
         "stats": db_stats,

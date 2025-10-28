@@ -74,7 +74,7 @@ backup_file "$OUT_JSON"
 log_step "Writing ${OUT_JSON}"
 AUTH_HEADER_LINE=''  # localhost may allow unauthenticated; include if token present
 if [[ -n "${_TOKEN}" ]]; then
-  AUTH_HEADER_LINE='      "headers": { "Authorization": "Bearer ${_TOKEN}" },'
+  AUTH_HEADER_LINE="      \"headers\": { \"Authorization\": \"Bearer ${_TOKEN}\" },"
 fi
 write_atomic "$OUT_JSON" <<JSON
 {
