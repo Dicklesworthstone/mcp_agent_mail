@@ -99,6 +99,33 @@
       <span class="hidden lg:inline" x-text="isFullscreen ? 'Exit' : 'Fullscreen'"></span>
     </button>
 
+    <!-- Refresh Controls -->
+    <div class="flex items-center gap-3">
+      <button @click="fetchLatestMessages()"
+              class="px-3 py-2 border border-slate-200 dark:border-slate-700 rounded-lg bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium flex items-center gap-2 transition-all duration-200 hover:border-primary-300 dark:hover:border-primary-700 hover:text-primary-700 dark:hover:text-primary-400"
+              :aria-busy="isRefreshing"
+              aria-label="Refresh inbox">
+        <i data-lucide="refresh-cw"
+           class="w-4 h-4"
+           :class="isRefreshing ? 'animate-spin text-primary-500' : 'text-slate-500 dark:text-slate-400'"></i>
+        <span class="hidden xl:inline">Refresh</span>
+      </button>
+      <div class="flex flex-col">
+        <span class="text-xs font-medium text-slate-500 dark:text-slate-400" x-text="lastRefreshLabel"></span>
+        <template x-if="refreshError">
+          <span class="text-xs text-rose-500" x-text="refreshError"></span>
+        </template>
+      </div>
+      <label class="flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-400 cursor-pointer select-none">
+        <input type="checkbox"
+               class="form-checkbox h-4 w-4 rounded border-slate-300 dark:border-slate-600 text-primary-600 focus:ring-primary-500"
+               x-model="autoRefreshEnabled"
+               @change="handleAutoRefreshToggle()"
+               aria-label="Toggle automatic refresh" />
+        <span>Auto-refresh</span>
+      </label>
+    </div>
+
     <!-- Message Count -->
     <div class="hidden md:flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
       <span class="font-semibold text-slate-900 dark:text-white" x-text="filteredMessages.length"></span>
@@ -633,6 +660,12 @@ function unifiedInboxManager() {
     sortBy: 'newest',
     viewMode: 'split',
     isFullscreen: false,
+    autoRefreshSeconds: 45,
+    autoRefreshEnabled: true,
+    autoRefreshHandle: null,
+    isRefreshing: false,
+    lastRefreshTime: null,
+    refreshError: null,
 
     // Filters
     filters: {
@@ -680,9 +713,36 @@ function unifiedInboxManager() {
              this.filters.importance || this.filters.hasThread;
     },
 
+    get lastRefreshLabel() {
+      if (this.isRefreshing) {
+        return 'Refreshing…';
+      }
+      if (!this.lastRefreshTime) {
+        return 'Awaiting first refresh';
+      }
+      const diffSeconds = Math.floor((Date.now() - this.lastRefreshTime.getTime()) / 1000);
+      if (diffSeconds < 10) {
+        return 'Updated just now';
+      }
+      if (diffSeconds < 60) {
+        return `Updated ${diffSeconds}s ago`;
+      }
+      const diffMinutes = Math.floor(diffSeconds / 60);
+      if (diffMinutes < 60) {
+        return `Updated ${diffMinutes}m ago`;
+      }
+      const diffHours = Math.floor(diffMinutes / 60);
+      if (diffHours < 24) {
+        return `Updated ${diffHours}h ago`;
+      }
+      const diffDays = Math.floor(diffHours / 24);
+      return `Updated ${diffDays}d ago`;
+    },
+
     init() {
       this.filteredMessages = [...this.allMessages];
       this.filterMessages();
+      this.lastRefreshTime = new Date();
 
       // Setup keyboard shortcuts with proper cleanup
       this._keydownHandler = (e) => {
@@ -746,10 +806,16 @@ function unifiedInboxManager() {
         this.selectMessage(this.filteredMessages[0]);
       }
 
+      this.scheduleAutoRefresh();
+
       // Return cleanup function for Alpine.js v3
       return () => {
         if (this._keydownHandler) {
           document.removeEventListener('keydown', this._keydownHandler);
+        }
+        if (this.autoRefreshHandle) {
+          clearInterval(this.autoRefreshHandle);
+          this.autoRefreshHandle = null;
         }
       };
     },
@@ -854,6 +920,92 @@ function unifiedInboxManager() {
           lucide.createIcons();
         }
       });
+    },
+
+    // Refresh helpers
+    scheduleAutoRefresh() {
+      if (this.autoRefreshHandle) {
+        clearInterval(this.autoRefreshHandle);
+        this.autoRefreshHandle = null;
+      }
+      if (!this.autoRefreshEnabled) {
+        return;
+      }
+      this.autoRefreshHandle = setInterval(() => {
+        this.fetchLatestMessages({ silent: true });
+      }, this.autoRefreshSeconds * 1000);
+    },
+
+    handleAutoRefreshToggle() {
+      if (this.autoRefreshEnabled) {
+        this.scheduleAutoRefresh();
+      } else if (this.autoRefreshHandle) {
+        clearInterval(this.autoRefreshHandle);
+        this.autoRefreshHandle = null;
+      }
+    },
+
+    async fetchLatestMessages(options = {}) {
+      const { silent = false } = options;
+      if (this.isRefreshing) {
+        return;
+      }
+      this.isRefreshing = true;
+      this.refreshError = null;
+
+      const previouslySelectedId = this.selectedMessage?.id ?? null;
+      const previouslySelectedSet = new Set(this.selectedMessages || []);
+
+      try {
+        const response = await fetch(`/mail/api/unified-inbox?limit=500&include_projects=false`, {
+          headers: { Accept: 'application/json' },
+          cache: 'no-store'
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        const incomingMessages = Array.isArray(payload.messages) ? payload.messages : [];
+
+        this.allMessages = incomingMessages;
+        this.filterMessages();
+
+        if (previouslySelectedId) {
+          const nextSelection = this.filteredMessages.find((m) => m.id === previouslySelectedId);
+          if (nextSelection) {
+            this.selectMessage(nextSelection);
+          } else {
+            this.selectedMessage = null;
+          }
+        } else if (this.viewMode === 'split' && !this.selectedMessage && this.filteredMessages.length > 0) {
+          this.selectMessage(this.filteredMessages[0]);
+        }
+
+        if (previouslySelectedSet.size > 0) {
+          this.selectedMessages = this.filteredMessages
+            .filter((m) => previouslySelectedSet.has(m.id))
+            .map((m) => m.id);
+        } else if (this.selectedMessages.length > 0) {
+          this.selectedMessages = [];
+        }
+
+        this.lastRefreshTime = new Date();
+
+        if (!silent && typeof window.showToast === 'function') {
+          window.showToast('Inbox refreshed', 'success');
+        }
+      } catch (error) {
+        console.error('Unified inbox refresh failed:', error);
+        this.refreshError = 'Refresh failed. Retrying soon.';
+        if (!silent && typeof window.showToast === 'function') {
+          window.showToast('Failed to refresh inbox', 'error');
+        }
+      } finally {
+        this.isRefreshing = false;
+        if (!silent) {
+          this.scheduleAutoRefresh();
+        }
+      }
     },
 
     clearFilters() {

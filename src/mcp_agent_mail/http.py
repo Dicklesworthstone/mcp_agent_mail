@@ -1126,22 +1126,27 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             payload = collect_lock_status(settings_local)
             return JSONResponse(payload)
 
-        @fastapi_app.get("/mail", response_class=HTMLResponse)
-        async def mail_unified_inbox() -> HTMLResponse:
-            """Unified inbox showing ALL messages across ALL projects (Gmail-style) + Projects below"""
+        async def _build_unified_inbox_payload(
+            *, limit: int = 500, include_projects: bool = True
+        ) -> dict[str, Any]:
+            """Fetch unified inbox data for HTML and JSON consumers."""
 
-            await ensure_schema()
-            await refresh_project_sibling_suggestions()
-            sibling_map = await get_project_sibling_data()
-
-            messages = []
-            projects = []
+            safe_limit = max(1, min(int(limit), 1000))
+            messages: list[dict[str, Any]] = []
+            projects: list[dict[str, Any]] = []
 
             try:
+                await ensure_schema()
+
+                sibling_map: dict[int, dict[str, Any]] = {}
+                if include_projects:
+                    await refresh_project_sibling_suggestions()
+                    sibling_map = await get_project_sibling_data()
+
                 async with get_session() as session:
                     # Fetch recent messages with sender/project and computed recipient list
-                    # Avoid DISTINCT within GROUP_CONCAT for SQLite by using a subquery
-                    query = text("""
+                    query = text(
+                        """
                         SELECT
                             m.id,
                             m.subject,
@@ -1169,38 +1174,34 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         JOIN agents sender ON m.sender_id = sender.id
                         JOIN projects p ON m.project_id = p.id
                         ORDER BY m.created_ts DESC
-                        LIMIT 500
-                    """)
+                        LIMIT :limit
+                        """
+                    )
 
-                    rows = await session.execute(query)
+                    rows = await session.execute(query, {"limit": safe_limit})
 
                     for r in rows.fetchall():
-                        # Extract excerpt from body (first 150 chars, stripped of markdown)
                         body = r[2] or ""
                         excerpt = body[:150].replace('#', '').replace('*', '').replace('`', '').strip()
                         if len(body) > 150:
                             excerpt += "..."
 
-                        # Format created timestamp with robust timezone handling
                         created_ts = r[3]
                         if isinstance(created_ts, str):
                             created_dt = datetime.fromisoformat(created_ts.replace('Z', '+00:00'))
                         else:
                             created_dt = created_ts
 
-                        # Normalize to timezone-aware UTC (SQLite may yield naive datetimes)
                         if created_dt.tzinfo is None:
                             created_dt = created_dt.replace(tzinfo=timezone.utc)
                         else:
                             created_dt = created_dt.astimezone(timezone.utc)
 
-                        # Relative time calculation
                         now = datetime.now(timezone.utc)
                         delta = now - created_dt
 
-                        # Handle future dates (clock skew, testing, etc.)
                         if delta.days < 0 or (delta.days == 0 and delta.seconds < 0):
-                            created_relative = "Just now"  # Treat future dates as current
+                            created_relative = "Just now"
                         elif delta.days > 365:
                             created_relative = f"{delta.days // 365}y ago"
                         elif delta.days > 30:
@@ -1214,47 +1215,73 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         else:
                             created_relative = "Just now"
 
-                        messages.append({
-                            "id": r[0],
-                            "subject": r[1] or "(No subject)",
-                            "body_md": r[2] or "",
-                            "excerpt": excerpt,
-                            "created_ts": str(r[3]),
-                            "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
-                            "created_relative": created_relative,
-                            "importance": r[4] or "normal",
-                            "thread_id": r[5],
-                            "sender": r[6],
-                            "project_slug": r[7],
-                            "project_name": r[8],
-                            "recipients": ", ".join(part.strip() for part in (r[9] or "").split(",") if part.strip()),
-                            "read": False  # TODO: Implement read tracking
-                        })
-
-                    # Fetch all projects with sibling data
-                    rows = await session.execute(
-                        text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
-                    )
-                    for r in rows.fetchall():
-                        project_id = int(r[0])
-                        siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
-                        projects.append(
+                        messages.append(
                             {
-                                "id": project_id,
-                                "slug": r[1],
-                                "human_key": r[2],
-                                "created_at": str(r[3]),
-                                "confirmed_siblings": siblings.get("confirmed", []),
-                                "suggested_siblings": siblings.get("suggested", []),
+                                "id": r[0],
+                                "subject": r[1] or "(No subject)",
+                                "body_md": r[2] or "",
+                                "excerpt": excerpt,
+                                "created_ts": str(r[3]),
+                                "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
+                                "created_relative": created_relative,
+                                "importance": r[4] or "normal",
+                                "thread_id": r[5],
+                                "sender": r[6],
+                                "project_slug": r[7],
+                                "project_name": r[8],
+                                "recipients": ", ".join(
+                                    part.strip() for part in (r[9] or "").split(",") if part.strip()
+                                ),
+                                "read": False,
                             }
                         )
 
-            except Exception as e:
-                # Log error but return empty messages list to avoid breaking the UI
-                import logging
-                logging.error(f"Error fetching unified inbox data: {e}", exc_info=True)
+                    if include_projects:
+                        rows = await session.execute(
+                            text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                        )
+                        for r in rows.fetchall():
+                            project_id = int(r[0])
+                            siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
+                            projects.append(
+                                {
+                                    "id": project_id,
+                                    "slug": r[1],
+                                    "human_key": r[2],
+                                    "created_at": str(r[3]),
+                                    "confirmed_siblings": siblings.get("confirmed", []),
+                                    "suggested_siblings": siblings.get("suggested", []),
+                                }
+                            )
 
-            return await _render("mail_unified_inbox.html", messages=messages, projects=projects)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logging.error("Error fetching unified inbox data", exc_info=True, extra={"error": str(exc)})
+
+            return {"messages": messages, "projects": projects}
+
+        @fastapi_app.get("/mail", response_class=HTMLResponse)
+        async def mail_unified_inbox() -> HTMLResponse:
+            """Unified inbox showing ALL messages across ALL projects (Gmail-style) + Projects below"""
+
+            payload = await _build_unified_inbox_payload()
+            return await _render(
+                "mail_unified_inbox.html",
+                messages=payload.get("messages", []),
+                projects=payload.get("projects", []),
+            )
+
+        @fastapi_app.get("/mail/api/unified-inbox", response_class=JSONResponse)
+        async def mail_unified_inbox_api(
+            limit: int = 500,
+            include_projects: bool = False,
+        ) -> JSONResponse:
+            """JSON feed for the unified inbox view (used for background refresh)."""
+
+            payload = await _build_unified_inbox_payload(limit=limit, include_projects=include_projects)
+            if not include_projects:
+                # Reduce payload size when polling for message updates only
+                payload["projects"] = []
+            return JSONResponse(payload)
 
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
