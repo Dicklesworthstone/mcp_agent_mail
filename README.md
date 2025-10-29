@@ -831,7 +831,6 @@ Common variables you may set:
 | `LLM_CACHE_BACKEND` | `memory` | LLM cache backend (`memory` or `redis`) |
 | `LLM_CACHE_REDIS_URL` |  | Redis URL for LLM cache (if backend=redis) |
 | `LLM_COST_LOGGING_ENABLED` | `true` | Log LLM API costs and token usage |
-
 | `FILE_RESERVATIONS_CLEANUP_ENABLED` | `false` | Enable background cleanup of expired file reservations |
 | `FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for file reservations cleanup task |
 | `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations |
