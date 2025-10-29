@@ -124,8 +124,7 @@ async def test_external_cross_project_routing(isolated_env):
         assert any(d.get("project") == "Ops" for d in deliveries)
 
         # Verify archive in Ops contains message file
-        storage_root = Path(get_settings().storage.root).resolve()
-        ops_dir = storage_root / "ops" / "messages"
+        storage_root = Path(get_settings().storage.root).expanduser().resolve()
+        ops_dir = storage_root / "projects" / "ops" / "messages"
         assert any(ops_dir.rglob("*.md"))
-
 

@@ -795,7 +795,7 @@ def display_startup_banner(settings: Any, host: str, port: int, path: str) -> No
     ui_text.append("Open the Web UI to view all agent messages:\n", style="bold bright_white")
     ui_text.append(ui_url, style=link_style)
     ui_text.append("\n\n", style="white")
-    ui_text.append("Tip: Per‑agent inbox: ", style="dim")
+    ui_text.append("Tip: Per-agent inbox: ", style="dim")
     ui_text.append(f"http://{ui_host_display}:{port}/mail/{{project}}/inbox/{{agent}}", style="bright_magenta")
 
     ui_panel = Panel(

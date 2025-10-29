@@ -17,7 +17,7 @@ async def test_attachments_keep_originals_and_manifest(isolated_env, monkeypatch
     monkeypatch.setenv("KEEP_ORIGINAL_IMAGES", "true")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    storage_root = Path(get_settings().storage.root).resolve()
+    storage_root = Path(get_settings().storage.root).expanduser().resolve()
     img_path = storage_root.parent / "img_o.png"
     img = Image.new("RGB", (4, 4), color=(0, 0, 255))
     img.save(img_path)
@@ -42,7 +42,7 @@ async def test_attachments_keep_originals_and_manifest(isolated_env, monkeypatch
         )
         assert res.data.get("deliveries")
         # Check originals and manifest presence
-        proj = Path(get_settings().storage.root).resolve() / "projects" / "backend"
+        proj = storage_root / "projects" / "backend"
         manifests = list((proj / "attachments" / "_manifests").glob("*.json"))
         assert manifests, "expected manifest json"
         originals = list((proj / "attachments" / "originals").rglob("*.*"))
@@ -56,7 +56,7 @@ async def test_attachment_inline_vs_file_threshold(isolated_env, monkeypatch):
     monkeypatch.setenv("INLINE_IMAGE_MAX_BYTES", "1048576")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
-    storage_root = Path(get_settings().storage.root).resolve()
+    storage_root = Path(get_settings().storage.root).expanduser().resolve()
     img_path = storage_root.parent / "img_t.png"
     img = Image.new("RGB", (8, 8), color=(255, 0, 0))
     img.save(img_path)
@@ -101,5 +101,4 @@ async def test_attachment_inline_vs_file_threshold(isolated_env, monkeypatch):
         atts2 = (r_file.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments", [])
         assert any(a.get("type") == "file" for a in atts2)
     img_path.unlink(missing_ok=True)
-
 

@@ -107,11 +107,10 @@ async def test_renew_file_reservations_extends_expiry(isolated_env):
             "renew_file_reservations",
             {
                 "project_key": "Backend",
-                "agent_name": "Claimer",
+                "agent_name": "GreenCastle",
                 "paths": ["src/app.py"],
                 "extend_seconds": 600,
             },
         )
         assert r.data.get("renewed", 0) >= 1
-
 

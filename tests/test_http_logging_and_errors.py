@@ -53,7 +53,7 @@ async def test_readiness_error_path_returns_503(isolated_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rbac_denies_when_tool_name_missing(isolated_env, monkeypatch):
-    # Enable RBAC but no JWT; default role is reader -> missing tool name should require writer and be denied
+    # Enable RBAC but no auth -> request should be rejected before RBAC evaluation
     monkeypatch.setenv("HTTP_RBAC_ENABLED", "true")
     # Disable localhost auto-authentication to properly test RBAC
     monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
@@ -67,6 +67,5 @@ async def test_rbac_denies_when_tool_name_missing(isolated_env, monkeypatch):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.post(settings.http.path, json=_rpc("tools/call", {"arguments": {}}))
-        assert r.status_code == 403
-
+        assert r.status_code == 401
 

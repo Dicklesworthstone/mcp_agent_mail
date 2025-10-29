@@ -73,7 +73,7 @@ async def test_messaging_flow(isolated_env):
         text_payload = resource_blocks[0].text
         assert "BlueLake" in text_payload
 
-        storage_root = Path(get_settings().storage.root).resolve()
+        storage_root = Path(get_settings().storage.root).expanduser().resolve()
         profile = storage_root / "projects" / "backend" / "agents" / "BlueLake" / "profile.json"
         assert profile.exists()
         message_file = next(iter((storage_root / "projects" / "backend" / "messages").rglob("*.md")))
@@ -89,30 +89,32 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
 
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/backend"})
-        await client.call_tool(
+        alpha_identity = await client.call_tool(
             "create_agent_identity",
             {
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name_hint": "Alpha",
+                "name_hint": "GreenHill",
             },
         )
-        await client.call_tool(
+        beta_identity = await client.call_tool(
             "create_agent_identity",
             {
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name_hint": "Beta",
+                "name_hint": "BlueRiver",
             },
         )
+        alpha_name = alpha_identity.data["name"]
+        beta_name = beta_identity.data["name"]
 
         result = await client.call_tool(
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Alpha",
+                "agent_name": alpha_name,
                 "paths": ["src/app.py"],
                 "ttl_seconds": 3600,
                 "exclusive": True,
@@ -124,7 +126,7 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Beta",
+                "agent_name": beta_name,
                 "paths": ["src/app.py"],
             },
         )
@@ -134,7 +136,7 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
             "release_file_reservations",
             {
                 "project_key": "Backend",
-                "agent_name": "Alpha",
+                "agent_name": alpha_name,
                 "paths": ["src/app.py"],
             },
         )
@@ -156,7 +158,7 @@ async def test_file_reservation_enforcement_blocks_message_on_overlap(isolated_e
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Alpha",
+                "name": "GreenCastle",
             },
         )
         await client.call_tool(
@@ -165,7 +167,7 @@ async def test_file_reservation_enforcement_blocks_message_on_overlap(isolated_e
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Beta",
+                "name": "BlueLake",
             },
         )
 
@@ -174,8 +176,8 @@ async def test_file_reservation_enforcement_blocks_message_on_overlap(isolated_e
             "file_reservation_paths",
             {
                 "project_key": "Backend",
-                "agent_name": "Beta",
-                "paths": ["agents/Alpha/inbox/*/*/*.md"],
+                "agent_name": "BlueLake",
+                "paths": ["agents/GreenCastle/inbox/*/*/*.md"],
                 "ttl_seconds": 1800,
                 "exclusive": True,
             },
@@ -254,8 +256,8 @@ async def test_search_and_summarize(isolated_env):
 
 @pytest.mark.asyncio
 async def test_attachment_conversion(isolated_env):
-    storage = Path(get_settings().storage.root).resolve()
-    image_path = storage.parent / "temp.png"
+    storage_root = Path(get_settings().storage.root).expanduser().resolve()
+    image_path = storage_root.parent / "temp.png"
     image = Image.new("RGB", (2, 2), color=(255, 0, 0))
     image.save(image_path)
 
@@ -268,15 +270,15 @@ async def test_attachment_conversion(isolated_env):
                 "project_key": "Backend",
                 "program": "codex",
                 "model": "gpt-5",
-                "name": "Artist",
+                "name": "OrangeMountain",
             },
         )
         result = await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Artist",
-                "to": ["Artist"],
+                "sender_name": "OrangeMountain",
+                "to": ["OrangeMountain"],
                 "subject": "Image",
                 "body_md": "Here is an image ![pic](%s)" % image_path,
                 "attachment_paths": [str(image_path)],
@@ -284,8 +286,8 @@ async def test_attachment_conversion(isolated_env):
         )
         attachments = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments")
         assert attachments
-        storage_root = storage / "projects" / "backend"
-        attachment_files = list((storage_root / "attachments").rglob("*.webp"))
+        project_root = storage_root / "projects" / "backend"
+        attachment_files = list((project_root / "attachments").rglob("*.webp"))
         assert attachment_files
     image_path.unlink(missing_ok=True)
 
@@ -334,8 +336,8 @@ async def test_server_level_attachment_policy_override(isolated_env, monkeypatch
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
 
-    storage = Path(get_settings().storage.root).resolve()
-    image_path = storage.parent / "temp2.png"
+    storage_root = Path(get_settings().storage.root).expanduser().resolve()
+    image_path = storage_root.parent / "temp2.png"
     image = Image.new("RGB", (2, 2), color=(0, 255, 0))
     image.save(image_path)
 
@@ -435,8 +437,8 @@ async def test_file_reservation_conflict_ttl_transition_allows_after_expiry(isol
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Alpha",
-                "to": ["Alpha"],
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
                 "subject": "AllowedAfterTTL",
                 "body_md": "hello",
             },
@@ -451,8 +453,8 @@ async def test_project_sibling_suggestions_backend(isolated_env, monkeypatch):
     server = build_mcp_server()
 
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/data/projects/smartedgar_mcp"})
-        await client.call_tool("ensure_project", {"human_key": "/data/projects/smartedgar_mcp_frontend"})
+        await client.call_tool("ensure_project", {"human_key": "/data/projects/backend_core"})
+        await client.call_tool("ensure_project", {"human_key": "/data/projects/backend_core_ui"})
 
     await refresh_project_sibling_suggestions(max_pairs=5)
     data = await get_project_sibling_data()

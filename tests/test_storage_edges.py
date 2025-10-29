@@ -53,7 +53,7 @@ async def test_data_uri_embed_without_conversion(isolated_env, monkeypatch):
 @pytest.mark.asyncio
 async def test_missing_file_path_in_markdown_and_originals_toggle(isolated_env, monkeypatch):
     # Originals disabled then enabled
-    storage = Path(get_settings().storage.root).resolve()
+    storage = Path(get_settings().storage.root).expanduser().resolve()
     image_path = storage.parent / "nope.png"
     if image_path.exists():
         image_path.unlink()
@@ -123,4 +123,3 @@ async def test_async_file_lock_recovers_stale(tmp_path, monkeypatch):
     # Metadata should be cleaned up after release
     assert not metadata_path.exists()
     assert not lock_path.exists()
-
