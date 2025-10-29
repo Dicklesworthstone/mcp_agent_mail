@@ -568,7 +568,9 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 ### Concurrency and lifecycle
 
-- One request/task = one isolated operation; Git writes are serialized by a lock file in the project repo root
+- One request/task = one isolated operation
+- Archive writes are guarded by a per-project `.archive.lock` under `projects/<slug>/`
+- Git index/commit operations are serialized across the shared archive repo by a repo-level `.commit.lock`
 - DB operations are short-lived and scoped to each tool call; FTS triggers keep the search index current
 - Artifacts are written first, then committed as a cohesive unit with a descriptive message
 - Attachments are content-addressed (sha1) to avoid duplication
@@ -946,7 +948,8 @@ This section has been removed to keep the README focused. See API Quick Referenc
 - Observability
   - Add logging and metrics at the ASGI layer returned by `mcp.http_app()` (Prometheus, OpenTelemetry)
 - Concurrency
-  - Git operations are serialized by a file lock per project to avoid index contention
+  - Archive writes: per-project `.archive.lock` prevents cross-project head-of-line blocking
+  - Commits: repo-level `.commit.lock` serializes Git index/commit to avoid races across projects
 
 ## Python client example (HTTP JSON-RPC)
 
@@ -1047,7 +1050,7 @@ This section has been removed to keep the README focused. Client code samples be
 | `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
 | `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
 | `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
-| `resource://tooling/locks` | — | `{locks[], summary}` | Active archive locks and owners (debugging only) |
+| `resource://tooling/locks` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |

@@ -262,7 +262,8 @@ async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
         slug=slug,
         root=project_root,
         repo=repo,
-        lock_path=repo_root / ".archive.lock",
+        # Use a per-project advisory lock to avoid cross-project contention
+        lock_path=project_root / ".archive.lock",
         repo_root=repo_root,
     )
 
@@ -717,8 +718,10 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             if trailers:
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
             repo.index.commit(final_message, author=actor, committer=actor)
-
-    await _to_thread(_perform_commit)
+    # Serialize commits across all projects sharing the same Git repo to avoid index races
+    commit_lock_path = Path(repo.working_tree_dir).resolve() / ".commit.lock"
+    async with AsyncFileLock(commit_lock_path):
+        await _to_thread(_perform_commit)
 
 
 # ==================================================================================

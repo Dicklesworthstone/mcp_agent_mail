@@ -411,7 +411,7 @@ def create_agent(project_key: str, program: str, model: str, task_description: s
     _ensure_project_tree(slug)
     repo = _repo_for_project(slug)
     paths = _project_paths(slug)
-    lock = FileLock(str(paths["root"] / ".mcp-mail.lock"))
+    lock = FileLock(str(paths["root"] / ".archive.lock"))
 
     with lock:
         conn = _db()
@@ -488,7 +488,7 @@ def send_message(project_key: str, from_agent: str, to: List[str], subject: str,
     _ensure_project_tree(slug)
     repo = _repo_for_project(slug)
     paths = _project_paths(slug)
-    lock = FileLock(str(paths["root"] / ".mcp-mail.lock"))
+    lock = FileLock(str(paths["root"] / ".archive.lock"))
 
     ts = NOW()
     mid = f"msg_{time.strftime('%Y%m%d', time.gmtime(ts))}_{uuid.uuid4().hex[:8]}"
@@ -605,7 +605,7 @@ def reserve_file_paths(project_key: str, agent_name: str, paths: List[str], ttl_
     _ensure_project_tree(slug)
     repo = _repo_for_project(slug)
     ppaths = _project_paths(slug)
-    lock = FileLock(str(ppaths["root"] / ".mcp-mail.lock"))
+    lock = FileLock(str(ppaths["root"] / ".archive.lock"))
     ts = NOW()
     exp = ts + max(60, ttl_seconds)
 
