@@ -46,6 +46,8 @@ What this does:
 
 Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, or `--token <hex>`.
 
+### If you want to do it yourself
+
 Clone the repo, set up and install with uv in a python 3.14 venv (install uv if you don't have it already), and then run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh`. This will automatically set things up for your various installed coding agent tools and start the MCP server on port 8765. If you want to run the MCP server again in the future, simply run `scripts/run_server_with_token.sh`:
 
 ```bash
@@ -109,25 +111,14 @@ Common pitfalls
 
 ## Integrating with Beads (dependency‑aware task planning)
 
-Beads is a lightweight, dependency‑aware issue database and CLI (command `bd`) that helps agents pick "ready work," manage priorities, and track status. It pairs naturally with MCP Agent Mail: keep Beads as the task authority and use Agent Mail for conversation, decisions, file‑reservation signaling, and human‑auditable artifacts. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads is a lightweight task planner (`bd` CLI) that complements Agent Mail by keeping status and dependencies in one place while Mail handles messaging, file reservations, and audit trails. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
 
-Why it's complementary
-- **Separation of concerns**: Beads = tasks, priorities, dependencies; Agent Mail = messaging, threads, audit trail, file reservations.
-- **Non‑overlapping MCP roles**: You can mount both in your MCP client without transport conflicts (both expose MCP surfaces).
-- **Shared identifiers**: Use Beads issue ids (e.g., `bd-123`) as Mail `thread_id`s so search, summaries, and audits line up.
+Highlights:
+- Beads owns task prioritization; Agent Mail carries the conversations and artifacts.
+- Shared identifiers (e.g., `bd-123`) keep Beads issues, Mail threads, and commits aligned.
+- Install the `bd` CLI via prebuilt release or Go build; see the repository for platform specifics.
 
-Install Beads (Linux/macOS)
-- Option A (prebuilt): Download the latest release for your platform from the repository's Releases page, place `bd` on your `PATH`, and `chmod +x` if needed. See: [steveyegge/beads](https://github.com/steveyegge/beads)
-- Option B (from source):
-  ```bash
-  # Prereqs: Go toolchain (1.22+ recommended)
-  git clone https://github.com/steveyegge/beads
-  cd beads
-  go build -o bd ./cmd/bd
-  sudo mv ./bd /usr/local/bin/
-  bd --help
-  ```
-Here is a ready made blurb you can add to your AGENTS.md or CLAUDE.md files (place below the previous blurb if you plan on using beads):
+Copy/paste blurb for agent-facing docs (leave as-is for reuse):
 
 ```
 
@@ -216,21 +207,6 @@ graph LR
   G --- GA
 ```
 
-```
-Coding Agents (various CLIs)
-        |  HTTP (Streamable) tools/resources
-        v
-  mcp-agent-mail (FastMCP server)
-        |                                   
-        | writes/reads                             indexes/queries
-        v                                          v
-Global Git archive (STORAGE_ROOT)           SQLite (FTS5)
-  ├─ agents/<AgentName>/{inbox,outbox}/     agents/messages/file_reservations
-  ├─ agents/<AgentName>/profile.json
-  ├─ messages/YYYY/MM/<msg-id>.md (canonical)
-  └─ file_reservations/<sha1-of-path>.json
-```
-
 ## Web UI (human-facing mail viewer)
 
 The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, file reservations, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
@@ -240,16 +216,18 @@ The server ships a lightweight, server‑rendered Web UI for humans. It lets you
 
 ### Launching the Web UI
 
-Start the HTTP server (the UI is mounted automatically):
+Recommended (simple):
 
 ```bash
-uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
+scripts/run_server_with_token.sh
 # then open http://127.0.0.1:8765/mail
 ```
 
-Alternative (ASGI factory):
+Advanced (manual commands):
 
 ```bash
+uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
+# or:
 uv run uvicorn mcp_agent_mail.http:build_http_app --factory --host 127.0.0.1 --port 8765
 ```
 
@@ -678,21 +656,6 @@ sequenceDiagram
   - External-content FTS virtual table and triggers index subject/body on insert/update/delete
   - Queries are constrained to the project id and ordered by `created_ts DESC`
 
-## Tools (MCP surface)
-
-| Tool | Purpose |
-| :-- | :-- |
-| `health_check()` | Return basic readiness information for the Agent Mail server |
-| `ensure_project(human_key)` | Idempotently create or ensure a project exists for the given human key |
-| `register_agent(...)` | Register a new agent identity and write `profile.json` in Git |
-| `whois(project_key, agent_name)` | Enriched profile for one agent (optionally includes recent commits) |
-| `create_agent_identity(project_key, program, model, name_hint?, task_description?, attachments_policy?)` | Always creates a new unique agent and writes `profile.json` |
-| `send_message(...)` | Create canonical + inbox/outbox markdown artifacts and commit |
-| `reply_message(...)` | Reply to an existing message and continue the thread |
-| `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?)` | Request permission to message another agent |
-| `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?)` | Approve or deny a contact request |
-| `list_contacts(project_key, agent_name)` | List contact links for an agent |
-| `set_contact_policy(project_key, agent_name, policy)` | Set policy: `open`, `auto` (default), `contacts_only`, `block_all` |
 ## Contact model and "consent-lite" messaging
 
 Goal: make coordination "just work" without spam across unrelated agents. The server enforces per-project isolation by default and adds an optional consent layer within a project so agents only contact relevant peers.
@@ -740,37 +703,11 @@ When two repos represent the same underlying project (e.g., `frontend` and `back
 
 Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is on by default (CONTACT_ENFORCEMENT_ENABLED=true) but is designed to be non-blocking in obvious collaboration contexts.
 
-| Tool | Purpose |
-| :-- | :-- |
-| `fetch_inbox(...)` | Pull recent messages for an agent |
-| `mark_message_read(project_key, agent_name, message_id)` | Mark a specific message as read for the given agent |
-| `acknowledge_message(...)` | Mark a message as acknowledged by agent |
-| `macro_start_session(...)` | Orchestrates ensure→register→optional file reservation→inbox fetch for session startup |
-| `macro_prepare_thread(...)` | Bundles registration, thread summary, and inbox context |
-| `macro_file_reservation_cycle(...)` | File Reservation + optionally release surfaces around a focused edit block |
-| `macro_contact_handshake(...)` | Automates contact request/approval and optional welcome ping |
-| `file_reservation_paths(...)` | Request advisory leases on files/globs |
-| `release_file_reservations(...)` | Release existing leases |
-| `renew_file_reservations(...)` | Extend TTL of existing file reservations without reissuing them |
-| `search_messages(...)` | FTS5 search over subject/body |
-| `summarize_thread(...)` | Extract summary/action items across a thread |
-| `summarize_threads(...)` | Digest across multiple threads (optional LLM refinement) |
-| `install_precommit_guard(project_key, code_repo_path)` | Install a Git pre-commit guard in a target repo |
-| `uninstall_precommit_guard(code_repo_path)` | Remove the guard |
+<!-- Consolidated in API Quick Reference → Tools below to avoid duplication -->
 
 ## Resource layer (read-only URIs)
 
-Expose common reads as resources that clients can fetch:
-
-- `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
-- `resource://message/{id}{?project}`
-- `resource://thread/{thread_id}{?project,include_bodies}`
-- `resource://views/urgent-unread/{agent}{?project,limit}`
-- `resource://views/ack-required/{agent}{?project,limit}`
-- `resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit}`: ack-required messages older than TTL without acknowledgements
-- `resource://mailbox-with-commits/{agent}{?project,limit}`: mailbox items enriched with per-message commit metadata and diff summaries (recommended)
-- `resource://mailbox/{agent}{?project,limit}`: recent inbox items with a basic/heuristic commit reference (legacy/simple)
-- `resource://outbox/{agent}{?project,limit,include_bodies,since_ts}`: messages sent by the agent (optionally include bodies)
+Expose common reads as resources that clients can fetch. See API Quick Reference → Resources for the full list and parameters.
 
 Example (conceptual) resource read:
 
@@ -781,16 +718,7 @@ Example (conceptual) resource read:
 }
 ```
 
-### Resource parameters
-
-- `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}`
-  - `project`: disambiguate if the same agent name exists in multiple projects; if omitted, the server auto-resolves only when the agent name uniquely maps to a single project. Otherwise, pass `project` explicitly.
-  - `since_ts`: ISO-8601 timestamp string; only messages newer than this are returned
-  - `urgent_only`: when true, only `importance in ('high','urgent')`
-  - `include_bodies`: include markdown bodies in results
-  - `limit`: max results (default 20)
-- `resource://message/{id}{?project}`: fetch one message; `project` optional if id is globally unique
-- `resource://thread/{thread_id}{?project,include_bodies}`: list a thread's messages; if `project` is omitted, the server auto-resolves only when the thread is uniquely identifiable to a single project (by numeric message id seed or thread key). Otherwise, pass `project` explicitly.
+<!-- Parameters consolidated in API Quick Reference → Resources -->
 
 ```mermaid
 sequenceDiagram
@@ -804,8 +732,7 @@ sequenceDiagram
   Server-->>Client: inbox data
 ```
 
-- `resource://views/urgent-unread/{agent}{?project,limit}`: high/urgent importance messages where `read_ts` is null
-- `resource://views/ack-required/{agent}{?project,limit}`: messages with `ack_required=true` where `ack_ts` is null
+<!-- View URIs consolidated in API Quick Reference → Resources -->
 
 ## File Reservations and the optional pre-commit guard
 
@@ -951,8 +878,9 @@ bash scripts/test_endpoints.sh
 bash scripts/test_guard.sh
 
 # Database schema (automatic!)
-# No migrations needed - the database schema automatically syncs with model definitions
-# Just start the server or run:
+# Tables are created from SQLModel definitions on first run. Schema changes are not auto‑migrated;
+# if models change, delete the SQLite DB (and WAL/SHM) and run migrate again.
+# Start the server or run:
 uv run python -m mcp_agent_mail.cli migrate
 ```
 
@@ -965,7 +893,7 @@ uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
 
-### Quick onboarding for agents
+## Agent Onboarding
 
 1) Register an identity
 
@@ -1346,22 +1274,7 @@ See `docs/observability.md` for a step-by-step cookbook (Loki/Prometheus example
 
 Operations teams can follow `docs/operations_alignment_checklist.md`, which links to the capability templates in `deploy/capabilities/` and the sample Prometheus alert rules in `deploy/observability/`.
 
-## Roadmap (selected)
-
-See `TODO.md` for the in-progress task list, including:
-
-- Filesystem archive and Git integration hardening (locks, authoring, commits)
-- Agent identity workflow polish (uniqueness, activity tracking)
-- Messaging enhancements (replies, read/ack semantics, urgent-only)
-- File reservations/leases (overlap detection, releases, resources)
-- Resources for inbox, thread, message, file reservations
-- Search UI and thread summaries
-- Config/auth/CLI and health endpoints
-- Tests for archive, file reservations, search, CLI
-
 ---
-
-If you're building with or contributing to this project, please read `project_idea_and_guide.md` for full design context and the motivation behind these decisions. Contributions that preserve the clean, HTTP-only FastMCP approach and the Git+SQLite dual persistence model are welcome.
 
 ## Deployment quick notes
 
@@ -1423,7 +1336,7 @@ sudo systemctl status mcp-agent-mail
 
 Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.
 
-See `deploy/gunicorn.conf.py` for a starter configuration and `TODO.md` for the broader deployment roadmap (Docker, systemd, automation scripts, CI/CD).
+See `deploy/gunicorn.conf.py` for a starter configuration. For project direction and planned areas, read `project_idea_and_guide.md`.
 
 ## CLI Commands
 
@@ -1466,51 +1379,7 @@ This repo includes a GitHub Actions workflow that runs on pushes and PRs:
 
 See `.github/workflows/ci.yml`.
 
-## Agent Onboarding Guide
-
-This quick guide shows how to register an agent, reserve file paths, send a message, and acknowledge.
-
-1) Start the server
-
-```bash
-uv run python -m mcp_agent_mail.cli serve-http
-```
-
-2) Register a project and an agent
-
-```bash
-uv run python -m mcp_agent_mail.cli list-projects
-```
-
-Or via MCP tools (using your client):
-
-- ensure project
-- register agent
-
-Example JSON-RPC payload (abbreviated):
-
-```json
-{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"ensure_project","arguments":{"human_key":"/abs/path/backend"}}}
-```
-
-3) Reserve a path for focused work (optional but recommended)
-
-- Use `file_reservation_paths` to create an exclusive reservation on your working surface.
-- Renew with `renew_file_reservations` before expiry.
-- Release with `release_file_reservations` when done.
-
-4) Send a message
-
-Use `send_message` with `to` set to recipients by agent name. Attach files via `attachment_paths` or inline images in Markdown. Attachments are converted to WebP and stored under `attachments/` by default.
-
-5) Acknowledge messages
-
-Use `acknowledge_message` to record receipt; overdue ACKs may be surfaced by background checks.
-
-See also:
-- `resource://inbox/{agent}` for inbox browsing
-- `cli acks pending`/`overdue` for reminder views
-- `cli file_reservations active/soon` for active file reservations
+For a step-by-step walkthrough of registering agents, reserving files, and sending your first message, see [Agent Onboarding](#agent-onboarding).
 
 ## Claude Code Integration (HTTP MCP + Hooks)
 
@@ -1543,10 +1412,10 @@ Example `.claude/settings.json`:
 }
 ```
 
-Start the MCP HTTP server:
+Start the server (recommended):
 
 ```bash
-uv run python -m mcp_agent_mail.cli serve-http
+scripts/run_server_with_token.sh
 ```
 
 ## Cline Integration (HTTP MCP)
@@ -1565,10 +1434,10 @@ Add our MCP server to Cline's MCP settings. Example project-local snippet you ca
 }
 ```
 
-Start the MCP HTTP server:
+Start the server (recommended):
 
 ```bash
-uv run python -m mcp_agent_mail.cli serve-http
+scripts/run_server_with_token.sh
 ```
 
 ## Windsurf Integration (HTTP MCP)
@@ -1587,10 +1456,10 @@ Add our MCP server to Windsurf's MCP settings. Example project-local snippet you
 }
 ```
 
-Start the MCP HTTP server:
+Start the server (recommended):
 
 ```bash
-uv run python -m mcp_agent_mail.cli serve-http
+scripts/run_server_with_token.sh
 ```
 
 ## OpenCode (sst/opencode) Integration via Helper Script
