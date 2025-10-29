@@ -1610,50 +1610,6 @@ def build_mcp_server() -> FastMCP:
         convert_markdown = (
             convert_images_override if convert_images_override is not None else settings.storage.convert_images
         )
-        # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
-        if settings.file_reservations_enforcement_enabled:
-            await _expire_stale_file_reservations(project.id or 0)
-            now_ts = datetime.now(timezone.utc)
-            y_dir = now_ts.strftime("%Y")
-            m_dir = now_ts.strftime("%m")
-            candidate_surfaces: list[str] = []
-            candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
-            for r in to_agents + cc_agents + bcc_agents:
-                candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
-
-            async with get_session() as session:
-                rows = await session.execute(
-                    select(FileReservation, Agent.name)
-                    .join(Agent, FileReservation.agent_id == Agent.id)
-                    .where(
-                        FileReservation.project_id == project.id,
-                        cast(Any, FileReservation.released_ts).is_(None),
-                        FileReservation.expires_ts > now_ts,
-                    )
-                )
-                active_file_reservations = rows.all()
-
-            conflicts: list[dict[str, Any]] = []
-            for surface in candidate_surfaces:
-                for file_reservation_record, holder_name in active_file_reservations:
-                    if _file_reservations_conflict(file_reservation_record, surface, True, sender):
-                        conflicts.append({
-                            "surface": surface,
-                            "holder": holder_name,
-                            "path_pattern": file_reservation_record.path_pattern,
-                            "exclusive": file_reservation_record.exclusive,
-                            "expires_ts": _iso(file_reservation_record.expires_ts),
-                        })
-            if conflicts:
-                # Return a structured error payload that clients can surface directly
-                return {
-                    "error": {
-                        "type": "FILE_RESERVATION_CONFLICT",
-                        "message": "Conflicting active file_reservations prevent message write.",
-                        "conflicts": conflicts,
-                    }
-                }
-
         # Respect agent-level attachments policy override if set
         embed_policy: str = "auto"
         if getattr(sender, "attachments_policy", None) in {"inline", "file"}:
@@ -1663,6 +1619,50 @@ def build_mcp_server() -> FastMCP:
         payload: dict[str, Any] | None = None
 
         async with AsyncFileLock(archive.lock_path):
+            # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
+            if settings.file_reservations_enforcement_enabled:
+                await _expire_stale_file_reservations(project.id or 0)
+                now_ts = datetime.now(timezone.utc)
+                y_dir = now_ts.strftime("%Y")
+                m_dir = now_ts.strftime("%m")
+                candidate_surfaces: list[str] = []
+                candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
+                for r in to_agents + cc_agents + bcc_agents:
+                    candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
+
+                async with get_session() as session:
+                    rows = await session.execute(
+                        select(FileReservation, Agent.name)
+                        .join(Agent, FileReservation.agent_id == Agent.id)
+                        .where(
+                            FileReservation.project_id == project.id,
+                            cast(Any, FileReservation.released_ts).is_(None),
+                            FileReservation.expires_ts > now_ts,
+                        )
+                    )
+                    active_file_reservations = rows.all()
+
+                conflicts: list[dict[str, Any]] = []
+                for surface in candidate_surfaces:
+                    for file_reservation_record, holder_name in active_file_reservations:
+                        if _file_reservations_conflict(file_reservation_record, surface, True, sender):
+                            conflicts.append({
+                                "surface": surface,
+                                "holder": holder_name,
+                                "path_pattern": file_reservation_record.path_pattern,
+                                "exclusive": file_reservation_record.exclusive,
+                                "expires_ts": _iso(file_reservation_record.expires_ts),
+                            })
+                if conflicts:
+                    # Return a structured error payload that clients can surface directly
+                    return {
+                        "error": {
+                            "type": "FILE_RESERVATION_CONFLICT",
+                            "message": "Conflicting active file_reservations prevent message write.",
+                            "conflicts": conflicts,
+                        }
+                    }
+
             processed_body, attachments_meta, attachment_files = await process_attachments(
                 archive,
                 body_md,

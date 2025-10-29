@@ -7,7 +7,6 @@ import base64
 import contextlib
 import hashlib
 import json
-import logging
 import os
 import re
 import time
@@ -16,16 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from filelock import SoftFileLock, Timeout as FileLockTimeout
+from filelock import SoftFileLock
 from git import Actor, Repo
 from PIL import Image
 
 from .config import Settings
 
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
-
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -47,7 +43,7 @@ class ProjectArchive:
 
 
 class AsyncFileLock:
-    """Async-friendly lock that tolerates stale SoftFileLock handles."""
+    """Async-friendly wrapper around SoftFileLock with metadata tracking."""
 
     def __init__(
         self,
@@ -56,37 +52,18 @@ class AsyncFileLock:
         timeout_seconds: float = 60.0,
         stale_timeout_seconds: float = 180.0,
     ) -> None:
-        self._lock_path = path
         self._lock = SoftFileLock(str(path))
         self._timeout = float(timeout_seconds)
         self._stale_timeout = float(max(stale_timeout_seconds, 0.0))
         self._pid = os.getpid()
         self._metadata_path = path.parent / f"{path.name}.owner.json"
-        env_value = (os.environ.get("APP_ENVIRONMENT") or "").lower()
-        self._is_test_env = env_value == "test"
-        self._effective_timeout = 0.1 if self._is_test_env else self._timeout
         self._held = False
 
     async def __aenter__(self) -> None:
-        while True:
-            try:
-                await _to_thread(self._lock.acquire, timeout=self._effective_timeout)
-            except FileLockTimeout:
-                if self._is_test_env:
-                    # Skip locking entirely in tests when contention occurs.
-                    return None
-                recovered = await _to_thread(self._handle_timeout)
-                if recovered:
-                    continue
-                raise
-            except Exception:
-                if self._is_test_env:
-                    return None
-                raise
-            else:
-                self._held = True
-                await _to_thread(self._write_metadata)
-                return None
+        await _to_thread(self._lock.acquire)
+        self._held = True
+        await _to_thread(self._write_metadata)
+        return None
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if not self._held:
@@ -96,55 +73,6 @@ class AsyncFileLock:
         with contextlib.suppress(Exception):
             await _to_thread(self._metadata_path.unlink)
         self._held = False
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _handle_timeout(self) -> bool:
-        """Attempt to break a stale lock after timing out."""
-
-        lock_path = self._lock_path
-        if not lock_path.exists():
-            return False
-
-        metadata: dict[str, Any] = {}
-        if self._metadata_path.exists():
-            try:
-                metadata = json.loads(self._metadata_path.read_text(encoding="utf-8"))
-            except Exception:
-                metadata = {}
-
-        owner_pid = int(metadata.get("pid", 0) or 0)
-        created_ts = float(metadata.get("created_ts", 0.0) or 0.0)
-        now = time.time()
-
-        lock_age = None
-        with contextlib.suppress(Exception):
-            lock_age = now - lock_path.stat().st_mtime
-        if created_ts:
-            lock_age = now - created_ts
-
-        if owner_pid and self._pid_alive(owner_pid):
-            # Another live process still owns the lock.
-            return False
-
-        if lock_age is not None and lock_age < self._stale_timeout:
-            # Not considered stale yet.
-            return False
-
-        with contextlib.suppress(Exception):
-            lock_path.unlink()
-        with contextlib.suppress(Exception):
-            self._metadata_path.unlink()
-        logger.warning(
-            "storage.async_file_lock.stale_recovered",
-            extra={
-                "lock_path": str(lock_path),
-                "owner_pid": owner_pid,
-                "lock_age_seconds": lock_age,
-            },
-        )
-        return True
 
 
     def _write_metadata(self) -> None:
