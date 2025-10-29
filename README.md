@@ -863,23 +863,23 @@ Common variables you may set:
 
 ## Development quick start
 
-This repository targets Python 3.14 and uses `uv` with a virtual environment. We manage dependencies via `pyproject.toml` only.
+Prerequisite: complete the setup above (Python 3.14 + uv venv + uv sync).
+
+Dev helpers:
 
 ```bash
-uv venv --python 3.14
-source .venv/bin/activate  # or use direnv
-uv sync --dev
-
 # Quick endpoint smoke test (server must be running locally)
 bash scripts/test_endpoints.sh
 
 # Pre-commit guard smoke test (no pytest)
 bash scripts/test_guard.sh
+```
 
-# Database schema (automatic!)
-# Tables are created from SQLModel definitions on first run. Schema changes are not auto‑migrated;
-# if models change, delete the SQLite DB (and WAL/SHM) and run migrate again.
-# Start the server or run:
+Database schema (automatic):
+
+```bash
+# Tables are created from SQLModel definitions on first run.
+# If models change, delete the SQLite DB (and WAL/SHM) and run migrate again.
 uv run python -m mcp_agent_mail.cli migrate
 ```
 
@@ -891,107 +891,6 @@ uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
 Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
-
-## Agent Onboarding
-
-1) Register an identity
-
-```json
-{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name":"BlueLake"}}}
-```
-
-2) Reserve edit surface (optional)
-
-```json
-{"method":"tools/call","params":{"name":"file_reservation_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","paths":["app/api/*.py"],"ttl_seconds":3600,"exclusive":true}}}
-```
-
-3) Send and acknowledge messages
-
-```json
-{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"BlueLake","to":["BlueLake"],"subject":"Plan","body_md":"hello"}}}
-{"method":"tools/call","params":{"name":"acknowledge_message","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":"<id>"}}}
-```
-
-## End-to-end walkthrough
-
-1. Create two agent identities (backend and frontend projects):
-
-```json
-{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/backend","program":"codex-cli","model":"gpt5-codex","name":"GreenCastle","task_description":"Auth refactor"}}}
-{"method":"tools/call","params":{"name":"register_agent","arguments":{"project_key":"/abs/path/frontend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"}}}
-```
-
-2. Backend agent reserves `app/api/*.py` exclusively for 2 hours while preparing DB migrations:
-
-```json
-{"method":"tools/call","params":{"name":"file_reservation_paths","arguments":{"project_key":"/abs/path/backend","agent_name":"GreenCastle","paths":["app/api/*.py"],"ttl_seconds":7200,"exclusive":true,"reason":"migrations"}}}
-```
-
-3. Backend agent sends a design doc with an embedded diagram image:
-
-```json
-{"method":"tools/call","params":{"name":"send_message","arguments":{"project_key":"/abs/path/backend","sender_name":"GreenCastle","to":["BlueLake"],"subject":"Plan for /api/users","body_md":"Here is the flow...\n\n![diagram](docs/flow.png)","convert_images":true}}}
-```
-
-4. Frontend agent checks inbox and replies in-thread with questions; reply inherits/sets `thread_id`:
-
-```json
-{"method":"tools/call","params":{"name":"fetch_inbox","arguments":{"project_key":"/abs/path/backend","agent_name":"BlueLake","include_bodies":true}}}
-{"method":"tools/call","params":{"name":"reply_message","arguments":{"project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake","body_md":"Questions: ..."}}}
-```
-
-5. Summarize the thread for quick context:
-
-```json
-{"method":"tools/call","params":{"name":"summarize_thread","arguments":{"project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true}}}
-```
-
-6. Pre-commit guard is installed on the backend repo to protect exclusive file reservations:
-
-```json
-{"method":"tools/call","params":{"name":"install_precommit_guard","arguments":{"project_key":"/abs/path/backend","code_repo_path":"/abs/path/backend"}}}
-```
-
-## HTTP usage examples (JSON-RPC over Streamable HTTP)
-
-Assuming the server is running at `http://127.0.0.1:8765/mcp/` (trailing slash optional).
-
-Call a tool:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8765/mcp \
-  -H 'content-type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "1",
-    "method": "tools/call",
-    "params": {
-      "name": "register_agent",
-      "arguments": {
-        "project_key": "/abs/path/backend",
-        "program": "codex-cli",
-        "model": "gpt5-codex",
-        "task_description": "Auth refactor"
-      }
-    }
-  }'
-```
-
-Read a resource:
-
-```bash
-curl -sS -X POST http://127.0.0.1:8765/mcp \
-  -H 'content-type: application/json' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": "2",
-    "method": "resources/read",
-    "params": {
-      "uri": "resource://inbox/BlueLake?project=/abs/path/backend&limit=10"
-    }
-  }'
-```
 
 ## Search syntax tips (SQLite FTS5)
 
@@ -1012,61 +911,7 @@ curl -sS -X POST http://127.0.0.1:8765/mcp \
 
 ## Examples (conceptual tool calls)
 
-Create an agent:
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "register_agent",
-    "arguments": {
-      "project_key": "/abs/path/backend",
-      "program": "codex-cli",
-      "model": "gpt5-codex",
-      "name": "GreenCastle",
-      "task_description": "Auth refactor"
-    }
-  }
-}
-```
-
-Send a message (auto-convert images to WebP; inline small ones):
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "send_message",
-    "arguments": {
-      "project_key": "/abs/path/backend",
-      "sender_name": "GreenCastle",
-      "to": ["BlueLake"],
-      "subject": "Plan for /api/users",
-      "body_md": "Here is the flow...\n\n![diagram](docs/flow.png)",
-      "convert_images": true
-    }
-  }
-}
-```
-
-Reserve a surface for editing:
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "file_reservation_paths",
-    "arguments": {
-      "project_key": "/abs/path/backend",
-      "agent_name": "GreenCastle",
-      "paths": ["app/api/*.py"],
-      "ttl_seconds": 7200,
-      "exclusive": true,
-      "reason": "migrations"
-    }
-  }
-}
-```
+This section has been removed to keep the README focused. See API Quick Reference below for canonical method signatures.
 
 ## Operational notes
 
@@ -1105,47 +950,7 @@ Reserve a surface for editing:
 
 ## Python client example (HTTP JSON-RPC)
 
-```python
-import httpx, json
-
-URL = "http://127.0.0.1:8765/mcp/"
-
-def call_tool(name: str, arguments: dict) -> dict:
-    payload = {
-        "jsonrpc": "2.0",
-        "id": "1",
-        "method": "tools/call",
-        "params": {"name": name, "arguments": arguments},
-    }
-    r = httpx.post(URL, json=payload, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if "error" in data:
-        raise RuntimeError(data["error"])  # surface MCP error
-    # JSON-RPC response body from Streamable HTTP includes the tool result directly in result
-    return data.get("result", {})
-
-def read_resource(uri: str) -> dict:
-    payload = {"jsonrpc":"2.0","id":"2","method":"resources/read","params":{"uri": uri}}
-    r = httpx.post(URL, json=payload, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if "error" in data:
-        raise RuntimeError(data["error"])  # surface MCP error
-    # Resources were not unwrapped before, so keep same behavior
-    # Returns {contents: [...]} - client can access contents array as needed
-    return data.get("result", {})
-
-if __name__ == "__main__":
-    profile = call_tool("register_agent", {
-        "project_key": "/abs/path/backend",
-        "program": "codex-cli",
-        "model": "gpt5-codex",
-        "task_description": "Auth refactor",
-    })
-    inbox = read_resource("resource://inbox/{}?project=/abs/path/backend&limit=5".format(profile["name"]))
-    print(json.dumps(inbox, indent=2))
-```
+This section has been removed to keep the README focused. Client code samples belong in `examples/`.
 
 ## Troubleshooting
 
@@ -1168,6 +973,36 @@ if __name__ == "__main__":
   - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists (`FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true`, default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo.
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
+
+- Why JSON‑RPC instead of REST or gRPC?
+  - MCP defines a tool/resource method call model that maps naturally to JSON‑RPC over a single endpoint. It keeps clients simple (one URL, method name + params), plays well with proxies, and avoids SDK lock‑in while remaining language‑agnostic.
+
+- Why separate "resources" (reads) from "tools" (mutations)?
+  - Clear semantics enable aggressive caching and safe prefetch for resources, while tools remain explicit, auditable mutations. This split also powers RBAC (read‑only vs writer) without guesswork.
+
+- Why canonical message storage in Git, not only in the database?
+  - Git gives durable, diffable, human‑reviewable artifacts you can clone, branch, and audit. SQLite provides fast indexing and FTS. The combo preserves governance and operability without a heavyweight message bus.
+
+- Why advisory file reservations instead of global locks?
+  - Agents coordinate asynchronously; hard locks create head‑of‑line blocking and brittle failures. Advisory reservations surface intent and conflicts while the optional pre‑commit guard enforces locally where it matters.
+
+- Why are agent names adjective+noun?
+  - Memorable identities reduce confusion in inboxes, commit logs, and UI. The scheme yields low collision risk while staying human‑friendly (vs GUIDs) and predictable for directory listings.
+
+- Why is `project_key` an absolute path?
+  - Using the workspace’s absolute path creates a stable, collision‑resistant project identity across shells and agents. Slugs are derived deterministically from it, avoiding accidental forks of the same project.
+
+- Why WebP attachments and optional inlining?
+  - WebP provides compact, high‑quality images. Small images can be inlined for readability; larger ones are stored as attachments. You can keep originals when needed (`KEEP_ORIGINAL_IMAGES=true`).
+
+- Why both static bearer and JWT/JWKS support?
+  - Local development should be zero‑friction (single bearer). Production benefits from verifiable JWTs with role claims, rotating keys via JWKS, and layered RBAC.
+
+- Why SQLite FTS5 instead of an external search service?
+  - FTS5 delivers fast, relevant search with minimal ops. It’s embedded, portable, and easy to back up with the Git archive. If FTS isn’t available, we degrade to SQL LIKE automatically.
+
+- Why is LLM usage optional?
+  - Summaries and discovery should enhance—not gate—core functionality. Keeping LLM usage optional controls cost and latency while allowing richer UX when enabled.
 
 ## API Quick Reference
 
@@ -1369,109 +1204,6 @@ uv run python -m mcp_agent_mail.cli acks pending /abs/path/backend BlueLake --li
 uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 ```
 
-## Continuous Integration
+## Client integrations
 
-This repo includes a GitHub Actions workflow that runs on pushes and PRs:
-
-- Ruff lint: `ruff check` (GitHub format)
-- Type check: `uvx ty check`
-
-See `.github/workflows/ci.yml`.
-
-For a step-by-step walkthrough of registering agents, reserving files, and sending your first message, see [Agent Onboarding](#agent-onboarding).
-
-## Claude Code Integration (HTTP MCP + Hooks)
-
-Add our MCP server to Claude Code settings and optional hooks for safety/automation.
-
-Example `.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "mcp-agent-mail": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp/",
-      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
-    }
-  },
-  "hooks": {
-    "SessionStart": [
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active backend" },
-      { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending backend $USER --limit 20" }
-    ],
-    "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon backend --minutes 10" } ] }
-    ],
-    "PostToolUse": [
-      { "matcher": { "tool": "send_message" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending backend $USER --limit 10" } ] },
-      { "matcher": { "tool": "file_reservation_paths" }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list backend" } ] }
-    ]
-  }
-}
-```
-
-Start the server (recommended):
-
-```bash
-scripts/run_server_with_token.sh
-```
-
-## Cline Integration (HTTP MCP)
-
-Add our MCP server to Cline's MCP settings. Example project-local snippet you can import or copy (e.g., `cline.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "mcp-agent-mail": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp/",
-      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
-    }
-  }
-}
-```
-
-Start the server (recommended):
-
-```bash
-scripts/run_server_with_token.sh
-```
-
-## Windsurf Integration (HTTP MCP)
-
-Add our MCP server to Windsurf's MCP settings. Example project-local snippet you can import or copy (e.g., `windsurf.mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "mcp-agent-mail": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp/",
-      "headers": { "Authorization": "Bearer ${MCP_AGENT_MAIL_TOKEN}" }
-    }
-  }
-}
-```
-
-Start the server (recommended):
-
-```bash
-scripts/run_server_with_token.sh
-```
-
-## OpenCode (sst/opencode) Integration via Helper Script
-
-OpenCode is a terminal TUI; use the provided helper to call Agent Mail over HTTP JSON‑RPC from custom commands or shell.
-
-```bash
-# One-time setup (writes scripts/mcp_mail_http.sh)
-bash scripts/integrate_opencode.sh --yes
-
-# Read inbox (resource):
-bash scripts/mcp_mail_http.sh resources/read 'resource://inbox/BlueLake?project=/abs/path/backend&limit=10'
-
-# Start a session (tool):
-bash scripts/mcp_mail_http.sh tools/call '{"name":"macro_start_session","arguments":{"human_key":"/abs/path/backend"}}'
-```
+Use the automated installer to wire up supported tools automatically (e.g., Claude Code, Cline, Windsurf, OpenCode). Run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh` or the one‑liner in the Quickstart above.
