@@ -2218,8 +2218,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         # Create HumanOverseer agent (use INSERT OR IGNORE to handle race conditions)
                         await session.execute(
                             text("""
-                                INSERT OR IGNORE INTO agents (project_id, name, program, model, task_description, contact_policy, created_ts, last_active_ts)
-                                VALUES (:pid, :name, :program, :model, :task, :policy, :ts, :ts)
+                                INSERT OR IGNORE INTO agents (project_id, name, program, model, task_description, contact_policy, attachments_policy, inception_ts, last_active_ts)
+                                VALUES (:pid, :name, :program, :model, :task, :policy, :attachments_policy, :ts, :ts)
                             """),
                             {
                                 "pid": project_id,
@@ -2228,6 +2228,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 "model": "Human",
                                 "task": "Human operator providing guidance and oversight to agents",
                                 "policy": "open",
+                                "attachments_policy": "auto",
                                 "ts": datetime.now(timezone.utc)
                             }
                         )
