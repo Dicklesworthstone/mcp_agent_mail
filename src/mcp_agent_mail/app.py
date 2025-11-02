@@ -2464,7 +2464,28 @@ def build_mcp_server() -> FastMCP:
                         pass
                 if blocked_recipients:
                     err_type: str = "CONTACT_REQUIRED"
-                    err_msg: str = "Recipient requires contact approval or recent context."
+                    blocked_sorted = sorted(set(blocked_recipients))
+                    recipient_list = ", ".join(blocked_sorted)
+                    sample_target = blocked_sorted[0]
+                    project_expr = repr(project.human_key)
+                    sender_expr = repr(sender.name)
+                    target_expr = repr(sample_target)
+                    err_msg_parts = [
+                        f"Contact approval required for recipients: {recipient_list}.",
+                        (
+                            "Before retrying, request approval with "
+                            f"`request_contact(project_key={project_expr}, from_agent={sender_expr}, "
+                            f"to_agent={target_expr})` or run "
+                            f"`macro_contact_handshake(project_key={project_expr}, requester={sender_expr}, "
+                            f"target={target_expr}, auto_accept=True)`."
+                        ),
+                        "Alternatively, send your message inside a recent thread that already includes them by reusing its thread_id.",
+                    ]
+                    if attempted:
+                        err_msg_parts.append(
+                            f"Automatic handshake attempts already ran for: {', '.join(attempted)}; wait for approval or retry the suggested calls explicitly."
+                        )
+                    err_msg: str = " ".join(err_msg_parts)
                     err_data: dict[str, Any] = {
                         "recipients_blocked": sorted(set(blocked_recipients)),
                         "remedies": remedies,
