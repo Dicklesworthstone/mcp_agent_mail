@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/dicklesworthstone-mcp-agent-mail-badge.png)](https://mseep.ai/app/dicklesworthstone-mcp-agent-mail)
+
 # MCP Agent Mail
 
 ![Agent Mail Showcase](screenshots/output/agent_mail_showcase.gif)
