@@ -213,3 +213,5 @@ screenshots/gif_canvas_frames
 screenshots/gif_canvas_frames_2k
 screenshots/renamed
 screenshots/gif_frames
+temp.lock
+temp.lock.owner.json
