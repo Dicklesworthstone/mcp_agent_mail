@@ -10,12 +10,13 @@ import json
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from filelock import SoftFileLock
+from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
 from PIL import Image
 
@@ -41,6 +42,9 @@ class ProjectArchive:
     def attachments_dir(self) -> Path:
         return self.root / "attachments"
 
+_PROCESS_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+_PROCESS_LOCK_OWNERS: dict[tuple[int, str], int] = {}
+
 
 class AsyncFileLock:
     """Async-friendly wrapper around SoftFileLock with metadata tracking."""
@@ -52,28 +56,100 @@ class AsyncFileLock:
         timeout_seconds: float = 60.0,
         stale_timeout_seconds: float = 180.0,
     ) -> None:
-        self._lock = SoftFileLock(str(path))
+        self._path = Path(path)
+        self._lock = SoftFileLock(str(self._path))
         self._timeout = float(timeout_seconds)
         self._stale_timeout = float(max(stale_timeout_seconds, 0.0))
         self._pid = os.getpid()
-        self._metadata_path = path.parent / f"{path.name}.owner.json"
+        self._metadata_path = self._path.parent / f"{self._path.name}.owner.json"
         self._held = False
+        self._lock_key = str(self._path.resolve())
+        self._loop_key: tuple[int, str] | None = None
+        self._process_lock: asyncio.Lock | None = None
+        self._process_lock_held = False
 
     async def __aenter__(self) -> None:
-        await _to_thread(self._lock.acquire)
-        self._held = True
-        await _to_thread(self._write_metadata)
+        loop = asyncio.get_running_loop()
+        self._loop_key = (id(loop), self._lock_key)
+        process_lock = _PROCESS_LOCKS.get(self._loop_key)
+        if process_lock is None:
+            process_lock = asyncio.Lock()
+            _PROCESS_LOCKS[self._loop_key] = process_lock
+        current_task = asyncio.current_task()
+        owner_id = _PROCESS_LOCK_OWNERS.get(self._loop_key)
+        current_task_id = id(current_task) if current_task else id(self)
+        if owner_id == current_task_id:
+            raise RuntimeError(f"Re-entrant AsyncFileLock acquisition detected for {self._path}")
+        self._process_lock = process_lock
+        await self._process_lock.acquire()
+        self._process_lock_held = True
+        _PROCESS_LOCK_OWNERS[self._loop_key] = current_task_id
+        try:
+            while True:
+                try:
+                    if self._timeout <= 0:
+                        await _to_thread(self._lock.acquire)
+                    else:
+                        await _to_thread(self._lock.acquire, self._timeout)
+                    self._held = True
+                    await _to_thread(self._write_metadata)
+                    break
+                except Timeout:
+                    cleaned = await _to_thread(self._cleanup_if_stale)
+                    if cleaned:
+                        continue
+                    raise TimeoutError(
+                        f"Timed out acquiring lock {self._path} after {self._timeout:.2f}s "
+                        "and no stale owner detected."
+                    ) from None
+        except Exception:
+            if self._loop_key is not None:
+                _PROCESS_LOCK_OWNERS.pop(self._loop_key, None)
+            if self._process_lock_held and self._process_lock:
+                self._process_lock.release()
+                self._process_lock_held = False
+            if (
+                self._loop_key is not None
+                and self._process_lock
+                and not self._process_lock.locked()
+            ):
+                _PROCESS_LOCKS.pop(self._loop_key, None)
+            self._process_lock = None
+            raise
         return None
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        if not self._held:
-            return None
+    def _cleanup_if_stale(self) -> bool:
+        """Remove lock and metadata when the previous holder is gone and the lock is stale."""
+        if not self._path.exists():
+            return False
+        now = time.time()
+        metadata: dict[str, Any] = {}
+        if self._metadata_path.exists():
+            try:
+                metadata = json.loads(self._metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                metadata = {}
+        pid_val = metadata.get("pid")
+        pid_int: int | None = None
         with contextlib.suppress(Exception):
-            await _to_thread(self._lock.release)
+            pid_int = int(pid_val)
+        owner_alive = self._pid_alive(pid_int) if pid_int else False
+        created_ts = metadata.get("created_ts")
+        age = None
+        if isinstance(created_ts, (int, float)):
+            age = now - float(created_ts)
+        else:
+            with contextlib.suppress(Exception):
+                age = now - self._path.stat().st_mtime
+        if owner_alive:
+            return False
+        if isinstance(age, (int, float)) and age < self._stale_timeout:
+            return False
         with contextlib.suppress(Exception):
-            await _to_thread(self._metadata_path.unlink)
-        self._held = False
-
+            self._path.unlink()
+        with contextlib.suppress(Exception):
+            self._metadata_path.unlink()
+        return True
 
     def _write_metadata(self) -> None:
         payload = {
@@ -81,6 +157,31 @@ class AsyncFileLock:
             "created_ts": time.time(),
         }
         self._metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+        return None
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._held:
+            with contextlib.suppress(Exception):
+                await _to_thread(self._lock.release)
+            with contextlib.suppress(Exception):
+                await _to_thread(self._metadata_path.unlink)
+            with contextlib.suppress(Exception):
+                await _to_thread(self._path.unlink)
+            self._held = False
+        if self._loop_key is not None:
+            _PROCESS_LOCK_OWNERS.pop(self._loop_key, None)
+        if self._process_lock_held and self._process_lock:
+            self._process_lock.release()
+            self._process_lock_held = False
+        if (
+            self._loop_key is not None
+            and self._process_lock
+            and not self._process_lock.locked()
+        ):
+            _PROCESS_LOCKS.pop(self._loop_key, None)
+        self._process_lock = None
+        self._loop_key = None
+        return None
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -95,6 +196,21 @@ class AsyncFileLock:
         except OSError:
             return False
         return True
+
+
+@asynccontextmanager
+async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+    """Context manager for safely mutating archive surfaces."""
+
+    lock = AsyncFileLock(archive.lock_path, timeout_seconds=timeout_seconds)
+    await lock.__aenter__()
+    try:
+        yield
+    except Exception as exc:
+        await lock.__aexit__(type(exc), exc, exc.__traceback__)
+        raise
+    else:
+        await lock.__aexit__(None, None, None)
 
 
 async def _to_thread(func, /, *args, **kwargs):
@@ -650,6 +766,47 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
     commit_lock_path = Path(repo.working_tree_dir).resolve() / ".commit.lock"
     async with AsyncFileLock(commit_lock_path):
         await _to_thread(_perform_commit)
+
+
+async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
+    """Scan the archive root for stale lock artifacts and clean them."""
+
+    root = Path(settings.storage.root).expanduser().resolve()
+    await _to_thread(root.mkdir, parents=True, exist_ok=True)
+    summary: dict[str, Any] = {
+        "locks_scanned": 0,
+        "locks_removed": [],
+        "metadata_removed": [],
+    }
+    if not root.exists():
+        return summary
+
+    for lock_path in sorted(root.rglob("*.lock"), key=str):
+        summary["locks_scanned"] += 1
+        try:
+            lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=0.0)
+            removed = await _to_thread(lock._cleanup_if_stale)
+            if removed:
+                summary["locks_removed"].append(str(lock_path))
+        except FileNotFoundError:
+            continue
+
+    for metadata_path in sorted(root.rglob("*.lock.owner.json"), key=str):
+        name = metadata_path.name
+        if not name.endswith(".owner.json"):
+            continue
+        lock_candidate = metadata_path.parent / name[: -len(".owner.json")]
+        if lock_candidate.exists():
+            continue
+        try:
+            await _to_thread(metadata_path.unlink)
+            summary["metadata_removed"].append(str(metadata_path))
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            continue
+
+    return summary
 
 
 # ==================================================================================

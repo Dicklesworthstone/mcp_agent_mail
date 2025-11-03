@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from .config import Settings
-from .storage import AsyncFileLock, ProjectArchive, ensure_archive
+from .storage import ProjectArchive, archive_write_lock, ensure_archive
 
 __all__ = [
     "install_guard",
@@ -106,7 +106,7 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
     hook_path = hooks_dir / "pre-commit"
     script = render_precommit_script(archive)
 
-    async with AsyncFileLock(archive.lock_path):
+    async with archive_write_lock(archive):
         await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
         await asyncio.to_thread(hook_path.write_text, script, "utf-8")
         await asyncio.to_thread(os.chmod, hook_path, 0o755)

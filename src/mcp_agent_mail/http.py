@@ -35,7 +35,7 @@ from .app import (
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
-    AsyncFileLock,
+    archive_write_lock,
     collect_lock_status,
     ensure_archive,
     get_agent_communication_graph,
@@ -586,7 +586,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                                         archive = await ensure_archive(
                                                             settings, (await _project_slug_from_id(project_id)) or ""
                                                         )
-                                                        async with AsyncFileLock(archive.lock_path):
+                                                        async with archive_write_lock(archive):
                                                             await write_agent_profile(
                                                                 archive,
                                                                 {
@@ -629,7 +629,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                         expires_at = now + _dt.timedelta(
                                             seconds=settings.ack_escalation_claim_ttl_seconds
                                         )
-                                        async with AsyncFileLock(archive.lock_path):
+                                        async with archive_write_lock(archive):
                                             await write_file_reservation_record(
                                                 archive,
                                                 {

@@ -31,9 +31,11 @@ from .guard import install_guard as install_guard_script, uninstall_guard as uni
 from .llm import complete_system_user
 from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, Project, ProjectSiblingSuggestion
 from .storage import (
-    AsyncFileLock,
+    ProjectArchive,
+    archive_write_lock,
     collect_lock_status,
     ensure_archive,
+    heal_archive_locks,
     process_attachments,
     write_agent_profile,
     write_file_reservation_record,
@@ -301,6 +303,16 @@ def _lifespan_factory(settings: Settings):
     @asynccontextmanager
     async def lifespan(app: FastMCP):
         init_engine(settings)
+        heal_summary = await heal_archive_locks(settings)
+        if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed"):
+            logger.info(
+                "archive.healed_on_startup",
+                extra={
+                    "locks_scanned": heal_summary.get("locks_scanned", 0),
+                    "locks_removed": len(heal_summary.get("locks_removed", [])),
+                    "metadata_removed": len(heal_summary.get("metadata_removed", [])),
+                },
+            )
         await ensure_schema(settings)
         yield
 
@@ -542,6 +554,28 @@ def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
     if a_id == b_id:
         raise ValueError("Project pair must reference distinct projects.")
     return (a_id, b_id) if a_id < b_id else (b_id, a_id)
+
+
+@asynccontextmanager
+async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+    try:
+        async with archive_write_lock(archive, timeout_seconds=timeout_seconds):
+            yield
+    except TimeoutError as exc:
+        raise ToolExecutionError(
+            "ARCHIVE_LOCK_TIMEOUT",
+            (
+                f"Archive lock busy for project '{archive.slug}' at '{archive.lock_path}'. "
+                f"Timed out after {timeout_seconds:.1f}s. "
+                "Inspect running agents or call collect_lock_status to clear stale locks."
+            ),
+            recoverable=True,
+            data={
+                "project_slug": archive.slug,
+                "lock_path": str(archive.lock_path),
+                "timeout_seconds": timeout_seconds,
+            },
+        ) from exc
 
 
 async def _read_file_preview(path: Path, *, max_chars: int) -> str:
@@ -1005,7 +1039,7 @@ async def _get_or_create_agent(
             await session.commit()
             await session.refresh(agent)
     archive = await ensure_archive(settings, project.slug)
-    async with AsyncFileLock(archive.lock_path):
+    async with _archive_write_lock(archive):
         await write_agent_profile(archive, _agent_to_dict(agent))
     return agent
 
@@ -1618,7 +1652,7 @@ def build_mcp_server() -> FastMCP:
 
         payload: dict[str, Any] | None = None
 
-        async with AsyncFileLock(archive.lock_path):
+        async with _archive_write_lock(archive):
             # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
             if settings.file_reservations_enforcement_enabled:
                 await _expire_stale_file_reservations(project.id or 0)
@@ -2099,7 +2133,7 @@ def build_mcp_server() -> FastMCP:
                 await session.refresh(db_agent)
                 agent = db_agent
         archive = await ensure_archive(settings, project.slug)
-        async with AsyncFileLock(archive.lock_path):
+        async with _archive_write_lock(archive):
             await write_agent_profile(archive, _agent_to_dict(agent))
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
@@ -4406,7 +4440,7 @@ def build_mcp_server() -> FastMCP:
         granted: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
         archive = await ensure_archive(settings, project.slug)
-        async with AsyncFileLock(archive.lock_path):
+        async with _archive_write_lock(archive):
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
                 for file_reservation_record, holder_name in existing_reservations:
@@ -4640,7 +4674,7 @@ def build_mcp_server() -> FastMCP:
 
         # Update Git artifacts for the renewed file_reservations
         archive = await ensure_archive(settings, project.slug)
-        async with AsyncFileLock(archive.lock_path):
+        async with _archive_write_lock(archive):
             for file_reservation_info in updated:
                 payload = {
                     "id": file_reservation_info["id"],
