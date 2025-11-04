@@ -4,15 +4,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-
-import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from git import Repo
 from PIL import Image
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.text import Text
 from sqlalchemy import text
 
 from mcp_agent_mail.app import (
@@ -23,10 +22,6 @@ from mcp_agent_mail.app import (
 )
 from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import get_session
-from rich.console import Console, Group
-from rich.panel import Panel
-from rich.syntax import Syntax
-from rich.text import Text
 
 
 @pytest.mark.asyncio

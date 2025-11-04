@@ -4,6 +4,7 @@ const searchInput = document.getElementById("search-input");
 const messageMeta = document.getElementById("message-meta");
 
 let messages = [];
+let databaseMessagesAvailable = false;
 
 async function loadJSON(path) {
   const response = await fetch(path, { cache: "no-store" });
@@ -11,6 +12,14 @@ async function loadJSON(path) {
     throw new Error(`Failed to fetch ${path} (${response.status})`);
   }
   return response.json();
+}
+
+async function loadBinary(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Failed to fetch ${path} (${response.status})`);
+  }
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 function renderProjects(manifest) {
@@ -71,7 +80,8 @@ function renderBundleInfo(manifest) {
   const generated = manifest.generated_at ?? "";
   const schema = manifest.schema_version ?? "";
   const exporter = manifest.exporter_version ?? "";
-  paragraph.textContent = `Generated ${generated} • Schema ${schema} • Exporter ${exporter}`;
+  const preset = manifest.scrub?.preset ? ` • Scrub preset ${manifest.scrub.preset}` : "";
+  paragraph.textContent = `Generated ${generated} • Schema ${schema} • Exporter ${exporter}${preset}`;
 }
 
 function renderManifest(manifest) {
@@ -105,7 +115,8 @@ function applySearch() {
   const term = searchInput.value.trim().toLowerCase();
   if (!term) {
     renderMessages(messages);
-    messageMeta.textContent = `${messages.length} message(s) shown.`;
+    const note = databaseMessagesAvailable ? "querying sqlite snapshot" : "cached messages.json";
+    messageMeta.textContent = `${messages.length} message(s) shown (${note}).`;
     return;
   }
   const filtered = messages.filter((msg) => {
@@ -118,6 +129,112 @@ function applySearch() {
   messageMeta.textContent = `${filtered.length} message(s) match “${term}”.`;
 }
 
+function formatChunkPath(pattern, index) {
+  return pattern.replace(/\{index(?::0?(\d+)d)?\}/, (_match, width) => {
+    const targetWidth = width ? Number(width) : 0;
+    return index.toString().padStart(targetWidth, "0");
+  });
+}
+
+async function loadDatabaseBytes(manifest) {
+  const dbInfo = manifest.database ?? {};
+  const dbPath = dbInfo.path ?? "mailbox.sqlite3";
+  const chunkManifest = dbInfo.chunk_manifest;
+
+  if (!chunkManifest) {
+    return { bytes: await loadBinary(`../${dbPath}`), source: dbPath };
+  }
+
+  const buffers = [];
+  let total = 0;
+  for (let index = 0; index < chunkManifest.chunk_count; index += 1) {
+    const relativeChunk = formatChunkPath(chunkManifest.pattern, index);
+    const chunkBytes = await loadBinary(`../${relativeChunk}`);
+    buffers.push(chunkBytes);
+    total += chunkBytes.length;
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of buffers) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return { bytes: merged, source: `${chunkManifest.pattern} (${chunkManifest.chunk_count} chunks)` };
+}
+
+const sqlJsConfig = {
+  locateFile(file) {
+    return `./vendor/${file}`;
+  },
+};
+
+async function ensureSqlJsLoaded() {
+  if (window.initSqlJs) {
+    return window.initSqlJs(sqlJsConfig);
+  }
+  await new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-sqljs="true"]');
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", (event) => reject(new Error(`Failed to load sql-wasm.js: ${event.message}`)), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "./vendor/sql-wasm.js";
+    script.async = true;
+    script.dataset.sqljs = "true";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load sql-wasm.js"));
+    document.head.append(script);
+  });
+  if (!window.initSqlJs) {
+    throw new Error("sql.js failed to initialise (initSqlJs missing)");
+  }
+  return window.initSqlJs(sqlJsConfig);
+}
+
+function queryMessagesFromDatabase(db, limit = 500) {
+  const results = [];
+  const statement = db.prepare(
+    `SELECT id, subject, created_ts, importance, substr(coalesce(body_md, ''), 1, 280) AS snippet
+     FROM messages
+     ORDER BY created_ts DESC
+     LIMIT ?`
+  );
+  try {
+    statement.bind([limit]);
+    while (statement.step()) {
+      const row = statement.getAsObject();
+      results.push({ ...row });
+    }
+  } finally {
+    statement.free();
+  }
+  return results;
+}
+
+async function tryLoadMessagesFromDatabase(manifest) {
+  try {
+    const SQL = await ensureSqlJsLoaded();
+    messageMeta.textContent = "Loading SQLite snapshot…";
+    const { bytes, source } = await loadDatabaseBytes(manifest);
+    const db = new SQL.Database(bytes);
+    try {
+      const rows = queryMessagesFromDatabase(db, 500);
+      databaseMessagesAvailable = true;
+      messageMeta.textContent = `${rows.length} message(s) queried directly from ${source}.`;
+      return rows;
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    console.warn("Falling back to cached messages.json:", error);
+    databaseMessagesAvailable = false;
+    return null;
+  }
+}
+
 async function bootstrap() {
   try {
     const manifest = await loadJSON("../manifest.json");
@@ -127,20 +244,21 @@ async function bootstrap() {
     renderAttachments(manifest);
     renderScrub(manifest);
 
-    if (manifest.viewer?.meta) {
-      messageMeta.textContent = "Loading message index…";
+    let hydrated = await tryLoadMessagesFromDatabase(manifest);
+    if (!hydrated) {
+      try {
+        const messageData = await loadJSON("./data/messages.json");
+        hydrated = messageData;
+        messageMeta.textContent = `${hydrated.length} message(s) loaded from cached messages.json.`;
+      } catch (error) {
+        messageMeta.textContent = `Unable to load messages.json (${error.message}).`;
+        hydrated = [];
+      }
     }
 
-    try {
-      const messageData = await loadJSON("./data/messages.json");
-      messages = messageData;
-      messageMeta.textContent = `${messages.length} message(s) cached for quick browsing.`;
-    } catch (error) {
-      messageMeta.textContent = `Unable to load messages.json (${error.message}).`;
-    }
-
+    messages = hydrated;
     searchInput.addEventListener("input", applySearch);
-    renderMessages(messages);
+    applySearch();
   } catch (error) {
     manifestOutput.textContent = `Viewer initialization failed: ${error}`;
   }
