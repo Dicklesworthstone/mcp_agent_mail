@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
+import tempfile
 import warnings
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
@@ -23,21 +26,36 @@ from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import Agent, FileReservation, Message, MessageRecipient, Project
+from .share import (
+    ShareExportError,
+    apply_project_scope,
+    create_sqlite_snapshot,
+    package_directory_as_zip,
+    prepare_output_directory,
+    resolve_sqlite_database_path,
+    scrub_snapshot,
+    write_bundle_scaffolding,
+)
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
 warnings.filterwarnings("ignore", category=UserWarning, module="bleach")
 
 console = Console()
+DEFAULT_ENV_PATH = Path(".env")
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
 
 guard_app = typer.Typer(help="Install or remove the Git pre-commit guard")
 file_reservations_app = typer.Typer(help="Inspect advisory file_reservations")
 acks_app = typer.Typer(help="Review acknowledgement status")
+share_app = typer.Typer(help="Export MCP Agent Mail data for static sharing")
+config_app = typer.Typer(help="Configure server settings")
 
 app.add_typer(guard_app, name="guard")
 app.add_typer(file_reservations_app, name="file_reservations")
 app.add_typer(acks_app, name="acks")
+app.add_typer(share_app, name="share")
+app.add_typer(config_app, name="config")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -121,6 +139,83 @@ def typecheck() -> None:
     console.rule("[bold]Running Type Checker[/bold]")
     _run_command(["uvx", "ty", "check"])
     console.print("[green]Type check complete.[/]")
+
+
+@share_app.command("export")
+def share_export(
+    output: Annotated[str, typer.Option("--output", "-o", help="Directory where the static bundle should be written.")],
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive",
+            "-i",
+            help="Launch an interactive wizard (future enhancement; currently prints guidance).",
+        ),
+    ] = False,
+    zip_bundle: Annotated[
+        bool,
+        typer.Option(
+            "--zip/--no-zip",
+            help="Package the exported directory into a ZIP archive (enabled by default).",
+            show_default=True,
+        ),
+    ] = True,
+) -> None:
+    """Export the MCP Agent Mail mailbox into a shareable static bundle (snapshot + scaffolding prototype)."""
+
+    raw_output = _resolve_path(output)
+    try:
+        output_path = prepare_output_directory(raw_output)
+    except ShareExportError as exc:
+        console.print(f"[red]Invalid output directory:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.rule("[bold]Static Mailbox Export[/bold]")
+    if interactive:
+        console.print(
+            "[yellow]Interactive wizard mode is not implemented yet; proceeding with default export flow.[/]"
+        )
+
+    try:
+        database_path = resolve_sqlite_database_path()
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to resolve SQLite database: {exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[cyan]Using database:[/] {database_path}")
+
+    snapshot_path = output_path / "mailbox.sqlite3"
+    console.print(f"[cyan]Creating snapshot:[/] {snapshot_path}")
+
+    try:
+        create_sqlite_snapshot(database_path, snapshot_path)
+    except ShareExportError as exc:
+        console.print(f"[red]Snapshot failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print("[cyan]Writing manifest and helper docs...[/]")
+    try:
+        write_bundle_scaffolding(output_path, snapshot=snapshot_path, selected_projects=["*"])
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to scaffold bundle:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print("[green]✓ Created SQLite snapshot for sharing.[/]")
+    console.print("[green]✓ Generated manifest, README.txt, and HOW_TO_DEPLOY.md placeholders.[/]")
+
+    if zip_bundle:
+        archive_path = output_path.parent / f"{output_path.name}.zip"
+        console.print(f"[cyan]Packaging archive:[/] {archive_path}")
+        try:
+            package_directory_as_zip(output_path, archive_path)
+        except ShareExportError as exc:
+            console.print(f"[red]Failed to create ZIP archive:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+        console.print("[green]✓ Packaged ZIP archive for distribution.[/]")
+
+    console.print(
+        "[dim]Next steps: add redaction rules, bundle viewer assets, and generate deployment helpers.[/]"
+    )
 
 
 def _resolve_path(raw_path: str) -> Path:
@@ -716,6 +811,93 @@ def list_acks(
     for msg, _ in rows:
         table.add_row(str(msg.id or ""), msg.subject, msg.importance, msg.created_ts.isoformat())
     console.print(table)
+
+
+@config_app.command("set-port")
+def config_set_port(
+    port: int = typer.Argument(..., help="HTTP server port number"),
+    env_file: Annotated[Optional[Path], typer.Option("--env-file", help="Path to .env file")] = None,
+) -> None:
+    """Set HTTP_PORT in .env file."""
+    import re
+
+    if port < 1 or port > 65535:
+        console.print(f"[red]Error:[/red] Port must be between 1 and 65535 (got: {port})")
+        raise typer.Exit(code=1)
+
+    env_target = env_file if env_file is not None else DEFAULT_ENV_PATH
+    env_path = _resolve_path(str(env_target))
+
+    # Ensure parent directory exists
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Use atomic write pattern: write to temp file, then move
+    try:
+        if env_path.exists():
+            # Read existing content
+            content = env_path.read_text(encoding="utf-8")
+
+            if re.search(r"^HTTP_PORT=", content, re.MULTILINE):
+                # Replace existing
+                new_content = re.sub(r"^HTTP_PORT=.*$", f"HTTP_PORT={port}", content, flags=re.MULTILINE)
+                action = "Updated"
+            else:
+                # Append (ensure file ends with newline first)
+                if content and not content.endswith("\n"):
+                    new_content = content + f"\nHTTP_PORT={port}\n"
+                else:
+                    new_content = content + f"HTTP_PORT={port}\n"
+                action = "Added"
+        else:
+            # Create new file
+            new_content = f"HTTP_PORT={port}\n"
+            action = "Created"
+
+        # Write to temporary file in same directory (for atomic move)
+        temp_fd, temp_path = tempfile.mkstemp(
+            dir=env_path.parent, prefix=".env.tmp.", text=True
+        )
+        try:
+            # Write content with secure permissions from the start
+            # (best-effort on Windows where Unix permissions don't apply)
+            with suppress(OSError, NotImplementedError):
+                Path(temp_path).chmod(0o600)
+
+            with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            # Atomic move
+            Path(temp_path).replace(env_path)
+
+            # Ensure final permissions are secure (best-effort on Windows)
+            with suppress(OSError, NotImplementedError):
+                env_path.chmod(0o600)
+
+            console.print(f"[green]✓[/green] {action} HTTP_PORT={port} in {env_path}")
+        except (OSError, IOError) as inner_e:
+            # Clean up temp file on error
+            Path(temp_path).unlink(missing_ok=True)
+            raise OSError(f"Failed to write temporary file: {inner_e}") from inner_e
+
+    except PermissionError as e:
+        console.print(f"[red]Error:[/red] Permission denied writing to {env_path}")
+        raise typer.Exit(code=1) from e
+    except OSError as e:
+        console.print(f"[red]Error:[/red] Failed to write {env_path}: {e}")
+        raise typer.Exit(code=1) from e
+
+    console.print("\n[dim]Note: Restart the server for changes to take effect[/dim]")
+
+
+@config_app.command("show-port")
+def config_show_port() -> None:
+    """Display the configured HTTP port."""
+    settings = get_settings()
+    console.print("[cyan]HTTP Server Configuration:[/cyan]")
+    console.print(f"  Host: {settings.http.host}")
+    console.print(f"  Port: [bold]{settings.http.port}[/bold]")
+    console.print(f"  Path: {settings.http.path}")
+    console.print(f"\n[dim]Full URL: http://{settings.http.host}:{settings.http.port}{settings.http.path}[/dim]")
 
 
 if __name__ == "__main__":

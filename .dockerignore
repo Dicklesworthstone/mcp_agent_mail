@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Testing
+.pytest_cache/
+.pytest_out/
+.coverage
+htmlcov/
+.tox/
+*.cover
+
+# Development
+.git/
+.github/
+.vscode/
+.idea/
+.ruff_cache/
+*.swp
+*.swo
+*~
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Backups
+backup_config_files/
+
+# Documentation (keep only essential docs)
+docs/
+screenshots/
+*.md
+!README.md
+!AGENTS.md
+!project_idea_and_guide.md
+!third_party_docs/*.md
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# Misc
+.DS_Store
+*.bak

@@ -44,7 +44,17 @@ What this does:
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
 - Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
 
-Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, or `--token <hex>`.
+Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, `--port <number>`, or `--token <hex>`.
+
+**Port conflicts?** Use `--port` to specify a different port (default: 8765):
+
+```bash
+# Install with custom port
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+
+# Or use the CLI command after installation
+uv run python -m mcp_agent_mail.cli config set-port 9000
+```
 
 ### If you want to do it yourself
 
@@ -72,6 +82,9 @@ scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_m
 scripts/run_server_with_token.sh
 
 # Now, simply launch Codex-CLI or Claude Code or other agent tools in other consoles; they should have the mail tool available. See below for a ready-made chunk of text you can add to the end of your existing AGENTS.md or CLAUDE.md files to help your agents better utilize the new tools.
+
+# Change port after installation
+uv run python -m mcp_agent_mail.cli config set-port 9000
 ```
 
 ## Ready-Made Blurb to Add to Your AGENTS.md or CLAUDE.md Files:
@@ -762,6 +775,46 @@ Install the guard into a code repo (conceptual tool call):
 ## Configuration
 
 Configuration is loaded from an existing `.env` via `python-decouple`. Do not use `os.getenv` or auto-dotenv loaders.
+
+### Changing the HTTP Port
+
+If port 8765 is already in use (e.g., by Cursor's Python extension), you can change it:
+
+**Option 1: During installation**
+```bash
+# One-liner with custom port
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+
+# Or with local script
+./scripts/install.sh --port 9000 --yes
+```
+
+**Option 2: After installation (CLI)**
+```bash
+# Change port using CLI command
+uv run python -m mcp_agent_mail.cli config set-port 9000
+
+# View current port configuration
+uv run python -m mcp_agent_mail.cli config show-port
+
+# Restart server for changes to take effect
+scripts/run_server_with_token.sh
+```
+
+**Option 3: Manual .env edit**
+```bash
+# Edit .env file manually with your text editor (recommended)
+nano .env  # or vim, code, etc.
+
+# Or append (⚠️ warning: will create duplicate if HTTP_PORT already exists)
+echo "HTTP_PORT=9000" >> .env
+```
+
+**Option 4: CLI server override**
+```bash
+# Override port at server startup (doesn't modify .env)
+uv run python -m mcp_agent_mail.cli serve-http --port 9000
+```
 
 ```python
 from decouple import Config as DecoupleConfig, RepositoryEnv
