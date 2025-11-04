@@ -154,11 +154,15 @@ echo "-- Integrating Windsurf (best effort)..."
 bash "${ROOT_DIR}/scripts/integrate_windsurf.sh" --yes "$@" || echo "(warn) Windsurf integration reported a non-fatal issue"
 
 if [[ $HAS_OPENCODE -eq 1 ]]; then
-  echo "-- Integrating OpenCode (helpers for JSON-RPC)..."
+  echo "-- Integrating OpenCode (native MCP support)..."
   bash "${ROOT_DIR}/scripts/integrate_opencode.sh" --yes "$@" || echo "(warn) OpenCode integration reported a non-fatal issue"
 else
   echo "-- Skipping OpenCode: not detected (install opencode to enable)."
 fi
+
+# GitHub Copilot integration (best effort - typically in VS Code)
+echo "-- Integrating GitHub Copilot (VS Code + IDE MCP support)..."
+bash "${ROOT_DIR}/scripts/integrate_github_copilot.sh" --yes "$@" || echo "(warn) GitHub Copilot integration reported a non-fatal issue"
 
 echo
 log_step "Summary"

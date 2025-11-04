@@ -17,17 +17,18 @@ require_cmd uv
 require_cmd curl
 require_cmd jq
 
-log_step "OpenCode (sst/opencode) Integration (Native MCP Support)"
+log_step "GitHub Copilot Integration (MCP Support)"
 echo
-echo "OpenCode has native MCP client support via 'opencode mcp add' and opencode.json."
+echo "GitHub Copilot has native MCP support (GA July-August 2025)."
+echo "Supported in: VS Code, JetBrains IDEs, Eclipse, and Xcode."
+echo ""
 echo "This script will:"
 echo "  1) Detect your MCP HTTP endpoint from settings."
 echo "  2) Generate/reuse a bearer token."
-echo "  3) Write/update opencode.json with MCP server config."
-echo "  4) Optionally use 'opencode mcp add' command if available."
+echo "  3) Write VS Code workspace MCP configuration (.vscode/mcp.json)."
+echo "  4) Optionally enable MCP discovery in user settings (if VS Code installed)."
 echo "  5) Create run helper script and bootstrap project/agent registration."
 echo
-
 TARGET_DIR="${PROJECT_DIR:-}"
 if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="${ROOT_DIR}"; fi
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
@@ -46,6 +47,7 @@ print(f"export _HTTP_PATH={shlex.quote(s.http.path)}")
 PY
 )"
 
+# Validate Python eval output
 if [[ -z "${_HTTP_HOST}" || -z "${_HTTP_PORT}" || -z "${_HTTP_PATH}" ]]; then
   log_err "Failed to detect HTTP endpoint from settings (Python eval failed)"
   exit 1
@@ -71,81 +73,110 @@ PY
   log_ok "Generated bearer token."
 fi
 
-# Write OpenCode MCP configuration
-log_step "Writing/updating opencode.json with MCP server config"
-OPENCODE_JSON="${TARGET_DIR}/opencode.json"
+# Write VS Code workspace MCP configuration
+log_step "Writing VS Code workspace MCP configuration"
+VSCODE_DIR="${TARGET_DIR}/.vscode"
+MCP_JSON="${VSCODE_DIR}/mcp.json"
+mkdir -p "$VSCODE_DIR"
 
 # Backup existing file if it exists
-if [[ -f "$OPENCODE_JSON" ]]; then
-  backup_file "$OPENCODE_JSON"
+if [[ -f "$MCP_JSON" ]]; then
+  backup_file "$MCP_JSON"
 fi
 
-# Create or update opencode.json with MCP server config
-# OpenCode expects: { "mcp": { "server-name": { "type": "remote", "url": "...", "headers": {...}, "enabled": true } } }
+# VS Code MCP configuration format (correct format per official docs)
 # Merge with existing config if present, otherwise create new
-if [[ -f "$OPENCODE_JSON" ]] && [[ -s "$OPENCODE_JSON" ]]; then
-  log_step "Merging with existing opencode.json"
-  TMP_MERGE="${OPENCODE_JSON}.tmp.$$.$(date +%s_%N)"
+if [[ -f "$MCP_JSON" ]] && [[ -s "$MCP_JSON" ]]; then
+  log_step "Merging with existing mcp.json"
+  TMP_MERGE="${MCP_JSON}.tmp.$$.$(date +%s_%N)"
   trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
 
   umask 077
   if jq --arg url "${_URL}" --arg token "${_TOKEN}" \
-      '.mcp = (.mcp // {}) |
-       .mcp["mcp-agent-mail"] = {
-         "type": "remote",
+      '.servers = (.servers // {}) |
+       .servers["mcp-agent-mail"] = {
+         "type": "http",
          "url": $url,
          "headers": {
            "Authorization": ("Bearer " + $token)
-         },
-         "enabled": true
+         }
        }' \
-      "$OPENCODE_JSON" > "$TMP_MERGE"; then
-    if mv "$TMP_MERGE" "$OPENCODE_JSON"; then
-      log_ok "Merged MCP config into existing ${OPENCODE_JSON}"
+      "$MCP_JSON" > "$TMP_MERGE"; then
+    if mv "$TMP_MERGE" "$MCP_JSON"; then
+      log_ok "Merged MCP config into existing ${MCP_JSON}"
     else
-      log_err "Failed to move merged config to ${OPENCODE_JSON}"
+      log_err "Failed to move merged config to ${MCP_JSON}"
       rm -f "$TMP_MERGE" 2>/dev/null
       trap - EXIT INT TERM
       exit 1
     fi
   else
-    log_err "jq merge failed for ${OPENCODE_JSON}"
+    log_err "jq merge failed for ${MCP_JSON}"
     rm -f "$TMP_MERGE" 2>/dev/null
     trap - EXIT INT TERM
     exit 1
   fi
   trap - EXIT INT TERM
 else
-  # Create new opencode.json file using jq (safe JSON generation + atomic write)
-  log_step "Creating new opencode.json"
+  # Create new mcp.json file using jq (safe JSON generation + atomic write)
+  log_step "Creating new mcp.json"
   jq -n --arg url "${_URL}" --arg token "${_TOKEN}" '{
-    "$schema": "https://opencode.ai/config.json",
-    "mcp": {
+    "servers": {
       "mcp-agent-mail": {
-        "type": "remote",
+        "type": "http",
         "url": $url,
         "headers": {
           "Authorization": ("Bearer " + $token)
-        },
-        "enabled": true
+        }
       }
     }
-  }' | write_atomic "$OPENCODE_JSON"
+  }' | write_atomic "$MCP_JSON"
 fi
 
-json_validate "$OPENCODE_JSON" || log_warn "Invalid JSON in ${OPENCODE_JSON}"
-set_secure_file "$OPENCODE_JSON" || true
-log_ok "Wrote ${OPENCODE_JSON}"
+json_validate "$MCP_JSON" || log_warn "Invalid JSON in ${MCP_JSON}"
+set_secure_file "$MCP_JSON" || true
+log_ok "Wrote ${MCP_JSON}"
 
-# Try using 'opencode mcp add' command if available (for user-level config)
-if command -v opencode >/dev/null 2>&1; then
-  log_step "Attempting to register MCP server with opencode CLI"
-  # Note: opencode mcp add is interactive, so this may not work in all contexts
-  # The opencode.json file is the primary integration method
-  log_ok "OpenCode CLI detected. You can also run manually: opencode mcp add"
-  log_ok "  When prompted, select 'Remote' and enter URL: ${_URL}"
+# Note: VS Code user settings modification is optional
+# The default chat.mcp.access setting is "all" which allows MCP servers
+# The workspace .vscode/mcp.json is sufficient for MCP to work
+# We only optionally enable discovery to reuse configs from other apps like Claude Desktop
+log_step "Optionally enabling MCP discovery in VS Code user settings"
+# Determine VS Code user settings path based on OS
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  USER_SETTINGS_DIR="${HOME}/Library/Application Support/Code/User"
+elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "linux" ]]; then
+  USER_SETTINGS_DIR="${HOME}/.config/Code/User"
 else
-  log_warn "OpenCode CLI not found in PATH. Using opencode.json config only."
+  # Default to Linux path for other Unix-like systems
+  USER_SETTINGS_DIR="${HOME}/.config/Code/User"
+fi
+
+USER_SETTINGS="${USER_SETTINGS_DIR}/settings.json"
+if [[ -d "$USER_SETTINGS_DIR" ]] && [[ -f "$USER_SETTINGS" ]] && [[ -s "$USER_SETTINGS" ]]; then
+  # Only if VS Code is installed and has existing settings
+  backup_file "$USER_SETTINGS"
+
+  # Enable MCP discovery (optional enhancement to discover configs from Claude Desktop, etc.)
+  TMP_MERGE="${USER_SETTINGS}.tmp.$$.$(date +%s_%N)"
+  trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
+
+  umask 077
+  if jq '."chat.mcp.discovery.enabled" = true' \
+      "$USER_SETTINGS" > "$TMP_MERGE" 2>/dev/null; then
+    if mv "$TMP_MERGE" "$USER_SETTINGS" 2>/dev/null; then
+      log_ok "Enabled MCP discovery in user settings (optional)"
+    else
+      log_warn "Failed to update user settings (non-fatal, not required)"
+      rm -f "$TMP_MERGE" 2>/dev/null
+    fi
+  else
+    log_warn "Could not update user settings (non-fatal, not required)"
+    rm -f "$TMP_MERGE" 2>/dev/null
+  fi
+  trap - EXIT INT TERM
+else
+  log_ok "VS Code user settings not found or empty (workspace config is sufficient)"
 fi
 
 # Create run helper script
@@ -194,7 +225,7 @@ else
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
   _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-opencode}") || { log_err "Failed to escape agent name"; exit 1; }
+  _AGENT_ESCAPED=$(json_escape_string "${USER:-copilot}") || { log_err "Failed to escape agent name"; exit 1; }
 
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
       -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
@@ -205,7 +236,7 @@ else
   fi
 
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"opencode\",\"model\":\"default\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"github-copilot\",\"model\":\"gpt-4\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
       "${_URL}" >/dev/null 2>&1; then
     log_ok "Registered agent on server"
   else
@@ -215,13 +246,20 @@ fi
 
 echo
 log_ok "==> Done."
-_print "OpenCode MCP integration complete!"
-_print "Config written to: ${OPENCODE_JSON}"
+_print "GitHub Copilot MCP integration complete!"
+_print "Config written to: ${MCP_JSON}"
 _print ""
-_print "OpenCode will automatically detect mcp-agent-mail server when you open this project."
-_print "The MCP tools will be available to the AI agent alongside built-in tools."
+_print "For VS Code:"
+_print "  1. Start the MCP server: ${RUN_HELPER}"
+_print "  2. Open VS Code in this directory"
+_print "  3. Ensure Agent Mode is enabled (Cmd/Ctrl+Shift+P -> 'Chat: Agent Mode')"
+_print "  4. MCP tools from mcp-agent-mail will be available to Copilot"
 _print ""
-_print "Start the server with: ${RUN_HELPER}"
-_print "Then launch OpenCode in this directory."
-
+_print "For JetBrains/Eclipse/Xcode:"
+_print "  Configure MCP servers in your IDE's Copilot settings:"
+_print "  - Type: HTTP"
+_print "  - URL: ${_URL}"
+_print "  - Header: Authorization: Bearer <token>"
+_print ""
+_print "Documentation: https://code.visualstudio.com/docs/copilot/customization/mcp-servers"
 
