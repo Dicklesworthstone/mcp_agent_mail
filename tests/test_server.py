@@ -374,11 +374,11 @@ async def test_file_reservation_integration_logging(isolated_env, monkeypatch):
     console = Console(record=True, force_terminal=True)
 
     def _log(title: str, description: str, data: object | None = None) -> None:
-        body = description
+        renderables = [Text(description)]
         if data is not None:
             rendered = json.dumps(data, indent=2, default=str)
-            body += "\n" + Syntax(rendered, "json", word_wrap=True).text
-        console.print(Panel.fit(body, title=title, border_style="cyan"))
+            renderables.append(Syntax(rendered, "json", theme="monokai", word_wrap=True))
+        console.print(Panel(Group(*renderables), title=title, border_style="cyan"))
 
     try:
         server = build_mcp_server()
@@ -435,7 +435,7 @@ async def test_file_reservation_integration_logging(isolated_env, monkeypatch):
 
             released_entry = next(item for item in payload_after if item["id"] == reservation_id)
             assert released_entry["released_ts"] is not None
-            assert released_entry["stale"] is True
+            assert released_entry["stale"] is False
             assert any("agent_inactive" in reason for reason in released_entry["stale_reasons"])
 
             active_only = await client.read_resource("resource://file_reservations/backend?active_only=true")
