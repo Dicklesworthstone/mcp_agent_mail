@@ -345,9 +345,12 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
             attachment_replacements = 0
             attachment_keys_removed = 0
             if attachments_value:
-                try:
-                    attachments_data = json.loads(attachments_value)
-                except json.JSONDecodeError:
+                if isinstance(attachments_value, str):
+                    try:
+                        attachments_data = json.loads(attachments_value)
+                    except json.JSONDecodeError:
+                        attachments_data = attachments_value
+                else:
                     attachments_data = attachments_value
                 sanitized, rep_count, removed_count = _scrub_structure(attachments_data)
                 attachment_replacements += rep_count
