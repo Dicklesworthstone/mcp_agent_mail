@@ -436,21 +436,31 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     async with get_session() as session:
                         rows = await session.execute(text("SELECT DISTINCT project_id FROM file_reservations"))
                         pids = [r[0] for r in rows.fetchall() if r[0] is not None]
+                    released_total = 0
                     for pid in pids:
                         with contextlib.suppress(Exception):
-                            await _expire_stale_file_reservations(pid)
+                            stale = await _expire_stale_file_reservations(pid)
+                            released_total += len(stale)
                     try:
                         rich_console = importlib.import_module("rich.console")
                         rich_panel = importlib.import_module("rich.panel")
                         Console = rich_console.Console
                         Panel = rich_panel.Panel
                         Console().print(
-                            Panel.fit(f"projects_scanned={len(pids)}", title="File Reservations Cleanup", border_style="cyan")
+                            Panel.fit(
+                                f"projects_scanned={len(pids)} released={released_total}",
+                                title="File Reservations Cleanup",
+                                border_style="cyan",
+                            )
                         )
                     except Exception:
                         pass
                     with contextlib.suppress(Exception):
-                        structlog.get_logger("tasks").info("file_reservations_cleanup", projects_scanned=len(pids))
+                        structlog.get_logger("tasks").info(
+                            "file_reservations_cleanup",
+                            projects_scanned=len(pids),
+                            stale_released=released_total,
+                        )
                 except Exception:
                     pass
                 await asyncio.sleep(settings.file_reservations_cleanup_interval_seconds)

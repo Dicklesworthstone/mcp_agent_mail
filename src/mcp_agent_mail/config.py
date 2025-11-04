@@ -111,6 +111,8 @@ class Settings:
     # Background maintenance toggles
     file_reservations_cleanup_enabled: bool
     file_reservations_cleanup_interval_seconds: int
+    file_reservation_inactivity_seconds: int
+    file_reservation_activity_grace_seconds: int
     # Server-side enforcement
     file_reservations_enforcement_enabled: bool
     # Ack TTL warnings
@@ -275,6 +277,8 @@ def get_settings() -> Settings:
         llm=llm_settings,
         file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
         file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
+        file_reservation_inactivity_seconds=_int(_decouple_config("FILE_RESERVATION_INACTIVITY_SECONDS", default="1800"), default=1800),
+        file_reservation_activity_grace_seconds=_int(_decouple_config("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", default="900"), default=900),
         file_reservations_enforcement_enabled=_bool(_decouple_config("FILE_RESERVATIONS_ENFORCEMENT_ENABLED", default="true"), default=True),
         ack_ttl_enabled=_bool(_decouple_config("ACK_TTL_ENABLED", default="false"), default=False),
         ack_ttl_seconds=_int(_decouple_config("ACK_TTL_SECONDS", default="1800"), default=1800),

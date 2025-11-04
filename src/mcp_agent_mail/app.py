@@ -12,14 +12,17 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, cast
+from urllib.parse import parse_qsl
 
 from fastmcp import Context, FastMCP
 from git import Repo
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from sqlalchemy import asc, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
@@ -336,6 +339,145 @@ def _iso(dt: Any) -> str:
         return str(dt)
     except Exception:
         return str(dt)
+
+
+def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Return a timezone-aware UTC datetime."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _max_datetime(*timestamps: Optional[datetime]) -> Optional[datetime]:
+    values = [ts for ts in timestamps if ts is not None]
+    if not values:
+        return None
+    return max(values)
+
+
+_TRUE_FLAG_VALUES: tuple[str, ...] = ("1", "true", "yes", "on", "y")
+_FALSE_FLAG_VALUES: tuple[str, ...] = ("0", "false", "no", "off", "n")
+
+
+def _split_slug_and_query(raw_value: str) -> tuple[str, dict[str, str]]:
+    slug, _, query_string = raw_value.partition("?")
+    if not query_string:
+        return slug, {}
+    params = cast(dict[str, str], dict(parse_qsl(query_string, keep_blank_values=True)))
+    return slug, params
+
+
+def _coerce_flag_to_bool(value: str, *, default: bool) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _TRUE_FLAG_VALUES:
+        return True
+    if normalized in _FALSE_FLAG_VALUES:
+        return False
+    return default
+
+
+@dataclass(slots=True)
+class FileReservationStatus:
+    reservation: FileReservation
+    agent: Agent
+    stale: bool
+    stale_reasons: list[str]
+    last_agent_activity: Optional[datetime]
+    last_mail_activity: Optional[datetime]
+    last_fs_activity: Optional[datetime]
+    last_git_activity: Optional[datetime]
+
+
+_GLOB_MARKERS: tuple[str, ...] = ("*", "?", "[")
+
+
+def _contains_glob(pattern: str) -> bool:
+    return any(marker in pattern for marker in _GLOB_MARKERS)
+
+
+def _normalize_pattern(pattern: str) -> str:
+    return pattern.lstrip("/").strip()
+
+
+def _collect_matching_paths(base: Path, pattern: str) -> list[Path]:
+    if not base.exists():
+        return []
+    normalized = _normalize_pattern(pattern)
+    if not normalized:
+        return []
+    if _contains_glob(normalized):
+        return list(base.glob(normalized))
+    candidate = base / normalized
+    if not candidate.exists():
+        return []
+    return [candidate]
+
+
+def _latest_filesystem_activity(paths: Sequence[Path]) -> Optional[datetime]:
+    mtimes: list[datetime] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        mtimes.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
+    if not mtimes:
+        return None
+    return max(mtimes)
+
+
+def _latest_git_activity(repo: Optional[Repo], matches: Sequence[Path]) -> Optional[datetime]:
+    if repo is None:
+        return None
+    repo_root = Path(repo.working_tree_dir or "").resolve()
+    commit_times: list[datetime] = []
+    for match in matches:
+        try:
+            rel_path = match.resolve().relative_to(repo_root)
+        except Exception:
+            continue
+        try:
+            commit = next(repo.iter_commits(paths=str(rel_path), max_count=1))
+        except StopIteration:
+            continue
+        except Exception:
+            continue
+        commit_times.append(datetime.fromtimestamp(commit.committed_date, tz=timezone.utc))
+    if not commit_times:
+        return None
+    return max(commit_times)
+
+
+def _project_workspace_path(project: Project) -> Optional[Path]:
+    try:
+        candidate = Path(project.human_key).expanduser()
+    except Exception:
+        return None
+    with suppress(OSError):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _open_repo_if_available(workspace: Optional[Path]) -> Optional[Repo]:
+    if workspace is None:
+        return None
+    try:
+        repo = Repo(workspace, search_parent_directories=True)
+    except (InvalidGitRepositoryError, NoSuchPathError):
+        return None
+    except Exception:
+        return None
+    try:
+        root = Path(repo.working_tree_dir or "")
+    except Exception:
+        return None
+    with suppress(Exception):
+        workspace.resolve().relative_to(root.resolve())
+        return repo
+    return None
 
 
 def _parse_json_safely(text: str) -> dict[str, Any] | None:
@@ -1125,8 +1267,148 @@ async def _create_file_reservation(
     return file_reservation
 
 
-async def _expire_stale_file_reservations(project_id: int) -> None:
+async def _collect_file_reservation_statuses(
+    project: Project,
+    *,
+    include_released: bool = False,
+    now: Optional[datetime] = None,
+) -> list[FileReservationStatus]:
+    if project.id is None:
+        return []
+    await ensure_schema()
+    moment = now or datetime.now(timezone.utc)
+    settings = get_settings()
+    inactivity_seconds = max(0, int(settings.file_reservation_inactivity_seconds))
+    activity_grace = max(0, int(settings.file_reservation_activity_grace_seconds))
+
+    async with get_session() as session:
+        stmt = (
+            select(FileReservation, Agent)
+            .join(Agent, FileReservation.agent_id == Agent.id)
+            .where(FileReservation.project_id == project.id)
+            .order_by(asc(FileReservation.created_ts))
+        )
+        if not include_released:
+            stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
+        result = await session.execute(stmt)
+        rows = result.all()
+        if not rows:
+            return []
+        agent_ids = [agent.id for _, agent in rows if agent.id is not None]
+        send_map: dict[int, Optional[datetime]] = {}
+        ack_map: dict[int, Optional[datetime]] = {}
+        read_map: dict[int, Optional[datetime]] = {}
+        if agent_ids:
+            send_result = await session.execute(
+                select(Message.sender_id, func.max(Message.created_ts))
+                .where(
+                    Message.project_id == project.id,
+                    cast(Any, Message.sender_id).in_(agent_ids),
+                )
+                .group_by(Message.sender_id)
+            )
+            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}
+            ack_result = await session.execute(
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))
+                .join(Message, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project.id,
+                    cast(Any, MessageRecipient.agent_id).in_(agent_ids),
+                    cast(Any, MessageRecipient.ack_ts).is_not(None),
+                )
+                .group_by(MessageRecipient.agent_id)
+            )
+            ack_map = {row[0]: _ensure_utc(row[1]) for row in ack_result}
+            read_result = await session.execute(
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))
+                .join(Message, MessageRecipient.message_id == Message.id)
+                .where(
+                    Message.project_id == project.id,
+                    cast(Any, MessageRecipient.agent_id).in_(agent_ids),
+                    cast(Any, MessageRecipient.read_ts).is_not(None),
+                )
+                .group_by(MessageRecipient.agent_id)
+            )
+            read_map = {row[0]: _ensure_utc(row[1]) for row in read_result}
+
+    workspace = _project_workspace_path(project)
+    repo = _open_repo_if_available(workspace) if workspace is not None else None
+
+    statuses: list[FileReservationStatus] = []
+    for reservation, agent in rows:
+        agent_id = agent.id or -1
+        agent_last_active = _ensure_utc(agent.last_active_ts)
+        last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
+
+        matches: list[Path] = []
+        fs_activity: Optional[datetime] = None
+        git_activity: Optional[datetime] = None
+
+        if workspace is not None:
+            matches = _collect_matching_paths(workspace, reservation.path_pattern)
+            if matches:
+                fs_activity = _latest_filesystem_activity(matches)
+                git_activity = _latest_git_activity(repo, matches)
+
+        agent_inactive = (
+            agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
+        )
+        recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
+        recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
+        recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
+
+        stale = bool(
+            reservation.released_ts is None
+            and agent_inactive
+            and not (recent_mail or recent_fs or recent_git)
+        )
+        reasons: list[str] = []
+        if agent_inactive:
+            reasons.append(f"agent_inactive>{inactivity_seconds}s")
+        else:
+            reasons.append("agent_recently_active")
+        if recent_mail:
+            reasons.append("mail_activity_recent")
+        else:
+            reasons.append(f"no_recent_mail_activity>{activity_grace}s")
+        if matches:
+            if recent_fs:
+                reasons.append("filesystem_activity_recent")
+            else:
+                reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
+            if recent_git:
+                reasons.append("git_activity_recent")
+            else:
+                reasons.append(f"no_recent_git_activity>{activity_grace}s")
+        else:
+            reasons.append("path_pattern_unmatched")
+
+        statuses.append(
+            FileReservationStatus(
+                reservation=reservation,
+                agent=agent,
+                stale=stale,
+                stale_reasons=reasons,
+                last_agent_activity=agent_last_active,
+                last_mail_activity=last_mail,
+                last_fs_activity=fs_activity,
+                last_git_activity=git_activity,
+            )
+        )
+    return statuses
+
+
+async def _expire_stale_file_reservations(project_id: int) -> list[FileReservationStatus]:
+    await ensure_schema()
     now = datetime.now(timezone.utc)
+
+    project: Optional[Project] = None
+    async with get_session() as session:
+        project = await session.get(Project, project_id)
+    if project is None:
+        return []
+
+    # Release any entries whose TTL has already elapsed
     async with get_session() as session:
         await session.execute(
             update(FileReservation)
@@ -1138,6 +1420,28 @@ async def _expire_stale_file_reservations(project_id: int) -> None:
             .values(released_ts=now)
         )
         await session.commit()
+
+    statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
+    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
+    stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
+    if not stale_ids:
+        return []
+
+    async with get_session() as session:
+        await session.execute(
+            update(FileReservation)
+            .where(
+                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.id).in_(stale_ids),
+                cast(Any, FileReservation.released_ts).is_(None),
+            )
+            .values(released_ts=now)
+        )
+        await session.commit()
+
+    for status in stale_statuses:
+        status.reservation.released_ts = now
+    return stale_statuses
 
 
 def _file_reservations_conflict(existing: FileReservation, candidate_path: str, candidate_exclusive: bool, candidate_agent: Agent) -> bool:
@@ -1976,7 +2280,7 @@ def build_mcp_server() -> FastMCP:
         - Use the same `project_key` consistently across cooperating agents.
         """
         project = await _get_project_by_identifier(project_key)
-        if get_settings().tools_log_enabled:
+        if settings.tools_log_enabled:
             try:
                 import importlib as _imp
                 _rc = _imp.import_module("rich.console")
@@ -4409,6 +4713,7 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        settings = get_settings()
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -4423,7 +4728,14 @@ def build_mcp_server() -> FastMCP:
         agent = await _get_agent(project, agent_name)
         if project.id is None:
             raise ValueError("Project must have an id before reserving file paths.")
-        await _expire_stale_file_reservations(project.id)
+        stale_auto_releases = await _expire_stale_file_reservations(project.id)
+        if stale_auto_releases:
+            summary = ", ".join(
+                f"{status.agent.name}:{status.reservation.path_pattern}"
+                for status in stale_auto_releases[:5]
+            )
+            extra = f" ({summary})" if summary else ""
+            await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
         project_id = project.id
         async with get_session() as session:
             existing_rows = await session.execute(
@@ -4577,6 +4889,174 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
+    @mcp.tool(name="force_release_file_reservation")
+    @_instrument_tool(
+        "force_release_file_reservation",
+        cluster=CLUSTER_FILE_RESERVATIONS,
+        capabilities={"file_reservations", "repository"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def force_release_file_reservation(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        file_reservation_id: int,
+        notify_previous: bool = True,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """
+        Force-release a stale file reservation held by another agent after inactivity heuristics.
+
+        The tool validates that the reservation appears abandoned (agent inactive beyond threshold and
+        no recent mail/filesystem/git activity). When released, an optional notification is sent to the
+        previous holder summarizing the heuristics.
+        """
+        project = await _get_project_by_identifier(project_key)
+        actor = await _get_agent(project, agent_name)
+        if project.id is None:
+            raise ValueError("Project must have an id before releasing file_reservations.")
+
+        await ensure_schema()
+        async with get_session() as session:
+            result = await session.execute(
+                select(FileReservation, Agent)
+                .join(Agent, FileReservation.agent_id == Agent.id)
+                .where(
+                    FileReservation.id == file_reservation_id,
+                    FileReservation.project_id == project.id,
+                )
+            )
+            row = result.first()
+        if not row:
+            raise ToolExecutionError(
+                "NOT_FOUND",
+                f"File reservation id={file_reservation_id} not found for project '{project.human_key}'.",
+                recoverable=True,
+                data={"file_reservation_id": file_reservation_id},
+            )
+
+        reservation, holder = row
+        if reservation.released_ts is not None:
+            return {
+                "released": 0,
+                "released_at": _iso(reservation.released_ts),
+                "already_released": True,
+            }
+
+        statuses = await _collect_file_reservation_statuses(project, include_released=False)
+        target_status = next((status for status in statuses if status.reservation.id == reservation.id), None)
+        if target_status is None:
+            raise ToolExecutionError(
+                "NOT_FOUND",
+                "Unable to evaluate reservation status; it may have been released concurrently.",
+                recoverable=True,
+                data={"file_reservation_id": file_reservation_id},
+            )
+
+        if not target_status.stale:
+            raise ToolExecutionError(
+                "RESERVATION_ACTIVE",
+                "Reservation still shows recent activity; refusing forced release.",
+                recoverable=True,
+                data={
+                    "file_reservation_id": file_reservation_id,
+                    "stale_reasons": target_status.stale_reasons,
+                },
+            )
+
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            await session.execute(
+                update(FileReservation)
+                .where(
+                    FileReservation.id == file_reservation_id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                )
+                .values(released_ts=now)
+            )
+            await session.commit()
+
+        reservation.released_ts = now
+        settings = get_settings()
+        grace_seconds = int(settings.file_reservation_activity_grace_seconds)
+        inactivity_seconds = int(settings.file_reservation_inactivity_seconds)
+
+        summary = {
+            "id": reservation.id,
+            "agent": holder.name,
+            "path_pattern": reservation.path_pattern,
+            "exclusive": reservation.exclusive,
+            "reason": reservation.reason,
+            "created_ts": _iso(reservation.created_ts),
+            "expires_ts": _iso(reservation.expires_ts),
+            "released_ts": _iso(reservation.released_ts),
+            "stale_reasons": target_status.stale_reasons,
+            "last_agent_activity_ts": _iso(target_status.last_agent_activity) if target_status.last_agent_activity else None,
+            "last_mail_activity_ts": _iso(target_status.last_mail_activity) if target_status.last_mail_activity else None,
+            "last_filesystem_activity_ts": _iso(target_status.last_fs_activity) if target_status.last_fs_activity else None,
+            "last_git_activity_ts": _iso(target_status.last_git_activity) if target_status.last_git_activity else None,
+        }
+
+        await ctx.info(
+            f"Force released reservation {file_reservation_id} held by '{holder.name}' on '{reservation.path_pattern}'."
+        )
+
+        notified = False
+        if notify_previous and holder.name != actor.name:
+            reasons_md = "\n".join(f"- {reason}" for reason in target_status.stale_reasons)
+            extras: list[str] = []
+            if target_status.last_agent_activity:
+                delta = now - target_status.last_agent_activity
+                extras.append(f"last agent activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_mail_activity:
+                delta = now - target_status.last_mail_activity
+                extras.append(f"last mail activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_fs_activity:
+                delta = now - target_status.last_fs_activity
+                extras.append(f"last filesystem touch ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_git_activity:
+                delta = now - target_status.last_git_activity
+                extras.append(f"last git commit ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            extras.append(f"inactivity threshold={inactivity_seconds}s grace={grace_seconds}s")
+            extra_md = "\n".join(f"- {line}" for line in extras if line)
+            body_lines = [
+                f"Hi {holder.name},",
+                "",
+                f"I released your file reservation on `{reservation.path_pattern}` because it looked abandoned.",
+                "",
+                "Observed signals:",
+                reasons_md or "- (none)",
+            ]
+            if extra_md:
+                body_lines.extend(["", "Details:", extra_md])
+            if note:
+                body_lines.extend(["", f"Additional note from {actor.name}:", note.strip()])
+            body_lines.extend(
+                [
+                    "",
+                    "If you still need this reservation, please re-acquire it via `file_reservation_paths`.",
+                ]
+            )
+            try:
+                from fastmcp.tools.tool import FunctionTool
+
+                send_tool = cast(FunctionTool, cast(Any, send_message))
+                await send_tool.run(
+                    {
+                        "project_key": project_key,
+                        "sender_name": agent_name,
+                        "to": [holder.name],
+                        "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
+                        "body_md": "\n".join(body_lines),
+                    }
+                )
+                notified = True
+            except Exception:
+                notified = False
+
+        summary["notified"] = notified
+        return {"released": 1, "released_at": _iso(now), "reservation": summary}
     @mcp.tool(name="renew_file_reservations")
     @_instrument_tool("renew_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
     async def renew_file_reservations(
@@ -5365,30 +5845,42 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=false"}}
         ```
         """
-        project = await _get_project_by_identifier(slug)
+        slug_value, query_params = _split_slug_and_query(slug)
+        if "active_only" in query_params:
+            active_only = _coerce_flag_to_bool(query_params["active_only"], default=active_only)
+
+        project = await _get_project_by_identifier(slug_value)
         await ensure_schema()
         if project.id is None:
             raise ValueError("Project must have an id before listing file_reservations.")
+
         await _expire_stale_file_reservations(project.id)
-        async with get_session() as session:
-            stmt = select(FileReservation, Agent.name).join(Agent, FileReservation.agent_id == Agent.id).where(FileReservation.project_id == project.id)
-            if active_only:
-                stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
-            result = await session.execute(stmt)
-            rows = result.all()
-        return [
-            {
-                "id": file_reservation.id,
-                "agent": holder,
-                "path_pattern": file_reservation.path_pattern,
-                "exclusive": file_reservation.exclusive,
-                "reason": file_reservation.reason,
-                "created_ts": _iso(file_reservation.created_ts),
-                "expires_ts": _iso(file_reservation.expires_ts),
-                "released_ts": _iso(file_reservation.released_ts) if file_reservation.released_ts else None,
-            }
-            for file_reservation, holder in rows
-        ]
+        statuses = await _collect_file_reservation_statuses(project, include_released=not active_only)
+
+        payload: list[dict[str, Any]] = []
+        for status in statuses:
+            reservation = status.reservation
+            if active_only and reservation.released_ts is not None:
+                continue
+            payload.append(
+                {
+                    "id": reservation.id,
+                    "agent": status.agent.name,
+                    "path_pattern": reservation.path_pattern,
+                    "exclusive": reservation.exclusive,
+                    "reason": reservation.reason,
+                    "created_ts": _iso(reservation.created_ts),
+                    "expires_ts": _iso(reservation.expires_ts),
+                    "released_ts": _iso(reservation.released_ts) if reservation.released_ts else None,
+                    "stale": status.stale,
+                    "stale_reasons": status.stale_reasons,
+                    "last_agent_activity_ts": _iso(status.last_agent_activity) if status.last_agent_activity else None,
+                    "last_mail_activity_ts": _iso(status.last_mail_activity) if status.last_mail_activity else None,
+                    "last_filesystem_activity_ts": _iso(status.last_fs_activity) if status.last_fs_activity else None,
+                    "last_git_activity_ts": _iso(status.last_git_activity) if status.last_git_activity else None,
+                }
+            )
+        return payload
 
     @mcp.resource("resource://message/{message_id}", mime_type="application/json")
     async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:

@@ -8,10 +8,12 @@
 ## Ease-of-Use Principles
 - Provide a single happy-path command (`uv run python -m mcp_agent_mail.cli share export --output ./out/mailbox-share`) that emits a ready-to-host bundle with smart defaults (all projects, chunking when needed, manifest signing, ZIP archive).
 - Offer an interactive `--interactive` wizard that prompts for project selection, redaction presets, encryption, and attachment policies so users never need to memorize flags.
-- Ship a built-in preview server (`uv run python -m mcp_agent_mail.cli share preview ./out/mailbox-share`) for instant local verification of the static bundle.
-- Auto-detect hosting constraints (GitHub Pages, Cloudflare Pages, Netlify, generic S3) and surface follow-up instructions as part of the export output.
-- Generate a `HOW_TO_DEPLOY.md` inside each bundle with copy/paste deployment steps, including header snippets and file-placement guidance.
-- Keep advanced options (age encryption, Ed25519 key management, external attachment buckets) opt-in and discoverable via wizard help rather than mandatory upfront setup.
+- ✅ *(2025-11-04)* Wizard now collects project filters, attachment thresholds, and ZIP opt-in before export.
+- ✅ *(2025-11-04)* Built-in preview server available via `share preview`, with optional browser launch for frictionless validation.
+- ✅ *(2025-11-04)* Minimal `viewer/` scaffold (HTML/CSS/JS + diagnostics) ships in every bundle to surface manifest and hosting details.
+- ✅ *(2025-11-04)* Export pipeline auto-detects GitHub Pages / Cloudflare Pages / Netlify / S3 signals and records tailored instructions in manifest + HOW_TO_DEPLOY.
+- ✅ *(2025-11-04)* Each bundle now renders `HOW_TO_DEPLOY.md` with host-specific copy/paste deployment steps automatically generated.
+- ✅ *(2025-11-04)* Advanced options (Ed25519 signing, age encryption, attachment thresholds) remain opt-in flags or wizard prompts; defaults stay minimal.
 
 ## Constraints & Assumptions
 - Exports must never mutate the live SQLite database; they operate on a read-only snapshot.
@@ -216,11 +218,16 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
    - Attachment bundling + manifest generation.
    - Automated tests for filter accuracy and redaction coverage.
    - Interactive wizard UX (`--interactive`) plus non-interactive defaults, including auto-detected hosting hints and `HOW_TO_DEPLOY.md` generation.
+   - ✅ *(2025-11-04)* Wizard collects project filters, attachment thresholds, and ZIP packaging choice before export.
    - Preview server (`share preview`) with hot reload to keep validation frictionless.
    - ✅ *(2025-11-04)* Prototype export now emits `manifest.json`, `README.txt`, and `HOW_TO_DEPLOY.md` scaffolding alongside the snapshot.
    - ✅ *(2025-11-04)* Default export now creates a deterministic `.zip` archive in addition to the snapshot directory.
    - ✅ *(2025-11-04)* `--project` filters limit exports to selected slugs/human keys and manifest records included scope + removed counts.
    - ✅ *(2025-11-04)* Scrubber pseudonymizes agents, clears ack/read markers, removes file reservations/agent links, and redacts common secret tokens before manifest generation.
+   - ✅ *(2025-11-04)* Attachment bundler hashes assets into `attachments/<sha>/` paths, inlines ≤64 KiB files as data URIs, marks >25 MiB artifacts for external hosting, and records per-message bundle metadata in the manifest.
+   - ✅ *(2025-11-04)* `share preview` command serves bundle directories via a local threaded HTTP server with optional browser launch.
+   - ✅ *(2025-11-04)* Export now copies shipped viewer scaffold (`viewer/index.html`, `viewer.js`, `styles.css`) so bundles render manifest diagnostics out of the box.
+   - ✅ *(2025-11-04)* End-to-end integration test exercises `share export` CLI, validates manifest/ZIP outputs, and emits rich diagnostics for traceability.
 3. **Viewer (3 weeks):**
    - Build UI shell, implement inbox/thread/detail/search flows.
    - Integrate database loader + caching.
@@ -229,12 +236,16 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
    - Hash/signing pipeline.
    - Optional encryption module.
    - Documentation and sample CI workflow.
+   - ✅ *(2025-11-04)* CLI supports Ed25519 manifest signing (`--signing-key`) and optional age encryption for ZIP bundles (`--age-recipient`).
 5. **Beta & Feedback (1 week):**
    - Publish sample bundle in repo `docs/share-demo/`.
    - Gather feedback, tune performance (chunking, query optimization).
 
 ## Testing Strategy
 - Unit tests for scrubbing rules, pseudonym determinism, and secret redaction.
+  - ✅ *(2025-11-04)* Added unit coverage for scrubbing + attachment bundling (`tests/test_share_export.py`).
+- Integration tests that exercise the CLI end-to-end with rich logging to validate manifest contents, attachment packaging, and ZIP bundles.
+  - ✅ *(2025-11-04)* Added `tests/integration/test_mailbox_share_integration.py` covering export + preview server workflow.
 - Snapshot tests for manifest integrity, schema_version, compile_options, and Ed25519 signatures.
 - Playwright E2E tests against static viewer (local http server): verify engine auto-selection, search results, attachments, and CSP enforcement.
 - Performance benchmarks: measure first meaningful paint on 10 MB, 100 MB, 500 MB bundles under httpvfs streaming; confirm warm-load OPFS cache hits.

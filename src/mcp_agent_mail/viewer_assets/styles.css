@@ -1,0 +1,171 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.banner {
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  padding: 1.5rem 2rem;
+  text-align: center;
+}
+
+.banner h1 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.8rem;
+}
+
+main {
+  padding: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.panels {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  margin-bottom: 2rem;
+}
+
+.panel {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 12px 20px rgba(15, 23, 42, 0.25);
+}
+
+.panel h2 {
+  margin-top: 0;
+  font-size: 1.3rem;
+  border-bottom: 1px solid #334155;
+  padding-bottom: 0.5rem;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.panel-header h2 {
+  border: none;
+  padding-bottom: 0;
+}
+
+.search {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.search input {
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #475569;
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+.search input:focus {
+  outline: 2px solid #3b82f6;
+}
+
+.panel ul {
+  list-style: none;
+  padding-left: 0;
+  margin: 0;
+}
+
+.panel li {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.panel li:last-child {
+  border-bottom: none;
+}
+
+.panel dl {
+  margin: 0;
+}
+
+.panel dt {
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.panel dd {
+  margin: 0;
+  color: #94a3b8;
+}
+
+.notice {
+  background: rgba(59, 130, 246, 0.12);
+  border-left: 3px solid #3b82f6;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1.5rem;
+}
+
+.code-block {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 1rem;
+  color: #cbd5f5;
+  overflow-x: auto;
+}
+
+footer {
+  text-align: center;
+  padding: 1rem;
+  border-top: 1px solid #334155;
+  color: #94a3b8;
+}
+.meta-line {
+  color: #94a3b8;
+  font-size: 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.message-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.message-list li {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 1rem;
+  background: #0f172a;
+}
+
+.message-list h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.1rem;
+}
+
+.message-meta-line {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  margin-bottom: 0.5rem;
+}
+
+.message-snippet {
+  white-space: pre-line;
+  line-height: 1.4;
+}

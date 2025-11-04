@@ -1,8 +1,16 @@
 import contextlib
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from git import Repo
 from PIL import Image
 from sqlalchemy import text
@@ -13,8 +21,12 @@ from mcp_agent_mail.app import (
     refresh_project_sibling_suggestions,
     update_project_sibling_status,
 )
-from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import get_session
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.text import Text
 
 
 @pytest.mark.asyncio
@@ -132,6 +144,12 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
         )
         assert conflict.data["conflicts"]
 
+        active_only_resource = await client.read_resource("resource://file_reservations/backend?active_only=true")
+        active_only_payload = json.loads(active_only_resource[0].text)
+        assert active_only_payload
+        assert active_only_payload[0]["path_pattern"] == "src/app.py"
+        assert active_only_payload[0]["stale"] is False
+
         release = await client.call_tool(
             "release_file_reservations",
             {
@@ -143,7 +161,11 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
         assert release.data["released"] == 1
 
         file_reservations_resource = await client.read_resource("resource://file_reservations/backend")
-        assert "src/app.py" in file_reservations_resource[0].text
+        payload = json.loads(file_reservations_resource[0].text)
+        assert any(entry["path_pattern"] == "src/app.py" and entry["released_ts"] is not None for entry in payload)
+
+        active_only_after_release = await client.read_resource("resource://file_reservations/backend?active_only=true")
+        assert json.loads(active_only_after_release[0].text) == []
 
 
 @pytest.mark.asyncio
@@ -208,6 +230,224 @@ async def test_file_reservation_enforcement_blocks_message_on_overlap(isolated_e
         assert payload.get("type") == "FILE_RESERVATION_CONFLICT" or payload.get("error", {}).get("type") == "FILE_RESERVATION_CONFLICT"
         conflicts = payload.get("conflicts") or payload.get("error", {}).get("conflicts")
         assert conflicts and isinstance(conflicts, list)
+
+
+@pytest.mark.asyncio
+async def test_force_release_file_reservation_stale(isolated_env, monkeypatch):
+    monkeypatch.setenv("FILE_RESERVATION_INACTIVITY_SECONDS", "5")
+    monkeypatch.setenv("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", "1")
+    clear_settings_cache()
+    try:
+        server = build_mcp_server()
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": "/backend"})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "BlueLake",
+                },
+            )
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "GreenLake",
+                },
+            )
+            reservation = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                    "paths": ["src/app.py"],
+                    "ttl_seconds": 3600,
+                },
+            )
+            reservation_id = reservation.data["granted"][0]["id"]
+
+            async with get_session() as session:
+                project_row = await session.execute(text("SELECT id FROM projects WHERE slug = :slug"), {"slug": "backend"})
+                project_id = project_row.scalar_one()
+                stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+                await session.execute(
+                    text(
+                        "UPDATE agents SET last_active_ts = :ts WHERE project_id = :pid AND lower(name) = :name"
+                    ),
+                    {"ts": stale_cutoff, "pid": project_id, "name": "bluelake"},
+                )
+                await session.commit()
+
+            force = await client.call_tool(
+                "force_release_file_reservation",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "GreenLake",
+                    "file_reservation_id": reservation_id,
+                },
+            )
+            assert force.data["released"] == 1
+            assert force.data["reservation"]["notified"] is True
+            resource = await client.read_resource("resource://file_reservations/backend?active_only=false")
+            payload = json.loads(resource[0].text)
+            released = next(item for item in payload if item["id"] == reservation_id)
+            assert released["released_ts"] is not None
+
+            inbox = await client.call_tool(
+                "fetch_inbox",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                },
+            )
+            messages = inbox.structured_content.get("result", [])
+            assert any("Released stale lock" in msg["subject"] for msg in messages)
+    finally:
+        clear_settings_cache()
+
+
+@pytest.mark.asyncio
+async def test_force_release_rejects_recent_activity(isolated_env, monkeypatch):
+    monkeypatch.setenv("FILE_RESERVATION_INACTIVITY_SECONDS", "300")
+    monkeypatch.setenv("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", "120")
+    clear_settings_cache()
+    try:
+        server = build_mcp_server()
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": "/backend"})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "BlueLake",
+                },
+            )
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "GreenLake",
+                },
+            )
+            reservation = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                    "paths": ["src/app.py"],
+                    "ttl_seconds": 3600,
+                },
+            )
+            reservation_id = reservation.data["granted"][0]["id"]
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "force_release_file_reservation",
+                    {
+                        "project_key": "Backend",
+                        "agent_name": "GreenLake",
+                        "file_reservation_id": reservation_id,
+                    },
+                )
+
+            resource = await client.read_resource("resource://file_reservations/backend?active_only=true")
+            entries = json.loads(resource[0].text)
+            assert entries and entries[0]["id"] == reservation_id
+            assert entries[0]["released_ts"] is None
+    finally:
+        clear_settings_cache()
+
+
+@pytest.mark.asyncio
+async def test_file_reservation_integration_logging(isolated_env, monkeypatch):
+    monkeypatch.setenv("FILE_RESERVATION_INACTIVITY_SECONDS", "5")
+    monkeypatch.setenv("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", "2")
+    clear_settings_cache()
+
+    console = Console(record=True, force_terminal=True)
+
+    def _log(title: str, description: str, data: object | None = None) -> None:
+        body = description
+        if data is not None:
+            rendered = json.dumps(data, indent=2, default=str)
+            body += "\n" + Syntax(rendered, "json", word_wrap=True).text
+        console.print(Panel.fit(body, title=title, border_style="cyan"))
+
+    try:
+        server = build_mcp_server()
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": "/backend"})
+            _log("Project", "Ensured project '/backend'")
+
+            for name in ("BlueLake", "GreenLake"):
+                await client.call_tool(
+                    "register_agent",
+                    {
+                        "project_key": "Backend",
+                        "program": "codex",
+                        "model": "gpt-5",
+                        "name": name,
+                    },
+                )
+                _log("Agent Registered", f"Registered agent {name}")
+
+            reservation = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                    "paths": ["src/app.py"],
+                    "ttl_seconds": 3600,
+                },
+            )
+            reservation_id = reservation.data["granted"][0]["id"]
+            _log(
+                "Reservation Granted",
+                "BlueLake reserved src/app.py",
+                reservation.data,
+            )
+
+            resource_initial = await client.read_resource("resource://file_reservations/backend?active_only=false")
+            payload_initial = json.loads(resource_initial[0].text)
+            _log("Initial Reservations", "Reservation state immediately after grant", payload_initial)
+
+            async with get_session() as session:
+                project_row = await session.execute(text("SELECT id FROM projects WHERE slug = :slug"), {"slug": "backend"})
+                project_id = project_row.scalar_one()
+                stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+                await session.execute(
+                    text("UPDATE agents SET last_active_ts = :ts WHERE project_id = :pid AND lower(name) = :name"),
+                    {"ts": stale_cutoff, "pid": project_id, "name": "bluelake"},
+                )
+                await session.commit()
+            _log("Agent Last Active Adjusted", "Artificially aged BlueLake last_active_ts to simulate inactivity.")
+
+            resource_after = await client.read_resource("resource://file_reservations/backend?active_only=false")
+            payload_after = json.loads(resource_after[0].text)
+            _log("Post Sweep", "Reservation state after inactivity sweep", payload_after)
+
+            released_entry = next(item for item in payload_after if item["id"] == reservation_id)
+            assert released_entry["released_ts"] is not None
+            assert released_entry["stale"] is True
+            assert any("agent_inactive" in reason for reason in released_entry["stale_reasons"])
+
+            active_only = await client.read_resource("resource://file_reservations/backend?active_only=true")
+            payload_active_only = json.loads(active_only[0].text)
+            _log("Active Reservations", "Active-only listing should omit released entries", payload_active_only)
+            assert payload_active_only == []
+
+            notebook = console.export_text(clear=False)
+            assert "BlueLake reserved" in notebook
+            assert "agent_inactive" in notebook
+    finally:
+        clear_settings_cache()
 
 
 @pytest.mark.asyncio

@@ -5,11 +5,17 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import warnings
+import webbrowser
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
 
@@ -27,13 +33,24 @@ from .guard import install_guard as install_guard_script, uninstall_guard as uni
 from .http import build_http_app
 from .models import Agent, FileReservation, Message, MessageRecipient, Project
 from .share import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNK_THRESHOLD,
+    DETACH_ATTACHMENT_THRESHOLD,
+    INLINE_ATTACHMENT_THRESHOLD,
     ShareExportError,
     apply_project_scope,
+    bundle_attachments,
+    copy_viewer_assets,
     create_sqlite_snapshot,
+    detect_hosting_hints,
+    encrypt_bundle,
+    export_viewer_data,
+    maybe_chunk_database,
     package_directory_as_zip,
     prepare_output_directory,
     resolve_sqlite_database_path,
     scrub_snapshot,
+    sign_manifest,
     write_bundle_scaffolding,
 )
 from .utils import slugify
@@ -153,6 +170,42 @@ def share_export(
         ),
     ] = False,
     projects: Annotated[list[str] | None, typer.Option("--project", "-p", help="Limit export to specific project slugs or human keys.")] = None,
+    inline_threshold: Annotated[
+        int,
+        typer.Option(
+            "--inline-threshold",
+            help="Inline attachments ≤ this many bytes as data URIs.",
+            min=0,
+            show_default=True,
+        ),
+    ] = INLINE_ATTACHMENT_THRESHOLD,
+    detach_threshold: Annotated[
+        int,
+        typer.Option(
+            "--detach-threshold",
+            help="Mark attachments ≥ this many bytes as external (not bundled).",
+            min=0,
+            show_default=True,
+        ),
+    ] = DETACH_ATTACHMENT_THRESHOLD,
+    chunk_threshold: Annotated[
+        int,
+        typer.Option(
+            "--chunk-threshold",
+            help="Chunk the SQLite database when it exceeds this size (bytes).",
+            min=0,
+            show_default=True,
+        ),
+    ] = DEFAULT_CHUNK_THRESHOLD,
+    chunk_size: Annotated[
+        int,
+        typer.Option(
+            "--chunk-size",
+            help="Chunk size in bytes when chunking is enabled.",
+            min=1024,
+            show_default=True,
+        ),
+    ] = DEFAULT_CHUNK_SIZE,
     zip_bundle: Annotated[
         bool,
         typer.Option(
@@ -161,9 +214,21 @@ def share_export(
             show_default=True,
         ),
     ] = True,
+    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")]=None,
+    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")]=None,
+    age_recipients: Annotated[
+        tuple[str, ...] | None,
+        typer.Option(
+            None,
+            "--age-recipient",
+            help="Encrypt ZIP with age using the provided recipient(s).",
+            multiple=True,
+        ),  # type: ignore[arg-type]
+    ] = None,
 ) -> None:
     """Export the MCP Agent Mail mailbox into a shareable static bundle (snapshot + scaffolding prototype)."""
 
+    age_recipient_list = list(age_recipients or ())
     if projects is None:
         projects = []
     raw_output = _resolve_path(output)
@@ -174,16 +239,27 @@ def share_export(
         raise typer.Exit(code=1) from exc
 
     console.rule("[bold]Static Mailbox Export[/bold]")
-    if interactive:
-        console.print(
-            "[yellow]Interactive wizard mode is not implemented yet; proceeding with default export flow.[/]"
-        )
 
     try:
         database_path = resolve_sqlite_database_path()
     except ShareExportError as exc:
         console.print(f"[red]Failed to resolve SQLite database: {exc}[/]")
         raise typer.Exit(code=1) from exc
+
+    if interactive:
+        wizard = _run_share_export_wizard(
+            database_path,
+            inline_threshold,
+            detach_threshold,
+            chunk_threshold,
+            chunk_size,
+        )
+        projects = wizard["projects"]
+        inline_threshold = wizard["inline_threshold"]
+        detach_threshold = wizard["detach_threshold"]
+        chunk_threshold = wizard["chunk_threshold"]
+        chunk_size = wizard["chunk_size"]
+        zip_bundle = wizard["zip_bundle"]
 
     console.print(f"[cyan]Using database:[/] {database_path}")
 
@@ -195,6 +271,23 @@ def share_export(
     except ShareExportError as exc:
         console.print(f"[red]Snapshot failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    if detach_threshold <= inline_threshold:
+        console.print(
+            "[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]"
+        )
+        detach_threshold = inline_threshold + max(1024, inline_threshold // 2 or 1)
+
+    hosting_hints = detect_hosting_hints(output_path)
+    if hosting_hints:
+        table = Table(title="Detected Hosting Targets")
+        table.add_column("Host")
+        table.add_column("Signals")
+        for hint in hosting_hints:
+            table.add_row(hint.title, "\n".join(hint.signals))
+        console.print(table)
+    else:
+        console.print("[dim]No hosting targets detected automatically; consult HOW_TO_DEPLOY.md for guidance.[/]")
 
     console.print("[cyan]Applying project filters and scrubbing data...[/]")
     try:
@@ -209,6 +302,34 @@ def share_export(
         console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
+    settings = get_settings()
+    storage_root = Path(settings.storage.root).expanduser()
+    try:
+        attachments_manifest = bundle_attachments(
+            snapshot_path,
+            output_path,
+            storage_root=storage_root,
+            inline_threshold=inline_threshold,
+            detach_threshold=detach_threshold,
+        )
+    except ShareExportError as exc:
+        console.print(f"[red]Attachment packaging failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    chunk_manifest = maybe_chunk_database(
+        snapshot_path,
+        output_path,
+        threshold_bytes=chunk_threshold,
+        chunk_bytes=chunk_size,
+    )
+    if chunk_manifest:
+        console.print(
+            f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size']//1024} KiB.[/]"
+        )
+
+    copy_viewer_assets(output_path)
+    viewer_data = export_viewer_data(snapshot_path, output_path)
+
     console.print("[cyan]Writing manifest and helper docs...[/]")
     try:
         write_bundle_scaffolding(
@@ -217,10 +338,30 @@ def share_export(
             scope=scope,
             project_filters=projects,
             scrub_summary=scrub_summary,
+            attachments_manifest=attachments_manifest,
+            chunk_manifest=chunk_manifest,
+            hosting_hints=hosting_hints,
+            viewer_data=viewer_data,
         )
     except ShareExportError as exc:
         console.print(f"[red]Failed to scaffold bundle:[/] {exc}")
         raise typer.Exit(code=1) from exc
+
+    if signing_key is not None:
+        try:
+            public_out_path = _resolve_path(signing_public_out) if signing_public_out else None
+            signature_info = sign_manifest(
+                output_path / "manifest.json",
+                signing_key,
+                output_path,
+                public_out=public_out_path,
+            )
+            console.print(
+                f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]"
+            )
+        except ShareExportError as exc:
+            console.print(f"[red]Manifest signing failed:[/] {exc}")
+            raise typer.Exit(code=1) from exc
 
     console.print("[green]✓ Created SQLite snapshot for sharing.[/]")
     console.print(
@@ -228,7 +369,16 @@ def share_export(
     )
     included_projects = ", ".join(record.slug for record in scope.projects)
     console.print(f"[green]✓ Project scope includes: {included_projects or 'none'}[/]")
-    console.print("[green]✓ Generated manifest, README.txt, and HOW_TO_DEPLOY.md placeholders.[/]")
+    att_stats = attachments_manifest.get("stats", {})
+    console.print(
+        "[green]✓ Packaged attachments: "
+        f"{att_stats.get('inline', 0)} inline, "
+        f"{att_stats.get('copied', 0)} copied, "
+        f"{att_stats.get('externalized', 0)} external, "
+        f"{att_stats.get('missing', 0)} missing "
+        f"(inline ≤ {inline_threshold} B, external ≥ {detach_threshold} B).[/]"
+    )
+    console.print("[green]✓ Generated manifest, README.txt, HOW_TO_DEPLOY.md, and viewer assets.[/]")
 
     if zip_bundle:
         archive_path = output_path.parent / f"{output_path.name}.zip"
@@ -239,13 +389,157 @@ def share_export(
             console.print(f"[red]Failed to create ZIP archive:[/] {exc}")
             raise typer.Exit(code=1) from exc
         console.print("[green]✓ Packaged ZIP archive for distribution.[/]")
+        if age_recipient_list:
+            try:
+                encrypted_path = encrypt_bundle(archive_path, age_recipient_list)
+                if encrypted_path:
+                    console.print(f"[green]✓ Encrypted bundle written to {encrypted_path}[/]")
+            except ShareExportError as exc:
+                console.print(f"[red]Bundle encryption failed:[/] {exc}")
+                raise typer.Exit(code=1) from exc
 
     console.print(
-        "[dim]Next steps: add redaction rules, bundle viewer assets, and generate deployment helpers.[/]"
+        "[dim]Next steps: flesh out the static SPA (search, thread detail) and tighten signing/encryption defaults per the roadmap.[/]"
     )
 
 
-def _resolve_path(raw_path: str) -> Path:
+def _list_projects_for_wizard(database_path: Path) -> list[tuple[str, str]]:
+    projects: list[tuple[str, str]] = []
+    try:
+        with sqlite3.connect(str(database_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT slug, human_key FROM projects ORDER BY slug COLLATE NOCASE").fetchall()
+            for row in rows:
+                slug = row["slug"] or ""
+                human_key = row["human_key"] or ""
+                projects.append((slug, human_key))
+    except sqlite3.Error:
+        pass
+    return projects
+
+
+def _parse_positive_int(value: str, default: int) -> int:
+    text = value.strip()
+    if not text:
+        return default
+    try:
+        result = int(text)
+        if result < 0:
+            raise ValueError
+        return result
+    except ValueError:
+        console.print(f"[yellow]Invalid number '{value}'. Using default {default}.[/]")
+        return default
+
+
+def _run_share_export_wizard(
+    database_path: Path,
+    default_inline: int,
+    default_detach: int,
+    default_chunk_threshold: int,
+    default_chunk_size: int,
+) -> dict[str, Any]:
+    console.rule("[bold]Share Export Wizard[/bold]")
+    projects = _list_projects_for_wizard(database_path)
+    if projects:
+        console.print("[cyan]Available projects:[/]")
+        for slug, human_key in projects:
+            console.print(f"  • [bold]{slug}[/] ({human_key})")
+    else:
+        console.print("[yellow]No projects detected in the database (exporting all projects).[/]")
+
+    project_input = typer.prompt(
+        "Enter project slugs or human keys to include (comma separated, leave blank for all)",
+        default="",
+    )
+    selected_projects = [part.strip() for part in project_input.split(",") if part.strip()]
+
+    inline_input = typer.prompt(
+        f"Inline attachments threshold in bytes (default {default_inline})",
+        default=str(default_inline),
+    )
+    inline_threshold = _parse_positive_int(inline_input, default_inline)
+
+    detach_input = typer.prompt(
+        f"External attachment threshold in bytes (default {default_detach})",
+        default=str(default_detach),
+    )
+    detach_threshold = _parse_positive_int(detach_input, default_detach)
+
+    chunk_threshold_input = typer.prompt(
+        f"Chunk database when size exceeds (bytes, default {default_chunk_threshold})",
+        default=str(default_chunk_threshold),
+    )
+    chunk_threshold = _parse_positive_int(chunk_threshold_input, default_chunk_threshold)
+
+    chunk_size_input = typer.prompt(
+        f"Chunk size in bytes (default {default_chunk_size})",
+        default=str(default_chunk_size),
+    )
+    chunk_size = _parse_positive_int(chunk_size_input, default_chunk_size)
+
+    zip_bundle = typer.confirm("Package the output directory as a .zip archive?", default=True)
+
+    return {
+        "projects": selected_projects,
+        "inline_threshold": inline_threshold,
+        "detach_threshold": detach_threshold,
+        "chunk_threshold": chunk_threshold,
+        "chunk_size": chunk_size,
+        "zip_bundle": zip_bundle,
+    }
+
+
+def _start_preview_server(bundle_path: Path, host: str, port: int) -> ThreadingHTTPServer:
+    handler = partial(SimpleHTTPRequestHandler, directory=str(bundle_path))
+    server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+    return server
+
+
+@share_app.command("preview")
+def share_preview(
+    bundle: Annotated[str, typer.Argument(help="Path to the exported bundle directory.")],
+    host: Annotated[str, typer.Option("--host", help="Host interface for the preview server.")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Port for the preview server.")] = 9000,
+    open_browser: Annotated[
+        bool,
+        typer.Option("--open-browser/--no-open-browser", help="Automatically open the bundle in a browser."),
+    ] = False,
+) -> None:
+    """Serve a static export bundle locally for inspection."""
+
+    bundle_path = _resolve_path(bundle)
+    if not bundle_path.exists() or not bundle_path.is_dir():
+        console.print(f"[red]Bundle directory not found:[/] {bundle_path}")
+        raise typer.Exit(code=1)
+
+    server = _start_preview_server(bundle_path, host, port)
+    actual_host, actual_port = server.server_address[:2]
+    actual_host = actual_host or host
+
+    console.rule("[bold]Static Bundle Preview[/bold]")
+    console.print(f"Serving {bundle_path} at http://{actual_host}:{actual_port}/ (Ctrl+C to stop)")
+
+    if open_browser:
+        with suppress(Exception):
+            webbrowser.open(f"http://{actual_host}:{actual_port}/")
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        while thread.is_alive():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Shutting down preview server...[/]")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        console.print("[green]Preview server stopped.[/]")
+
+
+def _resolve_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
     return path

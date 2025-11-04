@@ -756,6 +756,7 @@ Exclusive file reservations are advisory but visible and auditable:
 - A reservation JSON is written to `file_reservations/<sha1(path)>.json` capturing holder, pattern, exclusivity, created/expires
 - The pre-commit guard scans active exclusive reservations and blocks commits that touch conflicting paths held by another agent
 - Agents must set `AGENT_NAME` so the guard knows who "owns" the commit
+- The server continuously evaluates reservations for staleness (agent inactivity + mail/filesystem/git silence) and releases abandoned locks automatically; the `force_release_file_reservation` tool uses the same heuristics and notifies the previous holder when another agent clears a stale lease
 
 Install the guard into a code repo (conceptual tool call):
 
@@ -888,6 +889,8 @@ Common variables you may set:
 | `LLM_COST_LOGGING_ENABLED` | `true` | Log LLM API costs and token usage |
 | `FILE_RESERVATIONS_CLEANUP_ENABLED` | `false` | Enable background cleanup of expired file reservations |
 | `FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for file reservations cleanup task |
+| `FILE_RESERVATION_INACTIVITY_SECONDS` | `1800` | Inactivity threshold (seconds) before a reservation is considered stale |
+| `FILE_RESERVATION_ACTIVITY_GRACE_SECONDS` | `900` | Grace window for recent mail/filesystem/git activity to keep a reservation active |
 | `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
@@ -1093,6 +1096,7 @@ This section has been removed to keep the README focused. Client code samples be
 | `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{removed}` | Remove the guard from a repo |
 | `file_reservation_paths` | `file_reservation_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |
 | `release_file_reservations` | `release_file_reservations(project_key: str, agent_name: str, paths?: list[str], file_reservation_ids?: list[int])` | `{released, released_at}` | Releases agent's active file reservations |
+| `force_release_file_reservation` | `force_release_file_reservation(project_key: str, agent_name: str, file_reservation_id: int, notify_previous?: bool, note?: str)` | `{released, released_at, reservation}` | Clears stale reservations using inactivity/mail/fs/git heuristics and notifies the previous holder |
 | `renew_file_reservations` | `renew_file_reservations(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], file_reservation_ids?: list[int])` | `{renewed, file reservations[]}` | Extend TTL of existing file reservations |
 
 ### Resources
@@ -1108,7 +1112,7 @@ This section has been removed to keep the README focused. Client code samples be
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
-| `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations for a project |
+| `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations plus staleness metadata (heuristics, last activity timestamps) |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |
 | `resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit}` | listed | `{project, agent, count, messages[]}` | Inbox listing |

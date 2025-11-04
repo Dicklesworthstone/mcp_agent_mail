@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MCP Agent Mail Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="banner">
+      <h1>MCP Agent Mail – Static Viewer</h1>
+      <p id="bundle-info">Loading bundle metadata…</p>
+    </header>
+
+    <main>
+      <section class="panels">
+        <article class="panel" aria-labelledby="projects-heading">
+          <h2 id="projects-heading">Projects Included</h2>
+          <ul id="projects-list"></ul>
+        </article>
+
+        <article class="panel" aria-labelledby="attachments-heading">
+          <h2 id="attachments-heading">Attachment Summary</h2>
+          <dl id="attachment-stats"></dl>
+        </article>
+
+        <article class="panel" aria-labelledby="scrub-heading">
+          <h2 id="scrub-heading">Scrubbing Summary</h2>
+          <dl id="scrub-stats"></dl>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2>Message Overview</h2>
+          <div class="search">
+            <label for="search-input">Search</label>
+            <input id="search-input" type="search" placeholder="Filter by subject or snippet" />
+          </div>
+        </div>
+        <p id="message-meta" class="meta-line">Loading message index…</p>
+        <ul id="message-list" class="message-list"></ul>
+      </section>
+
+      <section class="panel">
+        <h2>Raw Manifest</h2>
+        <pre id="manifest-json" class="code-block">Loading manifest.json…</pre>
+      </section>
+    </main>
+
+    <footer>
+      <small>
+        Generated bundle — diagnostics based on <code>manifest.json</code>.
+      </small>
+    </footer>
+
+    <script type="module" src="./viewer.js"></script>
+  </body>
+</html>

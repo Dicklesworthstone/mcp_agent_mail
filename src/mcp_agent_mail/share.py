@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import base64
+import configparser
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import shutil
 import sqlite3
+import subprocess
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from importlib import abc, resources
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from sqlalchemy.engine import make_url
@@ -46,6 +51,10 @@ ATTACHMENT_REDACT_KEYS: frozenset[str] = frozenset(
 
 PSEUDONYM_PREFIX = "agent-"
 PSEUDONYM_LENGTH = 12
+INLINE_ATTACHMENT_THRESHOLD = 64 * 1024  # 64 KiB
+DETACH_ATTACHMENT_THRESHOLD = 25 * 1024 * 1024  # 25 MiB
+DEFAULT_CHUNK_THRESHOLD = 20 * 1024 * 1024  # 20 MiB
+DEFAULT_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,6 +81,291 @@ class ScrubSummary:
     agent_links_removed: int
     secrets_replaced: int
     attachments_sanitized: int
+
+
+@dataclass(slots=True, frozen=True)
+class HostingHint:
+    key: str
+    title: str
+    summary: str
+    instructions: list[str]
+    signals: list[str]
+
+
+HOSTING_GUIDES: dict[str, dict[str, object]] = {
+    "github_pages": {
+        "title": "GitHub Pages",
+        "summary": "Deploy the bundle via docs/ or gh-pages branch with correct MIME types.",
+        "instructions": [
+            "Copy `viewer/`, `manifest.json`, and `mailbox.sqlite3` into your `docs/` folder or gh-pages branch.",
+            "Add a `.nojekyll` file so `.wasm` assets are served, and ensure `.wasm` is mapped to `application/wasm` (via `static.json` or repository settings).",
+            "Commit and push, then confirm GitHub Pages is enabled for the repository branch."
+        ],
+    },
+    "cloudflare_pages": {
+        "title": "Cloudflare Pages",
+        "summary": "Deploy with wrangler or Pages UI and enable COOP/COEP headers for sqlite-wasm.",
+        "instructions": [
+            "Ensure `wrangler.toml` references the bundle directory (or upload the ZIP directly via the dashboard).",
+            "Add headers: `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` to unlock sqlite-wasm fast-path.",
+            "For attachments >25 MiB, push them to R2 and reference the signed URLs in the manifest."
+        ],
+    },
+    "netlify": {
+        "title": "Netlify",
+        "summary": "Use Netlify Drop or git deployment with matching COOP/COEP headers.",
+        "instructions": [
+            "Add or update `netlify.toml` with custom headers for COOP/COEP (apply to `/*`).",
+            "Deploy the bundle directory (or ZIP) via CLI or the Netlify UI.",
+            "Verify `.wasm` assets are served with `application/wasm` using Netlify's response headers tooling."
+        ],
+    },
+    "s3": {
+        "title": "Amazon S3 / Generic S3-Compatible",
+        "summary": "Upload the bundle to a bucket with proper Content-Types or front with CloudFront.",
+        "instructions": [
+            "Upload the bundle directory to your bucket (e.g., via `aws s3 sync`).",
+            "Set `Content-Type` metadata: `.wasm` → `application/wasm`, SQLite files → `application/octet-stream`.",
+            "When fronted by CloudFront, configure response headers for COOP/COEP and caching policies."
+        ],
+    },
+}
+
+GENERIC_HOSTING_NOTES: list[str] = [
+    "Serve the directory via any static host that honours `Content-Type` metadata (e.g., nginx, Vercel static, Firebase Hosting).",
+    "Ensure `.wasm` files return `application/wasm` and SQLite databases return `application/octet-stream` or `application/vnd.sqlite3`.",
+    "When sqlite-wasm cannot run (missing COOP/COEP), the viewer will fall back to streaming mode; document the expected performance for your release.",
+]
+
+
+def _find_repo_root(start: Path) -> Optional[Path]:
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _read_git_remotes(repo_root: Path) -> list[str]:
+    config_path = repo_root / ".git" / "config"
+    if not config_path.exists():
+        return []
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(config_path)
+    except Exception:
+        return []
+    urls: list[str] = []
+    for section in parser.sections():
+        if section.startswith("remote"):
+            url = parser[section].get("url")
+            if url:
+                urls.append(url)
+    return urls
+
+
+def detect_hosting_hints(output_dir: Path) -> list[HostingHint]:
+    signals: dict[str, list[str]] = defaultdict(list)
+    repo_root = _find_repo_root(Path.cwd())
+    remote_urls: list[str] = []
+    if repo_root:
+        remote_urls = _read_git_remotes(repo_root)
+        workflows_dir = repo_root / ".github" / "workflows"
+        if workflows_dir.exists():
+            for workflow in workflows_dir.glob("*.yml"):
+                text = workflow.read_text(encoding="utf-8", errors="ignore")
+                if "github-pages" in text or "pages" in workflow.name.lower():
+                    signals["github_pages"].append(f"Workflow {workflow.name} references Pages")
+                    break
+        if (repo_root / "wrangler.toml").exists():
+            signals["cloudflare_pages"].append("Found wrangler.toml")
+        if (repo_root / "netlify.toml").exists():
+            signals["netlify"].append("Found netlify.toml")
+        if (repo_root / "deploy" / "s3").exists() or (repo_root / "deploy" / "aws").exists():
+            signals["s3"].append("Detected deploy scripts referencing S3/AWS")
+
+    for url in remote_urls:
+        lower = url.lower()
+        if "github.com" in lower:
+            signals["github_pages"].append(f"Git remote: {url}")
+        if "cloudflare" in lower:
+            signals["cloudflare_pages"].append(f"Git remote: {url}")
+        if "netlify" in lower:
+            signals["netlify"].append(f"Git remote: {url}")
+        if "amazonaws" in lower or "s3" in lower:
+            signals["s3"].append(f"Git remote: {url}")
+
+    env = os.environ
+    if env.get("GITHUB_REPOSITORY"):
+        signals["github_pages"].append("GITHUB_REPOSITORY env set")
+    if env.get("CF_PAGES") or env.get("CF_ACCOUNT_ID"):
+        signals["cloudflare_pages"].append("Cloudflare Pages environment variables detected")
+    if env.get("NETLIFY") or env.get("NETLIFY_SITE_ID"):
+        signals["netlify"].append("Netlify environment variables detected")
+    if env.get("AWS_S3_BUCKET") or env.get("AWS_BUCKET"):
+        signals["s3"].append("AWS S3 bucket environment detected")
+
+    if repo_root:
+        docs_dir = repo_root / "docs"
+        if docs_dir.exists():
+            try:
+                if output_dir.is_relative_to(docs_dir):
+                    signals["github_pages"].append("Export path inside docs/ directory")
+            except AttributeError:
+                try:
+                    output_dir.relative_to(docs_dir)
+                    signals["github_pages"].append("Export path inside docs/ directory")
+                except ValueError:
+                    pass
+            except ValueError:
+                pass
+
+    hints: list[HostingHint] = []
+    for key, evidence in signals.items():
+        guide = HOSTING_GUIDES.get(key)
+        if not guide:
+            continue
+        instructions = cast(list[str], guide["instructions"])
+        hints.append(
+            HostingHint(
+                key=key,
+                title=str(guide["title"]),
+                summary=str(guide["summary"]),
+                instructions=list(instructions),
+                signals=evidence,
+            )
+        )
+
+    preferred_order = ["github_pages", "cloudflare_pages", "netlify", "s3"]
+    hints.sort(key=lambda hint: preferred_order.index(hint.key) if hint.key in preferred_order else len(preferred_order))
+    return hints
+
+
+def build_how_to_deploy(hosting_hints: Sequence[HostingHint]) -> str:
+    sections: list[str] = []
+    sections.append("# HOW_TO_DEPLOY\n")
+    sections.append("## Quick Local Preview\n")
+    sections.append("1. Run `uv run python -m mcp_agent_mail.cli share preview ./` from this bundle directory.")
+    sections.append("2. Open the printed URL (default `http://127.0.0.1:9000/`).")
+    sections.append("3. Press Ctrl+C to stop the preview server when finished.\n")
+
+    if hosting_hints:
+        sections.append("## Detected Hosting Targets\n")
+        for hint in hosting_hints:
+            signals_text = "; ".join(hint.signals)
+            sections.append(f"- **{hint.title}**: {hint.summary} _(signals: {signals_text})_")
+        sections.append("")
+    else:
+        sections.append("## Detected Hosting Targets\n- No specific hosts detected. Review the guides below.\n")
+
+    used_keys = {hint.key for hint in hosting_hints}
+    ordered_keys = [hint.key for hint in hosting_hints] + [key for key in HOSTING_GUIDES if key not in used_keys]
+    for key in ordered_keys:
+        guide = HOSTING_GUIDES[key]
+        detected_flag = " (detected)" if key in used_keys else " (guide)"
+        sections.append(f"## {guide['title']}{detected_flag}\n")
+        for step in cast(list[str], guide["instructions"]):
+            sections.append(f"- {step}")
+        sections.append("")
+
+    sections.append("## Generic Static Hosts\n")
+    for note in GENERIC_HOSTING_NOTES:
+        sections.append(f"- {note}")
+    sections.append("")
+    sections.append("Review `manifest.json` before publication to confirm the included projects, hashing, and scrubbing policies.")
+
+    return "\n".join(sections)
+
+
+def export_viewer_data(snapshot_path: Path, output_dir: Path, *, limit: int = 500) -> dict[str, Any]:
+    viewer_data_dir = output_dir / "viewer" / "data"
+    viewer_data_dir.mkdir(parents=True, exist_ok=True)
+
+    messages: list[dict[str, Any]] = []
+    total_messages = 0
+
+    with sqlite3.connect(str(snapshot_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        rows = conn.execute(
+            "SELECT id, subject, body_md, created_ts, importance, project_id FROM messages ORDER BY created_ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        for row in rows:
+            body = row["body_md"] or ""
+            snippet = body.strip().replace("\n", " ")[:280]
+            messages.append(
+                {
+                    "id": row["id"],
+                    "subject": row["subject"],
+                    "created_ts": row["created_ts"],
+                    "importance": row["importance"],
+                    "project_id": row["project_id"],
+                    "snippet": snippet,
+                }
+            )
+
+    messages_path = viewer_data_dir / "messages.json"
+    messages_path.write_text(json.dumps(messages, indent=2), encoding="utf-8")
+
+    meta = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "message_count": total_messages,
+        "messages_cached": len(messages),
+    }
+    meta_path = viewer_data_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return {"messages": str(messages_path.relative_to(output_dir)), "meta": str(meta_path.relative_to(output_dir))}
+
+
+def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path, *, public_out: Optional[Path] = None) -> dict[str, str]:
+    try:
+        from nacl.signing import SigningKey  # type: ignore
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise ShareExportError(
+            "PyNaCl is required for Ed25519 signing. Install it with `uv add PyNaCl`."
+        ) from exc
+
+    manifest_bytes = manifest_path.read_bytes()
+    key_raw = signing_key_path.read_bytes()
+    if len(key_raw) not in (32, 64):
+        raise ShareExportError("Signing key must be 32-byte seed or 64-byte expanded Ed25519 key.")
+    signing_key = SigningKey(key_raw[:32])
+    signature = signing_key.sign(manifest_bytes).signature
+    public_key = signing_key.verify_key.encode()
+
+    payload = {
+        "algorithm": "ed25519",
+        "signature": base64.b64encode(signature).decode("ascii"),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "public_key": base64.b64encode(public_key).decode("ascii"),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    sig_path = output_path / "manifest.sig.json"
+    _write_json_file(sig_path, payload)
+
+    if public_out is not None:
+        public_out.write_text(base64.b64encode(public_key).decode("ascii"), encoding="utf-8")
+
+    return payload
+
+
+def encrypt_bundle(bundle_path: Path, recipients: Sequence[str]) -> Optional[Path]:
+    if not recipients:
+        return None
+    age_exe = shutil.which("age")
+    if not age_exe:
+        raise ShareExportError("`age` CLI not found in PATH. Install age to enable bundle encryption.")
+
+    encrypted_path = bundle_path.with_suffix(bundle_path.suffix + ".age")
+    cmd = [age_exe]
+    for recipient in recipients:
+        cmd.extend(["-r", recipient])
+    cmd.extend(["-o", str(encrypted_path), str(bundle_path)])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ShareExportError(f"age encryption failed: {result.stderr.strip()}")
+    return encrypted_path
 
 
 def resolve_sqlite_database_path(database_url: Optional[str] = None) -> Path:
@@ -385,6 +679,235 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
     )
 
 
+def bundle_attachments(
+    snapshot_path: Path,
+    output_dir: Path,
+    *,
+    storage_root: Path,
+    inline_threshold: int = INLINE_ATTACHMENT_THRESHOLD,
+    detach_threshold: int = DETACH_ATTACHMENT_THRESHOLD,
+) -> dict[str, Any]:
+    """Materialize attachment assets referenced by the snapshot into the bundle."""
+
+    storage_root = storage_root.resolve()
+    attachments_dir = output_dir / "attachments"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    bundles: dict[str, Path] = {}
+    manifest_items: list[dict[str, Any]] = []
+    inline_count = 0
+    copied_count = 0
+    externalized_count = 0
+    missing_count = 0
+    bytes_copied = 0
+
+    with sqlite3.connect(str(snapshot_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT id, attachments FROM messages").fetchall()
+        for row in rows:
+            raw_attachments = row["attachments"]
+            if not raw_attachments:
+                continue
+            if isinstance(raw_attachments, str):
+                try:
+                    attachments_list = json.loads(raw_attachments)
+                except json.JSONDecodeError:
+                    attachments_list = []
+            else:
+                attachments_list = raw_attachments
+            if not isinstance(attachments_list, list):
+                continue
+            updated_list: list[Any] = []
+            changed = False
+            for entry in attachments_list:
+                if not isinstance(entry, dict):
+                    updated_list.append(entry)
+                    continue
+                entry_type = entry.get("type")
+                if entry_type != "file":
+                    updated_list.append(entry)
+                    continue
+                original_path = entry.get("path")
+                media_type = entry.get("media_type", "application/octet-stream")
+                sha_hint = entry.get("sha256") or entry.get("sha1")
+                if not original_path:
+                    updated_list.append(entry)
+                    continue
+                source_path = Path(original_path)
+                if not source_path.is_absolute():
+                    source_path = (storage_root / original_path).resolve()
+                if not source_path.is_file():
+                    missing_count += 1
+                    manifest_items.append(
+                        {
+                            "message_id": int(row["id"]),
+                            "mode": "missing",
+                            "original_path": original_path,
+                            "sha_hint": sha_hint,
+                            "media_type": media_type,
+                        }
+                    )
+                    updated_list.append(
+                        {
+                            "type": "missing",
+                            "original_path": original_path,
+                            "media_type": media_type,
+                            "sha_hint": sha_hint,
+                        }
+                    )
+                    changed = True
+                    continue
+
+                data = source_path.read_bytes()
+                size = len(data)
+                sha256 = hashlib.sha256(data).hexdigest()
+                ext = source_path.suffix or ".bin"
+                media_record = {
+                    "message_id": int(row["id"]),
+                    "sha256": sha256,
+                    "media_type": media_type,
+                    "original_path": original_path,
+                    "bytes": size,
+                }
+
+                if size <= inline_threshold:
+                    encoded = base64.b64encode(data).decode("ascii")
+                    updated_list.append(
+                        {
+                            "type": "inline",
+                            "media_type": media_type,
+                            "bytes": size,
+                            "sha256": sha256,
+                            "data_uri": f"data:{media_type};base64,{encoded}",
+                        }
+                    )
+                    media_record["mode"] = "inline"
+                    manifest_items.append(media_record)
+                    inline_count += 1
+                    changed = True
+                    continue
+
+                if size >= detach_threshold:
+                    media_record["mode"] = "external"
+                    media_record["note"] = "Attachment exceeds detach threshold; not bundled."
+                    manifest_items.append(media_record)
+                    updated_list.append(
+                        {
+                            "type": "external",
+                            "media_type": media_type,
+                            "bytes": size,
+                            "sha256": sha256,
+                            "original_path": original_path,
+                            "note": "Requires manual hosting (exceeds bundle threshold).",
+                        }
+                    )
+                    externalized_count += 1
+                    changed = True
+                    continue
+
+                rel_path = bundles.get(sha256)
+                if rel_path is None:
+                    rel_path = Path("attachments") / sha256[:2] / f"{sha256}{ext}"
+                    dest_path = output_dir / rel_path
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest_path.exists():
+                        dest_path.write_bytes(data)
+                        bytes_copied += size
+                    bundles[sha256] = rel_path
+                media_record["mode"] = "file"
+                media_record["bundle_path"] = rel_path.as_posix()
+                manifest_items.append(media_record)
+                updated_list.append(
+                    {
+                        "type": "file",
+                        "media_type": media_type,
+                        "bytes": size,
+                        "sha256": sha256,
+                        "path": rel_path.as_posix(),
+                    }
+                )
+                copied_count += 1
+                if sha_hint and sha_hint != sha256:
+                    media_record["sha_hint"] = sha_hint
+                changed = True
+            if changed:
+                conn.execute(
+                    "UPDATE messages SET attachments = ? WHERE id = ?",
+                    (json.dumps(updated_list, separators=(",", ":"), sort_keys=True), row["id"]),
+                )
+        conn.commit()
+
+    return {
+        "stats": {
+            "inline": inline_count,
+            "copied": copied_count,
+            "externalized": externalized_count,
+            "missing": missing_count,
+            "bytes_copied": bytes_copied,
+        },
+        "config": {
+            "inline_threshold": inline_threshold,
+            "detach_threshold": detach_threshold,
+        },
+        "items": manifest_items,
+    }
+
+
+def maybe_chunk_database(
+    snapshot_path: Path,
+    output_dir: Path,
+    *,
+    threshold_bytes: int = DEFAULT_CHUNK_THRESHOLD,
+    chunk_bytes: int = DEFAULT_CHUNK_SIZE,
+) -> Optional[dict[str, Any]]:
+    size = snapshot_path.stat().st_size
+    if size <= threshold_bytes:
+        return None
+
+    chunk_dir = output_dir / "chunks"
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    with snapshot_path.open("rb") as src:
+        index = 0
+        while True:
+            chunk = src.read(chunk_bytes)
+            if not chunk:
+                break
+            chunk_path = chunk_dir / f"{index:05d}.bin"
+            chunk_path.write_bytes(chunk)
+            index += 1
+
+    config = {
+        "version": 1,
+        "chunk_size": chunk_bytes,
+        "chunk_count": index,
+        "pattern": "chunks/{index:05d}.bin",
+        "original_bytes": size,
+    }
+    _write_json_file(output_dir / "mailbox.sqlite3.config.json", config)
+    return config
+
+
+def copy_viewer_assets(output_dir: Path) -> None:
+    """Copy the packaged viewer assets into the export output directory."""
+
+    viewer_root = output_dir / "viewer"
+    viewer_root.mkdir(parents=True, exist_ok=True)
+
+    package_root = resources.files("mcp_agent_mail.viewer_assets")
+
+    def _walk(node: abc.Traversable, relative: Path) -> None:  # type: ignore[attr-defined]
+        for child in node.iterdir():
+            child_relative = relative / child.name
+            if child.is_dir():
+                _walk(child, child_relative)
+            else:
+                destination = viewer_root / child_relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(child.read_bytes())
+
+    _walk(package_root, Path())
+
+
 def prepare_output_directory(directory: Path) -> Path:
     """Ensure the export directory exists and is empty before writing bundle artefacts."""
     resolved = directory.resolve()
@@ -427,6 +950,10 @@ def write_bundle_scaffolding(
     scope: ProjectScopeResult,
     project_filters: Sequence[str],
     scrub_summary: ScrubSummary,
+    attachments_manifest: dict[str, Any],
+    chunk_manifest: Optional[dict[str, Any]],
+    hosting_hints: Sequence[HostingHint],
+    viewer_data: Optional[dict[str, Any]],
     exporter_version: str = "prototype",
 ) -> None:
     """Create manifest and helper docs around the freshly minted snapshot."""
@@ -444,6 +971,8 @@ def write_bundle_scaffolding(
             "path": snapshot.name,
             "size_bytes": snapshot.stat().st_size,
             "sha256": _compute_sha256(snapshot),
+            "chunked": bool(chunk_manifest),
+            "chunk_manifest": chunk_manifest,
         },
         "project_scope": {
             "requested": list(project_filters),
@@ -451,42 +980,62 @@ def write_bundle_scaffolding(
             "removed_count": scope.removed_count,
         },
         "scrub": asdict(scrub_summary),
-        "attachments": [],
+        "attachments": attachments_manifest,
+        "hosting": {
+            "detected": [
+                {
+                    "id": hint.key,
+                    "title": hint.title,
+                    "summary": hint.summary,
+                    "signals": hint.signals,
+                }
+                for hint in hosting_hints
+            ],
+        },
         "notes": [
             "Prototype manifest. Future revisions will embed scrub configuration, viewer asset hashes, and attachment manifests.",
+            "Viewer scaffold with diagnostics is bundled; SPA search/thread views arrive in upcoming milestones.",
         ],
     }
+    if viewer_data:
+        manifest["viewer"] = viewer_data
     _write_json_file(output_dir / "manifest.json", manifest)
 
     readme_content = (
         "MCP Agent Mail Static Export (Prototype)\n"
         "=======================================\n\n"
-        "This bundle currently contains a raw SQLite snapshot (`mailbox.sqlite3`) and a manifest describing the export.\n"
-        "Redaction, attachment packaging, and viewer assets will be added in subsequent iterations.\n"
-        "Use the CLI `share preview` command (upcoming) or load the database with the static viewer once it is bundled.\n"
+        "This bundle contains a scrubbed SQLite snapshot (`mailbox.sqlite3`), optional chunk manifest, attachments, and a minimal viewer scaffold (`viewer/`).\n"
+        "Run `uv run python -m mcp_agent_mail.cli share preview .` from this directory to launch the local preview, or open `viewer/index.html` after hosting the bundle on a static site as described in `HOW_TO_DEPLOY.md`.\n"
+        "Use `manifest.json` to audit included projects, scrub statistics, hosting hints, and attachment packaging details.\n"
     )
+    if hosting_hints:
+        readme_content += "\nDetected hosting targets in this environment:\n"
+        for hint in hosting_hints:
+            signals_text = "; ".join(hint.signals)
+            readme_content += f"- {hint.title}: {hint.summary} (signals: {signals_text})\n"
     _write_text_file(output_dir / "README.txt", readme_content)
 
-    how_to_deploy = (
-        "# HOW_TO_DEPLOY (Prototype)\n\n"
-        "1. Host the entire directory on a static file server (e.g., `python -m http.server` for local testing).\n"
-        "2. Ensure `mailbox.sqlite3` and `manifest.json` remain alongside future `viewer/` assets.\n"
-        "3. When viewer assets are available, copy the generated bundle to your hosting provider (GitHub Pages, Cloudflare Pages, Netlify).\n"
-        "4. Review the manifest to confirm included projects and verify the SHA-256 hash before publication.\n"
-        "\n"
-        "More automated deployment guidance will be generated once the export pipeline emits full viewer packages.\n"
-    )
+    how_to_deploy = build_how_to_deploy(hosting_hints)
     _write_text_file(output_dir / "HOW_TO_DEPLOY.md", how_to_deploy)
 
 
 __all__ = [
+    "HostingHint",
     "ShareExportError",
     "apply_project_scope",
+    "build_how_to_deploy",
+    "bundle_attachments",
+    "copy_viewer_assets",
     "create_sqlite_snapshot",
+    "detect_hosting_hints",
+    "encrypt_bundle",
+    "export_viewer_data",
+    "maybe_chunk_database",
     "package_directory_as_zip",
     "prepare_output_directory",
     "resolve_sqlite_database_path",
     "scrub_snapshot",
+    "sign_manifest",
     "write_bundle_scaffolding",
 ]
 
