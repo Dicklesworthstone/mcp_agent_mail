@@ -215,3 +215,5 @@ screenshots/renamed
 screenshots/gif_frames
 temp.lock
 temp.lock.owner.json
+# Share export test output
+out/

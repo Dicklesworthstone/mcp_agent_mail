@@ -152,6 +152,7 @@ def share_export(
             help="Launch an interactive wizard (future enhancement; currently prints guidance).",
         ),
     ] = False,
+    projects: Annotated[list[str] | None, typer.Option("--project", "-p", help="Limit export to specific project slugs or human keys.")] = None,
     zip_bundle: Annotated[
         bool,
         typer.Option(
@@ -163,6 +164,8 @@ def share_export(
 ) -> None:
     """Export the MCP Agent Mail mailbox into a shareable static bundle (snapshot + scaffolding prototype)."""
 
+    if projects is None:
+        projects = []
     raw_output = _resolve_path(output)
     try:
         output_path = prepare_output_directory(raw_output)
@@ -193,14 +196,38 @@ def share_export(
         console.print(f"[red]Snapshot failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
+    console.print("[cyan]Applying project filters and scrubbing data...[/]")
+    try:
+        scope = apply_project_scope(snapshot_path, projects)
+    except ShareExportError as exc:
+        console.print(f"[red]Project filtering failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    try:
+        scrub_summary = scrub_snapshot(snapshot_path)
+    except ShareExportError as exc:
+        console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
     console.print("[cyan]Writing manifest and helper docs...[/]")
     try:
-        write_bundle_scaffolding(output_path, snapshot=snapshot_path, selected_projects=["*"])
+        write_bundle_scaffolding(
+            output_path,
+            snapshot=snapshot_path,
+            scope=scope,
+            project_filters=projects,
+            scrub_summary=scrub_summary,
+        )
     except ShareExportError as exc:
         console.print(f"[red]Failed to scaffold bundle:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print("[green]✓ Created SQLite snapshot for sharing.[/]")
+    console.print(
+        f"[green]✓ Applied scrubbing policies (pseudonymized {scrub_summary.agents_pseudonymized}/{scrub_summary.agents_total} agents, {scrub_summary.secrets_replaced} secret tokens redacted).[/]"
+    )
+    included_projects = ", ".join(record.slug for record in scope.projects)
+    console.print(f"[green]✓ Project scope includes: {included_projects or 'none'}[/]")
     console.print("[green]✓ Generated manifest, README.txt, and HOW_TO_DEPLOY.md placeholders.[/]")
 
     if zip_bundle:
