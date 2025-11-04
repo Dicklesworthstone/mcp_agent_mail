@@ -154,7 +154,7 @@ def test_share_export_end_to_end(monkeypatch, tmp_path: Path) -> None:
     manifest_path = output_dir / "manifest.json"
     assert manifest_path.is_file()
     with manifest_path.open(encoding="utf-8") as handle:
-        manifest = json.load(handle)
+    manifest = json.load(handle)
 
     console.print(
         Panel(
@@ -169,6 +169,7 @@ def test_share_export_end_to_end(monkeypatch, tmp_path: Path) -> None:
     assert stats["copied"] == 1
     assert stats["externalized"] == 1
     assert stats["missing"] == 0
+    assert manifest["scrub"]["preset"] == "standard"
 
     hosting_detected = {entry["id"] for entry in manifest.get("hosting", {}).get("detected", [])}
     assert "github_pages" in hosting_detected

@@ -114,12 +114,15 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
 
     summary = scrub_snapshot(snapshot, export_salt=b"unit-test-salt")
 
+    assert summary.preset == "standard"
     assert summary.agents_total == 1
     assert summary.agents_pseudonymized == 1
     assert summary.ack_flags_cleared == 1
     assert summary.file_reservations_removed == 1
     assert summary.agent_links_removed == 1
     assert summary.secrets_replaced >= 2  # subject + body tokens
+    assert summary.bodies_redacted == 0
+    assert summary.attachments_cleared == 0
 
     with sqlite3.connect(snapshot) as conn:
         agent_name = conn.execute("SELECT name FROM agents WHERE id = 1").fetchone()[0]
@@ -138,6 +141,22 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
     assert "bearer" not in body.lower()
     assert attachments[0]["type"] == "file"
     assert "download_url" not in attachments[0]
+
+
+def test_scrub_snapshot_strict_preset(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+
+    summary = scrub_snapshot(snapshot, preset="strict", export_salt=b"strict-mode")
+
+    assert summary.preset == "strict"
+    assert summary.bodies_redacted == 1
+    assert summary.attachments_cleared == 1
+
+    with sqlite3.connect(snapshot) as conn:
+        body = conn.execute("SELECT body_md FROM messages WHERE id = 1").fetchone()[0]
+        attachments_raw = conn.execute("SELECT attachments FROM messages WHERE id = 1").fetchone()[0]
+    assert body == "[Message body redacted]"
+    assert attachments_raw == "[]"
 
 
 def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
@@ -216,11 +235,11 @@ def test_run_share_export_wizard(monkeypatch, tmp_path: Path) -> None:
         conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (1, 'demo', 'Demo Human')")
         conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (2, 'ops', 'Operations Vault')")
 
-    responses = iter(["demo,ops", "2048", "65536", "1048576", "131072"])
+    responses = iter(["demo,ops", "2048", "65536", "1048576", "131072", "strict"])
     monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(responses))
     monkeypatch.setattr(cli_module.typer, "confirm", lambda *_args, **_kwargs: False)
 
-    result = cli_module._run_share_export_wizard(db, 1024, 32768, 1_048_576, 131_072)
+    result = cli_module._run_share_export_wizard(db, 1024, 32768, 1_048_576, 131_072, "standard")
 
     assert result["projects"] == ["demo", "ops"]
     assert result["inline_threshold"] == 2048
@@ -228,6 +247,7 @@ def test_run_share_export_wizard(monkeypatch, tmp_path: Path) -> None:
     assert result["chunk_threshold"] == 1_048_576
     assert result["chunk_size"] == 131_072
     assert result["zip_bundle"] is False
+    assert result["scrub_preset"] == "strict"
 
 
 def test_start_preview_server_serves_content(tmp_path: Path) -> None:
@@ -243,6 +263,9 @@ def test_start_preview_server_serves_content(tmp_path: Path) -> None:
         with urllib.request.urlopen(f"http://{host}:{port}/", timeout=2) as response:
             body = response.read().decode("utf-8")
         assert "hello preview" in body
+        with urllib.request.urlopen(f"http://{host}:{port}/__preview__/status", timeout=2) as response:
+            status_payload = json.loads(response.read().decode("utf-8"))
+        assert "signature" in status_payload
     finally:
         server.shutdown()
         server.server_close()
@@ -298,4 +321,5 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
     manifest = json.loads((output_dir / "manifest.json").read_text())
     assert manifest["database"]["chunked"] is True
     assert "viewer" in manifest
+    assert manifest["scrub"]["preset"] == "standard"
     clear_settings_cache()

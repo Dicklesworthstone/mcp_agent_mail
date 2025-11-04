@@ -14,7 +14,6 @@ import warnings
 import webbrowser
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
-from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
@@ -506,13 +505,67 @@ def _run_share_export_wizard(
         "detach_threshold": detach_threshold,
         "chunk_threshold": chunk_threshold,
         "chunk_size": chunk_size,
+        "scrub_preset": preset_value,
         "zip_bundle": zip_bundle,
     }
 
 
+def _collect_preview_status(bundle_path: Path) -> dict[str, Any]:
+    bundle_path = bundle_path.resolve()
+    entries: list[str] = []
+    latest_ns = 0
+    manifest_ns = None
+    if bundle_path.is_dir():
+        for path in bundle_path.rglob("*"):
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            rel = path.relative_to(bundle_path).as_posix()
+            entries.append(f"{rel}:{stat.st_mtime_ns}:{stat.st_size}")
+            latest_ns = max(latest_ns, stat.st_mtime_ns)
+            if rel == "manifest.json":
+                manifest_ns = stat.st_mtime_ns
+    digest_input = "|".join(entries).encode("utf-8")
+    signature = hashlib.sha256(digest_input).hexdigest() if entries else "0"
+    payload: dict[str, Any] = {
+        "signature": signature,
+        "files_indexed": len(entries),
+        "last_modified_ns": latest_ns or None,
+    }
+    if latest_ns:
+        payload["last_modified_iso"] = datetime.fromtimestamp(latest_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+    if manifest_ns:
+        payload["manifest_ns"] = manifest_ns
+        payload["manifest_iso"] = datetime.fromtimestamp(manifest_ns / 1_000_000_000, tz=timezone.utc).isoformat()
+    return payload
+
+
 def _start_preview_server(bundle_path: Path, host: str, port: int) -> ThreadingHTTPServer:
-    handler = partial(SimpleHTTPRequestHandler, directory=str(bundle_path))
-    server = ThreadingHTTPServer((host, port), handler)
+    bundle_path = bundle_path.resolve()
+
+    class PreviewRequestHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(bundle_path), **kwargs)
+
+        def end_headers(self) -> None:  # type: ignore[override]
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            super().end_headers()
+
+        def do_GET(self) -> None:  # type: ignore[override]
+            if self.path.startswith("/__preview__/status"):
+                payload = _collect_preview_status(bundle_path)
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            return super().do_GET()
+
+    server = ThreadingHTTPServer((host, port), PreviewRequestHandler)
     server.daemon_threads = True
     return server
 
