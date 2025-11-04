@@ -212,26 +212,28 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
     - ✅ *(2025-11-04)* Added SQLite snapshot helper and initial `share export` CLI command (snapshot stage only).
 1. **Foundation (1 week):**
    - Research final WASM packaging strategy.
+   - ✅ *(2025-11-04)* Bundled sql.js (wasm) + loader so the static viewer queries the exported snapshot directly.
    - Prototype `sql.js` viewer hitting a sample export.
 2. **Export CLI (2 weeks):**
    - Snapshot + scrub modules.
    - Attachment bundling + manifest generation.
    - Automated tests for filter accuracy and redaction coverage.
-   - Interactive wizard UX (`--interactive`) plus non-interactive defaults, including auto-detected hosting hints and `HOW_TO_DEPLOY.md` generation.
+   - ✅ *(2025-11-04)* Interactive wizard now covers project filters, redaction presets, attachment thresholds, chunking, and ZIP opt-in with inline guidance.
    - ✅ *(2025-11-04)* Wizard collects project filters, attachment thresholds, and ZIP packaging choice before export.
-   - Preview server (`share preview`) with hot reload to keep validation frictionless.
+   - ✅ *(2025-11-04)* Preview server exposes `/__preview__/status`; viewer polls and hot-reloads bundle changes automatically.
    - ✅ *(2025-11-04)* Prototype export now emits `manifest.json`, `README.txt`, and `HOW_TO_DEPLOY.md` scaffolding alongside the snapshot.
    - ✅ *(2025-11-04)* Default export now creates a deterministic `.zip` archive in addition to the snapshot directory.
    - ✅ *(2025-11-04)* `--project` filters limit exports to selected slugs/human keys and manifest records included scope + removed counts.
    - ✅ *(2025-11-04)* Scrubber pseudonymizes agents, clears ack/read markers, removes file reservations/agent links, and redacts common secret tokens before manifest generation.
+   - ✅ *(2025-11-04)* Added scrub presets (`standard`, `strict`) available via CLI flag or wizard, captured in manifest summaries.
    - ✅ *(2025-11-04)* Attachment bundler hashes assets into `attachments/<sha>/` paths, inlines ≤64 KiB files as data URIs, marks >25 MiB artifacts for external hosting, and records per-message bundle metadata in the manifest.
    - ✅ *(2025-11-04)* `share preview` command serves bundle directories via a local threaded HTTP server with optional browser launch.
    - ✅ *(2025-11-04)* Export now copies shipped viewer scaffold (`viewer/index.html`, `viewer.js`, `styles.css`) so bundles render manifest diagnostics out of the box.
    - ✅ *(2025-11-04)* End-to-end integration test exercises `share export` CLI, validates manifest/ZIP outputs, and emits rich diagnostics for traceability.
 3. **Viewer (3 weeks):**
    - Build UI shell, implement inbox/thread/detail/search flows.
-   - Integrate database loader + caching.
-   - Add analytics-free telemetry (optional local metrics only).
+   - ✅ *(2025-11-04)* Viewer loads bundled SQLite via sql.js (with chunk reassembly fallback) and hydrates message list without server APIs.
+   - ✅ *(2025-11-04)* Client logs local performance metrics to the browser console (analytics-free telemetry).
 4. **Security & Hardening (1 week):**
    - Hash/signing pipeline.
    - Optional encryption module.

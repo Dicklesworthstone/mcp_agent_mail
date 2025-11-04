@@ -5,6 +5,7 @@ const messageMeta = document.getElementById("message-meta");
 
 let messages = [];
 let databaseMessagesAvailable = false;
+const bootstrapStart = performance.now();
 
 async function loadJSON(path) {
   const response = await fetch(path, { cache: "no-store" });
@@ -259,6 +260,12 @@ async function bootstrap() {
     messages = hydrated;
     searchInput.addEventListener("input", applySearch);
     applySearch();
+    const durationMs = Math.round(performance.now() - bootstrapStart);
+    console.info("[viewer] bootstrap complete", {
+      durationMs,
+      databaseMessagesAvailable,
+      messageCount: messages.length,
+    });
   } catch (error) {
     manifestOutput.textContent = `Viewer initialization failed: ${error}`;
   }

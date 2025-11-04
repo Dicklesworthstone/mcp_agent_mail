@@ -1071,6 +1071,7 @@ def write_bundle_scaffolding(
 
 
 __all__ = [
+    "SCRUB_PRESETS",
     "HostingHint",
     "ShareExportError",
     "apply_project_scope",
@@ -1086,7 +1087,6 @@ __all__ = [
     "prepare_output_directory",
     "resolve_sqlite_database_path",
     "scrub_snapshot",
-    "SCRUB_PRESETS",
     "sign_manifest",
     "write_bundle_scaffolding",
 ]
