@@ -72,6 +72,7 @@ class ProjectScopeResult:
 
 @dataclass(slots=True, frozen=True)
 class ScrubSummary:
+    preset: str
     pseudonym_salt: str
     agents_total: int
     agents_pseudonymized: int
@@ -81,6 +82,8 @@ class ScrubSummary:
     agent_links_removed: int
     secrets_replaced: int
     attachments_sanitized: int
+    bodies_redacted: int
+    attachments_cleared: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -90,6 +93,22 @@ class HostingHint:
     summary: str
     instructions: list[str]
     signals: list[str]
+
+
+SCRUB_PRESETS: dict[str, dict[str, Any]] = {
+    "standard": {
+        "description": "Default redaction: pseudonymise agents, clear ack/read state, scrub common secrets; retain message bodies and attachments.",
+        "redact_body": False,
+        "body_placeholder": None,
+        "drop_attachments": False,
+    },
+    "strict": {
+        "description": "High-scrub: replace message bodies with placeholders and omit all attachments from the snapshot.",
+        "redact_body": True,
+        "body_placeholder": "[Message body redacted]",
+        "drop_attachments": True,
+    },
+}
 
 
 HOSTING_GUIDES: dict[str, dict[str, object]] = {
@@ -542,6 +561,15 @@ def _scrub_text(value: str) -> tuple[str, int]:
     return updated, replacements
 
 
+def _normalize_scrub_preset(preset: str) -> str:
+    key = (preset or "standard").strip().lower()
+    if key not in SCRUB_PRESETS:
+        raise ShareExportError(
+            f"Unknown scrub preset '{preset}'. Supported presets: {', '.join(SCRUB_PRESETS)}"
+        )
+    return key
+
+
 def _scrub_structure(value: Any) -> tuple[Any, int, int]:
     """Recursively scrub secrets from attachment metadata structures.
 
@@ -578,11 +606,22 @@ def _scrub_structure(value: Any) -> tuple[Any, int, int]:
     return value, 0, 0
 
 
-def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) -> ScrubSummary:
+def scrub_snapshot(
+    snapshot_path: Path,
+    *,
+    preset: str = "standard",
+    export_salt: Optional[bytes] = None,
+) -> ScrubSummary:
     """Apply in-place redactions to the snapshot and return a summary."""
+
+    preset_key = _normalize_scrub_preset(preset)
+    preset_opts = SCRUB_PRESETS[preset_key]
 
     salt = export_salt or secrets.token_bytes(32)
     pseudonym_salt = base64.urlsafe_b64encode(salt).decode("ascii")
+
+    bodies_redacted = 0
+    attachments_cleared = 0
 
     with sqlite3.connect(str(snapshot_path)) as conn:
         conn.row_factory = sqlite3.Row
@@ -646,6 +685,10 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
                         attachments_data = attachments_value
                 else:
                     attachments_data = attachments_value
+                if preset_opts["drop_attachments"] and attachments_data:
+                    attachments_data = []
+                    attachments_cleared += 1
+                    attachments_updated = True
                 sanitized, rep_count, removed_count = _scrub_structure(attachments_data)
                 attachment_replacements += rep_count
                 attachment_keys_removed += removed_count
@@ -658,7 +701,12 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
                     )
             if subject != msg["subject"]:
                 conn.execute("UPDATE messages SET subject = ? WHERE id = ?", (subject, msg["id"]))
-            if body != msg["body_md"]:
+            if preset_opts["redact_body"]:
+                body = preset_opts.get("body_placeholder") or "[Message body redacted]"
+                if msg["body_md"] != body:
+                    bodies_redacted += 1
+                    conn.execute("UPDATE messages SET body_md = ? WHERE id = ?", (body, msg["id"]))
+            elif body != msg["body_md"]:
                 conn.execute("UPDATE messages SET body_md = ? WHERE id = ?", (body, msg["id"]))
             secrets_replaced += attachment_replacements
             if attachments_updated or attachment_replacements or attachment_keys_removed:
@@ -667,6 +715,7 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
         conn.commit()
 
     return ScrubSummary(
+        preset=preset_key,
         pseudonym_salt=pseudonym_salt,
         agents_total=agents_total,
         agents_pseudonymized=pseudonym_count,
@@ -676,6 +725,8 @@ def scrub_snapshot(snapshot_path: Path, *, export_salt: Optional[bytes] = None) 
         agent_links_removed=agent_links_removed,
         secrets_replaced=secrets_replaced,
         attachments_sanitized=attachments_sanitized,
+        bodies_redacted=bodies_redacted,
+        attachments_cleared=attachments_cleared,
     )
 
 

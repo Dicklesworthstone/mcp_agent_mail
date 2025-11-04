@@ -37,6 +37,7 @@ from .share import (
     DEFAULT_CHUNK_THRESHOLD,
     DETACH_ATTACHMENT_THRESHOLD,
     INLINE_ATTACHMENT_THRESHOLD,
+    SCRUB_PRESETS,
     ShareExportError,
     apply_project_scope,
     bundle_attachments,
@@ -188,6 +189,15 @@ def share_export(
             show_default=True,
         ),
     ] = DETACH_ATTACHMENT_THRESHOLD,
+    scrub_preset: Annotated[
+        str,
+        typer.Option(
+            "--scrub-preset",
+            help="Redaction preset to apply (e.g., standard, strict).",
+            case_sensitive=False,
+            show_default=True,
+        ),
+    ] = "standard",
     chunk_threshold: Annotated[
         int,
         typer.Option(
