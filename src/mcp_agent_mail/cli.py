@@ -241,6 +241,13 @@ def share_export(
     age_recipient_list = list(age_recipients or ())
     if projects is None:
         projects = []
+    scrub_preset = (scrub_preset or "standard").strip().lower()
+    if scrub_preset not in SCRUB_PRESETS:
+        console.print(
+            "[red]Invalid scrub preset:[/] "
+            f"{scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}."
+        )
+        raise typer.Exit(code=1)
     raw_output = _resolve_path(output)
     try:
         output_path = prepare_output_directory(raw_output)
@@ -263,6 +270,7 @@ def share_export(
             detach_threshold,
             chunk_threshold,
             chunk_size,
+            scrub_preset,
         )
         projects = wizard["projects"]
         inline_threshold = wizard["inline_threshold"]
@@ -270,6 +278,7 @@ def share_export(
         chunk_threshold = wizard["chunk_threshold"]
         chunk_size = wizard["chunk_size"]
         zip_bundle = wizard["zip_bundle"]
+        scrub_preset = wizard["scrub_preset"]
 
     console.print(f"[cyan]Using database:[/] {database_path}")
 
@@ -307,7 +316,7 @@ def share_export(
         raise typer.Exit(code=1) from exc
 
     try:
-        scrub_summary = scrub_snapshot(snapshot_path)
+        scrub_summary = scrub_snapshot(snapshot_path, preset=scrub_preset)
     except ShareExportError as exc:
         console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
@@ -375,7 +384,8 @@ def share_export(
 
     console.print("[green]✓ Created SQLite snapshot for sharing.[/]")
     console.print(
-        f"[green]✓ Applied scrubbing policies (pseudonymized {scrub_summary.agents_pseudonymized}/{scrub_summary.agents_total} agents, {scrub_summary.secrets_replaced} secret tokens redacted).[/]"
+        f"[green]✓ Applied '{scrub_summary.preset}' scrub (pseudonymized {scrub_summary.agents_pseudonymized}/{scrub_summary.agents_total} agents, "
+        f"{scrub_summary.secrets_replaced} secret tokens redacted, {scrub_summary.bodies_redacted} bodies replaced).[/]"
     )
     included_projects = ", ".join(record.slug for record in scope.projects)
     console.print(f"[green]✓ Project scope includes: {included_projects or 'none'}[/]")
