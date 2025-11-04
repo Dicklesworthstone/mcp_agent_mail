@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
-FROM ghcr.io/astral-sh/uv:0.4.12 AS build
+FROM python:3.14-bookworm AS build
+COPY --from=ghcr.io/astral-sh/uv:0.4.12 /uv /uvx /bin/
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md .
 COPY src src
