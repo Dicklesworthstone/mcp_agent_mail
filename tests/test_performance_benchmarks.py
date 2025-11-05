@@ -23,7 +23,7 @@ from mcp_agent_mail import share
 
 @pytest.fixture
 def small_db(tmp_path: Path) -> Path:
-    """Create a small database (~1MB) with 100 messages."""
+    """Create a small database (~200KB-1MB with overhead) with 100 messages."""
     return _create_test_database(tmp_path, "small.sqlite3", num_messages=100, body_size=1000)
 
 
