@@ -430,7 +430,7 @@ def select_projects(projects: list[dict[str, str]]) -> list[str]:
 def select_scrub_preset() -> str:
     """Select redaction preset."""
     console.print("\n[bold]Redaction Preset:[/]")
-    console.print("  [cyan]standard[/]: Pseudonymize agents, scrub secrets, keep message bodies")
+    console.print("  [cyan]standard[/]: Scrub secrets (API keys, tokens), keep agent names and message bodies")
     console.print("  [cyan]strict[/]: Replace all message bodies with placeholders, remove attachments")
 
     return Prompt.ask(

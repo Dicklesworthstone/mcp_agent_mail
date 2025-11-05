@@ -98,7 +98,7 @@ class HostingHint:
 
 SCRUB_PRESETS: dict[str, dict[str, Any]] = {
     "standard": {
-        "description": "Default redaction: pseudonymise agents, clear ack/read state, scrub common secrets; retain message bodies and attachments.",
+        "description": "Default redaction: clear ack/read state, scrub common secrets (API keys, tokens); retain agent names, message bodies and attachments.",
         "redact_body": False,
         "body_placeholder": None,
         "drop_attachments": False,
@@ -697,9 +697,6 @@ def scrub_snapshot(
     preset_key = _normalize_scrub_preset(preset)
     preset_opts = SCRUB_PRESETS[preset_key]
 
-    salt = export_salt or secrets.token_bytes(32)
-    pseudonym_salt = base64.urlsafe_b64encode(salt).decode("ascii")
-
     bodies_redacted = 0
     attachments_cleared = 0
 
@@ -708,31 +705,9 @@ def scrub_snapshot(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
 
-        agents = conn.execute("SELECT id, name FROM agents ORDER BY id").fetchall()
-        agents_total = len(agents)
-        pseudonym_count = 0
-        used_aliases: set[str] = set()
-
-        for row in agents:
-            raw_name = row["name"]
-            digest = hmac.new(salt, raw_name.encode("utf-8"), hashlib.sha256).hexdigest()
-            alias_core = digest[:PSEUDONYM_LENGTH]
-            alias = f"{PSEUDONYM_PREFIX}{alias_core}"
-            extra_index = PSEUDONYM_LENGTH
-            while alias in used_aliases:
-                alias_core = digest[:extra_index]
-                alias = f"{PSEUDONYM_PREFIX}{alias_core}"
-                extra_index += 1
-                if extra_index > len(digest):
-                    alias = f"{PSEUDONYM_PREFIX}{alias_core}{secrets.token_hex(2)}"
-                    break
-            used_aliases.add(alias)
-            if alias != raw_name:
-                pseudonym_count += 1
-            conn.execute(
-                "UPDATE agents SET name = ?, contact_policy = 'redacted' WHERE id = ?",
-                (alias, row["id"]),
-            )
+        # Agent names (BlueMountain, GreenCastle, etc.) are already meaningless pseudonyms by design
+        # No need to further pseudonymize them
+        agents_total = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
 
         ack_cursor = conn.execute("UPDATE messages SET ack_required = 0")
         ack_flags_cleared = ack_cursor.rowcount or 0
@@ -801,9 +776,9 @@ def scrub_snapshot(
 
     return ScrubSummary(
         preset=preset_key,
-        pseudonym_salt=pseudonym_salt,
+        pseudonym_salt="",  # No longer used - agent names already meaningless
         agents_total=agents_total,
-        agents_pseudonymized=pseudonym_count,
+        agents_pseudonymized=0,  # No longer pseudonymizing - agent names already meaningless
         ack_flags_cleared=ack_flags_cleared,
         recipients_cleared=recipients_cleared,
         file_reservations_removed=file_res_removed,
