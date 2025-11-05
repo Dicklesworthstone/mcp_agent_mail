@@ -1282,7 +1282,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         @fastapi_app.get("/mail/api/unified-inbox", response_class=JSONResponse)
         async def mail_unified_inbox_api(
-            limit: int = 500,
+            limit: int = 50000,
             include_projects: bool = False,
         ) -> JSONResponse:
             """JSON feed for the unified inbox view (used for background refresh)."""
@@ -1377,11 +1377,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     except Exception:
                         # Fallback to LIKE if FTS not available
                         if like_scope == "subject":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT 50"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
                         elif like_scope == "body":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT 50"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
                         else:
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT 50"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT 10000"
                         search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
                         matched_messages = [
                             {
@@ -1445,7 +1445,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
 
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
-        async def unified_inbox(limit: int = 100, filter_importance: str | None = None) -> HTMLResponse:
+        async def unified_inbox(limit: int = 10000, filter_importance: str | None = None) -> HTMLResponse:
             """Unified inbox showing messages from all active agents across all projects."""
             await ensure_schema()
             async with get_session() as session:
@@ -1582,7 +1582,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             )
 
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
-        async def mail_inbox(project: str, agent: str, limit: int = 50, page: int = 1) -> HTMLResponse:
+        async def mail_inbox(project: str, agent: str, limit: int = 10000, page: int = 1) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
                 prow = (
@@ -1966,7 +1966,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         async def mail_search(
             project: str,
             q: str,
-            limit: int = 100,
+            limit: int = 10000,
             scope: str | None = None,
             order: str | None = None,
             boost: int | None = None,
@@ -2095,7 +2095,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 pid = int(prow[0])
                 rows = await session.execute(
                     text(
-                        "SELECT id, subject, created_ts, attachments FROM messages WHERE project_id = :pid AND json_array_length(attachments) > 0 ORDER BY created_ts DESC LIMIT 200"
+                        "SELECT id, subject, created_ts, attachments FROM messages WHERE project_id = :pid AND json_array_length(attachments) > 0 ORDER BY created_ts DESC LIMIT 10000"
                     ),
                     {"pid": pid},
                 )

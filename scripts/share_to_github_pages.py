@@ -35,11 +35,125 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 console = Console()
 
 
-def check_prerequisites() -> bool:
+def detect_package_manager() -> str | None:
+    """Detect the available package manager on this system."""
+    managers = {
+        "brew": ["brew", "--version"],
+        "apt": ["apt", "--version"],
+        "dnf": ["dnf", "--version"],
+        "npm": ["npm", "--version"],
+    }
+    for name, cmd in managers.items():
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+            return name
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+    return None
+
+
+def install_gh_cli() -> bool:
+    """Offer to install gh CLI automatically."""
+    console.print("\n[yellow]gh CLI is not installed.[/]")
+
+    pkg_mgr = detect_package_manager()
+    if not pkg_mgr or pkg_mgr == "npm":
+        console.print("[cyan]Install gh CLI from:[/] https://cli.github.com/")
+        return False
+
+    install_commands = {
+        "brew": ["brew", "install", "gh"],
+        "apt": ["sudo", "apt", "install", "gh", "-y"],
+        "dnf": ["sudo", "dnf", "install", "gh", "-y"],
+    }
+
+    cmd = install_commands.get(pkg_mgr)
+    if not cmd:
+        console.print("[cyan]Install gh CLI from:[/] https://cli.github.com/")
+        return False
+
+    if Confirm.ask(f"Install gh CLI using {pkg_mgr}?", default=True):
+        console.print(f"[cyan]Running:[/] {' '.join(cmd)}")
+        try:
+            subprocess.run(cmd, check=True)
+            console.print("[green]✓ gh CLI installed successfully[/]")
+            return True
+        except subprocess.CalledProcessError:
+            console.print("[red]Installation failed. Please install manually:[/] https://cli.github.com/")
+            return False
+    return False
+
+
+def install_wrangler_cli() -> bool:
+    """Offer to install wrangler CLI automatically."""
+    console.print("\n[yellow]wrangler CLI is not installed.[/]")
+
+    # Check if npm is available
+    try:
+        subprocess.run(["npm", "--version"], capture_output=True, check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        console.print("[red]npm is required to install wrangler.[/]")
+        console.print("[cyan]Install Node.js from:[/] https://nodejs.org/")
+        return False
+
+    if Confirm.ask("Install wrangler CLI using npm?", default=True):
+        console.print("[cyan]Running:[/] npm install -g wrangler")
+        try:
+            subprocess.run(["npm", "install", "-g", "wrangler"], check=True)
+            console.print("[green]✓ wrangler CLI installed successfully[/]")
+            return True
+        except subprocess.CalledProcessError:
+            console.print("[red]Installation failed. Try manually:[/] npm install -g wrangler")
+            return False
+    return False
+
+
+def authenticate_gh_cli() -> bool:
+    """Guide user through gh CLI authentication."""
+    console.print("\n[bold cyan]GitHub CLI Authentication[/]")
+    console.print("You need to authenticate with GitHub to create repositories and enable Pages.")
+    console.print("\n[dim]The next command will open your browser to authenticate.[/]")
+
+    if not Confirm.ask("Run 'gh auth login' now?", default=True):
+        console.print("[yellow]Skipping authentication. You can run 'gh auth login' manually later.[/]")
+        return False
+
+    try:
+        # Run gh auth login interactively (don't capture output)
+        subprocess.run(["gh", "auth", "login"], check=True)
+        console.print("[green]✓ GitHub authentication complete[/]")
+        return True
+    except subprocess.CalledProcessError:
+        console.print("[red]Authentication failed.[/]")
+        return False
+
+
+def authenticate_wrangler_cli() -> bool:
+    """Guide user through wrangler CLI authentication."""
+    console.print("\n[bold cyan]Cloudflare Wrangler Authentication[/]")
+    console.print("You need to authenticate with Cloudflare to deploy to Pages.")
+    console.print("\n[dim]The next command will open your browser to authenticate.[/]")
+
+    if not Confirm.ask("Run 'wrangler login' now?", default=True):
+        console.print("[yellow]Skipping authentication. You can run 'wrangler login' manually later.[/]")
+        return False
+
+    try:
+        # Run wrangler login interactively
+        subprocess.run(["wrangler", "login"], check=True)
+        console.print("[green]✓ Cloudflare authentication complete[/]")
+        return True
+    except subprocess.CalledProcessError:
+        console.print("[red]Authentication failed.[/]")
+        return False
+
+
+def check_prerequisites(require_cloudflare: bool = False) -> bool:
     """Check if required tools are installed and configured."""
-    issues = []
+    all_satisfied = True
 
     # Check gh CLI
+    gh_installed = False
     try:
         result = subprocess.run(
             ["gh", "auth", "status"],
@@ -47,26 +161,62 @@ def check_prerequisites() -> bool:
             text=True,
             check=False,
         )
-        if result.returncode != 0:
-            issues.append("❌ gh CLI not authenticated. Run: gh auth login")
+        if result.returncode == 0:
+            gh_installed = True
+            console.print("[green]✓ gh CLI installed and authenticated[/]")
+        else:
+            console.print("[yellow]⚠ gh CLI installed but not authenticated[/]")
+            gh_installed = True
+            if not authenticate_gh_cli():
+                all_satisfied = False
     except FileNotFoundError:
-        issues.append("❌ gh CLI not installed. Install from: https://cli.github.com/")
+        if install_gh_cli():
+            # After install, try to authenticate
+            if not authenticate_gh_cli():
+                all_satisfied = False
+        else:
+            all_satisfied = False
+
+    # Check wrangler CLI (only if Cloudflare deployment selected)
+    if require_cloudflare:
+        wrangler_installed = False
+        try:
+            result = subprocess.run(
+                ["wrangler", "whoami"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                wrangler_installed = True
+                console.print("[green]✓ wrangler CLI installed and authenticated[/]")
+            else:
+                console.print("[yellow]⚠ wrangler CLI installed but not authenticated[/]")
+                wrangler_installed = True
+                if not authenticate_wrangler_cli():
+                    all_satisfied = False
+        except FileNotFoundError:
+            if install_wrangler_cli():
+                if not authenticate_wrangler_cli():
+                    all_satisfied = False
+            else:
+                all_satisfied = False
 
     # Check git config
     try:
-        subprocess.run(["git", "config", "user.name"], capture_output=True, check=True)
-        subprocess.run(["git", "config", "user.email"], capture_output=True, check=True)
+        subprocess.run(["git", "config", "user.name"], capture_output=True, check=True, text=True)
+        subprocess.run(["git", "config", "user.email"], capture_output=True, check=True, text=True)
+        console.print("[green]✓ git configured[/]")
     except (FileNotFoundError, subprocess.CalledProcessError):
-        issues.append("❌ git not configured. Run: git config --global user.name/user.email")
+        console.print("[red]❌ git not configured[/]")
+        console.print("[cyan]Run:[/] git config --global user.name \"Your Name\"")
+        console.print("[cyan]Run:[/] git config --global user.email \"you@example.com\"")
+        all_satisfied = False
 
-    if issues:
-        console.print("[bold red]Prerequisites missing:[/]")
-        for issue in issues:
-            console.print(f"  {issue}")
-        return False
+    if not all_satisfied:
+        console.print("\n[yellow]Some prerequisites are missing. Please address them and try again.[/]")
 
-    console.print("[green]✓ All prerequisites satisfied[/]")
-    return True
+    return all_satisfied
 
 
 def get_projects() -> list[dict[str, str]]:
@@ -132,16 +282,25 @@ def select_scrub_preset() -> str:
 def select_deployment_target() -> dict[str, Any]:
     """Select where to deploy."""
     console.print("\n[bold]Deployment Target:[/]")
-    console.print("  1. New GitHub repository (we'll create it)")
-    console.print("  2. Export locally only (no GitHub)")
+    console.print("  1. GitHub Pages (create new repository)")
+    console.print("  2. Cloudflare Pages (fast global CDN)")
+    console.print("  3. Export locally only")
 
-    choice = Prompt.ask("Choose option", choices=["1", "2"], default="1")
+    choice = Prompt.ask("Choose option", choices=["1", "2", "3"], default="1")
 
-    if choice == "2":
+    if choice == "3":
         output_dir = Prompt.ask("Output directory", default="./mailbox-export")
         return {"type": "local", "path": output_dir}
 
-    # GitHub deployment - create new repo
+    if choice == "2":
+        # Cloudflare Pages deployment
+        project_name = Prompt.ask("Cloudflare Pages project name", default="mailbox-viewer")
+        return {
+            "type": "cloudflare-pages",
+            "project_name": project_name,
+        }
+
+    # GitHub Pages deployment - create new repo
     repo_name = Prompt.ask("Repository name", default="mailbox-viewer")
     is_private = Confirm.ask("Make repository private?", default=False)
     description = Prompt.ask(
@@ -161,7 +320,11 @@ def generate_signing_key() -> Path:
     # Save to current directory (not /tmp) so it persists
     key_path = Path.cwd() / f"signing-{secrets.token_hex(4)}.key"
     key_path.write_bytes(secrets.token_bytes(32))
-    key_path.chmod(0o600)
+    # Set secure permissions (best-effort on Windows where this may not apply)
+    try:
+        key_path.chmod(0o600)
+    except (OSError, NotImplementedError):
+        pass  # Windows or other platform without Unix permissions
     console.print(f"[yellow]⚠ Private signing key saved to:[/] {key_path}")
     console.print("[yellow]⚠ Back up this file securely - you'll need it to update the bundle[/]")
     return key_path
@@ -329,15 +492,16 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
     """Initialize git repo and push to GitHub."""
     try:
         # Use cwd parameter instead of os.chdir() to avoid side effects
-        subprocess.run(["git", "init"], cwd=output_dir, check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], cwd=output_dir, check=True, capture_output=True)
+        subprocess.run(["git", "init"], cwd=output_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=output_dir, check=True, capture_output=True, text=True)
         subprocess.run(
             ["git", "commit", "-m", "Initial mailbox export"],
             cwd=output_dir,
             check=True,
             capture_output=True,
+            text=True,
         )
-        subprocess.run(["git", "branch", "-M", branch], cwd=output_dir, check=True, capture_output=True)
+        subprocess.run(["git", "branch", "-M", branch], cwd=output_dir, check=True, capture_output=True, text=True)
 
         # Add remote and push
         repo_url = f"git@github.com:{repo_full_name}.git"
@@ -346,12 +510,14 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
             cwd=output_dir,
             check=True,
             capture_output=True,
+            text=True,
         )
         subprocess.run(
             ["git", "push", "-u", "origin", branch],
             cwd=output_dir,
             check=True,
             capture_output=True,
+            text=True,
         )
 
         console.print(f"[green]✓ Pushed to {repo_full_name}[/]")
@@ -380,6 +546,7 @@ def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool
             ],
             check=True,
             capture_output=True,
+            text=True,
         )
 
         # Get the Pages URL
@@ -419,22 +586,70 @@ def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool
             return False, ""
 
 
+def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[bool, str]:
+    """Deploy bundle to Cloudflare Pages using wrangler."""
+    console.print(f"\n[bold cyan]Deploying to Cloudflare Pages...[/]")
+
+    try:
+        # Use wrangler pages deploy command
+        result = subprocess.run(
+            [
+                "wrangler",
+                "pages",
+                "deploy",
+                str(output_dir),
+                "--project-name", project_name,
+                "--branch", "main",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        # Parse output for deployment URL
+        # Wrangler outputs URLs in format: https://xxx.pages.dev
+        pages_url = ""
+        for line in result.stdout.split("\n"):
+            if ".pages.dev" in line:
+                # Extract URL from the line
+                import re
+                url_match = re.search(r"https://[^\s]+\.pages\.dev[^\s]*", line)
+                if url_match:
+                    pages_url = url_match.group(0)
+                    break
+
+        if not pages_url:
+            # Fallback: construct expected URL
+            pages_url = f"https://{project_name}.pages.dev"
+
+        console.print(f"[green]✓ Deployed to Cloudflare Pages[/]")
+        return True, pages_url
+
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Cloudflare Pages deployment failed:[/]\n{e.stderr}")
+        return False, ""
+
+
 def main() -> None:
     """Main wizard flow."""
     console.print(
         Panel.fit(
-            "[bold cyan]MCP Agent Mail → GitHub Pages[/]\n\n"
+            "[bold cyan]MCP Agent Mail → Deployment Wizard[/]\n\n"
             "This wizard will:\n"
             "  1. Export your mailbox to a static HTML bundle\n"
             "  2. Preview it locally\n"
-            "  3. Deploy to GitHub Pages\n\n"
+            "  3. Deploy to GitHub Pages or Cloudflare Pages\n\n"
             "[dim]Press Ctrl+C anytime to cancel[/]",
             title="Welcome",
         )
     )
 
-    # Check prerequisites
-    if not check_prerequisites():
+    # Get deployment target first to know which CLIs we need
+    deployment = select_deployment_target()
+
+    # Check prerequisites based on deployment choice
+    require_cf = deployment["type"] == "cloudflare-pages"
+    if not check_prerequisites(require_cloudflare=require_cf):
         sys.exit(1)
 
     # Get projects
@@ -457,8 +672,6 @@ def main() -> None:
         else:
             key_path = Prompt.ask("Path to existing signing key")
             signing_key = Path(key_path)
-
-    deployment = select_deployment_target()
 
     # Export to temp directory first for preview
     with tempfile.TemporaryDirectory(prefix="mailbox-preview-") as temp_dir:
@@ -522,6 +735,27 @@ def main() -> None:
             else:
                 console.print(f"\n[yellow]Repository created but Pages setup failed[/]")
                 console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
+
+        elif deployment["type"] == "cloudflare-pages":
+            # Deploy to Cloudflare Pages
+            success, pages_url = deploy_to_cloudflare_pages(temp_path, deployment["project_name"])
+            if success:
+                console.print(
+                    Panel.fit(
+                        f"[bold green]Deployment Complete![/]\n\n"
+                        f"Cloudflare Pages: {pages_url}\n\n"
+                        f"[dim]Note: Your site should be live immediately[/]",
+                        title="Success",
+                        border_style="green",
+                    )
+                )
+
+                if signing_pub:
+                    console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
+                    console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
+            else:
+                console.print(f"\n[yellow]Cloudflare Pages deployment failed[/]")
+                sys.exit(1)
 
 
 if __name__ == "__main__":
