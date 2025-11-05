@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import configparser
 import hashlib
 import hmac
@@ -1180,9 +1181,12 @@ def _compute_sha256(path: Path) -> str:
 
 def _compute_sri(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except (IOError, OSError) as exc:
+        raise ShareExportError(f"Failed to read {path} for SRI computation: {exc}") from exc
     encoded = base64.b64encode(digest.digest()).decode("ascii")
     return f"sha256-{encoded}"
 
@@ -1208,8 +1212,15 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
     if not manifest_path.exists():
         raise ShareExportError(f"manifest.json not found in bundle at {bundle_root}")
 
-    manifest_bytes = manifest_path.read_bytes()
-    manifest_data = json.loads(manifest_bytes)
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except (IOError, OSError) as exc:
+        raise ShareExportError(f"Failed to read manifest.json: {exc}") from exc
+
+    try:
+        manifest_data = json.loads(manifest_bytes)
+    except json.JSONDecodeError as exc:
+        raise ShareExportError(f"manifest.json is not valid JSON: {exc}") from exc
 
     viewer_section = cast(dict[str, Any], manifest_data.get("viewer", {}))
     sri_entries = cast(dict[str, str], viewer_section.get("sri", {}))
@@ -1231,7 +1242,14 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
     if sig_path.exists() or public_key:
         if not sig_path.exists():
             raise ShareExportError("manifest.sig.json missing but a public key was provided for verification.")
-        sig_payload = json.loads(sig_path.read_text(encoding="utf-8"))
+
+        try:
+            sig_payload = json.loads(sig_path.read_text(encoding="utf-8"))
+        except (IOError, OSError) as exc:
+            raise ShareExportError(f"Failed to read manifest.sig.json: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise ShareExportError(f"manifest.sig.json is not valid JSON: {exc}") from exc
+
         key_b64 = public_key or sig_payload.get("public_key")
         signature_b64 = sig_payload.get("signature")
         if not key_b64 or not signature_b64:
@@ -1241,9 +1259,19 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
             from nacl.signing import VerifyKey  # type: ignore[import-not-found]
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ShareExportError("PyNaCl is required to verify manifest signatures.") from exc
-        verify_key = VerifyKey(base64.b64decode(key_b64))
+
         try:
-            verify_key.verify(manifest_bytes, base64.b64decode(signature_b64))
+            verify_key = VerifyKey(base64.b64decode(key_b64))
+        except (ValueError, binascii.Error) as exc:
+            raise ShareExportError(f"Invalid base64 in public_key: {exc}") from exc
+
+        try:
+            signature_bytes = base64.b64decode(signature_b64)
+        except (ValueError, binascii.Error) as exc:
+            raise ShareExportError(f"Invalid base64 in signature: {exc}") from exc
+
+        try:
+            verify_key.verify(manifest_bytes, signature_bytes)
             signature_verified = True
         except BadSignatureError as exc:
             raise ShareExportError("Manifest signature verification failed.") from exc
@@ -1275,13 +1303,21 @@ def decrypt_with_age(
     if not identity and passphrase is None:
         raise ShareExportError("Decryption requires --identity or --passphrase.")
 
+    # Expand and validate encrypted file path
+    encrypted_path = encrypted_path.expanduser().resolve()
+    if not encrypted_path.exists():
+        raise ShareExportError(f"Encrypted file not found: {encrypted_path}")
+
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [age_exe, "-d", "-o", str(output_path)]
     input_text: Optional[str] = None
     if identity:
-        cmd.extend(["-i", str(identity)])
+        identity_path = identity.expanduser().resolve()
+        if not identity_path.exists():
+            raise ShareExportError(f"Identity file not found: {identity_path}")
+        cmd.extend(["-i", str(identity_path)])
     elif passphrase is not None:
         cmd.append("-p")
         input_text = passphrase + "\n"

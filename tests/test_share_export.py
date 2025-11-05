@@ -30,7 +30,8 @@ pytestmark = pytest.mark.filterwarnings("ignore:.*ResourceWarning")
 
 def _build_snapshot(tmp_path: Path) -> Path:
     snapshot = tmp_path / "snapshot.sqlite3"
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         conn.executescript(
             """
             CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
@@ -105,16 +106,22 @@ def _build_snapshot(tmp_path: Path) -> Path:
         conn.execute(
             "INSERT INTO agent_links (id, a_project_id, b_project_id) VALUES (1, 1, 1)"
         )
+        conn.commit()
+    finally:
+        conn.close()
     return snapshot
 
 
 def _read_message(snapshot: Path) -> tuple[str, str, list[dict[str, object]]]:
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT subject, body_md, attachments FROM messages WHERE id = 1").fetchone()
-    attachments_raw = row["attachments"]
-    attachments = json.loads(attachments_raw) if attachments_raw else []
-    return row["subject"], row["body_md"], attachments
+        attachments_raw = row["attachments"]
+        attachments = json.loads(attachments_raw) if attachments_raw else []
+        return row["subject"], row["body_md"], attachments
+    finally:
+        conn.close()
 
 
 def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
@@ -132,7 +139,8 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
     assert summary.bodies_redacted == 0
     assert summary.attachments_cleared == 0
 
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         agent_name = conn.execute("SELECT name FROM agents WHERE id = 1").fetchone()[0]
         assert agent_name.startswith("agent-")
 
@@ -142,7 +150,9 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
         read_ack = conn.execute(
             "SELECT read_ts, ack_ts FROM message_recipients WHERE message_id = 1"
         ).fetchone()
-    assert read_ack == (None, None)
+        assert read_ack == (None, None)
+    finally:
+        conn.close()
 
     subject, body, attachments = _read_message(snapshot)
     assert "sk-" not in subject
@@ -160,11 +170,14 @@ def test_scrub_snapshot_strict_preset(tmp_path: Path) -> None:
     assert summary.bodies_redacted == 1
     assert summary.attachments_cleared == 1
 
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         body = conn.execute("SELECT body_md FROM messages WHERE id = 1").fetchone()[0]
         attachments_raw = conn.execute("SELECT attachments FROM messages WHERE id = 1").fetchone()[0]
-    assert body == "[Message body redacted]"
-    assert attachments_raw == "[]"
+        assert body == "[Message body redacted]"
+        assert attachments_raw == "[]"
+    finally:
+        conn.close()
 
 
 def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
@@ -189,12 +202,15 @@ def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
         {"type": "file", "path": "attachments/raw/missing.txt", "media_type": "text/plain"},
     ]
 
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         conn.execute(
             "UPDATE messages SET attachments = ? WHERE id = 1",
             (json.dumps(payload),),
         )
         conn.commit()
+    finally:
+        conn.close()
 
     manifest = bundle_attachments(
         snapshot,
@@ -250,12 +266,15 @@ def test_summarize_snapshot(tmp_path: Path) -> None:
         {"type": "file", "path": "attachments/raw/missing.bin", "media_type": "application/octet-stream"},
     ]
 
-    with sqlite3.connect(snapshot) as conn:
+    conn = sqlite3.connect(snapshot)
+    try:
         conn.execute(
             "UPDATE messages SET attachments = ? WHERE id = 1",
             (json.dumps(attachments),),
         )
         conn.commit()
+    finally:
+        conn.close()
 
     summary = summarize_snapshot(
         snapshot,
@@ -341,10 +360,14 @@ def test_manifest_snapshot_structure(monkeypatch, tmp_path: Path) -> None:
 
 def test_run_share_export_wizard(monkeypatch, tmp_path: Path) -> None:
     db = tmp_path / "wizard.sqlite3"
-    with sqlite3.connect(db) as conn:
+    conn = sqlite3.connect(db)
+    try:
         conn.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT)")
         conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (1, 'demo', 'Demo Human')")
         conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (2, 'ops', 'Operations Vault')")
+        conn.commit()
+    finally:
+        conn.close()
 
     responses = iter(["demo,ops", "2048", "65536", "1048576", "131072", "strict"])
     monkeypatch.setattr(cli_module.typer, "prompt", lambda *_args, **_kwargs: next(responses))
@@ -629,6 +652,11 @@ def test_decrypt_with_age_validation(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(ShareExportError, match="requires --identity or --passphrase"):
         share.decrypt_with_age(encrypted, output)
 
+    # Identity file must exist
+    missing_identity = tmp_path / "nonexistent.txt"
+    with pytest.raises(ShareExportError, match="Identity file not found"):
+        share.decrypt_with_age(encrypted, output, identity=missing_identity)
+
 
 def test_sri_computation(tmp_path: Path) -> None:
     """Test SRI hash computation."""
@@ -707,3 +735,51 @@ def test_cli_verify_command_missing_bundle(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Bundle directory not found" in result.output
+
+
+def test_cli_verify_command_not_directory(tmp_path: Path) -> None:
+    """Test verify command with file instead of directory."""
+    not_a_dir = tmp_path / "file.txt"
+    not_a_dir.write_text("test", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        ["share", "verify", str(not_a_dir)],
+    )
+
+    assert result.exit_code == 1
+    assert "must be a directory" in result.output
+
+
+def test_cli_decrypt_command_auto_output(tmp_path: Path) -> None:
+    """Test decrypt command with auto-generated output path."""
+    encrypted = tmp_path / "bundle.zip.age"
+    encrypted.write_bytes(b"fake encrypted data")
+
+    runner = CliRunner()
+    # Should fail because age is not installed, but validates CLI parameter handling
+    result = runner.invoke(
+        cli_module.app,
+        ["share", "decrypt", str(encrypted), "--identity", str(tmp_path / "key.txt")],
+    )
+
+    # Will fail due to missing age binary, but should not fail due to missing --output
+    assert result.exit_code == 1
+    # Error should be about age, not about missing output parameter
+    assert "age" in result.output.lower() or "CLI not found" in result.output
+
+
+def test_cli_decrypt_command_not_file(tmp_path: Path) -> None:
+    """Test decrypt command with directory instead of file."""
+    not_a_file = tmp_path / "directory"
+    not_a_file.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        ["share", "decrypt", str(not_a_file), "--identity", str(tmp_path / "key.txt")],
+    )
+
+    assert result.exit_code == 1
+    assert "must be a file" in result.output

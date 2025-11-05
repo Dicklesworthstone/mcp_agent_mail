@@ -277,6 +277,8 @@ def share_export(
         database_path = resolve_sqlite_database_path()
     except ShareExportError as exc:
         console.print(f"[red]Failed to resolve SQLite database: {exc}[/]")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     if interactive:
@@ -305,6 +307,8 @@ def share_export(
         create_sqlite_snapshot(database_path, snapshot_path)
     except ShareExportError as exc:
         console.print(f"[red]Snapshot failed:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     if detach_threshold <= inline_threshold:
@@ -329,12 +333,16 @@ def share_export(
         scope = apply_project_scope(snapshot_path, projects)
     except ShareExportError as exc:
         console.print(f"[red]Project filtering failed:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     try:
         scrub_summary = scrub_snapshot(snapshot_path, preset=scrub_preset)
     except ShareExportError as exc:
         console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     fts_enabled = build_search_indexes(snapshot_path)
@@ -408,6 +416,8 @@ def share_export(
         )
     except ShareExportError as exc:
         console.print(f"[red]Attachment packaging failed:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     chunk_manifest = maybe_chunk_database(
@@ -439,6 +449,8 @@ def share_export(
         )
     except ShareExportError as exc:
         console.print(f"[red]Failed to scaffold bundle:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     if signing_key is not None:
@@ -455,6 +467,8 @@ def share_export(
             )
         except ShareExportError as exc:
             console.print(f"[red]Manifest signing failed:[/] {exc}")
+            if temp_dir is not None:
+                temp_dir.cleanup()
             raise typer.Exit(code=1) from exc
 
     console.print("[green]✓ Created SQLite snapshot for sharing.[/]")
@@ -486,6 +500,8 @@ def share_export(
             package_directory_as_zip(output_path, archive_path)
         except ShareExportError as exc:
             console.print(f"[red]Failed to create ZIP archive:[/] {exc}")
+            if temp_dir is not None:
+                temp_dir.cleanup()
             raise typer.Exit(code=1) from exc
         console.print("[green]✓ Packaged ZIP archive for distribution.[/]")
         if age_recipient_list:
@@ -495,6 +511,8 @@ def share_export(
                     console.print(f"[green]✓ Encrypted bundle written to {encrypted_path}[/]")
             except ShareExportError as exc:
                 console.print(f"[red]Bundle encryption failed:[/] {exc}")
+                if temp_dir is not None:
+                    temp_dir.cleanup()
                 raise typer.Exit(code=1) from exc
 
     if temp_dir is not None:
@@ -728,6 +746,9 @@ def share_verify(
     if not bundle_path.exists():
         console.print(f"[red]Bundle directory not found:[/] {bundle_path}")
         raise typer.Exit(code=1)
+    if not bundle_path.is_dir():
+        console.print(f"[red]Bundle path must be a directory:[/] {bundle_path}")
+        raise typer.Exit(code=1)
 
     console.print(f"[cyan]Verifying bundle:[/] {bundle_path}")
 
@@ -753,7 +774,14 @@ def share_verify(
 @share_app.command("decrypt")
 def share_decrypt(
     encrypted_path: Annotated[str, typer.Argument(help="Path to the age-encrypted file (e.g., bundle.zip.age).")],
-    output: Annotated[str, typer.Option("--output", "-o", help="Path where decrypted file should be written.")],
+    output: Annotated[
+        Optional[str],
+        typer.Option(
+            "--output",
+            "-o",
+            help="Path where decrypted file should be written. Defaults to encrypted filename with .age removed.",
+        ),
+    ] = None,
     identity: Annotated[
         Optional[Path],
         typer.Option(
@@ -778,8 +806,18 @@ def share_decrypt(
     if not enc_path.exists():
         console.print(f"[red]Encrypted file not found:[/] {enc_path}")
         raise typer.Exit(code=1)
+    if not enc_path.is_file():
+        console.print(f"[red]Encrypted path must be a file, not a directory:[/] {enc_path}")
+        raise typer.Exit(code=1)
 
-    out_path = _resolve_path(output)
+    # Auto-determine output path if not provided
+    if output is None:
+        if enc_path.suffix == ".age":
+            out_path = enc_path.with_suffix("")
+        else:
+            out_path = enc_path.parent / f"{enc_path.stem}_decrypted{enc_path.suffix}"
+    else:
+        out_path = _resolve_path(output)
 
     passphrase_text: Optional[str] = None
     if passphrase:
