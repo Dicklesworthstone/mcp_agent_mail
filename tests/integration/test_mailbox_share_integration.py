@@ -32,7 +32,8 @@ def _seed_mailbox(db_path: Path, storage_root: Path) -> None:
     (attachments_dir / "bundle.bin").write_bytes(b"B" * 256)
     (attachments_dir / "huge.dat").write_bytes(b"H" * 1024 * 32)
 
-    with sqlite3.connect(db_path) as conn:
+    conn = sqlite3.connect(db_path)
+    try:
         conn.executescript(
             """
             CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
@@ -119,6 +120,9 @@ def _seed_mailbox(db_path: Path, storage_root: Path) -> None:
         conn.execute(
             "INSERT INTO agent_links (id, a_project_id, b_project_id) VALUES (1, 1, 1)"
         )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.mark.usefixtures("isolated_env")
