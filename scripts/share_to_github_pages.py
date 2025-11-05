@@ -35,6 +35,117 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
+# Configuration directory
+CONFIG_DIR = Path.home() / ".mcp-agent-mail"
+CONFIG_FILE = CONFIG_DIR / "wizard-config.json"
+
+
+def find_available_port(start: int = 9000, end: int = 9100) -> int:
+    """Find an available port in the given range."""
+    import socket
+    for port in range(start, end):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", port))
+                return port
+        except OSError:
+            continue
+    raise RuntimeError(f"No available ports in range {start}-{end}")
+
+
+def parse_selection(choice: str, max_items: int) -> list[int]:
+    """Parse selection string like '1,3,5' or '1-3,5' into list of indices."""
+    if choice.strip().lower() == "all":
+        return list(range(max_items))
+
+    indices = []
+    try:
+        for part in choice.split(","):
+            part = part.strip()
+            if "-" in part:
+                start_str, end_str = part.split("-", 1)
+                start, end = int(start_str.strip()), int(end_str.strip())
+                if start < 1 or end > max_items or start > end:
+                    raise ValueError(f"Invalid range: {part}")
+                indices.extend(range(start - 1, end))
+            else:
+                idx = int(part)
+                if idx < 1 or idx > max_items:
+                    raise ValueError(f"Invalid index: {idx}")
+                indices.append(idx - 1)
+        return sorted(set(indices))  # Remove duplicates and sort
+    except ValueError as e:
+        console.print(f"[red]Invalid selection:[/] {e}")
+        return []
+
+
+def save_config(config: dict[str, Any]) -> None:
+    """Save wizard configuration for next run."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        import json
+        with CONFIG_FILE.open("w") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        console.print(f"[yellow]Could not save config:[/] {e}")
+
+
+def load_last_config() -> dict[str, Any] | None:
+    """Load last wizard configuration if it exists."""
+    if not CONFIG_FILE.exists():
+        return None
+    try:
+        import json
+        with CONFIG_FILE.open("r") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def estimate_bundle_size(projects: list[str]) -> str:
+    """Estimate bundle size based on project count (rough approximation)."""
+    # Very rough estimate: 5-20MB per project depending on message count
+    base_size = 2  # Static assets ~2MB
+    project_size = len(projects) * 10  # ~10MB per project average
+    total_mb = base_size + project_size
+
+    if total_mb < 1:
+        return "< 1 MB"
+    elif total_mb < 1024:
+        return f"~{total_mb} MB"
+    else:
+        return f"~{total_mb / 1024:.1f} GB"
+
+
+def validate_github_repo_available(repo_name: str) -> tuple[bool, str]:
+    """Check if GitHub repo name is available."""
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", repo_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            return False, f"Repository '{repo_name}' already exists in your account"
+        return True, ""
+    except FileNotFoundError:
+        return True, ""  # Can't check, assume available
+
+
+def detect_existing_github_repo(repo_name: str) -> bool:
+    """Check if GitHub repo already exists."""
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", repo_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
 
 def detect_package_manager() -> str | None:
     """Detect the available package manager on this system."""
@@ -252,7 +363,7 @@ def get_projects() -> list[dict[str, str]]:
 
 
 def select_projects(projects: list[dict[str, str]]) -> list[str]:
-    """Interactive project selection."""
+    """Interactive project selection with support for ranges and lists."""
     if not projects:
         console.print("[yellow]No projects found. Create some messages first![/]")
         sys.exit(1)
@@ -268,17 +379,16 @@ def select_projects(projects: list[dict[str, str]]) -> list[str]:
 
     console.print(table)
 
-    choice = Prompt.ask(
-        "\n[bold]Select projects to export[/]",
-        choices=["all"] + [str(i) for i in range(1, len(projects) + 1)],
-        default="all",
-    )
+    while True:
+        choice = Prompt.ask(
+            "\n[bold]Select projects to export[/] (e.g., 'all', '1,3,5', or '1-3')",
+            default="all",
+        )
 
-    if choice == "all":
-        return [p["human_key"] for p in projects]
-    else:
-        idx = int(choice) - 1
-        return [projects[idx]["human_key"]]
+        indices = parse_selection(choice, len(projects))
+        if indices:  # Valid selection
+            return [projects[idx]["human_key"] for idx in indices]
+        # If empty, parse_selection already printed error, loop continues
 
 
 def select_scrub_preset() -> str:
@@ -404,7 +514,14 @@ def preview_bundle(output_dir: Path) -> bool:
     import socket
 
     console.print("\n[bold cyan]Launching preview server...[/]")
-    console.print("[dim]Press Ctrl+C in the preview window to stop the server[/]")
+
+    # Find available port
+    try:
+        port = find_available_port()
+        console.print(f"[dim]Using port {port} (Ctrl+C to stop server)[/]")
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/]")
+        return False
 
     process = None
     try:
@@ -420,7 +537,7 @@ def preview_bundle(output_dir: Path) -> bool:
                 "preview",
                 str(output_dir),
                 "--port",
-                "9000",
+                str(port),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -431,7 +548,7 @@ def preview_bundle(output_dir: Path) -> bool:
         max_attempts = 30
         for attempt in range(max_attempts):
             try:
-                with socket.create_connection(("127.0.0.1", 9000), timeout=1):
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
                     break
             except (ConnectionRefusedError, OSError):
                 if process.poll() is not None:
@@ -444,8 +561,8 @@ def preview_bundle(output_dir: Path) -> bool:
             return False
 
         # Server is ready, open browser
-        console.print("[green]✓ Server ready, opening browser...[/]")
-        webbrowser.open("http://127.0.0.1:9000")
+        console.print(f"[green]✓ Server ready, opening browser at http://127.0.0.1:{port}[/]")
+        webbrowser.open(f"http://127.0.0.1:{port}")
 
         # Wait for server process to complete (user will Ctrl+C)
         process.wait()
@@ -658,8 +775,28 @@ def main() -> None:
         )
     )
 
-    # Get deployment target first to know which CLIs we need
-    deployment = select_deployment_target()
+    # Check if we have a previous configuration
+    last_config = load_last_config()
+    use_last_config = False
+
+    if last_config:
+        console.print("\n[bold cyan]Previous Configuration Found[/]")
+        console.print(f"  Projects: {last_config.get('project_count', '?')} selected")
+        console.print(f"  Redaction: {last_config.get('scrub_preset', 'standard')}")
+        console.print(f"  Target: {last_config.get('deployment_type', 'unknown')}")
+
+        use_last_config = Confirm.ask(
+            "\nUse these settings again?",
+            default=True,
+        )
+
+    # If not using last config, go through interactive setup
+    if not use_last_config:
+        # Get deployment target first to know which CLIs we need
+        deployment = select_deployment_target()
+    else:
+        # Reconstruct deployment config from saved settings
+        deployment = last_config.get("deployment", {})
 
     # Check prerequisites based on deployment choice
     require_gh = deployment["type"] == "github-new"
@@ -675,18 +812,49 @@ def main() -> None:
 
     console.print(f"\n[green]Found {len(projects_list)} project(s)[/]")
 
-    # Interactive selections
-    selected_projects = select_projects(projects_list)
-    scrub_preset = select_scrub_preset()
-
-    # Signing key
-    signing_key = None
-    if Confirm.ask("\nSign the bundle with Ed25519?", default=True):
-        if Confirm.ask("Generate a new signing key?", default=True):
-            signing_key = generate_signing_key()
+    # Interactive selections (or use saved config)
+    if not use_last_config:
+        selected_projects = select_projects(projects_list)
+        scrub_preset = select_scrub_preset()
+        # Record selected project indices for saving config later
+        selected_indices = [i for i, p in enumerate(projects_list) if p["human_key"] in selected_projects]
+    else:
+        # Use saved project indices
+        saved_indices = last_config.get("project_indices", list(range(len(projects_list))))
+        # Validate indices are still valid
+        selected_indices = [i for i in saved_indices if i < len(projects_list)]
+        if not selected_indices:
+            console.print("[yellow]Saved project selection invalid, please select again[/]")
+            selected_projects = select_projects(projects_list)
+            selected_indices = [i for i, p in enumerate(projects_list) if p["human_key"] in selected_projects]
         else:
-            key_path = Prompt.ask("Path to existing signing key")
-            signing_key = Path(key_path)
+            selected_projects = [projects_list[idx]["human_key"] for idx in selected_indices]
+            console.print(f"[green]Using saved selection: {len(selected_projects)} project(s)[/]")
+
+        scrub_preset = last_config.get("scrub_preset", "standard")
+
+    # Signing key (use saved preference if available)
+    signing_key = None
+    if not use_last_config:
+        use_signing = Confirm.ask("\nSign the bundle with Ed25519?", default=True)
+        generate_new_key = False
+        if use_signing:
+            generate_new_key = Confirm.ask("Generate a new signing key?", default=True)
+            if generate_new_key:
+                signing_key = generate_signing_key()
+            else:
+                key_path = Prompt.ask("Path to existing signing key")
+                signing_key = Path(key_path)
+    else:
+        use_signing = last_config.get("use_signing", True)
+        generate_new_key = last_config.get("generate_new_key", True)
+        if use_signing:
+            if generate_new_key:
+                signing_key = generate_signing_key()
+            else:
+                # Ask for key path again (don't save sensitive paths)
+                key_path = Prompt.ask("Path to existing signing key")
+                signing_key = Path(key_path)
 
     # Export to temp directory first for preview
     with tempfile.TemporaryDirectory(prefix="mailbox-preview-") as temp_dir:
@@ -715,6 +883,17 @@ def main() -> None:
 
             if signing_pub:
                 console.print(f"[green]✓ Signing public key: {signing_pub}[/]")
+
+            # Save config for next run
+            save_config({
+                "project_indices": selected_indices,
+                "project_count": len(selected_projects),
+                "scrub_preset": scrub_preset,
+                "deployment": deployment,
+                "deployment_type": "local",
+                "use_signing": use_signing,
+                "generate_new_key": generate_new_key,
+            })
 
         elif deployment["type"] == "github-new":
             # Create repo
@@ -747,6 +926,17 @@ def main() -> None:
                 if signing_pub:
                     console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
                     console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
+
+                # Save config for next run
+                save_config({
+                    "project_indices": selected_indices,
+                    "project_count": len(selected_projects),
+                    "scrub_preset": scrub_preset,
+                    "deployment": deployment,
+                    "deployment_type": "github-new",
+                    "use_signing": use_signing,
+                    "generate_new_key": generate_new_key,
+                })
             else:
                 console.print(f"\n[yellow]Repository created but Pages setup failed[/]")
                 console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
@@ -768,6 +958,17 @@ def main() -> None:
                 if signing_pub:
                     console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
                     console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
+
+                # Save config for next run
+                save_config({
+                    "project_indices": selected_indices,
+                    "project_count": len(selected_projects),
+                    "scrub_preset": scrub_preset,
+                    "deployment": deployment,
+                    "deployment_type": "cloudflare-pages",
+                    "use_signing": use_signing,
+                    "generate_new_key": generate_new_key,
+                })
             else:
                 console.print(f"\n[yellow]Cloudflare Pages deployment failed[/]")
                 sys.exit(1)

@@ -67,9 +67,11 @@ try {
       createHTML: (dirty) => {
         // For Clusterize.js: HTML is already escaped via escapeHtml() in our rendering functions
         // We verify this is safe because:
-        // 1. All user content goes through escapeHtml() before template insertion
-        // 2. highlightText() also calls escapeHtml() before regex replacement
-        // 3. Only static HTML tags and escaped content are in the strings
+        // 1. All user content (subjects, snippets, thread keys) goes through escapeHtml()
+        // 2. highlightText() calls escapeHtml() before regex replacement
+        // 3. Timestamps are escaped via escapeHtml(formatTimestamp())
+        // 4. Numbers (message counts, IDs) are not user-controllable
+        // 5. Only static HTML tags (<li>, <h3>, <div>, <span>) and escaped content
         return dirty;
       },
     });
@@ -626,7 +628,7 @@ function renderThreads(threads) {
     const subject = thread.thread_key === "all"
       ? "All messages"
       : escapeHtml(thread.latest_subject || "(no subject)");
-    const timestamp = thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : "";
+    const timestamp = thread.last_created_ts ? escapeHtml(formatTimestamp(thread.last_created_ts)) : "";
     const snippet = highlightText(thread.latest_snippet || "", state.searchTerm);
 
     return `<li class="thread-item${activeClass}" tabindex="0" data-thread-key="${escapeHtml(thread.thread_key)}">
@@ -671,7 +673,8 @@ function renderThreads(threads) {
         scrollElem: threadScrollEl,
         contentElem: threadListEl,
         rows_in_block: 20,
-        blocks_in_cluster: 2
+        blocks_in_cluster: 2,
+        tag: "li"  // Use <li> for spacing rows to maintain valid HTML structure
       });
     }
   } else {
@@ -704,7 +707,7 @@ function renderThreads(threads) {
       meta.className = "thread-meta";
       meta.innerHTML = createTrustedHTML(`
         <span class="pill">${thread.message_count} msg</span>
-        <span>${thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : ""}</span>
+        <span>${thread.last_created_ts ? escapeHtml(formatTimestamp(thread.last_created_ts)) : ""}</span>
       `);
 
       const preview = document.createElement("div");
@@ -780,7 +783,7 @@ function renderMessages(list, { context, term }) {
     const isActive = Number(state.selectedMessageId) === Number(message.id);
     const activeClass = isActive ? ' active' : '';
     const subject = highlightText(message.subject || "(no subject)", term);
-    const timestamp = formatTimestamp(message.created_ts);
+    const timestamp = escapeHtml(formatTimestamp(message.created_ts));
     const importance = escapeHtml(message.importance || "normal");
     const snippet = highlightText(message.snippet || "", term);
 
@@ -811,7 +814,8 @@ function renderMessages(list, { context, term }) {
         scrollElem: messageScrollEl,
         contentElem: messageListEl,
         rows_in_block: 20,
-        blocks_in_cluster: 2
+        blocks_in_cluster: 2,
+        tag: "li"  // Use <li> for spacing rows to maintain valid HTML structure
       });
     }
   } else {
@@ -839,7 +843,7 @@ function renderMessages(list, { context, term }) {
 
       const meta = document.createElement("div");
       meta.className = "message-meta-line";
-      meta.innerHTML = createTrustedHTML(`${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")}`);
+      meta.innerHTML = createTrustedHTML(`${escapeHtml(formatTimestamp(message.created_ts))} • importance: ${escapeHtml(message.importance || "normal")}`);
 
       const snippet = document.createElement("div");
       snippet.className = "message-snippet";
@@ -980,7 +984,7 @@ function renderMessageDetail(message) {
   const header = document.createElement("header");
   header.innerHTML = createTrustedHTML(`
     <h3>${escapeHtml(message.subject || "(no subject)")}</h3>
-    <div class="meta-line">${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")} • project: ${escapeHtml(message.project_slug || "-")}</div>
+    <div class="meta-line">${escapeHtml(formatTimestamp(message.created_ts))} • importance: ${escapeHtml(message.importance || "normal")} • project: ${escapeHtml(message.project_slug || "-")}</div>
   `);
 
   const body = document.createElement("div");
