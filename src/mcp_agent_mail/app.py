@@ -3488,6 +3488,7 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_names = {row[0] for row in existing.fetchall()}
+            unknown_local: set[str] = set()
             unknown_external: dict[str, list[str]] = defaultdict(list)
 
             class _ContactBlocked(Exception):
@@ -3624,12 +3625,16 @@ def build_mcp_server() -> FastMCP:
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
+                        # No link found - add to unknown recipients for later validation
+                        if explicit_override:
+                            label = (
+                                target_project_override.human_key or target_project_override.slug
+                                if target_project_override
+                                else "(unknown project)"
+                            )
+                            unknown_external[label].append(candidate)
                         else:
-                            local_bcc.append(nm)
+                            unknown_local.add(candidate)
 
         try:
             await _route(to_names, "to")
@@ -3637,6 +3642,41 @@ def build_mcp_server() -> FastMCP:
             await _route(bcc_list, "bcc")
         except _ContactBlocked:
             return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+
+        # Validate all recipients were resolved
+        if unknown_local or unknown_external:
+            parts: list[str] = []
+            data_payload: dict[str, Any] = {}
+            if unknown_local:
+                missing_local = sorted({name for name in unknown_local if name})
+                parts.append(
+                    f"local recipients {', '.join(missing_local)} are not registered in project '{project.human_key}'"
+                )
+                data_payload["unknown_local"] = missing_local
+            if unknown_external:
+                formatted_external = {
+                    label: sorted({name for name in names if name})
+                    for label, names in unknown_external.items()
+                }
+                ext_parts = [
+                    f"{', '.join(names)} @ {label}"
+                    for label, names in sorted(formatted_external.items())
+                    if names
+                ]
+                if ext_parts:
+                    parts.append(
+                        "external recipients missing approved contact links: " + "; ".join(ext_parts)
+                    )
+                data_payload["unknown_external"] = formatted_external
+            hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
+            parts.append(hint)
+            message = "Unable to send reply — " + "; ".join(parts)
+            raise ToolExecutionError(
+                "RECIPIENT_UNKNOWN",
+                message,
+                recoverable=True,
+                data=data_payload,
+            )
 
         deliveries: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
