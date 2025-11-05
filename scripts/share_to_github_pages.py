@@ -133,6 +133,41 @@ def validate_github_repo_available(repo_name: str) -> tuple[bool, str]:
         return True, ""  # Can't check, assume available
 
 
+def show_deployment_summary(
+    projects: list[str],
+    scrub_preset: str,
+    deployment: dict[str, Any],
+    signing_key: Path | None,
+) -> bool:
+    """Show deployment summary and ask for confirmation."""
+    console.print("\n[bold cyan]═══ Deployment Summary ═══[/]\n")
+
+    # Projects
+    console.print(f"[bold]Projects:[/] {len(projects)} selected")
+    console.print(f"[bold]Bundle size:[/] {estimate_bundle_size(projects)}")
+    console.print(f"[bold]Redaction:[/] {scrub_preset}")
+
+    # Deployment target
+    if deployment["type"] == "local":
+        console.print(f"[bold]Target:[/] Local export to {deployment['path']}")
+    elif deployment["type"] == "github-new":
+        console.print(f"[bold]Target:[/] GitHub Pages")
+        console.print(f"  Repository: {deployment['repo_name']}")
+        console.print(f"  Visibility: {'Private' if deployment['private'] else 'Public'}")
+    elif deployment["type"] == "cloudflare-pages":
+        console.print(f"[bold]Target:[/] Cloudflare Pages")
+        console.print(f"  Project: {deployment['project_name']}")
+
+    # Signing
+    if signing_key:
+        console.print(f"[bold]Signing:[/] Enabled (Ed25519)")
+    else:
+        console.print(f"[bold]Signing:[/] Disabled")
+
+    console.print()
+    return Confirm.ask("[bold]Proceed with export and deployment?[/]", default=True)
+
+
 def detect_existing_github_repo(repo_name: str) -> bool:
     """Check if GitHub repo already exists."""
     try:
@@ -621,43 +656,48 @@ def create_github_repo(name: str, private: bool, description: str) -> tuple[bool
 
 
 def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "main") -> bool:
-    """Initialize git repo and push to GitHub."""
-    try:
-        # Use cwd parameter instead of os.chdir() to avoid side effects
-        subprocess.run(["git", "init"], cwd=output_dir, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=output_dir, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Initial mailbox export"],
-            cwd=output_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(["git", "branch", "-M", branch], cwd=output_dir, check=True, capture_output=True, text=True)
+    """Initialize git repo and push to GitHub with real-time output."""
+    console.print("\n[bold cyan]Initializing git repository and pushing...[/]")
 
-        # Add remote and push
-        repo_url = f"git@github.com:{repo_full_name}.git"
-        subprocess.run(
-            ["git", "remote", "add", "origin", repo_url],
-            cwd=output_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "push", "-u", "origin", branch],
-            cwd=output_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
+    commands = [
+        (["git", "init"], "Initializing repository"),
+        (["git", "add", "."], "Adding files"),
+        (["git", "commit", "-m", "Initial mailbox export"], "Creating commit"),
+        (["git", "branch", "-M", branch], f"Setting branch to {branch}"),
+        (["git", "remote", "add", "origin", f"git@github.com:{repo_full_name}.git"], "Adding remote"),
+        (["git", "push", "-u", "origin", branch], "Pushing to GitHub"),
+    ]
 
-        console.print(f"[green]✓ Pushed to {repo_full_name}[/]")
-        return True
+    for cmd, description in commands:
+        console.print(f"[cyan]{description}...[/]")
+        try:
+            # Stream output in real-time
+            process = subprocess.Popen(
+                cmd,
+                cwd=output_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,  # Line buffered
+            )
 
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Git operation failed:[/]\n{e.stderr}")
-        return False
+            # Print output as it arrives
+            for line in process.stdout:
+                console.print(f"  [dim]{line.rstrip()}[/]")
+
+            process.wait()
+            if process.returncode != 0:
+                console.print(f"[red]✗ {description} failed[/]")
+                return False
+
+            console.print(f"[green]✓ {description} complete[/]")
+
+        except Exception as e:
+            console.print(f"[red]Git operation failed:[/] {e}")
+            return False
+
+    console.print(f"\n[bold green]✓ Successfully pushed to {repo_full_name}[/]")
+    return True
 
 
 def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool, str]:
@@ -719,12 +759,12 @@ def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool
 
 
 def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[bool, str]:
-    """Deploy bundle to Cloudflare Pages using wrangler."""
+    """Deploy bundle to Cloudflare Pages with real-time output."""
     console.print(f"\n[bold cyan]Deploying to Cloudflare Pages...[/]")
 
     try:
-        # Use wrangler pages deploy command
-        result = subprocess.run(
+        # Use wrangler pages deploy command with real-time streaming
+        process = subprocess.Popen(
             [
                 "wrangler",
                 "pages",
@@ -733,31 +773,43 @@ def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[boo
                 "--project-name", project_name,
                 "--branch", "main",
             ],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            check=True,
+            bufsize=1,  # Line buffered
         )
 
-        # Parse output for deployment URL
-        # Wrangler outputs URLs in format: https://xxx.pages.dev
+        # Collect output and parse for deployment URL
         pages_url = ""
-        for line in result.stdout.split("\n"):
-            if ".pages.dev" in line:
-                # Extract URL from the line
-                url_match = re.search(r"https://[^\s]+\.pages\.dev[^\s]*", line)
+        output_lines = []
+
+        # Stream output in real-time
+        for line in process.stdout:
+            stripped = line.rstrip()
+            output_lines.append(stripped)
+            console.print(f"  [dim]{stripped}[/]")
+
+            # Parse for deployment URL
+            if ".pages.dev" in stripped and not pages_url:
+                url_match = re.search(r"https://[^\s]+\.pages\.dev[^\s]*", stripped)
                 if url_match:
                     pages_url = url_match.group(0)
-                    break
+
+        process.wait()
+
+        if process.returncode != 0:
+            console.print(f"[red]Cloudflare Pages deployment failed with exit code {process.returncode}[/]")
+            return False, ""
 
         if not pages_url:
             # Fallback: construct expected URL
             pages_url = f"https://{project_name}.pages.dev"
 
-        console.print(f"[green]✓ Deployed to Cloudflare Pages[/]")
+        console.print(f"\n[bold green]✓ Deployed to Cloudflare Pages[/]")
         return True, pages_url
 
-    except subprocess.CalledProcessError as e:
-        console.print(f"[red]Cloudflare Pages deployment failed:[/]\n{e.stderr}")
+    except Exception as e:
+        console.print(f"[red]Cloudflare Pages deployment failed:[/] {e}")
         return False, ""
 
 
@@ -855,6 +907,11 @@ def main() -> None:
                 # Ask for key path again (don't save sensitive paths)
                 key_path = Prompt.ask("Path to existing signing key")
                 signing_key = Path(key_path)
+
+    # Show deployment summary and ask for confirmation
+    if not show_deployment_summary(selected_projects, scrub_preset, deployment, signing_key):
+        console.print("[yellow]Deployment cancelled by user[/]")
+        sys.exit(0)
 
     # Export to temp directory first for preview
     with tempfile.TemporaryDirectory(prefix="mailbox-preview-") as temp_dir:

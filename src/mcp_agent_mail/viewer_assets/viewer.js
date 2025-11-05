@@ -787,7 +787,7 @@ function renderMessages(list, { context, term }) {
     const importance = escapeHtml(message.importance || "normal");
     const snippet = highlightText(message.snippet || "", term);
 
-    return `<li class="${activeClass}" data-id="${message.id}" data-thread-key="${escapeHtml(message.thread_key)}">
+    return `<li class="${activeClass}" data-id="${escapeHtml(String(message.id))}" data-thread-key="${escapeHtml(message.thread_key)}">
       <h3>${subject}</h3>
       <div class="message-meta-line">${timestamp} • importance: ${importance}</div>
       <div class="message-snippet">${snippet}</div>
