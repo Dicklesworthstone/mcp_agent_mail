@@ -1357,7 +1357,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             if (order or "relevance") == "time"
                             else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]}) "
                         )
-                        + "LIMIT 50"
+                        + "LIMIT 10000"
                     )
                     try:
                         search = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q})
