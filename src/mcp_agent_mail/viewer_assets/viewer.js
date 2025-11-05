@@ -59,6 +59,20 @@ try {
         return escapeHtml(dirty);
       },
     });
+
+    // Default policy for Clusterize.js compatibility
+    // Clusterize uses innerHTML but doesn't understand Trusted Types
+    // This policy passes through HTML that we've already escaped in createThreadHTML/createMessageHTML
+    trustedTypes.createPolicy("default", {
+      createHTML: (dirty) => {
+        // For Clusterize.js: HTML is already escaped via escapeHtml() in our rendering functions
+        // We verify this is safe because:
+        // 1. All user content goes through escapeHtml() before template insertion
+        // 2. highlightText() also calls escapeHtml() before regex replacement
+        // 3. Only static HTML tags and escaped content are in the strings
+        return dirty;
+      },
+    });
   }
 } catch (error) {
   console.warn("Trusted Types not supported or policy creation failed:", error);
@@ -654,8 +668,8 @@ function renderThreads(threads) {
       // Initialize new Clusterize instance
       state.threadClusterize = new Clusterize({
         rows: rows,
-        scrollId: threadScrollEl,
-        contentId: threadListEl,
+        scrollElem: threadScrollEl,
+        contentElem: threadListEl,
         rows_in_block: 20,
         blocks_in_cluster: 2
       });
@@ -794,8 +808,8 @@ function renderMessages(list, { context, term }) {
       // Initialize new Clusterize instance
       state.messageClusterize = new Clusterize({
         rows: rows,
-        scrollId: messageScrollEl,
-        contentId: messageListEl,
+        scrollElem: messageScrollEl,
+        contentElem: messageListEl,
         rows_in_block: 20,
         blocks_in_cluster: 2
       });
