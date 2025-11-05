@@ -3487,7 +3487,15 @@ def build_mcp_server() -> FastMCP:
 
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
-            local_names = {row[0] for row in existing.fetchall()}
+            # Build case-insensitive lookup like send_message does
+            local_lookup: dict[str, str] = {}
+            for row in existing.fetchall():
+                canonical_name = (row[0] or "").strip()
+                if not canonical_name:
+                    continue
+                sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
+                for key in {canonical_name.lower(), sanitized_canonical.lower()}:
+                    local_lookup.setdefault(key, canonical_name)
             unknown_local: set[str] = set()
             unknown_external: dict[str, list[str]] = defaultdict(list)
 
@@ -3526,14 +3534,23 @@ def build_mcp_server() -> FastMCP:
                                 label = project_part.strip() or "(invalid project)"
                                 unknown_external[label].append(candidate)
                                 continue
-                    if not explicit_override and nm in local_names:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
-                        else:
-                            local_bcc.append(nm)
-                        continue
+                    # Use case-insensitive lookup like send_message
+                    if not explicit_override:
+                        sanitized_nm = sanitize_agent_name(nm) or nm
+                        key_candidates = {nm.lower(), sanitized_nm.lower()}
+                        resolved_local = None
+                        for key in key_candidates:
+                            resolved_local = local_lookup.get(key)
+                            if resolved_local:
+                                break
+                        if resolved_local:
+                            if kind == "to":
+                                local_to.append(resolved_local)
+                            elif kind == "cc":
+                                local_cc.append(resolved_local)
+                            else:
+                                local_bcc.append(resolved_local)
+                            continue
                     rows = None
                     if target_project_override is not None and target_name_override:
                         rows = await sx.execute(
