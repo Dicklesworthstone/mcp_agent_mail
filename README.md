@@ -552,7 +552,7 @@ Each bundle contains:
 - **Attachments**: Images and files, either bundled directly (for small files) or marked as external references (for large files).
 - **Integrity metadata**: SHA-256 hashes for all assets (vendor libraries, database, attachments) stored in `manifest.json` for verification.
 - **Optional signature**: Ed25519 cryptographic signature over the manifest to prove authenticity and detect tampering.
-- **Security hardening**: Content Security Policy headers, DOMPurify sanitization, and Trusted Types enforcement protect against XSS attacks in message bodies.
+- **Security hardening**: Content Security Policy headers and DOMPurify sanitization protect against XSS attacks in message bodies.
 
 ### Quick Start: Interactive Deployment Wizard
 
@@ -570,21 +570,55 @@ uv run python -m mcp_agent_mail.cli share wizard
 
 The wizard provides a fully automated end-to-end deployment experience:
 
-1. **Configuration management**: Remembers your last settings and offers to reuse them, saving time on repeated exports
-2. **Deployment target selection**: Choose between GitHub Pages, Cloudflare Pages, or local export
-3. **Automatic CLI installation**: Detects and installs missing tools (`gh` for GitHub, `wrangler` for Cloudflare)
-4. **Guided authentication**: Step-by-step browser login flows for GitHub and Cloudflare
-5. **Smart project selection**:
+1. **Session resumption**: Detects interrupted sessions and offers to resume exactly where you left off, avoiding re-export
+2. **Configuration management**: Remembers your last settings and offers to reuse them, saving time on repeated exports
+3. **Deployment target selection**: Choose between GitHub Pages, Cloudflare Pages, or local export
+4. **Automatic CLI installation**: Detects and installs missing tools (`gh` for GitHub, `wrangler` for Cloudflare)
+5. **Guided authentication**: Step-by-step browser login flows for GitHub and Cloudflare
+6. **Smart project selection**:
    - Shows all available projects in a formatted table
    - Supports multiple selection modes: `all`, single number (`1`), lists (`1,3,5`), or ranges (`1-3`, `2-5,8`)
    - Remembers your previous selection for quick re-export
-6. **Redaction configuration**: Choose between `standard` (scrub secrets like API keys/tokens, keep agent names) or `strict` (redact all message bodies)
-7. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or use your existing key
-8. **Pre-flight validation**: Checks that GitHub repo names are available before starting the export
-9. **Deployment summary**: Shows what will be deployed (project count, bundle size, target, signing status) and asks for confirmation
-10. **Export and preview**: Exports the bundle and launches a local preview server with automatic port detection (tries 9000-9100)
-11. **Real-time deployment**: Streams git and deployment output in real-time so you can follow the progress
-12. **Automatic deployment**: Creates repos, enables Pages, pushes code, and gives you the live URL
+7. **Redaction configuration**: Choose between `standard` (scrub secrets like API keys/tokens, keep agent names) or `strict` (redact all message bodies)
+8. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or reuse of existing keys
+9. **Pre-flight validation**: Checks that GitHub repo names are available before starting the export
+10. **Deployment summary**: Shows what will be deployed (project count, bundle size, target, signing status) and asks for confirmation
+11. **Export and preview**: Exports the bundle and launches an interactive preview server with automatic port detection (tries 9000-9100)
+12. **Interactive preview controls**:
+    - Press **'r'** to force browser refresh (manual cache bust)
+    - Press **'d'** to skip preview and deploy immediately
+    - Press **'q'** to quit preview server
+13. **Automatic viewer asset refresh**: Always ensures latest HTML/JS/CSS from source tree are used, even when reusing bundles
+14. **Real-time deployment**: Streams git and deployment output in real-time so you can follow the progress
+15. **Automatic deployment**: Creates repos, enables Pages, pushes code, and gives you the live URL
+
+#### Session resumption (new in latest version)
+
+If you interrupt the wizard (close terminal, Ctrl+C during preview, etc.), it saves your progress to `~/.mcp-agent-mail/wizard-session/`. When you run the wizard again:
+
+```
+Incomplete session detected
+  Projects: 3 selected
+  Stage: preview
+  Workspace: ~/.mcp-agent-mail/wizard-session/bundle
+
+Resume where you left off? (Y/n):
+```
+
+**What gets saved:**
+- Selected projects and scrub preset
+- Deployment configuration (target, repo name, etc.)
+- Signing key preferences and paths
+- Exported bundle (in session workspace)
+- Current stage (preview, deploy)
+
+**Resume scenarios:**
+- **Closed terminal during preview**: Resume → Skip re-export → Launch preview immediately
+- **Changed your mind after export**: Resume → "Reuse bundle?" → Preview or re-export
+- **Want to deploy later**: Resume → Press 'd' in preview → Deploy without re-exporting
+- **Made viewer code changes**: Resume → Assets auto-refresh from source tree
+
+After successful deployment, the session state is automatically cleared. Sessions also clear if they become invalid (workspace deleted, projects removed, etc.).
 
 #### Configuration persistence
 
@@ -604,8 +638,13 @@ This allows rapid re-deployment with the same settings. The saved configuration 
 - Redaction preset
 - Deployment target and parameters (repo name, privacy, project name)
 - Signing preferences (whether to sign, whether to generate new key)
+- Last used signing key path (offered as default when not generating new key)
 
 Configuration is project-agnostic: if you add or remove projects, the wizard validates saved indices and prompts for re-selection if needed.
+
+**Difference between session and config:**
+- **Session state** (`wizard-session/`): Temporary, for resuming interrupted runs, includes exported bundle
+- **Config file** (`wizard-config.json`): Persistent, for "use last settings" across fresh runs, no bundle
 
 #### Multi-project selection
 
@@ -780,7 +819,15 @@ uv run python -m mcp_agent_mail.cli share preview ./my-bundle \
   --open-browser
 ```
 
-This launches a lightweight HTTP server that serves the static files. Open `http://127.0.0.1:9000/` in your browser to explore the archive.
+This launches a lightweight HTTP server that serves the static files. Open `http://127.0.0.1:9000/viewer/` in your browser to explore the archive.
+
+**Interactive preview controls:**
+- **'r'**: Force browser reload (bumps manual cache-bust token, triggers viewer refresh)
+- **'d'**: Request deployment (exits with code 42; wizard detects and proceeds to deploy)
+- **'q'**: Quit preview server
+- **Ctrl+C**: Stop preview server
+
+The preview server automatically refreshes viewer assets from the source tree if available, ensuring you always see the latest HTML/JS/CSS during development.
 
 **3. Verify integrity**
 
@@ -838,23 +885,28 @@ After decryption, unzip the archive and use `share preview` to view it.
 
 ### Security features
 
-**XSS protection (DOMPurify + Trusted Types)**
+**XSS protection (DOMPurify + CSP)**
 
 Message bodies are rendered using a defense-in-depth pipeline:
 
 1. **Marked.js** parses GitHub-Flavored Markdown into HTML
 2. **DOMPurify** sanitizes the HTML, removing dangerous tags and attributes
-3. **Trusted Types** enforces that all `innerHTML` assignments use TrustedHTML objects
-4. **Content Security Policy** blocks inline scripts, external resources, and unsafe-eval
+3. **Content Security Policy** restricts script sources, blocks inline event handlers, and limits network access
 
 This prevents malicious content in message bodies from executing JavaScript or exfiltrating data.
+
+**CSP configuration notes:**
+- `script-src`: Allows self, CDNs (Tailwind, Alpine.js), and `'unsafe-eval'` (required for SQL.js WebAssembly)
+- `connect-src`: Allows `*` (all origins) to support preview mode polling and flexible deployment scenarios
+- `style-src`: Allows self, inline styles (for Tailwind), and font CDNs
+- Trusted Types removed for browser compatibility (Firefox, Safari don't support it yet)
 
 **Cryptographic signing (Ed25519)**
 
 When you provide a signing key, the export process:
 
 1. Generates a canonical JSON representation of `manifest.json`
-2. Signs it with Ed25519 (fast, 64-byte signatures)
+2. Signs it with Ed25519 (fast, 64-byte signatures, 128-bit security)
 3. Writes the signature and public key to `manifest.sig.json`
 
 Recipients can verify the signature using `share verify` to ensure:
@@ -862,6 +914,12 @@ Recipients can verify the signature using `share verify` to ensure:
 - The bundle hasn't been modified since signing
 - The bundle was created by someone with the private key
 - All assets match their declared SHA-256 hashes
+
+**Requirements and fallback:**
+- Requires PyNaCl >= 1.6.0 (installed automatically with this package)
+- If PyNaCl is unavailable or signing fails, export gracefully falls back to unsigned mode
+- Wizard reuses existing signing keys by default (no re-generation unless requested)
+- Private keys are automatically excluded from git via `.gitignore` (signing-*.key pattern)
 
 **Encryption (age)**
 
@@ -895,22 +953,46 @@ All presets apply redaction to message subjects, bodies, and attachment metadata
 The bundled HTML viewer provides:
 
 **Dashboard layout**:
+- **Gmail-style three-pane interface**: Projects sidebar, message list (center), and detail pane (right)
 - **Bundle metadata header**: Shows bundle creation time, export settings, and scrubbing preset
-- **Summary panels**: Three side-by-side panels displaying projects included, attachment statistics, and redaction summary
-- **Message overview**: Searchable list of all messages with filtering by subject/body
+- **Summary panels**: Side-by-side panels displaying projects included, attachment statistics, and redaction summary
+- **Message list**: Virtual-scrolled message list with sender, subject, snippet, and importance badges
 - **Raw manifest viewer**: Collapsible JSON display of the complete manifest for verification
 
-**Full-text search**: Powered by SQLite FTS5, runs entirely in the browser. Search syntax supports phrases (`"build plan"`), boolean operators (`plan AND users`), and field filters (`subject:deploy`).
+**Advanced boolean search** (new): Powered by SQLite FTS5 with LIKE fallback, supports complex queries:
+- **Boolean operators**: `(auth OR login) AND NOT admin`
+- **Quoted phrases**: `"build plan"` (exact match)
+- **Parentheses**: Control precedence like `(A OR B) AND (C OR D)`
+- **Operator precedence**: NOT > AND > OR (e.g., `A OR B AND C` = `A OR (B AND C)`)
+- **Automatic debouncing**: 140ms delay avoids hammering the database on every keystroke
+- **Performance**: FTS5 search is 10-100x faster than LIKE on large datasets
+
+**Lazy message loading** (performance optimization):
+- Initial load fetches only 280-character snippets for all messages (3-6x faster)
+- Full message body loaded on-demand when you click a message
+- Dramatically reduces memory usage and initial load time
+
+**Virtual scrolling** (new): Clusterize.js-powered virtual list rendering:
+- Smoothly handles 100,000+ messages without slowdown
+- Only ~30 DOM nodes exist at any time (visible rows + buffers)
+- Maintains native scrollbar feel with keyboard navigation
 
 **Markdown rendering**: Message bodies are rendered with GitHub-Flavored Markdown, supporting code blocks, tables, task lists, and inline images.
 
-**OPFS caching**: The SQLite database is cached in Origin Private File System (OPFS) for instant subsequent loads. First load downloads the database, subsequent loads are instant.
+**Opportunistic OPFS caching**: The SQLite database is cached in Origin Private File System (OPFS) in the background:
+- First load: Downloads from network, caches to OPFS during idle time
+- Subsequent loads: Instant from OPFS (even faster than IndexedDB)
+- Automatic cache key validation prevents stale data
+
+**Dark mode**: Toggle between light and dark themes with localStorage persistence. Dark mode state is managed by the main viewer controller for consistency.
 
 **Attachment preview**: Inline images render directly in message bodies. External attachments show file size and download links.
 
-**Message detail view**: Click any message in the list to view its full body, metadata (sender, recipients, timestamp, importance), and attachments.
+**Message detail view**: Click any message in the list to load its full body (lazy), view metadata (sender, recipients, timestamp, importance), and browse attachments.
 
 **No server required**: After the initial HTTP serving (which can be a static file host like S3, GitHub Pages, or Netlify), all functionality runs client-side. No backend, no API calls, no authentication.
+
+**Browser compatibility**: Works in all modern browsers (Chrome, Firefox, Safari, Edge) with graceful fallbacks for missing features (OPFS, FTS5).
 
 ### Deployment options
 
