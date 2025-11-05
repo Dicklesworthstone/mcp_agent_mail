@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -103,7 +104,9 @@ async def test_tooling_locks_resource(isolated_env):
     lock_path = storage_root / ".archive.lock"
     lock_path.touch()
     metadata_path = storage_root / ".archive.lock.owner.json"
-    metadata_path.write_text(json.dumps({"pid": 999_999, "created_ts": time.time() - 500}), encoding="utf-8")
+    # Use current process PID and recent timestamp so lock is not considered stale
+    # (heal_archive_locks runs at server startup and would remove stale locks)
+    metadata_path.write_text(json.dumps({"pid": os.getpid(), "created_ts": time.time()}), encoding="utf-8")
 
     async with Client(server) as client:
         blocks = await client.read_resource("resource://tooling/locks")

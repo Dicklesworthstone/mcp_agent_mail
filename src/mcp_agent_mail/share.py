@@ -796,17 +796,20 @@ def summarize_snapshot(
     with sqlite3.connect(str(snapshot_path)) as conn:
         conn.row_factory = sqlite3.Row
         total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        total_threads = conn.execute(
-            """
-            SELECT COUNT(DISTINCT(
-                CASE WHEN thread_id IS NULL OR thread_id = ''
-                     THEN printf('msg:%d', id)
-                     ELSE thread_id
-                END
-            ))
-            FROM messages
-            """
-        ).fetchone()[0]
+        try:
+            total_threads = conn.execute(
+                """
+                SELECT COUNT(DISTINCT(
+                    CASE WHEN thread_id IS NULL OR thread_id = ''
+                         THEN printf('msg:%d', id)
+                         ELSE thread_id
+                    END
+                ))
+                FROM messages
+                """
+            ).fetchone()[0]
+        except sqlite3.OperationalError:
+            total_threads = total_messages
         projects = [
             {"slug": row["slug"], "human_key": row["human_key"]}
             for row in conn.execute("SELECT slug, human_key FROM projects ORDER BY slug")

@@ -137,13 +137,17 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
                 "paths": ["src/app.py"],
             },
         )
+        # Advisory model: conflicts are reported but reservation is still granted
         assert conflict.data["conflicts"]
+        assert conflict.data["granted"]
+        assert conflict.data["granted"][0]["path_pattern"] == "src/app.py"
 
+        # Both Alpha and Beta should have active reservations now (advisory model)
         active_only_resource = await client.read_resource("resource://file_reservations/backend?active_only=true")
         active_only_payload = json.loads(active_only_resource[0].text)
-        assert active_only_payload
-        assert active_only_payload[0]["path_pattern"] == "src/app.py"
-        assert active_only_payload[0]["stale"] is False
+        assert len(active_only_payload) == 2
+        assert all(entry["path_pattern"] == "src/app.py" for entry in active_only_payload)
+        assert {entry["agent"] for entry in active_only_payload} == {alpha_name, beta_name}
 
         release = await client.call_tool(
             "release_file_reservations",
@@ -159,8 +163,13 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
         payload = json.loads(file_reservations_resource[0].text)
         assert any(entry["path_pattern"] == "src/app.py" and entry["released_ts"] is not None for entry in payload)
 
+        # After Alpha releases, Beta's reservation should still be active (advisory model)
         active_only_after_release = await client.read_resource("resource://file_reservations/backend?active_only=true")
-        assert json.loads(active_only_after_release[0].text) == []
+        active_reservations = json.loads(active_only_after_release[0].text)
+        assert len(active_reservations) == 1
+        assert active_reservations[0]["agent"] == beta_name
+        assert active_reservations[0]["path_pattern"] == "src/app.py"
+        assert active_reservations[0]["released_ts"] is None
 
 
 @pytest.mark.asyncio

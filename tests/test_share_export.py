@@ -486,3 +486,224 @@ def test_maybe_chunk_database_rejects_zero_chunk_size(tmp_path: Path) -> None:
             threshold_bytes=1,
             chunk_bytes=0,
         )
+
+
+def test_sign_and_verify_manifest(tmp_path: Path) -> None:
+    """Test Ed25519 manifest signing and verification flow."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    # Create a test manifest
+    manifest_path = tmp_path / "manifest.json"
+    manifest_data = {"version": "1.0", "test": "data"}
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    # Generate signing key (32-byte seed)
+    signing_key_path = tmp_path / "signing.key"
+    signing_key_path.write_bytes(b"A" * 32)
+
+    # Sign the manifest
+    signature_info = share.sign_manifest(
+        manifest_path,
+        signing_key_path,
+        tmp_path,
+    )
+
+    assert signature_info["algorithm"] == "ed25519"
+    assert "signature" in signature_info
+    assert "public_key" in signature_info
+    assert "manifest_sha256" in signature_info
+
+    # Verify signature file was created
+    sig_path = tmp_path / "manifest.sig.json"
+    assert sig_path.exists()
+
+    # Verify the bundle (should pass)
+    result = share.verify_bundle(tmp_path)
+    assert result["signature_checked"] is True
+    assert result["signature_verified"] is True
+
+    # Verify with explicit public key (should pass)
+    result = share.verify_bundle(tmp_path, public_key=signature_info["public_key"])
+    assert result["signature_verified"] is True
+
+    # Tamper with manifest and verify (should fail)
+    manifest_path.write_text(json.dumps({"tampered": True}), encoding="utf-8")
+    with pytest.raises(ShareExportError, match="signature verification failed"):
+        share.verify_bundle(tmp_path)
+
+
+def test_verify_bundle_without_signature(tmp_path: Path) -> None:
+    """Test bundle verification when no signature is present."""
+    # Create minimal manifest
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    # Verify should succeed but report no signature
+    result = share.verify_bundle(tmp_path)
+    assert result["signature_checked"] is False
+    assert result["signature_verified"] is False
+
+
+def test_verify_bundle_with_sri(tmp_path: Path) -> None:
+    """Test SRI hash verification in bundle."""
+    # Create manifest with SRI entries
+    viewer_dir = tmp_path / "viewer"
+    viewer_dir.mkdir()
+
+    js_file = viewer_dir / "test.js"
+    js_file.write_text("console.log('test');", encoding="utf-8")
+
+    # Compute SRI hash
+    sri_hash = share._compute_sri(js_file)
+
+    manifest_data = {
+        "version": "1.0",
+        "viewer": {
+            "sri": {
+                "viewer/test.js": sri_hash
+            }
+        }
+    }
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    # Verification should pass
+    result = share.verify_bundle(tmp_path)
+    assert result["sri_checked"] is True
+
+    # Tamper with JS file
+    js_file.write_text("console.log('hacked');", encoding="utf-8")
+
+    # Verification should fail
+    with pytest.raises(ShareExportError, match="SRI mismatch"):
+        share.verify_bundle(tmp_path)
+
+
+def test_verify_bundle_missing_sri_asset(tmp_path: Path) -> None:
+    """Test verification fails when SRI asset is missing."""
+    manifest_data = {
+        "version": "1.0",
+        "viewer": {
+            "sri": {
+                "viewer/missing.js": "sha256-abc123"
+            }
+        }
+    }
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="Missing asset for SRI entry"):
+        share.verify_bundle(tmp_path)
+
+
+def test_decrypt_with_age_requires_age_binary(tmp_path: Path, monkeypatch) -> None:
+    """Test that decrypt_with_age fails gracefully when age is not installed."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: None)
+
+    encrypted = tmp_path / "bundle.age"
+    encrypted.write_bytes(b"encrypted data")
+    output = tmp_path / "decrypted"
+
+    with pytest.raises(ShareExportError, match="`age` CLI not found"):
+        share.decrypt_with_age(encrypted, output, identity=tmp_path / "key.txt")
+
+
+def test_decrypt_with_age_validation(tmp_path: Path, monkeypatch) -> None:
+    """Test decrypt_with_age input validation."""
+    # Mock age binary as available for validation tests
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    encrypted = tmp_path / "bundle.age"
+    encrypted.write_bytes(b"data")
+    output = tmp_path / "out"
+    identity = tmp_path / "identity.txt"
+    identity.write_text("AGE-SECRET-KEY-1...", encoding="utf-8")
+
+    # Can't provide both identity and passphrase
+    with pytest.raises(ShareExportError, match="either an identity file or a passphrase"):
+        share.decrypt_with_age(encrypted, output, identity=identity, passphrase="secret")
+
+    # Must provide at least one
+    with pytest.raises(ShareExportError, match="requires --identity or --passphrase"):
+        share.decrypt_with_age(encrypted, output)
+
+
+def test_sri_computation(tmp_path: Path) -> None:
+    """Test SRI hash computation."""
+    test_file = tmp_path / "test.js"
+    test_file.write_text("test content", encoding="utf-8")
+
+    sri = share._compute_sri(test_file)
+
+    # Should start with sha256-
+    assert sri.startswith("sha256-")
+
+    # Should be base64 encoded (typically 44+ chars including prefix)
+    assert len(sri) > 40
+
+    # Should be deterministic
+    sri2 = share._compute_sri(test_file)
+    assert sri == sri2
+
+
+def test_build_viewer_sri(tmp_path: Path) -> None:
+    """Test building SRI map for viewer assets."""
+    viewer_dir = tmp_path / "viewer"
+    vendor_dir = viewer_dir / "vendor"
+    vendor_dir.mkdir(parents=True)
+
+    # Create test assets
+    (viewer_dir / "viewer.js").write_text("js code", encoding="utf-8")
+    (viewer_dir / "styles.css").write_text("css code", encoding="utf-8")
+    (vendor_dir / "lib.wasm").write_bytes(b"wasm binary")
+    (viewer_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+    (viewer_dir / "README.txt").write_text("readme", encoding="utf-8")
+
+    sri_map = share._build_viewer_sri(tmp_path)
+
+    # Should include .js, .css, .wasm files
+    assert "viewer/viewer.js" in sri_map
+    assert "viewer/styles.css" in sri_map
+    assert "viewer/vendor/lib.wasm" in sri_map
+
+    # Should NOT include .html or .txt
+    assert "viewer/index.html" not in sri_map
+    assert "viewer/README.txt" not in sri_map
+
+    # All values should be SRI hashes
+    for path, sri in sri_map.items():
+        assert sri.startswith("sha256-")
+
+
+def test_cli_verify_command(tmp_path: Path) -> None:
+    """Test the CLI verify command."""
+    # Create a bundle with manifest
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    manifest = bundle / "manifest.json"
+    manifest.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        ["share", "verify", str(bundle)],
+    )
+
+    assert result.exit_code == 0
+    assert "Bundle verification passed" in result.output
+    assert "SRI checked: False" in result.output
+    assert "Signature checked: False" in result.output
+
+
+def test_cli_verify_command_missing_bundle(tmp_path: Path) -> None:
+    """Test verify command with non-existent bundle."""
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        ["share", "verify", str(tmp_path / "nonexistent")],
+    )
+
+    assert result.exit_code == 1
+    assert "Bundle directory not found" in result.output

@@ -710,6 +710,101 @@ def share_preview(
         console.print("[green]Preview server stopped.[/]")
 
 
+@share_app.command("verify")
+def share_verify(
+    bundle: Annotated[str, typer.Argument(help="Path to the exported bundle directory.")],
+    public_key: Annotated[
+        Optional[str],
+        typer.Option(
+            "--public-key",
+            help="Ed25519 public key (base64) to verify signature. If omitted, uses key from manifest.sig.json.",
+        ),
+    ] = None,
+) -> None:
+    """Verify bundle integrity (SRI hashes) and optional Ed25519 signature."""
+    from .share import verify_bundle
+
+    bundle_path = _resolve_path(bundle)
+    if not bundle_path.exists():
+        console.print(f"[red]Bundle directory not found:[/] {bundle_path}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[cyan]Verifying bundle:[/] {bundle_path}")
+
+    try:
+        result = verify_bundle(bundle_path, public_key=public_key)
+        console.print()
+        console.print("[green]✓ Bundle verification passed[/]")
+        console.print(f"  Bundle: {result['bundle']}")
+        console.print(f"  SRI checked: {result['sri_checked']}")
+        console.print(f"  Signature checked: {result['signature_checked']}")
+        console.print(f"  Signature verified: {result['signature_verified']}")
+
+        if not result["sri_checked"]:
+            console.print("[yellow]  Warning: No SRI hashes found in manifest[/]")
+        if not result["signature_checked"]:
+            console.print("[yellow]  Warning: No signature found (manifest.sig.json)[/]")
+
+    except ShareExportError as exc:
+        console.print(f"[red]Verification failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+@share_app.command("decrypt")
+def share_decrypt(
+    encrypted_path: Annotated[str, typer.Argument(help="Path to the age-encrypted file (e.g., bundle.zip.age).")],
+    output: Annotated[str, typer.Option("--output", "-o", help="Path where decrypted file should be written.")],
+    identity: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--identity",
+            "-i",
+            help="Path to age identity file (private key). Mutually exclusive with --passphrase.",
+        ),
+    ] = None,
+    passphrase: Annotated[
+        bool,
+        typer.Option(
+            "--passphrase",
+            "-p",
+            help="Prompt for passphrase interactively. Mutually exclusive with --identity.",
+        ),
+    ] = False,
+) -> None:
+    """Decrypt an age-encrypted bundle using identity file or passphrase."""
+    from .share import decrypt_with_age
+
+    enc_path = _resolve_path(encrypted_path)
+    if not enc_path.exists():
+        console.print(f"[red]Encrypted file not found:[/] {enc_path}")
+        raise typer.Exit(code=1)
+
+    out_path = _resolve_path(output)
+
+    passphrase_text: Optional[str] = None
+    if passphrase:
+        import getpass
+
+        passphrase_text = getpass.getpass("Enter passphrase: ")
+        if not passphrase_text:
+            console.print("[red]Passphrase cannot be empty[/]")
+            raise typer.Exit(code=1)
+
+    console.print(f"[cyan]Decrypting:[/] {enc_path} → {out_path}")
+
+    try:
+        decrypt_with_age(
+            enc_path,
+            out_path,
+            identity=identity,
+            passphrase=passphrase_text,
+        )
+        console.print(f"[green]✓ Decrypted successfully to {out_path}[/]")
+    except ShareExportError as exc:
+        console.print(f"[red]Decryption failed:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+
 def _resolve_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
