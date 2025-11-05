@@ -416,6 +416,9 @@ footer {
   list-style: none;
   padding: 0;
   margin: 0;
+  /* Override list overflow/flex when inside Clusterize wrapper */
+  overflow-y: visible;
+  flex: none;
 }
 
 .thread-list li {
