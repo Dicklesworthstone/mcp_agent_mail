@@ -250,7 +250,9 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
 - Integration tests that exercise the CLI end-to-end with rich logging to validate manifest contents, attachment packaging, and ZIP bundles.
   - ✅ *(2025-11-04)* Added `tests/integration/test_mailbox_share_integration.py` covering export + preview server workflow.
 - Snapshot tests for manifest integrity, schema_version, compile_options, and Ed25519 signatures.
+  - ✅ *(2025-11-05)* `test_manifest_snapshot_structure` validates manifest schema/version/summary fields after export.
 - Playwright E2E tests against static viewer (local http server): verify engine auto-selection, search results, attachments, and CSP enforcement.
+  - ✅ *(2025-11-05)* `test_viewer_playwright_smoke` runs Chromium to ensure viewer loads, blocks XSS, and surfaces metadata.
 - Performance benchmarks: measure first meaningful paint on 10 MB, 100 MB, 500 MB bundles under httpvfs streaming; confirm warm-load OPFS cache hits.
 - Query locality validation: run `EXPLAIN QUERY PLAN` + `dbstat` checks to ensure covering indexes minimize random seeks.[3]
 - Cross-browser storage tests: Chrome, Firefox, Safari covering OPFS (with SAH-Pool) and IndexedDB limits.
