@@ -154,7 +154,7 @@ def test_share_export_end_to_end(monkeypatch, tmp_path: Path) -> None:
     manifest_path = output_dir / "manifest.json"
     assert manifest_path.is_file()
     with manifest_path.open(encoding="utf-8") as handle:
-    manifest = json.load(handle)
+        manifest = json.load(handle)
 
     console.print(
         Panel(

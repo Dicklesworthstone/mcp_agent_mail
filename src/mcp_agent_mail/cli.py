@@ -459,6 +459,7 @@ def _run_share_export_wizard(
     default_detach: int,
     default_chunk_threshold: int,
     default_chunk_size: int,
+    default_scrub_preset: str,
 ) -> dict[str, Any]:
     console.rule("[bold]Share Export Wizard[/bold]")
     projects = _list_projects_for_wizard(database_path)
@@ -498,6 +499,20 @@ def _run_share_export_wizard(
         default=str(default_chunk_size),
     )
     chunk_size = _parse_positive_int(chunk_size_input, default_chunk_size)
+
+    console.print("[cyan]Scrub presets:[/]")
+    for name, config in SCRUB_PRESETS.items():
+        console.print(f"  • [bold]{name}[/] - {config['description']}")
+    preset_input = typer.prompt(
+        f"Scrub preset (default {default_scrub_preset})",
+        default=default_scrub_preset,
+    )
+    preset_value = (preset_input or default_scrub_preset).strip().lower()
+    if preset_value not in SCRUB_PRESETS:
+        console.print(
+            f"[yellow]Unknown preset '{preset_value}'. Using {default_scrub_preset} instead.[/]"
+        )
+        preset_value = default_scrub_preset
 
     zip_bundle = typer.confirm("Package the output directory as a .zip archive?", default=True)
 

@@ -14,6 +14,7 @@
 - ✅ *(2025-11-04)* Export pipeline auto-detects GitHub Pages / Cloudflare Pages / Netlify / S3 signals and records tailored instructions in manifest + HOW_TO_DEPLOY.
 - ✅ *(2025-11-04)* Each bundle now renders `HOW_TO_DEPLOY.md` with host-specific copy/paste deployment steps automatically generated.
 - ✅ *(2025-11-04)* Advanced options (Ed25519 signing, age encryption, attachment thresholds) remain opt-in flags or wizard prompts; defaults stay minimal.
+- ✅ *(2025-11-05)* Share wizard now presents scrub presets (`standard`, `strict`) with inline guidance so operators pick the right redaction level without reading docs.
 
 ## Constraints & Assumptions
 - Exports must never mutate the live SQLite database; they operate on a read-only snapshot.
