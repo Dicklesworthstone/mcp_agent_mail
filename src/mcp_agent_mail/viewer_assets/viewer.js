@@ -1196,15 +1196,15 @@ function viewerController() {
       if (this.selectedMessage?.id === msg.id) {
         // Deselect if clicking the same message
         this.selectedMessage = null;
-        this.updateVirtualList();
+        this.syncVisibleSelectionHighlight();
         return;
       }
       const fullBody = await this.loadMessageBodyById(msg.id);
       this.selectedMessage = { ...msg, body_md: fullBody };
       // Switch to split view when selecting a message
       this.viewMode = 'split';
-      // Refresh list to reflect selected styling
-      this.updateVirtualList();
+      // Update highlight without rebuilding rows to preserve scroll position
+      this.syncVisibleSelectionHighlight();
     },
 
     selectThread(thread) {
@@ -1503,6 +1503,23 @@ function viewerController() {
         requestAnimationFrame(() => { if (this.clusterize) this.clusterize.refresh(true); });
         this._clusterizeFrame = null;
       });
+    },
+
+    // Update selected-row styling for visible rows only, without touching Clusterize data
+    syncVisibleSelectionHighlight() {
+      try {
+        const container = document.getElementById('virtual-message-list');
+        if (!container) return;
+        // Clear any existing highlight
+        container.querySelectorAll('.message-row').forEach(el => {
+          el.classList.remove('bg-primary-50', 'dark:bg-primary-900/20', 'border-l-4', 'border-l-primary-500');
+        });
+        if (!this.selectedMessage) return;
+        const sel = container.querySelector(`.message-row[data-message-id="${this.selectedMessage.id}"]`);
+        if (sel) {
+          sel.classList.add('bg-primary-50', 'dark:bg-primary-900/20', 'border-l-4', 'border-l-primary-500');
+        }
+      } catch (_) {}
     },
     selectFirstMessage() {
       if (this.filteredMessages.length > 0 && !this.selectedMessage) {
