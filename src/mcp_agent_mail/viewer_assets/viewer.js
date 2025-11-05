@@ -46,6 +46,7 @@ const state = {
 // Trusted Types Policy for secure Markdown rendering
 // See plan document lines 190-205 for security requirements
 let trustedTypesPolicy;
+let trustedScriptURLPolicy;
 try {
   if (window.trustedTypes) {
     trustedTypesPolicy = trustedTypes.createPolicy("mailViewerDOMPurify", {
@@ -58,7 +59,16 @@ try {
         console.warn("DOMPurify not available, falling back to basic escaping");
         return escapeHtml(dirty);
       },
+      createScriptURL: (url) => {
+        // Only allow loading scripts from our vendor directory
+        if (url.startsWith("./vendor/") || url.startsWith("/vendor/")) {
+          return url;
+        }
+        throw new Error(`Untrusted script URL: ${url}`);
+      },
     });
+
+    trustedScriptURLPolicy = trustedTypesPolicy;
 
     // Default policy for Clusterize.js compatibility
     // Clusterize uses innerHTML but doesn't understand Trusted Types
@@ -73,6 +83,13 @@ try {
         // 4. Numbers (message counts, IDs) are not user-controllable
         // 5. Only static HTML tags (<li>, <h3>, <div>, <span>) and escaped content
         return dirty;
+      },
+      createScriptURL: (url) => {
+        // Only allow loading scripts from our vendor directory
+        if (url.startsWith("./vendor/") || url.startsWith("/vendor/")) {
+          return url;
+        }
+        throw new Error(`Untrusted script URL: ${url}`);
       },
     });
   }
@@ -444,7 +461,11 @@ async function ensureSqlJsLoaded() {
       return;
     }
     const script = document.createElement("script");
-    script.src = "./vendor/sql-wasm.js";
+    const scriptURL = "./vendor/sql-wasm.js";
+    // Use Trusted Types policy if available
+    script.src = trustedScriptURLPolicy
+      ? trustedScriptURLPolicy.createScriptURL(scriptURL)
+      : scriptURL;
     script.async = true;
     script.dataset.sqljs = "true";
     script.onload = () => resolve();
