@@ -1186,6 +1186,84 @@ async def _get_or_create_agent(
     return agent
 
 
+async def _ensure_cross_project_link(
+    source_project: Project,
+    source_agent: Agent,
+    target_project: Project,
+    target_agent: Agent,
+    *,
+    ttl_seconds: int,
+    reason: str = "auto-cross-project",
+) -> AgentLink:
+    """Ensure a directed AgentLink exists and is approved between two projects."""
+
+    if any(item is None for item in (source_project.id, source_agent.id, target_project.id, target_agent.id)):
+        raise ValueError("Projects and agents must be persisted before creating cross-project links.")
+
+    await ensure_schema()
+    now = datetime.now(timezone.utc)
+    ttl = max(0, int(ttl_seconds or 0))
+    expires = now + timedelta(seconds=max(60, ttl)) if ttl else None
+
+    async with get_session() as session:
+        stmt = select(AgentLink).where(
+            AgentLink.a_project_id == source_project.id,
+            AgentLink.a_agent_id == source_agent.id,
+            AgentLink.b_project_id == target_project.id,
+            AgentLink.b_agent_id == target_agent.id,
+        )
+        existing = (await session.execute(stmt)).scalars().first()
+        if existing:
+            updated = False
+            if existing.status != "approved":
+                existing.status = "approved"
+                updated = True
+            if expires and (existing.expires_ts is None or existing.expires_ts < expires):
+                existing.expires_ts = expires
+                updated = True
+            if reason and reason not in (existing.reason or ""):
+                existing.reason = reason
+                updated = True
+            if updated:
+                existing.updated_ts = now
+                session.add(existing)
+                await session.commit()
+                await session.refresh(existing)
+            return existing
+
+        link = AgentLink(
+            a_project_id=source_project.id or 0,
+            a_agent_id=source_agent.id or 0,
+            b_project_id=target_project.id or 0,
+            b_agent_id=target_agent.id or 0,
+            status="approved",
+            reason=reason,
+            created_ts=now,
+            updated_ts=now,
+            expires_ts=expires,
+        )
+        session.add(link)
+        await session.commit()
+        await session.refresh(link)
+        return link
+
+
+async def _lookup_agents_any_project(name: str) -> list[tuple[Project, Agent]]:
+    """Return all (project, agent) pairs matching a given agent name globally."""
+
+    target = (name or "").strip()
+    if not target:
+        return []
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Project, Agent)
+            .join(Agent, Agent.project_id == Project.id)
+            .where(func.lower(Agent.name) == target.lower())
+        )
+        return [(proj, agent) for proj, agent in result.all() if proj and agent]
+
+
 async def _get_agent(project: Project, name: str) -> Agent:
     await ensure_schema()
     async with get_session() as session:
@@ -3015,6 +3093,58 @@ def build_mcp_server() -> FastMCP:
                         )
 
                     rec = rows.first() if rows else None
+                    if not rec:
+                        if explicit_override and target_project_override is not None:
+                            try:
+                                target_agent = await _get_or_create_agent(
+                                    target_project_override,
+                                    canonical,
+                                    sender.program,
+                                    sender.model,
+                                    sender.task_description,
+                                    settings_local,
+                                )
+                                ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                link = await _ensure_cross_project_link(
+                                    project,
+                                    sender,
+                                    target_project_override,
+                                    target_agent,
+                                    ttl_seconds=ttl_seconds,
+                                    reason="auto-cross-project",
+                                )
+                                rec = (link, target_project_override, target_agent)
+                            except Exception:
+                                rec = None
+                        else:
+                            try:
+                                global_matches = [
+                                    (proj, agent)
+                                    for proj, agent in await _lookup_agents_any_project(canonical)
+                                    if proj.id != project.id
+                                ]
+                            except Exception:
+                                global_matches = []
+                            if len(global_matches) == 1:
+                                target_project_override, target_agent = global_matches[0]
+                                try:
+                                    ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                    link = await _ensure_cross_project_link(
+                                        project,
+                                        sender,
+                                        target_project_override,
+                                        target_agent,
+                                        ttl_seconds=ttl_seconds,
+                                        reason="auto-cross-project",
+                                    )
+                                    rec = (link, target_project_override, target_agent)
+                                except Exception:
+                                    rec = None
+                            elif len(global_matches) > 1:
+                                for proj, _agent in global_matches:
+                                    label = proj.human_key or proj.slug or "(unknown project)"
+                                    unknown_external[label].append(display_value or candidate.strip() or candidate)
+                                continue
                     if rec:
                         _link, target_project, target_agent = rec
                         pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
@@ -3058,7 +3188,7 @@ def build_mcp_server() -> FastMCP:
                                 sender.program,
                                 sender.model,
                                 sender.task_description,
-                                settings,
+                                settings_local,
                             )
                             newly_registered.add(missing)
                         except Exception:
@@ -3244,7 +3374,7 @@ def build_mcp_server() -> FastMCP:
         for _pid, group in external.items():
             p: Project = group["project"]
             try:
-                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
+                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings_local)
                 payload_ext = await _deliver_message(
                     ctx,
                     "send_message",
@@ -3436,6 +3566,58 @@ def build_mcp_server() -> FastMCP:
                             .limit(1)
                         )
                     rec = rows.first()
+                    if not rec:
+                        if explicit_override and target_project_override is not None:
+                            try:
+                                target_agent = await _get_or_create_agent(
+                                    target_project_override,
+                                    target_name_override,
+                                    sender.program,
+                                    sender.model,
+                                    sender.task_description,
+                                    settings_local,
+                                )
+                                ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                link = await _ensure_cross_project_link(
+                                    project,
+                                    sender,
+                                    target_project_override,
+                                    target_agent,
+                                    ttl_seconds=ttl_seconds,
+                                    reason="auto-cross-project",
+                                )
+                                rec = (link, target_project_override, target_agent)
+                            except Exception:
+                                rec = None
+                        else:
+                            try:
+                                global_matches = [
+                                    (proj, agent)
+                                    for proj, agent in await _lookup_agents_any_project(nm)
+                                    if proj.id != project.id
+                                ]
+                            except Exception:
+                                global_matches = []
+                            if len(global_matches) == 1:
+                                target_project_override, target_agent = global_matches[0]
+                                try:
+                                    ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                    link = await _ensure_cross_project_link(
+                                        project,
+                                        sender,
+                                        target_project_override,
+                                        target_agent,
+                                        ttl_seconds=ttl_seconds,
+                                        reason="auto-cross-project",
+                                    )
+                                    rec = (link, target_project_override, target_agent)
+                                except Exception:
+                                    rec = None
+                            elif len(global_matches) > 1:
+                                for proj, _agent in global_matches:
+                                    label = proj.human_key or proj.slug or "(unknown project)"
+                                    unknown_external.setdefault(label, []).append(nm)
+                                continue
                     if rec:
                         _link, target_project, target_agent = rec
                         recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
