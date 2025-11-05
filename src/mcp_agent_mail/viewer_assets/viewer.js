@@ -1,21 +1,3 @@
-const manifestOutput = document.getElementById("manifest-json");
-const projectsList = document.getElementById("projects-list");
-const attachmentStatsList = document.getElementById("attachment-stats");
-const scrubStatsList = document.getElementById("scrub-stats");
-const bundleInfo = document.getElementById("bundle-info");
-const threadListEl = document.getElementById("thread-list");
-const threadScrollEl = document.getElementById("thread-scroll");
-const threadFilterInput = document.getElementById("thread-filter");
-const messageListEl = document.getElementById("message-list");
-const messageScrollEl = document.getElementById("message-scroll");
-const messageMetaEl = document.getElementById("message-meta");
-const messageDetailEl = document.getElementById("message-detail");
-const searchInput = document.getElementById("search-input");
-const cacheToggle = document.getElementById("cache-toggle");
-const engineStatus = document.getElementById("engine-status");
-const clearDetailButton = document.getElementById("clear-detail");
-
-const bootstrapStart = performance.now();
 const CACHE_SUPPORTED = typeof navigator.storage?.getDirectory === "function";
 const CACHE_PREFIX = "mailbox-snapshot";
 const VIRTUAL_SCROLL_THRESHOLD = 1000; // Use virtual scrolling when items > this
@@ -39,8 +21,6 @@ const state = {
   databaseSource: "network",
   selectedMessageId: undefined,
   explainMode: false,
-  threadClusterize: null,
-  messageClusterize: null,
 };
 
 // Trusted Types Policy for secure Markdown rendering
@@ -176,89 +156,6 @@ function highlightText(text, term) {
   const safeTerm = escapeRegExp(term);
   const regex = new RegExp(`(${safeTerm})`, "gi");
   return escapeHtml(text).replace(regex, "<mark>$1</mark>");
-}
-
-function renderProjects(manifest) {
-  projectsList.innerHTML = "";
-  const entries = manifest.project_scope?.included ?? [];
-  if (!entries.length) {
-    const li = document.createElement("li");
-    li.textContent = "All projects";
-    projectsList.append(li);
-    return;
-  }
-  for (const entry of entries) {
-    const li = document.createElement("li");
-    li.innerHTML = createTrustedHTML(`<strong>${escapeHtml(entry.slug)}</strong> <span>${escapeHtml(entry.human_key)}</span>`);
-    projectsList.append(li);
-  }
-}
-
-function renderScrub(manifest) {
-  const scrub = manifest.scrub ?? {};
-  scrubStatsList.innerHTML = "";
-  for (const [key, value] of Object.entries(scrub)) {
-    const dt = document.createElement("dt");
-    dt.textContent = key.replace(/_/g, " ");
-    const dd = document.createElement("dd");
-    dd.textContent = String(value);
-    scrubStatsList.append(dt, dd);
-  }
-}
-
-function renderAttachments(manifest) {
-  const stats = manifest.attachments?.stats ?? {};
-  const config = manifest.attachments?.config ?? {};
-  attachmentStatsList.innerHTML = "";
-  const entries = {
-    "Inline assets": stats.inline,
-    "Bundled files": stats.copied,
-    "External references": stats.externalized,
-    "Missing references": stats.missing,
-    "Bytes copied": stats.bytes_copied,
-    "Inline threshold (bytes)": config.inline_threshold,
-    "External threshold (bytes)": config.detach_threshold,
-  };
-  for (const [label, value] of Object.entries(entries)) {
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    dd.textContent = value !== undefined ? String(value) : "—";
-    attachmentStatsList.append(dt, dd);
-  }
-}
-
-function renderBundleInfo(manifest) {
-  const generated = manifest.generated_at ?? "";
-  const schema = manifest.schema_version ?? "";
-  const exporter = manifest.exporter_version ?? "";
-  const scrubPreset = manifest.scrub?.preset ? ` • Scrub preset ${manifest.scrub.preset}` : "";
-  bundleInfo.textContent = `Generated ${generated} • Schema ${schema} • Exporter ${exporter}${scrubPreset}`;
-}
-
-function renderManifest(manifest) {
-  manifestOutput.textContent = JSON.stringify(manifest, null, 2);
-}
-
-function updateEngineStatus() {
-  const parts = ["Engine: sql.js", state.ftsEnabled ? "FTS5 enabled" : "LIKE fallback"];
-  if (CACHE_SUPPORTED) {
-    const cacheLabel = state.cacheState === "opfs" ? "OPFS" : state.cacheState === "memory" ? "session" : "none";
-    parts.push(`Cache: ${cacheLabel}`);
-  } else {
-    parts.push("Cache: unsupported");
-  }
-  engineStatus.textContent = parts.join(" • ");
-}
-
-function updateCacheToggle() {
-  if (!CACHE_SUPPORTED) {
-    cacheToggle.disabled = true;
-    cacheToggle.textContent = "Offline caching unavailable";
-    return;
-  }
-  cacheToggle.disabled = !state.cacheKey;
-  cacheToggle.textContent = state.cacheState === "opfs" ? "Remove local cache" : "Cache for offline use";
 }
 
 async function getOpfsRoot() {
@@ -641,106 +538,6 @@ function formatTimestamp(value) {
   }
 }
 
-function renderThreads(threads) {
-  // Helper to create HTML string for a thread item
-  const createThreadHTML = (thread) => {
-    const isActive = thread.thread_key === state.selectedThread;
-    const activeClass = isActive ? ' active' : '';
-    const subject = thread.thread_key === "all"
-      ? "All messages"
-      : escapeHtml(thread.latest_subject || "(no subject)");
-    const timestamp = thread.last_created_ts ? escapeHtml(formatTimestamp(thread.last_created_ts)) : "";
-    const snippet = highlightText(thread.latest_snippet || "", state.searchTerm);
-
-    return `<li class="thread-item${activeClass}" tabindex="0" data-thread-key="${escapeHtml(thread.thread_key)}">
-      <h3>${subject}</h3>
-      <div class="thread-meta">
-        <span class="pill">${thread.message_count} msg</span>
-        <span>${timestamp}</span>
-      </div>
-      <div class="thread-preview">${snippet}</div>
-    </li>`;
-  };
-
-  // Build all threads array (including "All messages" entry)
-  const allThreads = [
-    {
-      thread_key: "all",
-      message_count: state.totalMessages,
-      last_created_ts: threads[0]?.last_created_ts || null,
-      latest_subject: "All messages",
-      latest_snippet: ""
-    },
-    ...threads
-  ];
-
-  const totalCount = allThreads.length;
-
-  // Use virtual scrolling if items exceed threshold
-  if (totalCount > VIRTUAL_SCROLL_THRESHOLD) {
-    // Show scroll container, hide skeleton
-    threadScrollEl.classList.remove("hidden");
-    document.getElementById("thread-skeleton").classList.add("hidden");
-
-    const rows = allThreads.map(thread => createThreadHTML(thread));
-
-    if (state.threadClusterize) {
-      // Update existing Clusterize instance
-      state.threadClusterize.update(rows);
-    } else {
-      // Initialize new Clusterize instance
-      state.threadClusterize = new Clusterize({
-        rows: rows,
-        scrollElem: threadScrollEl,
-        contentElem: threadListEl,
-        rows_in_block: 20,
-        blocks_in_cluster: 2,
-        tag: "li"  // Use <li> for spacing rows to maintain valid HTML structure
-      });
-    }
-  } else {
-    // Direct DOM rendering for small lists
-    threadScrollEl.classList.remove("hidden");
-    document.getElementById("thread-skeleton").classList.add("hidden");
-
-    // Destroy Clusterize if it exists
-    if (state.threadClusterize) {
-      state.threadClusterize.destroy(true);
-      state.threadClusterize = null;
-    }
-
-    threadListEl.innerHTML = "";
-    for (const thread of allThreads) {
-      const li = document.createElement("li");
-      li.className = "thread-item";
-      li.tabIndex = 0;
-      li.dataset.threadKey = thread.thread_key;
-      if (thread.thread_key === state.selectedThread) {
-        li.classList.add("active");
-      }
-
-      const title = document.createElement("h3");
-      title.innerHTML = createTrustedHTML(thread.thread_key === "all"
-        ? "All messages"
-        : escapeHtml(thread.latest_subject || "(no subject)"));
-
-      const meta = document.createElement("div");
-      meta.className = "thread-meta";
-      meta.innerHTML = createTrustedHTML(`
-        <span class="pill">${thread.message_count} msg</span>
-        <span>${thread.last_created_ts ? escapeHtml(formatTimestamp(thread.last_created_ts)) : ""}</span>
-      `);
-
-      const preview = document.createElement("div");
-      preview.className = "thread-preview";
-      preview.innerHTML = createTrustedHTML(highlightText(thread.latest_snippet || "", state.searchTerm));
-
-      li.append(title, meta, preview);
-      threadListEl.append(li);
-    }
-  }
-}
-
 function getThreadMessages(threadKey, limit = 50000) {
   const results = [];
   let statement;
@@ -843,246 +640,6 @@ function renderMessages(list, { context, term }) {
     // Direct DOM rendering for small lists
     messageScrollEl.classList.remove("hidden");
     document.getElementById("message-skeleton").classList.add("hidden");
-
-    // Destroy Clusterize if it exists
-    if (state.messageClusterize) {
-      state.messageClusterize.destroy(true);
-      state.messageClusterize = null;
-    }
-
-    messageListEl.innerHTML = "";
-    for (const message of list) {
-      const item = document.createElement("li");
-      item.dataset.id = String(message.id);
-      item.dataset.threadKey = message.thread_key;
-      if (Number(state.selectedMessageId) === Number(message.id)) {
-        item.classList.add("active");
-      }
-
-      const title = document.createElement("h3");
-      title.innerHTML = createTrustedHTML(highlightText(message.subject || "(no subject)", term));
-
-      const meta = document.createElement("div");
-      meta.className = "message-meta-line";
-      meta.innerHTML = createTrustedHTML(`${escapeHtml(formatTimestamp(message.created_ts))} • importance: ${escapeHtml(message.importance || "normal")}`);
-
-      const snippet = document.createElement("div");
-      snippet.className = "message-snippet";
-      snippet.innerHTML = createTrustedHTML(highlightText(message.snippet || "", term));
-
-      item.append(title, meta, snippet);
-      messageListEl.append(item);
-    }
-  }
-}
-
-function updateMessageMeta({ context, term }) {
-  if (context === "search") {
-    messageMetaEl.textContent = `${state.messages.length} result(s) for “${term}” (${state.ftsEnabled ? "FTS" : "LIKE"} search)`;
-  } else if (context === "thread" && state.selectedThread !== "all") {
-    messageMetaEl.textContent = `${state.messages.length} message(s) in thread ${state.selectedThread}`;
-  } else {
-    const note = state.ftsEnabled ? "FTS ready" : "LIKE fallback";
-    messageMetaEl.textContent = `${state.messages.length} message(s) shown (${note}).`;
-  }
-}
-
-function performSearch(term) {
-  const query = term.trim();
-  state.searchTerm = query;
-  if (query.length < 2) {
-    state.messagesContext = state.selectedThread === "all" ? "inbox" : "thread";
-    state.messages = getThreadMessages(state.selectedThread);
-    renderMessages(state.messages, { context: state.messagesContext, term: "" });
-    updateMessageMeta({ context: state.messagesContext, term: "" });
-    return;
-  }
-
-  let results = [];
-  if (state.ftsEnabled) {
-    try {
-      const ftsSql = `SELECT messages.id, messages.subject, messages.created_ts, messages.importance,
-                CASE WHEN messages.thread_id IS NULL OR messages.thread_id = '' THEN printf('msg:%d', messages.id) ELSE messages.thread_id END AS thread_key,
-                COALESCE(snippet(fts_messages, 1, '<mark>', '</mark>', '…', 32), substr(messages.body_md, 1, 280)) AS snippet
-         FROM fts_messages
-         JOIN messages ON messages.id = fts_messages.rowid
-         WHERE fts_messages MATCH ?
-         ORDER BY datetime(messages.created_ts) DESC
-         LIMIT 10000`;
-      explainQuery(state.db, ftsSql, [query], "performSearch (FTS)");
-      const stmt = state.db.prepare(ftsSql);
-      stmt.bind([query]);
-      while (stmt.step()) {
-        const row = stmt.getAsObject();
-        results.push({
-          ...row,
-          snippet: row.snippet?.replace(/<mark>/g, "").replace(/<\/mark>/g, "") ?? "",
-        });
-      }
-      stmt.free();
-    } catch (error) {
-      console.warn("FTS query failed, falling back to LIKE", error);
-      state.ftsEnabled = false;
-      results = [];
-    }
-  }
-
-  if (!state.ftsEnabled) {
-    const likeSql = `SELECT id, subject, created_ts, importance,
-              CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
-              substr(COALESCE(body_md, ''), 1, 280) AS snippet
-       FROM messages
-       WHERE subject LIKE ? OR body_md LIKE ?
-       ORDER BY datetime(created_ts) DESC
-       LIMIT 10000`;
-    const pattern = `%${query}%`;
-    explainQuery(state.db, likeSql, [pattern, pattern], "performSearch (LIKE)");
-    const stmt = state.db.prepare(likeSql);
-    stmt.bind([pattern, pattern]);
-    while (stmt.step()) {
-      results.push(stmt.getAsObject());
-    }
-    stmt.free();
-  }
-
-  state.messagesContext = "search";
-  state.messages = results;
-  renderMessages(state.messages, { context: "search", term: query });
-  updateMessageMeta({ context: "search", term: query });
-}
-
-function selectThread(threadKey) {
-  state.selectedThread = threadKey;
-  state.searchTerm = "";
-  state.messagesContext = threadKey === "all" ? "inbox" : "thread";
-  searchInput.value = "";
-  state.messages = getThreadMessages(threadKey);
-  state.selectedMessageId = undefined;
-  renderThreads(state.filteredThreads.length ? state.filteredThreads : state.threads);
-  renderMessages(state.messages, { context: state.messagesContext, term: "" });
-  updateMessageMeta({ context: state.messagesContext, term: "" });
-  clearMessageDetail();
-}
-
-function clearMessageDetail() {
-  state.selectedMessageId = undefined;
-  messageDetailEl.innerHTML = createTrustedHTML("<p class='meta-line'>Select a message to inspect subject, body, and attachments.</p>");
-  const active = messageListEl.querySelector("li.active");
-  if (active) {
-    active.classList.remove("active");
-  }
-}
-
-function getMessageDetail(id) {
-  const stmt = state.db.prepare(
-    `SELECT m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id, m.project_id,
-            m.attachments,
-            COALESCE(p.slug, '') AS project_slug,
-            COALESCE(p.human_key, '') AS project_name
-     FROM messages m
-     LEFT JOIN projects p ON p.id = m.project_id
-     WHERE m.id = ?`
-  );
-  try {
-    stmt.bind([id]);
-    if (stmt.step()) {
-      return stmt.getAsObject();
-    }
-    return null;
-  } finally {
-    stmt.free();
-  }
-}
-
-function renderMessageDetail(message) {
-  if (!message) {
-    clearMessageDetail();
-    return;
-  }
-
-  messageDetailEl.innerHTML = "";
-
-  const header = document.createElement("header");
-  header.innerHTML = createTrustedHTML(`
-    <h3>${escapeHtml(message.subject || "(no subject)")}</h3>
-    <div class="meta-line">${escapeHtml(formatTimestamp(message.created_ts))} • importance: ${escapeHtml(message.importance || "normal")} • project: ${escapeHtml(message.project_slug || "-")}</div>
-  `);
-
-  const body = document.createElement("div");
-  body.className = "message-snippet";
-  // Render markdown safely using DOMPurify + Marked.js + Trusted Types
-  // Note: Search highlighting on rendered HTML is complex (requires text-node-only highlighting)
-  // For now, we prioritize secure markdown rendering over search highlighting in detail view
-  body.innerHTML = renderMarkdownSafe(message.body_md || "(empty body)");
-
-  messageDetailEl.append(header, body);
-
-  if (message.attachments) {
-    try {
-      const data = typeof message.attachments === "string" ? JSON.parse(message.attachments || "[]") : message.attachments;
-      if (Array.isArray(data) && data.length) {
-        const list = document.createElement("ul");
-        list.className = "attachment-list";
-        for (const entry of data) {
-          const li = document.createElement("li");
-          const mode = entry.type || entry.mode || "file";
-          const label = entry.media_type || "application/octet-stream";
-
-          // Build complete HTML string, then create TrustedHTML once
-          let html = `<strong>${escapeHtml(mode)}</strong> – ${escapeHtml(label)}`;
-          if (entry.sha256) {
-            html += `<br /><span class="meta-line">sha256: ${escapeHtml(entry.sha256)}</span>`;
-          }
-          if (entry.path) {
-            html += `<br /><span class="meta-line">Path: ${escapeHtml(entry.path)}</span>`;
-          }
-          if (entry.original_path) {
-            html += `<br /><span class="meta-line">Original: ${escapeHtml(entry.original_path)}</span>`;
-          }
-          li.innerHTML = createTrustedHTML(html);
-          list.append(li);
-        }
-        const attachmentsHeader = document.createElement("h4");
-        attachmentsHeader.textContent = "Attachments";
-        messageDetailEl.append(attachmentsHeader, list);
-      }
-    } catch (error) {
-      console.warn("Failed to parse attachments", error);
-    }
-  }
-}
-
-function handleMessageSelection(event) {
-  const item = event.target.closest("li[data-id]");
-  if (!item) {
-    return;
-  }
-  const id = Number(item.dataset.id);
-  state.selectedMessageId = id;
-  messageListEl.querySelectorAll("li.active").forEach((el) => el.classList.remove("active"));
-  item.classList.add("active");
-  const detail = getMessageDetail(id);
-  renderMessageDetail(detail);
-}
-
-function filterThreads(term) {
-  const value = term.trim().toLowerCase();
-  if (!value) {
-    state.filteredThreads = state.threads;
-  } else {
-    state.filteredThreads = state.threads.filter((thread) => {
-      if (thread.thread_key === "all") {
-        return true;
-      }
-      return (
-        (thread.latest_subject && thread.latest_subject.toLowerCase().includes(value)) ||
-        (thread.latest_snippet && thread.latest_snippet.toLowerCase().includes(value)) ||
-        thread.thread_key.toLowerCase().includes(value)
-      );
-    });
-  }
-  renderThreads(state.filteredThreads);
-}
 
 /**
  * Show skeleton loading screens while data loads.
@@ -1720,7 +1277,11 @@ window.viewerController = function() {
 
       if (this.filters.recipient) {
         filtered = filtered.filter(msg => {
-          return msg.recipients && msg.recipients.includes(this.filters.recipient);
+          if (!msg.recipients) return false;
+          // Split recipients and do exact matching to avoid substring false positives
+          // e.g., "Alice" shouldn't match "Alicia, Bob"
+          const recipientsList = msg.recipients.split(',').map(r => r.trim());
+          return recipientsList.includes(this.filters.recipient);
         });
       }
 
@@ -1978,6 +1539,16 @@ window.viewerController = function() {
         });
       } catch {
         return timestamp;
+      }
+    },
+
+    // Cleanup when component is destroyed
+    destroy() {
+      // Clear auto-refresh interval to prevent memory leaks
+      if (this.refreshInterval) {
+        clearInterval(this.refreshInterval);
+        this.refreshInterval = null;
+        console.info('[Alpine] Cleaned up auto-refresh interval');
       }
     },
   };
