@@ -169,3 +169,66 @@ footer {
   white-space: pre-line;
   line-height: 1.4;
 }
+
+/* Warning Banner for Cross-Origin Isolation */
+.warning-banner {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
+  color: #78350f;
+  padding: 1.5rem;
+  margin: 1rem 0;
+  border-radius: 8px;
+  border-left: 4px solid #92400e;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.warning-banner strong {
+  display: block;
+  font-size: 1.1rem;
+  margin-bottom: 0.5rem;
+  color: #78350f;
+}
+
+.warning-banner p {
+  margin: 0.5rem 0;
+  color: #92400e;
+  line-height: 1.6;
+}
+
+.warning-banner details {
+  margin-top: 1rem;
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+}
+
+.warning-banner summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #78350f;
+  user-select: none;
+}
+
+.warning-banner summary:hover {
+  text-decoration: underline;
+}
+
+.warning-banner ul {
+  margin: 0.75rem 0;
+  padding-left: 1.5rem;
+  color: #92400e;
+}
+
+.warning-banner li {
+  margin: 0.5rem 0;
+  line-height: 1.6;
+}
+
+.warning-banner code {
+  background: rgba(0, 0, 0, 0.1);
+  padding: 0.2rem 0.4rem;
+  border-radius: 3px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+  color: #78350f;
+  font-weight: 600;
+}
