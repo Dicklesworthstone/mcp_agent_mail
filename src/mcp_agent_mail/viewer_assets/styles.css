@@ -411,35 +411,20 @@ footer {
   flex: 1;
 }
 
-/* Clusterize virtual scrolling containers */
-.clusterize-scroll {
+/* Virtualized message list container */
+.virtual-scroll {
   flex: 1;
   overflow-y: auto;
-  /* Override vendor CSS default of max-height: 400px */
   max-height: none !important;
 }
 
-/* Higher specificity to override .message-pane .message-list (0,2,0) and .thread-list (0,1,0) */
-.clusterize-scroll .thread-list.clusterize-content,
-.clusterize-scroll .message-list.clusterize-content {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  /* Override list overflow/flex when inside Clusterize wrapper */
-  overflow-y: visible !important;
-  flex: none !important;
+.virtual-scroll-content {
+  display: block;
 }
 
-/* Reset styles for Clusterize spacing rows to prevent height calculation issues */
-.clusterize-extra-row {
-  padding: 0 !important;
-  border: none !important;
-  background: transparent !important;
-  cursor: default !important;
-}
-
-.clusterize-extra-row:hover {
-  background: transparent !important;
+.virtual-spacer {
+  width: 100%;
+  pointer-events: none;
 }
 
 .thread-list li {

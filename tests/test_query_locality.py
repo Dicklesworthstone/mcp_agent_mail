@@ -103,7 +103,7 @@ def _explain_query(conn: sqlite3.Connection, sql: str, params: list | None = Non
     """Run EXPLAIN QUERY PLAN and return the plan as a list of dicts."""
     cursor = conn.execute(f"EXPLAIN QUERY PLAN {sql}", params or [])
     columns = [desc[0] for desc in cursor.description]
-    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    return [dict(zip(columns, row, strict=False)) for row in cursor.fetchall()]
 
 
 def _has_full_table_scan(plan: list[dict[str, str]]) -> bool:
@@ -111,10 +111,9 @@ def _has_full_table_scan(plan: list[dict[str, str]]) -> bool:
     for step in plan:
         detail = step.get("detail", "")
         # Look for SCAN operations that don't have "USING" (which means they're not using indexes)
-        if "SCAN" in detail and "USING" not in detail:
+        if "SCAN" in detail and "USING" not in detail and "fts_messages" not in detail:
             # Exception: SCAN of virtual FTS tables is expected
-            if "fts_messages" not in detail:
-                return True
+            return True
     return False
 
 
@@ -122,9 +121,8 @@ def _has_search_using_index(plan: list[dict[str, str]], table: str, index: str |
     """Check if query plan uses SEARCH operation with an index on the specified table."""
     for step in plan:
         detail = step.get("detail", "")
-        if "SEARCH" in detail and table in detail and "USING" in detail:
-            if index is None or index in detail:
-                return True
+        if "SEARCH" in detail and table in detail and "USING" in detail and (index is None or index in detail):
+            return True
     return False
 
 

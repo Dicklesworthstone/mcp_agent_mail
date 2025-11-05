@@ -1401,7 +1401,7 @@ function viewerController() {
     },
 
     // Virtual list (Clusterize.js)
-    clusterize: null,
+    virtualList: null,
     buildMessageRow(msg, index) {
       const isSelected = this.selectedMessage?.id === msg.id;
       const selectedClasses = isSelected
@@ -1449,26 +1449,61 @@ function viewerController() {
     initVirtualList() {
       const scrollElem = document.getElementById('virtual-message-list');
       const contentElem = document.getElementById('virtual-message-content');
-      if (!scrollElem || !contentElem || typeof Clusterize === 'undefined') {
+      if (!scrollElem || !contentElem) {
         return;
       }
-      // Ensure the scroll container has a concrete height based on viewport
+
       const setHeightFromViewport = () => {
         try {
           const rect = scrollElem.getBoundingClientRect();
           const vh = window.innerHeight || document.documentElement.clientHeight || 800;
           const h = Math.max(240, Math.floor(vh - rect.top - 12));
-          scrollElem.style.height = h + 'px';
+          scrollElem.style.height = `${h}px`;
         } catch (_) {}
       };
+
       setHeightFromViewport();
-      const rows = this.buildRowsFromMessages(this.filteredMessages);
-      if (this.clusterize) {
-        this.clusterize.update(rows);
-      } else {
-        this.clusterize = new Clusterize({ scrollElem, contentElem, rows, no_data_text: '<div class="py-20 text-center text-slate-500">No messages found</div>' });
-        // Delegate clicks to rows
-        scrollElem.addEventListener('click', (event) => {
+
+      const virtualState = {
+        scrollElem,
+        contentElem,
+        estimatedRowHeight: 156,
+        overscan: 6,
+        renderRaf: null,
+        heightRaf: null
+      };
+
+      const scheduleRender = () => {
+        if (virtualState.renderRaf) cancelAnimationFrame(virtualState.renderRaf);
+        virtualState.renderRaf = requestAnimationFrame(() => {
+          virtualState.renderRaf = null;
+          this.renderVirtualSlice();
+        });
+      };
+
+      const measureRowHeight = () => {
+        if (!this.virtualList) return;
+        const rows = Array.from(this.virtualList.contentElem.querySelectorAll('.message-row'));
+        if (!rows.length) return;
+        const total = rows.reduce((acc, el) => acc + el.getBoundingClientRect().height, 0);
+        const avg = total / rows.length;
+        if (Number.isFinite(avg) && avg > 32) {
+          this.virtualList.estimatedRowHeight = (this.virtualList.estimatedRowHeight * 0.6) + (avg * 0.4);
+        }
+      };
+
+      const onScroll = () => {
+        scheduleRender();
+      };
+
+      const onResize = () => {
+        setHeightFromViewport();
+        measureRowHeight();
+        scheduleRender();
+      };
+
+      if (!this._onRowClick) {
+        this._onRowClick = (event) => {
           const row = event.target.closest('[data-message-id]');
           if (!row) return;
           const id = Number(row.getAttribute('data-message-id'));
@@ -1476,33 +1511,87 @@ function viewerController() {
           if (msg) {
             this.handleMessageClick(msg);
           }
-        });
-        // Refresh measurements after fonts are ready
-        try {
-          if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(() => {
-              if (this.clusterize) this.clusterize.refresh(true);
-            }).catch(() => {});
-          }
-        } catch (_) {}
-        // Refresh on resize to keep measurements accurate
-        this._onResize = () => { setHeightFromViewport(); if (this.clusterize) this.clusterize.refresh(true); };
-        window.addEventListener('resize', this._onResize);
+        };
+      }
+
+      this._onVirtualScroll = onScroll;
+      scrollElem.addEventListener('scroll', this._onVirtualScroll);
+      scrollElem.addEventListener('click', this._onRowClick);
+      this._onResize = onResize;
+      window.addEventListener('resize', this._onResize);
+
+      this.virtualList = { ...virtualState, scheduleRender, measureRowHeight };
+
+      // Wait for fonts to load before first measurement to avoid layout jumps
+      try {
+        if (document.fonts && document.fonts.ready) {
+          document.fonts.ready.then(() => {
+            if (this.virtualList) {
+              this.virtualList.measureRowHeight();
+              this.renderVirtualSlice(true);
+            }
+          }).catch(() => {
+            this.renderVirtualSlice(true);
+          });
+        } else {
+          this.renderVirtualSlice(true);
+        }
+      } catch (_) {
+        this.renderVirtualSlice(true);
       }
     },
     updateVirtualList() {
-      // Keep Clusterize rows in sync with filtered messages and selection state
-      if (!this.clusterize) {
+      if (!this.virtualList) {
         this.initVirtualList();
         return;
       }
-      if (this._clusterizeFrame) cancelAnimationFrame(this._clusterizeFrame);
-      this._clusterizeFrame = requestAnimationFrame(() => {
-        this.clusterize.update(this.buildRowsFromMessages(this.filteredMessages));
-        // A second pass to ensure measurements are accurate after DOM settles
-        requestAnimationFrame(() => { if (this.clusterize) this.clusterize.refresh(true); });
-        this._clusterizeFrame = null;
-      });
+      this.renderVirtualSlice(true);
+    },
+    renderVirtualSlice(forceRebuild = false) {
+      if (!this.virtualList) return;
+      const { scrollElem, contentElem, estimatedRowHeight, overscan } = this.virtualList;
+      const total = this.filteredMessages.length;
+
+      if (total === 0) {
+        scrollElem.scrollTop = 0;
+        contentElem.innerHTML = '<div class="py-20 text-center text-slate-500 dark:text-slate-400">No messages found</div>';
+        return;
+      }
+
+      const viewportHeight = scrollElem.clientHeight || 1;
+      const scrollTop = scrollElem.scrollTop || 0;
+      const estRow = Math.max(estimatedRowHeight, 56);
+      const startIndex = Math.max(0, Math.floor(scrollTop / estRow) - overscan);
+      const visibleCount = Math.ceil(viewportHeight / estRow) + overscan * 2;
+      const endIndex = Math.min(total, startIndex + visibleCount);
+
+      const beforeHeight = startIndex * estRow;
+      const afterHeight = Math.max(0, (total - endIndex) * estRow);
+
+      // Build rows for current window
+      const rows = [];
+      for (let idx = startIndex; idx < endIndex; idx += 1) {
+        rows.push(this.buildMessageRow(this.filteredMessages[idx], idx));
+      }
+
+      const spacerBefore = `<div class="virtual-spacer" style="height:${beforeHeight}px"></div>`;
+      const spacerAfter = `<div class="virtual-spacer" style="height:${afterHeight}px"></div>`;
+
+      const nextMarkup = spacerBefore + rows.join('') + spacerAfter;
+      if (!forceRebuild && contentElem.innerHTML === nextMarkup) {
+        return;
+      }
+      contentElem.innerHTML = nextMarkup;
+
+      this.virtualList.measureRowHeight();
+
+      try {
+        if (typeof lucide !== 'undefined') {
+          lucide.createIcons();
+        }
+      } catch (_) {}
+
+      this.syncVisibleSelectionHighlight();
     },
 
     // Update selected-row styling for visible rows only, without touching Clusterize data
@@ -1578,10 +1667,19 @@ function viewerController() {
         this.refreshInterval = null;
         console.info('[Alpine] Cleaned up auto-refresh interval');
       }
-      if (this.clusterize) {
-        try { this.clusterize.destroy(true); } catch (_) {}
-        this.clusterize = null;
+      if (this.virtualList && this.virtualList.scrollElem) {
+        try {
+          this.virtualList.scrollElem.removeEventListener('scroll', this._onVirtualScroll);
+          this.virtualList.scrollElem.removeEventListener('click', this._onRowClick);
+        } catch (_) {}
       }
+      if (this._onVirtualScroll) {
+        this._onVirtualScroll = null;
+      }
+      if (this._onRowClick) {
+        this._onRowClick = null;
+      }
+      this.virtualList = null;
       if (this._onResize) {
         try { window.removeEventListener('resize', this._onResize); } catch (_) {}
         this._onResize = null;

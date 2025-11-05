@@ -978,7 +978,7 @@ def share_wizard() -> None:
         raise typer.Exit(code=result.returncode)
     except KeyboardInterrupt:
         console.print("\n[yellow]Wizard cancelled by user[/]")
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=0) from None
 
 
 def _resolve_path(raw_path: str | Path) -> Path:

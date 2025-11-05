@@ -159,7 +159,7 @@ def test_small_bundle_export_performance(small_db: Path, tmp_path: Path) -> None
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print(f"\nSmall snapshot performance:")
+    print("\nSmall snapshot performance:")
     print(f"  Database size: {db_size_mb:.2f} MB")
     print(f"  Snapshot time: {export_time:.3f} seconds")
     if export_time > 0:
@@ -187,7 +187,7 @@ def test_medium_bundle_export_performance(medium_db: Path, tmp_path: Path) -> No
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print(f"\nMedium snapshot performance:")
+    print("\nMedium snapshot performance:")
     print(f"  Database size: {db_size_mb:.2f} MB")
     print(f"  Snapshot time: {export_time:.3f} seconds")
     if export_time > 0:
@@ -215,7 +215,7 @@ def test_large_bundle_export_performance(large_db: Path, tmp_path: Path) -> None
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print(f"\nLarge snapshot performance:")
+    print("\nLarge snapshot performance:")
     print(f"  Database size: {db_size_mb:.2f} MB")
     print(f"  Snapshot time: {snapshot_time:.3f} seconds")
     if snapshot_time > 0:
@@ -263,15 +263,14 @@ def test_database_compressibility(small_db: Path, tmp_path: Path) -> None:
 
     # Compress with gzip
     compressed_path = tmp_path / "mailbox.sqlite3.gz"
-    with snapshot_path.open("rb") as f_in:
-        with gzip.open(compressed_path, "wb", compresslevel=6) as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    with snapshot_path.open("rb") as f_in, gzip.open(compressed_path, "wb", compresslevel=6) as f_out:
+        shutil.copyfileobj(f_in, f_out)
 
     compressed_size = compressed_path.stat().st_size
     compressed_mb = compressed_size / (1024 * 1024)
     compression_ratio = compressed_size / uncompressed_size
 
-    print(f"\nDatabase compression statistics:")
+    print("\nDatabase compression statistics:")
     print(f"  Uncompressed: {uncompressed_mb:.2f} MB")
     print(f"  Compressed (gzip): {compressed_mb:.2f} MB")
     print(f"  Compression ratio: {compression_ratio:.2%}")
@@ -304,7 +303,7 @@ def test_chunk_size_validation(large_db: Path, tmp_path: Path) -> None:
         chunk_bytes=int(chunk_size_mb * 1024 * 1024),
     )
 
-    print(f"\nChunk validation:")
+    print("\nChunk validation:")
     print(f"  Was chunked: {chunked}")
 
     if chunked:
@@ -520,10 +519,7 @@ def test_export_scales_linearly(tmp_path: Path, num_messages: int) -> None:
     snapshot_time = time.time() - start_time
 
     # Calculate throughput
-    if snapshot_time > 0:
-        throughput = num_messages / snapshot_time
-    else:
-        throughput = float('inf')
+    throughput = num_messages / snapshot_time if snapshot_time > 0 else float('inf')
 
     db_size_mb = _get_file_size_mb(snapshot_path)
 

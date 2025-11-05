@@ -564,10 +564,8 @@ def generate_signing_key() -> Path:
     key_path = Path.cwd() / f"signing-{secrets.token_hex(4)}.key"
     key_path.write_bytes(secrets.token_bytes(32))
     # Set secure permissions (best-effort on Windows where this may not apply)
-    try:
+    with suppress(OSError, NotImplementedError):
         key_path.chmod(0o600)
-    except (OSError, NotImplementedError):
-        pass  # Windows or other platform without Unix permissions
     console.print(f"[yellow]⚠ Private signing key saved to:[/] {key_path}")
     console.print("[yellow]⚠ Back up this file securely - you'll need it to update the bundle[/]")
     return key_path
@@ -625,7 +623,7 @@ def export_bundle(
     ) as progress:
         task = progress.add_task("Exporting...", total=None)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
             progress.update(task, completed=True)
             console.print("[green]✓ Export complete[/]")
             return True, signing_pub_path
@@ -640,7 +638,7 @@ def export_bundle(
                 console.print("[yellow]Signing unavailable or failed. Retrying export without signing...[/]")
                 no_sign_cmd = [arg for arg in cmd if arg not in {"--signing-key", "--signing-public-out", str(signing_key), str(signing_pub_path)}]
                 try:
-                    result2 = subprocess.run(no_sign_cmd, capture_output=True, text=True, check=True)
+                    subprocess.run(no_sign_cmd, capture_output=True, text=True, check=True)
                     console.print("[green]✓ Export complete (unsigned)[/]")
                     return True, None
                 except subprocess.CalledProcessError as e2:
@@ -1008,7 +1006,7 @@ def main() -> None:
         if not use_last_config:
             deployment = select_deployment_target()
         else:
-            deployment = last_config.get("deployment", {})
+            deployment = (last_config or {}).get("deployment", {})
             if not deployment.get("type"):
                 console.print("[yellow]Saved deployment config is invalid, please select again[/]")
                 deployment = select_deployment_target()

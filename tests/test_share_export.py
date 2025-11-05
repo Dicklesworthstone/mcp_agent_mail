@@ -803,7 +803,6 @@ def test_encrypt_bundle_requires_age_binary(tmp_path: Path, monkeypatch) -> None
 def test_encrypt_bundle_with_invalid_recipient(tmp_path: Path, monkeypatch) -> None:
     """Test encryption failure with invalid recipient format."""
     # Mock age binary to test actual age failures
-    import subprocess
 
     bundle = tmp_path / "bundle.zip"
     bundle.write_bytes(b"test data")
@@ -819,7 +818,7 @@ def test_encrypt_bundle_with_invalid_recipient(tmp_path: Path, monkeypatch) -> N
     monkeypatch.setattr(share.subprocess, "run", mock_run)
     monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
 
-    with pytest.raises(ShareExportError, match="age encryption failed.*invalid recipient"):
+    with pytest.raises(ShareExportError, match=r"age encryption failed.*invalid recipient"):
         share.encrypt_bundle(bundle, ["notavalidrecipient"])
 
 

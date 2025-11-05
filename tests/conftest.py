@@ -1,3 +1,4 @@
+import contextlib
 import gc
 from pathlib import Path
 
@@ -33,8 +34,9 @@ def isolated_env(tmp_path, monkeypatch):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=ResourceWarning)
             try:
-                from git import Repo
                 import time
+
+                from git import Repo
 
                 # Explicitly close repo at storage_root if it exists
                 storage_root = tmp_path / "storage"
@@ -52,10 +54,8 @@ def isolated_env(tmp_path, monkeypatch):
                     # Close any Repo instances that might still be open
                     for obj in gc.get_objects():
                         if isinstance(obj, Repo):
-                            try:
+                            with contextlib.suppress(Exception):
                                 obj.close()
-                            except Exception:
-                                pass
 
                 # Give subprocesses time to terminate
                 time.sleep(0.1)

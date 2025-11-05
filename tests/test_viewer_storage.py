@@ -15,8 +15,6 @@ as OPFS and SharedArrayBuffer APIs are not available in Node.js or Python runtim
 
 from __future__ import annotations
 
-import pytest
-
 
 def test_opfs_caching_requirements_documentation() -> None:
     """Document requirements for OPFS caching tests.
