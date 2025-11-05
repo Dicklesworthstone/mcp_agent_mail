@@ -1368,4 +1368,333 @@ clearAllCachesButton.addEventListener("click", async () => {
   }
 });
 
-bootstrap();
+// Alpine.js Controllers
+// These functions must be defined before Alpine.js loads (we use defer on Alpine script)
+
+/**
+ * Dark mode controller for Alpine.js
+ * Manages dark mode toggle with localStorage persistence
+ */
+window.darkModeController = function() {
+  return {
+    darkMode: false,
+
+    init() {
+      // Initialize from localStorage or system preference
+      try {
+        const stored = localStorage.getItem('darkMode');
+        const prefers = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        this.darkMode = stored === 'true' || (stored === null && prefers);
+      } catch (error) {
+        console.warn('Failed to read darkMode from localStorage', error);
+        this.darkMode = false;
+      }
+    },
+
+    toggleDarkMode() {
+      this.darkMode = !this.darkMode;
+      try {
+        localStorage.setItem('darkMode', String(this.darkMode));
+      } catch (error) {
+        console.warn('Failed to persist darkMode to localStorage', error);
+      }
+
+      // Update document class
+      if (this.darkMode) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    }
+  };
+};
+
+/**
+ * Main viewer controller for Alpine.js
+ * Manages all viewer state and interactions
+ */
+window.viewerController = function() {
+  return {
+    // State
+    manifest: null,
+    isLoading: true,
+    viewMode: 'inbox', // 'inbox' or 'threads'
+    searchQuery: '',
+    filteredMessages: [],
+    selectedMessage: null,
+    splitView: true,
+    sortBy: 'date-desc',
+    isFullscreen: false,
+    showDiagnostics: false,
+    cacheState: 'none',
+    cacheSupported: CACHE_SUPPORTED,
+    totalMessages: 0,
+    ftsEnabled: false,
+    databaseSource: 'network',
+    selectedThread: null,
+    allMessages: [],
+    allThreads: [],
+
+    async init() {
+      console.info('[Alpine] Initializing viewer controller');
+      await this.initViewer();
+    },
+
+    async initViewer() {
+      this.isLoading = true;
+
+      try {
+        // Load manifest
+        this.manifest = await loadJSON("../manifest.json");
+        state.manifest = this.manifest;
+
+        // Load database
+        const { bytes, source } = await loadDatabaseBytes(this.manifest);
+        this.databaseSource = source;
+        state.databaseSource = source;
+
+        // Initialize SQL.js
+        state.SQL = await ensureSqlJsLoaded();
+        state.db = new state.SQL.Database(bytes);
+
+        // Detect FTS
+        this.ftsEnabled = Boolean(this.manifest.database?.fts_enabled) && detectFts(state.db);
+        state.ftsEnabled = this.ftsEnabled;
+
+        // Load data
+        this.totalMessages = Number(getScalar(state.db, "SELECT COUNT(*) FROM messages") || 0);
+        state.totalMessages = this.totalMessages;
+        loadProjectMap(state.db);
+
+        // Build threads and messages
+        const threads = buildThreadList(state.db);
+        this.allThreads = this.buildThreadsForAlpine(threads);
+
+        const messages = this.getAllMessages();
+        this.allMessages = messages;
+        this.filteredMessages = messages;
+
+        // Update cache state
+        this.cacheState = state.cacheState;
+
+        this.isLoading = false;
+
+        console.info('[Alpine] Viewer initialized', {
+          totalMessages: this.totalMessages,
+          ftsEnabled: this.ftsEnabled,
+          databaseSource: this.databaseSource,
+          cacheState: this.cacheState
+        });
+
+      } catch (error) {
+        console.error('[Alpine] Initialization failed', error);
+        this.isLoading = false;
+        alert(`Failed to initialize viewer: ${error.message}`);
+      }
+    },
+
+    getAllMessages() {
+      const results = [];
+      const stmt = state.db.prepare(`
+        SELECT
+          id,
+          subject,
+          created_ts,
+          importance,
+          CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
+          substr(COALESCE(body_md, ''), 1, 280) AS snippet,
+          COALESCE(
+            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = messages.id LIMIT 1)),
+            'Unknown'
+          ) AS sender,
+          body_md
+        FROM messages
+        ORDER BY datetime(created_ts) DESC, id DESC
+      `);
+
+      try {
+        while (stmt.step()) {
+          results.push(stmt.getAsObject());
+        }
+      } finally {
+        stmt.free();
+      }
+
+      return results;
+    },
+
+    buildThreadsForAlpine(rawThreads) {
+      const threads = [];
+
+      for (const thread of rawThreads) {
+        // Get all messages in this thread
+        const messages = this.getMessagesInThread(thread.thread_key);
+
+        threads.push({
+          id: thread.thread_key,
+          subject: thread.latest_subject || '(no subject)',
+          messages: messages,
+          last_created_ts: thread.last_created_ts,
+          message_count: thread.message_count
+        });
+      }
+
+      return threads;
+    },
+
+    getMessagesInThread(threadKey) {
+      const results = [];
+      const stmt = state.db.prepare(`
+        SELECT
+          id,
+          subject,
+          created_ts,
+          importance,
+          body_md,
+          COALESCE(
+            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = messages.id LIMIT 1)),
+            'Unknown'
+          ) AS sender
+        FROM messages
+        WHERE
+          (thread_id = ?)
+          OR (thread_id IS NULL AND printf('msg:%d', id) = ?)
+        ORDER BY datetime(created_ts) ASC, id ASC
+      `);
+
+      try {
+        stmt.bind([threadKey, threadKey]);
+        while (stmt.step()) {
+          results.push(stmt.getAsObject());
+        }
+      } finally {
+        stmt.free();
+      }
+
+      return results;
+    },
+
+    filterMessages() {
+      const query = this.searchQuery.trim().toLowerCase();
+
+      if (!query) {
+        this.filteredMessages = this.allMessages;
+        return;
+      }
+
+      // Simple client-side filtering for now
+      // TODO: Use FTS5 for better search performance
+      this.filteredMessages = this.allMessages.filter(msg => {
+        return (
+          (msg.subject && msg.subject.toLowerCase().includes(query)) ||
+          (msg.body_md && msg.body_md.toLowerCase().includes(query)) ||
+          (msg.sender && msg.sender.toLowerCase().includes(query))
+        );
+      });
+    },
+
+    selectMessage(msg) {
+      if (this.selectedMessage?.id === msg.id) {
+        // Deselect if clicking the same message
+        this.selectedMessage = null;
+        this.splitView = false;
+      } else {
+        this.selectedMessage = msg;
+        this.splitView = true;
+      }
+    },
+
+    selectThread(thread) {
+      this.selectedThread = thread;
+      this.viewMode = 'threads';
+    },
+
+    renderMarkdown(markdown) {
+      if (!markdown) {
+        return '';
+      }
+
+      // Use the existing renderMarkdownSafe function
+      return renderMarkdownSafe(markdown);
+    },
+
+    formatTimestamp(timestamp) {
+      if (!timestamp) {
+        return '';
+      }
+
+      try {
+        const date = new Date(timestamp);
+        if (Number.isNaN(date.getTime())) {
+          return timestamp;
+        }
+
+        const now = new Date();
+        const diffMs = now.getTime() - date.getTime();
+        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+        if (diffDays === 0) {
+          return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        } else if (diffDays === 1) {
+          return 'Yesterday';
+        } else if (diffDays < 7) {
+          return date.toLocaleDateString([], { weekday: 'short' });
+        } else {
+          return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+        }
+      } catch {
+        return timestamp;
+      }
+    },
+
+    async toggleCache() {
+      if (!CACHE_SUPPORTED || !state.cacheKey) {
+        alert('Caching is not supported in this browser.');
+        return;
+      }
+
+      try {
+        if (state.cacheState === 'opfs') {
+          await removeFromOpfs(state.cacheKey);
+          state.cacheState = state.lastDatabaseBytes ? 'memory' : 'none';
+        } else if (state.lastDatabaseBytes) {
+          const success = await writeToOpfs(state.cacheKey, state.lastDatabaseBytes);
+          if (success) {
+            state.cacheState = 'opfs';
+          }
+        }
+
+        this.cacheState = state.cacheState;
+      } catch (error) {
+        console.error('[Alpine] Cache toggle failed', error);
+        alert(`Failed to toggle cache: ${error.message}`);
+      }
+    },
+
+    sortMessages(sortBy) {
+      this.sortBy = sortBy;
+
+      const messages = [...this.filteredMessages];
+
+      switch (sortBy) {
+        case 'date-desc':
+          messages.sort((a, b) => new Date(b.created_ts) - new Date(a.created_ts));
+          break;
+        case 'date-asc':
+          messages.sort((a, b) => new Date(a.created_ts) - new Date(b.created_ts));
+          break;
+        case 'subject':
+          messages.sort((a, b) => (a.subject || '').localeCompare(b.subject || ''));
+          break;
+        case 'sender':
+          messages.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
+          break;
+      }
+
+      this.filteredMessages = messages;
+    }
+  };
+};
+
+// Alpine.js controllers are now the ONLY way to initialize the viewer
+// No backwards compatibility - we only support the Alpine.js version that matches the Python webui
