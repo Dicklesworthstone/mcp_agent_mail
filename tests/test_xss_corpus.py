@@ -21,9 +21,6 @@ from pathlib import Path
 
 import pytest
 
-from mcp_agent_mail.share import ShareExportError
-
-
 # XSS attack vectors organized by category
 XSS_VECTORS = {
     "script_tags": [
@@ -181,7 +178,7 @@ def test_xss_vectors_properly_escaped(category: str, vectors: list[str], tmp_pat
         rows = conn.execute("SELECT id, subject, body_md FROM messages ORDER BY id").fetchall()
         assert len(rows) == len(vectors)
 
-        for idx, (msg_id, subject, body_md) in enumerate(rows):
+        for idx, (msg_id, _subject, body_md) in enumerate(rows):
             assert msg_id == idx + 1
             assert vectors[idx] in body_md, f"XSS vector not preserved in database: {vectors[idx]}"
 

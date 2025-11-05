@@ -118,12 +118,6 @@
   <script src="./vendor/dompurify.min.js" integrity="sha256-0kaYYq3qitkkVZpP/6uKTJwfTpqFNM6OHDbsaYzw9Uw="
     crossorigin="anonymous"></script>
 
-  <!-- Clusterize.js for virtual scrolling -->
-  <link rel="stylesheet" href="./vendor/clusterize.min.css"
-    integrity="sha256-IoY0mRl15723XeZvl/t8zDwMQwuZ8ZkZLnmcCgZBgRM=" crossorigin="anonymous" />
-  <script src="./vendor/clusterize.min.js" integrity="sha256-kZrY+ddUOM0611/m0WOv4sSCBjS1SX32kf23mZ+dXyk="
-    crossorigin="anonymous"></script>
-
   <style>
     [x-cloak] {
       display: none !important;
@@ -133,12 +127,12 @@
     .prose {
       max-width: 65ch;
     }
-    .clusterize-scroll {
+    .virtual-scroll {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
     }
     .message-row { min-height: 68px; }
-    .clusterize-scroll {
+    .virtual-scroll {
       contain: content;
     }
 
@@ -634,11 +628,11 @@
           </div>
         </div>
 
-        <!-- Message List (Virtualized with Clusterize.js) -->
+        <!-- Message List (Windowed Rendering) -->
         <div class="flex-1 overflow-hidden">
-          <div id="virtual-message-list" class="clusterize-scroll" style="max-height: calc(100vh - 320px);">
-            <div id="virtual-message-content" class="clusterize-content">
-              <div class="clusterize-no-data py-20 text-center text-slate-500 dark:text-slate-400">Loading...</div>
+          <div id="virtual-message-list" class="virtual-scroll" style="max-height: calc(100vh - 320px);">
+            <div id="virtual-message-content" class="virtual-scroll-content">
+              <div class="virtual-no-data py-20 text-center text-slate-500 dark:text-slate-400">Loading...</div>
             </div>
           </div>
         </div>
