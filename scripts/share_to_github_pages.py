@@ -62,27 +62,45 @@ def install_gh_cli() -> bool:
         console.print("[cyan]Install gh CLI from:[/] https://cli.github.com/")
         return False
 
-    install_commands = {
-        "brew": ["brew", "install", "gh"],
-        "apt": ["sudo", "apt", "install", "gh", "-y"],
-        "dnf": ["sudo", "dnf", "install", "gh", "-y"],
-    }
-
-    cmd = install_commands.get(pkg_mgr)
-    if not cmd:
-        console.print("[cyan]Install gh CLI from:[/] https://cli.github.com/")
+    # Only brew is simple enough to automate reliably
+    if pkg_mgr == "brew":
+        if Confirm.ask("Install gh CLI using Homebrew?", default=True):
+            console.print("[cyan]Running:[/] brew install gh")
+            try:
+                subprocess.run(["brew", "install", "gh"], check=True)
+                console.print("[green]✓ gh CLI installed successfully[/]")
+                return True
+            except subprocess.CalledProcessError:
+                console.print("[red]Installation failed.[/]")
+                return False
         return False
 
-    if Confirm.ask(f"Install gh CLI using {pkg_mgr}?", default=True):
-        console.print(f"[cyan]Running:[/] {' '.join(cmd)}")
-        try:
-            subprocess.run(cmd, check=True)
-            console.print("[green]✓ gh CLI installed successfully[/]")
-            return True
-        except subprocess.CalledProcessError:
-            console.print("[red]Installation failed. Please install manually:[/] https://cli.github.com/")
-            return False
-    return False
+    # For apt/dnf, show manual instructions (requires adding repo first)
+    if pkg_mgr == "apt":
+        console.print("\n[cyan]To install gh CLI on Ubuntu/Debian:[/]")
+        console.print("  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg")
+        console.print('  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null')
+        console.print("  sudo apt update")
+        console.print("  sudo apt install gh -y")
+    elif pkg_mgr == "dnf":
+        console.print("\n[cyan]To install gh CLI on Fedora/RHEL:[/]")
+        console.print("  sudo dnf install 'dnf-command(config-manager)'")
+        console.print("  sudo dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo")
+        console.print("  sudo dnf install gh -y")
+    else:
+        console.print("[cyan]Install gh CLI from:[/] https://cli.github.com/")
+
+    console.print("\n[yellow]Press Enter after installing to continue...[/]")
+    input()
+
+    # Check if it's now available
+    try:
+        subprocess.run(["gh", "--version"], capture_output=True, check=True)
+        console.print("[green]✓ gh CLI detected[/]")
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        console.print("[red]gh CLI still not found. Continuing anyway...[/]")
+        return False
 
 
 def install_wrangler_cli() -> bool:

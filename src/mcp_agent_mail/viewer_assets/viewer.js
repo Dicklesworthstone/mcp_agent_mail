@@ -4,8 +4,10 @@ const attachmentStatsList = document.getElementById("attachment-stats");
 const scrubStatsList = document.getElementById("scrub-stats");
 const bundleInfo = document.getElementById("bundle-info");
 const threadListEl = document.getElementById("thread-list");
+const threadScrollEl = document.getElementById("thread-scroll");
 const threadFilterInput = document.getElementById("thread-filter");
 const messageListEl = document.getElementById("message-list");
+const messageScrollEl = document.getElementById("message-scroll");
 const messageMetaEl = document.getElementById("message-meta");
 const messageDetailEl = document.getElementById("message-detail");
 const searchInput = document.getElementById("search-input");
@@ -16,6 +18,7 @@ const clearDetailButton = document.getElementById("clear-detail");
 const bootstrapStart = performance.now();
 const CACHE_SUPPORTED = typeof navigator.storage?.getDirectory === "function";
 const CACHE_PREFIX = "mailbox-snapshot";
+const VIRTUAL_SCROLL_THRESHOLD = 1000; // Use virtual scrolling when items > this
 
 const state = {
   manifest: null,
@@ -36,6 +39,8 @@ const state = {
   databaseSource: "network",
   selectedMessageId: undefined,
   explainMode: false,
+  threadClusterize: null,
+  messageClusterize: null,
 };
 
 // Trusted Types Policy for secure Markdown rendering
@@ -600,40 +605,101 @@ function formatTimestamp(value) {
 }
 
 function renderThreads(threads) {
-  threadListEl.innerHTML = "";
-
-  const renderEntry = (thread) => {
-    const li = document.createElement("li");
-    li.className = "thread-item";
-    li.tabIndex = 0;
-    li.dataset.threadKey = thread.thread_key;
-    if (thread.thread_key === state.selectedThread) {
-      li.classList.add("active");
-    }
-
-    const title = document.createElement("h3");
-    title.innerHTML = createTrustedHTML(thread.thread_key === "all"
+  // Helper to create HTML string for a thread item
+  const createThreadHTML = (thread) => {
+    const isActive = thread.thread_key === state.selectedThread;
+    const activeClass = isActive ? ' active' : '';
+    const subject = thread.thread_key === "all"
       ? "All messages"
-      : escapeHtml(thread.latest_subject || "(no subject)"));
+      : escapeHtml(thread.latest_subject || "(no subject)");
+    const timestamp = thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : "";
+    const snippet = highlightText(thread.latest_snippet || "", state.searchTerm);
 
-    const meta = document.createElement("div");
-    meta.className = "thread-meta";
-    meta.innerHTML = createTrustedHTML(`
-      <span class="pill">${thread.message_count} msg</span>
-      <span>${thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : ""}</span>
-    `);
-
-    const preview = document.createElement("div");
-    preview.className = "thread-preview";
-    preview.innerHTML = createTrustedHTML(highlightText(thread.latest_snippet || "", state.searchTerm));
-
-    li.append(title, meta, preview);
-    threadListEl.append(li);
+    return `<li class="thread-item${activeClass}" tabindex="0" data-thread-key="${escapeHtml(thread.thread_key)}">
+      <h3>${subject}</h3>
+      <div class="thread-meta">
+        <span class="pill">${thread.message_count} msg</span>
+        <span>${timestamp}</span>
+      </div>
+      <div class="thread-preview">${snippet}</div>
+    </li>`;
   };
 
-  renderEntry({ thread_key: "all", message_count: state.totalMessages, last_created_ts: threads[0]?.last_created_ts || null, latest_subject: "All messages", latest_snippet: "" });
-  for (const thread of threads) {
-    renderEntry(thread);
+  // Build all threads array (including "All messages" entry)
+  const allThreads = [
+    {
+      thread_key: "all",
+      message_count: state.totalMessages,
+      last_created_ts: threads[0]?.last_created_ts || null,
+      latest_subject: "All messages",
+      latest_snippet: ""
+    },
+    ...threads
+  ];
+
+  const totalCount = allThreads.length;
+
+  // Use virtual scrolling if items exceed threshold
+  if (totalCount > VIRTUAL_SCROLL_THRESHOLD) {
+    // Show scroll container, hide skeleton
+    threadScrollEl.classList.remove("hidden");
+    document.getElementById("thread-skeleton").classList.add("hidden");
+
+    const rows = allThreads.map(thread => createThreadHTML(thread));
+
+    if (state.threadClusterize) {
+      // Update existing Clusterize instance
+      state.threadClusterize.update(rows);
+    } else {
+      // Initialize new Clusterize instance
+      state.threadClusterize = new Clusterize({
+        rows: rows,
+        scrollId: threadScrollEl,
+        contentId: threadListEl,
+        rows_in_block: 20,
+        blocks_in_cluster: 2
+      });
+    }
+  } else {
+    // Direct DOM rendering for small lists
+    threadScrollEl.classList.remove("hidden");
+    document.getElementById("thread-skeleton").classList.add("hidden");
+
+    // Destroy Clusterize if it exists
+    if (state.threadClusterize) {
+      state.threadClusterize.destroy(true);
+      state.threadClusterize = null;
+    }
+
+    threadListEl.innerHTML = "";
+    for (const thread of allThreads) {
+      const li = document.createElement("li");
+      li.className = "thread-item";
+      li.tabIndex = 0;
+      li.dataset.threadKey = thread.thread_key;
+      if (thread.thread_key === state.selectedThread) {
+        li.classList.add("active");
+      }
+
+      const title = document.createElement("h3");
+      title.innerHTML = createTrustedHTML(thread.thread_key === "all"
+        ? "All messages"
+        : escapeHtml(thread.latest_subject || "(no subject)"));
+
+      const meta = document.createElement("div");
+      meta.className = "thread-meta";
+      meta.innerHTML = createTrustedHTML(`
+        <span class="pill">${thread.message_count} msg</span>
+        <span>${thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : ""}</span>
+      `);
+
+      const preview = document.createElement("div");
+      preview.className = "thread-preview";
+      preview.innerHTML = createTrustedHTML(highlightText(thread.latest_snippet || "", state.searchTerm));
+
+      li.append(title, meta, preview);
+      threadListEl.append(li);
+    }
   }
 }
 
