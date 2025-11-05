@@ -122,7 +122,7 @@ Common pitfalls
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 ```
 
-## Integrating with Beads (dependency‑aware task planning)
+## Integrating with Beads (dependency-aware task planning)
 
 Beads is a lightweight task planner (`bd` CLI) that complements Agent Mail by keeping status and dependencies in one place while Mail handles messaging, file reservations, and audit trails. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
 
@@ -135,9 +135,9 @@ Copy/paste blurb for agent-facing docs (leave as-is for reuse):
 
 ```
 
-## Integrating with Beads (dependency‑aware task planning)
+## Integrating with Beads (dependency-aware task planning)
 
-Beads provides a lightweight, dependency‑aware issue database and a CLI (`bd`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging, audit trail, and file‑reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads provides a lightweight, dependency-aware issue database and a CLI (`bd`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging, audit trail, and file-reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
 
 Recommended conventions
 - **Single source of truth**: Use **Beads** for task status/priority/dependencies; use **Agent Mail** for conversation, decisions, and attachments (audit).
@@ -152,20 +152,20 @@ Typical flow (agents)
 3) **Announce start** (Mail)
    - `send_message(..., thread_id="bd-123", subject="[bd-123] Start: <short title>", ack_required=true)`
 4) **Work and update**
-   - Reply in‑thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
+   - Reply in-thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
 5) **Complete and release**
    - `bd close bd-123 --reason "Completed"` (Beads is status authority)
    - `release_file_reservations(project_key, agent_name, paths=["src/**"])`
    - Final Mail reply: `[bd-123] Completed` with summary and links
 
-Mapping cheat‑sheet
+Mapping cheat-sheet
 - **Mail `thread_id`** ↔ `bd-###`
 - **Mail subject**: `[bd-###] …`
 - **File reservation `reason`**: `bd-###`
 - **Commit messages (optional)**: include `bd-###` for traceability
 
 Event mirroring (optional automation)
-- On `bd update --status blocked`, send a high‑importance Mail message in thread `bd-###` describing the blocker.
+- On `bd update --status blocked`, send a high-importance Mail message in thread `bd-###` describing the blocker.
 - On Mail "ACK overdue" for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
 
 Pitfalls to avoid
@@ -222,7 +222,7 @@ graph LR
 
 ## Web UI (human-facing mail viewer)
 
-The server ships a lightweight, server‑rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, file reservations, and perform full‑text search with FTS5 when available (with an automatic LIKE fallback).
+The server ships a lightweight, server-rendered Web UI for humans. It lets you browse projects, agents, inboxes, single messages, attachments, file reservations, and perform full-text search with FTS5 when available (with an automatic LIKE fallback).
 
 - Where it lives: built into the HTTP server in `mcp_agent_mail.http` under the `/mail` path.
 - Who it's for: humans reviewing activity; agents should continue to use the MCP tools/resources API.
@@ -252,7 +252,7 @@ Auth notes:
 ### Routes and what you can do
 
 - `/mail` (Unified inbox + Projects + Related Projects Discovery)
-  - Shows a unified, reverse‑chronological inbox of recent messages across all projects with excerpts, relative timestamps, sender/recipients, and project badges.
+  - Shows a unified, reverse-chronological inbox of recent messages across all projects with excerpts, relative timestamps, sender/recipients, and project badges.
   - Below the inbox, lists all projects (slug, human name, created time) with sibling suggestions.
   - Suggests **likely sibling projects** when two slugs appear to be parts of the same product (e.g., backend vs. frontend). Suggestions are ranked with heuristics and, when `LLM_ENABLED=true`, an LLM pass across key docs (`README.md`, `AGENTS.md`, etc.).
   - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross-project messaging; agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
@@ -270,14 +270,14 @@ Auth notes:
   - Quick links to File Reservations and Attachments for the project header.
 
 - `/mail/{project}/inbox/{agent}` (Inbox for one agent)
-  - Reverse‑chronological list with subject, sender, created time, importance badge, thread id.
+  - Reverse-chronological list with subject, sender, created time, importance badge, thread id.
   - Pagination (`?page=N&limit=M`).
 
 - `/mail/{project}/message/{id}` (Message detail)
   - Shows subject, sender, created time, importance, recipients (To/Cc/Bcc), thread messages.
   - Body rendering:
-    - If the server pre‑converted markdown to HTML, it's sanitized with Bleach (limited tags/attributes, safe CSS via CSSSanitizer) and then displayed.
-    - Otherwise markdown is rendered client‑side with Marked + Prism for code highlighting.
+    - If the server pre-converted markdown to HTML, it's sanitized with Bleach (limited tags/attributes, safe CSS via CSSSanitizer) and then displayed.
+    - Otherwise markdown is rendered client-side with Marked + Prism for code highlighting.
   - Attachments are referenced from the message frontmatter (WebP files or inline data URIs).
 
 - `/mail/{project}/search?q=...` (Dedicated search page)
@@ -511,13 +511,13 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 - Templates live in `src/mcp_agent_mail/templates/` and are rendered by Jinja2.
 - Markdown is converted with `markdown2` on the server where possible; HTML is sanitized with Bleach (with CSS sanitizer when available).
 - Tailwind CSS, Lucide icons, Alpine.js, Marked, and Prism are loaded via CDN in `base.html` for a modern look without a frontend build step.
-- All rendering is server‑side; there's no SPA router. Pages degrade cleanly without JavaScript.
+- All rendering is server-side; there's no SPA router. Pages degrade cleanly without JavaScript.
 
 ### Security considerations
 
 - HTML sanitization: Only a conservative set of tags/attributes are allowed; CSS is filtered. Links are limited to http/https/mailto/data.
 - Auth: Use bearer token or JWT when exposing beyond localhost. For local dev, enable localhost bypass as noted above.
-- Rate limiting (optional): Token‑bucket limiter can be enabled; UI GET requests are light and unaffected by POST limits.
+- Rate limiting (optional): Token-bucket limiter can be enabled; UI GET requests are light and unaffected by POST limits.
 
 ### Troubleshooting the UI
 
@@ -717,14 +717,15 @@ Redaction is applied to message bodies and attachment metadata before they're wr
 
 The bundled HTML viewer provides:
 
-**Three-pane interface**:
-- Left pane: Projects list with message counts
-- Middle pane: Message list for selected project (searchable)
-- Right pane: Message detail with full body, attachments, and thread context
+**Dashboard layout**:
+- **Bundle metadata header**: Shows bundle creation time, export settings, and scrubbing preset
+- **Summary panels**: Three side-by-side panels displaying projects included, attachment statistics, and redaction summary
+- **Message overview**: Searchable list of all messages with filtering by subject/body
+- **Raw manifest viewer**: Collapsible JSON display of the complete manifest for verification
 
 **Full-text search**: Powered by SQLite FTS5, runs entirely in the browser. Search syntax supports phrases (`"build plan"`), boolean operators (`plan AND users`), and field filters (`subject:deploy`).
 
-**Markdown rendering**: Message bodies are rendered with GitHub-Flavored Markdown, supporting code blocks (with syntax highlighting), tables, task lists, and inline images.
+**Markdown rendering**: Message bodies are rendered with GitHub-Flavored Markdown, supporting code blocks, tables, task lists, and inline images.
 
 **OPFS caching**: The SQLite database is cached in Origin Private File System (OPFS) for instant subsequent loads. First load downloads the database, subsequent loads are instant.
 
@@ -1432,29 +1433,29 @@ This section has been removed to keep the README focused. Client code samples be
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
-- Why JSON‑RPC instead of REST or gRPC?
-  - MCP defines a tool/resource method call model that maps naturally to JSON‑RPC over a single endpoint. It keeps clients simple (one URL, method name + params), plays well with proxies, and avoids SDK lock‑in while remaining language‑agnostic.
+- Why JSON-RPC instead of REST or gRPC?
+  - MCP defines a tool/resource method call model that maps naturally to JSON-RPC over a single endpoint. It keeps clients simple (one URL, method name + params), plays well with proxies, and avoids SDK lock-in while remaining language-agnostic.
 
 - Why separate "resources" (reads) from "tools" (mutations)?
-  - Clear semantics enable aggressive caching and safe prefetch for resources, while tools remain explicit, auditable mutations. This split also powers RBAC (read‑only vs writer) without guesswork.
+  - Clear semantics enable aggressive caching and safe prefetch for resources, while tools remain explicit, auditable mutations. This split also powers RBAC (read-only vs writer) without guesswork.
 
 - Why canonical message storage in Git, not only in the database?
-  - Git gives durable, diffable, human‑reviewable artifacts you can clone, branch, and audit. SQLite provides fast indexing and FTS. The combo preserves governance and operability without a heavyweight message bus.
+  - Git gives durable, diffable, human-reviewable artifacts you can clone, branch, and audit. SQLite provides fast indexing and FTS. The combo preserves governance and operability without a heavyweight message bus.
 
 - Why advisory file reservations instead of global locks?
-  - Agents coordinate asynchronously; hard locks create head‑of‑line blocking and brittle failures. Advisory reservations surface intent and conflicts while the optional pre‑commit guard enforces locally where it matters.
+  - Agents coordinate asynchronously; hard locks create head-of-line blocking and brittle failures. Advisory reservations surface intent and conflicts while the optional pre-commit guard enforces locally where it matters.
 
 - Why are agent names adjective+noun?
-  - Memorable identities reduce confusion in inboxes, commit logs, and UI. The scheme yields low collision risk while staying human‑friendly (vs GUIDs) and predictable for directory listings.
+  - Memorable identities reduce confusion in inboxes, commit logs, and UI. The scheme yields low collision risk while staying human-friendly (vs GUIDs) and predictable for directory listings.
 
 - Why is `project_key` an absolute path?
-  - Using the workspace’s absolute path creates a stable, collision‑resistant project identity across shells and agents. Slugs are derived deterministically from it, avoiding accidental forks of the same project.
+  - Using the workspace's absolute path creates a stable, collision-resistant project identity across shells and agents. Slugs are derived deterministically from it, avoiding accidental forks of the same project.
 
 - Why WebP attachments and optional inlining?
-  - WebP provides compact, high‑quality images. Small images can be inlined for readability; larger ones are stored as attachments. You can keep originals when needed (`KEEP_ORIGINAL_IMAGES=true`).
+  - WebP provides compact, high-quality images. Small images can be inlined for readability; larger ones are stored as attachments. You can keep originals when needed (`KEEP_ORIGINAL_IMAGES=true`).
 
 - Why both static bearer and JWT/JWKS support?
-  - Local development should be zero‑friction (single bearer). Production benefits from verifiable JWTs with role claims, rotating keys via JWKS, and layered RBAC.
+  - Local development should be zero-friction (single bearer). Production benefits from verifiable JWTs with role claims, rotating keys via JWKS, and layered RBAC.
 
 - Why SQLite FTS5 instead of an external search service?
   - FTS5 delivers fast, relevant search with minimal ops. It’s embedded, portable, and easy to back up with the Git archive. If FTS isn’t available, we degrade to SQL LIKE automatically.
@@ -1560,7 +1561,7 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
 ```
 
 2. **Ship the logs.** Forward the structured stream (stderr/stdout or JSON log files) into your observability stack (e.g., Loki, Datadog, Elastic) and parse the `tools[]` array.
-3. **Alert on anomalies.** Create a rule that raises when `errors / calls` exceeds a threshold for any tool (for example 5% over a 5‑minute window) so you can decide whether to expose a macro or improve documentation.
+3. **Alert on anomalies.** Create a rule that raises when `errors / calls` exceeds a threshold for any tool (for example 5% over a 5-minute window) so you can decide whether to expose a macro or improve documentation.
 4. **Dashboard the clusters.** Group by `cluster` to see where agents are spending time and which workflows might warrant additional macros or guard-rails.
 
 See `docs/observability.md` for a step-by-step cookbook (Loki/Prometheus example pipelines included), and `docs/GUIDE_TO_OPTIMAL_MCP_SERVER_DESIGN.md` for a comprehensive design guide covering tool curation, capability gating, security, and observability best practices.
@@ -1641,6 +1642,12 @@ The project exposes a developer CLI for common operations:
 - `list-projects [--include-agents]`: enumerate projects
 - `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
+- `share export --output <path> [options]`: export mailbox to a static HTML bundle (see Static Mailbox Export section for full options)
+- `share preview <bundle_path> [--port N] [--open-browser]`: serve a static bundle locally for inspection
+- `share verify <bundle_path> [--public-key <key>]`: verify bundle integrity (SRI hashes and Ed25519 signature)
+- `share decrypt <encrypted_path> [--identity <file> | --passphrase]`: decrypt an age-encrypted bundle
+- `config set-port <port>`: change the HTTP server port (updates .env)
+- `config show-port`: display the current configured HTTP port
 - `clear-and-reset-everything [--force]`: DELETE the SQLite database (incl. WAL/SHM) and WIPE all contents under `STORAGE_ROOT` (including per-project Git archives). Use only when you intentionally want a clean slate.
 - `list-acks --project <key> --agent <name> [--limit N]`: list messages requiring acknowledgement for an agent where ack is missing
 - `acks pending <project> <agent> [--limit N]`: show pending acknowledgements for an agent
@@ -1653,6 +1660,21 @@ The project exposes a developer CLI for common operations:
 Examples:
 
 ```bash
+# Export a static bundle with signing and encryption
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./bundle \
+  --signing-key ./keys/signing.key \
+  --age-recipient age1abc...xyz
+
+# Preview a bundle locally
+uv run python -m mcp_agent_mail.cli share preview ./bundle --port 9000 --open-browser
+
+# Verify bundle integrity
+uv run python -m mcp_agent_mail.cli share verify ./bundle
+
+# Change server port
+uv run python -m mcp_agent_mail.cli config set-port 9000
+
 # Install guard into a repo
 uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/backend
 
@@ -1665,4 +1687,4 @@ uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 
 ## Client integrations
 
-Use the automated installer to wire up supported tools automatically (e.g., Claude Code, Cline, Windsurf, OpenCode). Run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh` or the one‑liner in the Quickstart above.
+Use the automated installer to wire up supported tools automatically (e.g., Claude Code, Cline, Windsurf, OpenCode). Run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh` or the one-liner in the Quickstart above.
