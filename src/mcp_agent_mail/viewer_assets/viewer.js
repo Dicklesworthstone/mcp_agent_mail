@@ -744,36 +744,96 @@ function getThreadMessages(threadKey, limit = 50000) {
 }
 
 function renderMessages(list, { context, term }) {
-  messageListEl.innerHTML = "";
-
   if (!list.length) {
+    // Destroy Clusterize if it exists
+    if (state.messageClusterize) {
+      state.messageClusterize.destroy(true);
+      state.messageClusterize = null;
+    }
+
+    messageScrollEl.classList.remove("hidden");
+    document.getElementById("message-skeleton").classList.add("hidden");
+    messageListEl.innerHTML = "";
+
     const empty = document.createElement("li");
     empty.textContent = context === "search" ? "No messages match your query." : "No messages available.";
     messageListEl.append(empty);
     return;
   }
 
-  for (const message of list) {
-    const item = document.createElement("li");
-    item.dataset.id = String(message.id);
-    item.dataset.threadKey = message.thread_key;
-    if (Number(state.selectedMessageId) === Number(message.id)) {
-      item.classList.add("active");
+  // Helper to create HTML string for a message item
+  const createMessageHTML = (message) => {
+    const isActive = Number(state.selectedMessageId) === Number(message.id);
+    const activeClass = isActive ? ' active' : '';
+    const subject = highlightText(message.subject || "(no subject)", term);
+    const timestamp = formatTimestamp(message.created_ts);
+    const importance = escapeHtml(message.importance || "normal");
+    const snippet = highlightText(message.snippet || "", term);
+
+    return `<li class="${activeClass}" data-id="${message.id}" data-thread-key="${escapeHtml(message.thread_key)}">
+      <h3>${subject}</h3>
+      <div class="message-meta-line">${timestamp} • importance: ${importance}</div>
+      <div class="message-snippet">${snippet}</div>
+    </li>`;
+  };
+
+  const totalCount = list.length;
+
+  // Use virtual scrolling if items exceed threshold
+  if (totalCount > VIRTUAL_SCROLL_THRESHOLD) {
+    // Show scroll container, hide skeleton
+    messageScrollEl.classList.remove("hidden");
+    document.getElementById("message-skeleton").classList.add("hidden");
+
+    const rows = list.map(message => createMessageHTML(message));
+
+    if (state.messageClusterize) {
+      // Update existing Clusterize instance
+      state.messageClusterize.update(rows);
+    } else {
+      // Initialize new Clusterize instance
+      state.messageClusterize = new Clusterize({
+        rows: rows,
+        scrollId: messageScrollEl,
+        contentId: messageListEl,
+        rows_in_block: 20,
+        blocks_in_cluster: 2
+      });
+    }
+  } else {
+    // Direct DOM rendering for small lists
+    messageScrollEl.classList.remove("hidden");
+    document.getElementById("message-skeleton").classList.add("hidden");
+
+    // Destroy Clusterize if it exists
+    if (state.messageClusterize) {
+      state.messageClusterize.destroy(true);
+      state.messageClusterize = null;
     }
 
-    const title = document.createElement("h3");
-    title.innerHTML = createTrustedHTML(highlightText(message.subject || "(no subject)", term));
+    messageListEl.innerHTML = "";
+    for (const message of list) {
+      const item = document.createElement("li");
+      item.dataset.id = String(message.id);
+      item.dataset.threadKey = message.thread_key;
+      if (Number(state.selectedMessageId) === Number(message.id)) {
+        item.classList.add("active");
+      }
 
-    const meta = document.createElement("div");
-    meta.className = "message-meta-line";
-    meta.innerHTML = createTrustedHTML(`${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")}`);
+      const title = document.createElement("h3");
+      title.innerHTML = createTrustedHTML(highlightText(message.subject || "(no subject)", term));
 
-    const snippet = document.createElement("div");
-    snippet.className = "message-snippet";
-    snippet.innerHTML = createTrustedHTML(highlightText(message.snippet || "", term));
+      const meta = document.createElement("div");
+      meta.className = "message-meta-line";
+      meta.innerHTML = createTrustedHTML(`${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")}`);
 
-    item.append(title, meta, snippet);
-    messageListEl.append(item);
+      const snippet = document.createElement("div");
+      snippet.className = "message-snippet";
+      snippet.innerHTML = createTrustedHTML(highlightText(message.snippet || "", term));
+
+      item.append(title, meta, snippet);
+      messageListEl.append(item);
+    }
   }
 }
 

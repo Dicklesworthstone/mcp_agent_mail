@@ -406,6 +406,18 @@ footer {
   flex: 1;
 }
 
+/* Clusterize virtual scrolling containers */
+.clusterize-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.clusterize-scroll .clusterize-content {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
 .thread-list li {
   padding: 0.75rem 1rem;
   border-bottom: 1px solid #334155;

@@ -28,5 +28,17 @@
         "sha256": "d2469862adea8ad924559a4fffab8a4c9c1f4e9a8534ce8e1c36ec698cf0f54c"
       }
     }
+  },
+  "clusterize": {
+    "version": "0.18.0",
+    "source": "https://github.com/NeXTs/Clusterize.js",
+    "files": {
+      "clusterize.min.js": {
+        "sha256": "919ad8f9d75438cd3ad75fe6d163afe2c4820634b5497df691fdb7999f9d5f29"
+      },
+      "clusterize.min.css": {
+        "sha256": "228634991975e7bdb75de66f97fb7ccc3c0c430b99f199192e799c0a06418113"
+      }
+    }
   }
 }
