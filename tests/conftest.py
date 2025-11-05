@@ -1,3 +1,4 @@
+import gc
 from pathlib import Path
 
 import pytest
@@ -25,8 +26,51 @@ def isolated_env(tmp_path, monkeypatch):
     try:
         yield
     finally:
+        # Close any Git Repo objects before cleanup to prevent subprocess warnings
+        # Suppress ResourceWarnings during cleanup since Python 3.14 warns about resources
+        # being cleaned up by GC, which is exactly what we want
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ResourceWarning)
+            try:
+                from git import Repo
+                import time
+
+                # Explicitly close repo at storage_root if it exists
+                storage_root = tmp_path / "storage"
+                if storage_root.exists() and (storage_root / ".git").exists():
+                    try:
+                        repo = Repo(str(storage_root))
+                        repo.close()
+                        del repo
+                    except Exception:
+                        pass
+
+                # Multiple GC passes to ensure full cleanup
+                for _ in range(3):
+                    gc.collect()
+                    # Close any Repo instances that might still be open
+                    for obj in gc.get_objects():
+                        if isinstance(obj, Repo):
+                            try:
+                                obj.close()
+                            except Exception:
+                                pass
+
+                # Give subprocesses time to terminate
+                time.sleep(0.1)
+
+                # Final GC pass
+                gc.collect()
+            except Exception:
+                pass
+
+            # Force another GC to clean up any remaining references (inside warning suppression)
+            gc.collect()
+
         clear_settings_cache()
         reset_database_state()
+
         if db_path.exists():
             db_path.unlink()
         storage_root = tmp_path / "storage"

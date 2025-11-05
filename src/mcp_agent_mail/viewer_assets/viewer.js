@@ -37,6 +37,27 @@ const state = {
   selectedMessageId: undefined,
 };
 
+// Trusted Types Policy for secure Markdown rendering
+// See plan document lines 190-205 for security requirements
+let trustedTypesPolicy;
+try {
+  if (window.trustedTypes) {
+    trustedTypesPolicy = trustedTypes.createPolicy("mailViewerDOMPurify", {
+      createHTML: (dirty) => {
+        // DOMPurify will be loaded from vendor/dompurify.min.js
+        if (typeof DOMPurify !== "undefined") {
+          return DOMPurify.sanitize(dirty, { RETURN_TRUSTED_TYPE: true });
+        }
+        // Fallback to basic escaping if DOMPurify not loaded
+        console.warn("DOMPurify not available, falling back to basic escaping");
+        return escapeHtml(dirty);
+      },
+    });
+  }
+} catch (error) {
+  console.warn("Trusted Types not supported or policy creation failed:", error);
+}
+
 function escapeHtml(value) {
   return value
     .replace(/&/g, "&amp;")
@@ -44,6 +65,50 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Render Markdown safely using Marked + DOMPurify + Trusted Types.
+ * @param {string} markdown - Raw markdown text
+ * @returns {string|TrustedHTML} - Sanitized HTML ready for innerHTML
+ */
+function renderMarkdownSafe(markdown) {
+  if (!markdown) {
+    return trustedTypesPolicy ? trustedTypesPolicy.createHTML("") : "";
+  }
+
+  // If Marked.js is available, parse Markdown
+  let html;
+  if (typeof marked !== "undefined") {
+    try {
+      html = marked.parse(markdown, {
+        breaks: true, // GFM line breaks
+        gfm: true, // GitHub Flavored Markdown
+        headerIds: false, // Disable auto-generated IDs for security
+        mangle: false, // Don't mangle email addresses
+      });
+    } catch (error) {
+      console.error("Marked parsing error:", error);
+      html = escapeHtml(markdown);
+    }
+  } else {
+    // Fallback: treat as plain text
+    html = escapeHtml(markdown).replace(/\n/g, "<br>");
+  }
+
+  // Sanitize with DOMPurify + Trusted Types
+  if (trustedTypesPolicy) {
+    return trustedTypesPolicy.createHTML(html);
+  }
+
+  // Fallback for browsers without Trusted Types
+  if (typeof DOMPurify !== "undefined") {
+    return DOMPurify.sanitize(html);
+  }
+
+  // Last resort: return escaped HTML
+  console.warn("No sanitization available, returning escaped text");
+  return escapeHtml(markdown);
 }
 
 function escapeRegExp(value) {
@@ -671,7 +736,10 @@ function renderMessageDetail(message) {
 
   const body = document.createElement("div");
   body.className = "message-snippet";
-  body.innerHTML = highlightText(message.body_md || "(empty body)", state.searchTerm);
+  // Render markdown safely using DOMPurify + Marked.js + Trusted Types
+  // Note: Search highlighting on rendered HTML is complex (requires text-node-only highlighting)
+  // For now, we prioritize secure markdown rendering over search highlighting in detail view
+  body.innerHTML = renderMarkdownSafe(message.body_md || "(empty body)");
 
   messageDetailEl.append(header, body);
 

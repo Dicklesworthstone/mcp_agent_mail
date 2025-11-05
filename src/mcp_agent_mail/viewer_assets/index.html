@@ -3,6 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types mailViewerDOMPurify;"
+    />
     <title>MCP Agent Mail Viewer</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -53,6 +57,10 @@
         Generated bundle — diagnostics based on <code>manifest.json</code>.
       </small>
     </footer>
+
+    <!-- Vendor libraries for secure markdown rendering -->
+    <script src="./vendor/marked.min.js"></script>
+    <script src="./vendor/dompurify.min.js"></script>
 
     <script type="module" src="./preview-reload.js"></script>
     <script type="module" src="./viewer.js"></script>

@@ -783,3 +783,195 @@ def test_cli_decrypt_command_not_file(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "must be a file" in result.output
+
+
+def test_encrypt_bundle_requires_age_binary(tmp_path: Path, monkeypatch) -> None:
+    """Test that encrypt_bundle fails gracefully when age is not installed."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: None)
+
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"test data")
+
+    with pytest.raises(ShareExportError, match="`age` CLI not found"):
+        share.encrypt_bundle(bundle, ["age1recipient..."])
+
+
+def test_encrypt_bundle_with_invalid_recipient(tmp_path: Path, monkeypatch) -> None:
+    """Test encryption failure with invalid recipient format."""
+    # Mock age binary to test actual age failures
+    import subprocess
+
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"test data")
+
+    def mock_run(*args, **kwargs):
+        # Simulate age returning error for invalid recipient
+        class Result:
+            returncode = 1
+            stderr = "Error: invalid recipient format: notavalidrecipient"
+
+        return Result()
+
+    monkeypatch.setattr(share.subprocess, "run", mock_run)
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    with pytest.raises(ShareExportError, match="age encryption failed.*invalid recipient"):
+        share.encrypt_bundle(bundle, ["notavalidrecipient"])
+
+
+def test_encrypt_bundle_returns_none_for_empty_recipients(tmp_path: Path) -> None:
+    """Test that encrypt_bundle returns None when no recipients provided."""
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"test data")
+
+    result = share.encrypt_bundle(bundle, [])
+    assert result is None
+
+
+def test_verify_bundle_with_tampered_signature(tmp_path: Path) -> None:
+    """Test signature verification fails when signature doesn't match."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    # Create a valid signed bundle
+    manifest_path = tmp_path / "manifest.json"
+    manifest_data = {"version": "1.0", "test": "data"}
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    signing_key_path = tmp_path / "signing.key"
+    signing_key_path.write_bytes(b"A" * 32)
+
+    share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+    # Tamper with the manifest after signing (this invalidates the signature)
+    manifest_data["tampered"] = True
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    # Verification should fail because manifest changed
+    with pytest.raises(ShareExportError, match="signature verification failed"):
+        share.verify_bundle(tmp_path)
+
+
+def test_verify_bundle_with_missing_signature_file(tmp_path: Path) -> None:
+    """Test verification when signature file is present in manifest but missing from disk."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    # Create manifest with signature claim
+    manifest_path = tmp_path / "manifest.json"
+    manifest_data = {"version": "1.0", "signed": True}
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    # Create signature file
+    sig_path = tmp_path / "manifest.sig.json"
+    sig_data = {
+        "algorithm": "ed25519",
+        "signature": "dGVzdA==",  # base64 "test"
+        "public_key": "dGVzdA==",
+        "manifest_sha256": "abc123",
+    }
+    sig_path.write_text(json.dumps(sig_data), encoding="utf-8")
+
+    # Delete signature file after manifest references it
+    sig_path.unlink()
+
+    # Verification should handle missing signature gracefully
+    result = share.verify_bundle(tmp_path)
+    assert result["signature_checked"] is False
+
+
+def test_verify_bundle_with_corrupted_signature_json(tmp_path: Path) -> None:
+    """Test verification handles corrupted signature JSON."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    sig_path = tmp_path / "manifest.sig.json"
+    sig_path.write_text("{ invalid json", encoding="utf-8")
+
+    # Should handle gracefully
+    with pytest.raises(ShareExportError, match="not valid JSON"):
+        share.verify_bundle(tmp_path)
+
+
+def test_decrypt_encrypted_file_not_exist(tmp_path: Path, monkeypatch) -> None:
+    """Test decrypt handles non-existent encrypted file."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    encrypted = tmp_path / "nonexistent.age"
+    output = tmp_path / "out"
+    identity = tmp_path / "key.txt"
+    identity.write_text("AGE-SECRET-KEY-1...", encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="Encrypted file not found"):
+        share.decrypt_with_age(encrypted, output, identity=identity)
+
+
+def test_sign_manifest_with_invalid_key_length(tmp_path: Path) -> None:
+    """Test signing fails with key that's not 32 or 64 bytes."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    signing_key_path = tmp_path / "bad_key.key"
+    signing_key_path.write_bytes(b"A" * 16)  # Invalid: only 16 bytes
+
+    with pytest.raises(ShareExportError, match="32-byte seed or 64-byte expanded"):
+        share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+
+def test_sign_manifest_with_directory_instead_of_file(tmp_path: Path) -> None:
+    """Test signing fails when manifest path is a directory."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_dir = tmp_path / "manifest_dir"
+    manifest_dir.mkdir()
+
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+
+    with pytest.raises(ShareExportError, match="Manifest path must be a file"):
+        share.sign_manifest(manifest_dir, signing_key_path, tmp_path)
+
+
+def test_sign_manifest_with_missing_manifest(tmp_path: Path) -> None:
+    """Test signing fails when manifest doesn't exist."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_path = tmp_path / "missing.json"
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+
+    with pytest.raises(ShareExportError, match="Manifest file not found"):
+        share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+
+def test_verify_bundle_with_sri_and_signature_both_valid(tmp_path: Path) -> None:
+    """Test verification succeeds when both SRI and signature are valid."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    # Create viewer file
+    viewer_dir = tmp_path / "viewer"
+    viewer_dir.mkdir()
+    js_file = viewer_dir / "test.js"
+    js_file.write_text("console.log('test');", encoding="utf-8")
+
+    # Compute SRI
+    sri_hash = share._compute_sri(js_file)
+
+    # Create manifest with SRI
+    manifest_data = {
+        "version": "1.0",
+        "viewer": {"sri": {"viewer/test.js": sri_hash}},
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    # Sign manifest
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+    share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+    # Verification should pass
+    result = share.verify_bundle(tmp_path)
+    assert result["sri_checked"] is True
+    assert result["signature_checked"] is True
+    assert result["signature_verified"] is True

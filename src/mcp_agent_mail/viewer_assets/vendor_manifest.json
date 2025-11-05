@@ -10,5 +10,23 @@
         "sha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73"
       }
     }
+  },
+  "marked": {
+    "version": "11.0.0",
+    "source": "https://cdn.jsdelivr.net/npm/marked@11.0.0/marked.min.js",
+    "files": {
+      "marked.min.js": {
+        "sha256": "8a2388c31987f183f05076962a87c0be2e8d4d423da5e73a834e5e95bb4207ef"
+      }
+    }
+  },
+  "dompurify": {
+    "version": "3.0.8",
+    "source": "https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js",
+    "files": {
+      "dompurify.min.js": {
+        "sha256": "d2469862adea8ad924559a4fffab8a4c9c1f4e9a8534ce8e1c36ec698cf0f54c"
+      }
+    }
   }
 }

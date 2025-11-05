@@ -402,7 +402,12 @@ def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path
     }
 
     sig_path = output_path / "manifest.sig.json"
-    _write_json_file(sig_path, payload)
+    try:
+        _write_json_file(sig_path, payload)
+    except ShareExportError:
+        raise  # Re-raise ShareExportError as-is
+    except Exception as exc:
+        raise ShareExportError(f"Failed to write signature file: {exc}") from exc
 
     if public_out is not None:
         # Expand and validate public key output path

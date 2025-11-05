@@ -29,6 +29,7 @@ dependencies = [
   "jinja2>=3.1.4",
   "markdown2>=2.4.12",
   "bleach>=6.1.0",
+  "tinycss2>=1.4.0",
   "python-decouple>=3.8",
   "sqlmodel>=0.0.16",
   "sqlalchemy[asyncio]>=2.0.35",
@@ -123,6 +124,10 @@ addopts = [
 pythonpath = ["src"]
 filterwarnings = [
   "ignore:coroutine 'FastMCP.get_tool' was never awaited:RuntimeWarning",
+]
+markers = [
+  "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+  "benchmark: marks tests as performance benchmarks",
 ]
 
 [dependency-groups]
