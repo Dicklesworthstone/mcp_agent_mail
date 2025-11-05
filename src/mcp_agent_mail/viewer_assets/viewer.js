@@ -825,7 +825,51 @@ function filterThreads(term) {
   renderThreads(state.filteredThreads);
 }
 
+/**
+ * Check if the page is running in a cross-origin isolated context.
+ * Display a warning banner if isolation is not available.
+ */
+function checkCrossOriginIsolation() {
+  const isIsolated = window.crossOriginIsolated === true;
+
+  if (!isIsolated) {
+    showIsolationWarning();
+  }
+
+  return isIsolated;
+}
+
+/**
+ * Display a warning banner about missing cross-origin isolation.
+ */
+function showIsolationWarning() {
+  const header = document.querySelector('header.banner');
+  if (!header) return;
+
+  const warningBanner = document.createElement('div');
+  warningBanner.id = 'isolation-warning';
+  warningBanner.className = 'warning-banner';
+  warningBanner.innerHTML = createTrustedHTML(`
+    <strong>⚠️ Cross-Origin Isolation Not Enabled</strong>
+    <p>This viewer requires Cross-Origin-Opener-Policy (COOP) and Cross-Origin-Embedder-Policy (COEP) headers for optimal performance.</p>
+    <details>
+      <summary>How to fix this</summary>
+      <ul>
+        <li><strong>Cloudflare Pages / Netlify:</strong> The included <code>_headers</code> file should be automatically applied.</li>
+        <li><strong>GitHub Pages:</strong> Uncomment the <code>&lt;script src="./coi-serviceworker.js"&gt;&lt;/script&gt;</code> line in <code>index.html</code> and redeploy.</li>
+        <li><strong>Other hosts:</strong> Configure your server to send COOP and COEP headers. See <code>HOW_TO_DEPLOY.md</code> for details.</li>
+      </ul>
+      <p>Without isolation, advanced features like OPFS caching and SharedArrayBuffer may be unavailable.</p>
+    </details>
+  `);
+
+  header.parentNode.insertBefore(warningBanner, header.nextSibling);
+}
+
 async function bootstrap() {
+  // Check for cross-origin isolation and show warning if needed
+  checkCrossOriginIsolation();
+
   try {
     const manifest = await loadJSON("../manifest.json");
     state.manifest = manifest;
