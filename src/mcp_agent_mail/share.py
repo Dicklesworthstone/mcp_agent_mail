@@ -6,11 +6,9 @@ import base64
 import binascii
 import configparser
 import hashlib
-import hmac
 import json
 import os
 import re
-import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -1272,11 +1270,26 @@ def maybe_chunk_database(
 
 
 def copy_viewer_assets(output_dir: Path) -> None:
-    """Copy the packaged viewer assets into the export output directory."""
+    """Copy viewer assets into the export output directory.
+
+    Prefer the live source tree (useful during development) and fall back to
+    installed package resources when the source tree is not available.
+    """
 
     viewer_root = output_dir / "viewer"
     viewer_root.mkdir(parents=True, exist_ok=True)
 
+    # Attempt to copy from live source tree first
+    source_tree = Path(__file__).parent / "viewer_assets"
+    if source_tree.exists() and source_tree.is_dir():
+        for src_path in sorted(p for p in source_tree.rglob("*") if p.is_file()):
+            rel = src_path.relative_to(source_tree)
+            dest = viewer_root / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(src_path.read_bytes())
+        return
+
+    # Fallback to packaged resources
     _verify_viewer_vendor_assets()
 
     package_root = resources.files("mcp_agent_mail.viewer_assets")

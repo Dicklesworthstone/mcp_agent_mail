@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -44,12 +45,12 @@ from .share import (
     build_materialized_views,
     build_search_indexes,
     bundle_attachments,
-    finalize_snapshot_for_export,
     copy_viewer_assets,
     create_sqlite_snapshot,
     detect_hosting_hints,
     encrypt_bundle,
     export_viewer_data,
+    finalize_snapshot_for_export,
     maybe_chunk_database,
     package_directory_as_zip,
     prepare_output_directory,
@@ -67,6 +68,9 @@ warnings.filterwarnings("ignore", category=UserWarning, module="bleach")
 console = Console()
 DEFAULT_ENV_PATH = Path(".env")
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
+
+_PREVIEW_FORCE_TOKEN = 0
+_PREVIEW_FORCE_LOCK = threading.Lock()
 
 guard_app = typer.Typer(help="Install or remove the Git pre-commit guard")
 file_reservations_app = typer.Typer(help="Inspect advisory file_reservations")
@@ -636,7 +640,16 @@ def _run_share_export_wizard(
     }
 
 
+def _bump_preview_force_token() -> int:
+    global _PREVIEW_FORCE_TOKEN
+    with _PREVIEW_FORCE_LOCK:
+        _PREVIEW_FORCE_TOKEN = (_PREVIEW_FORCE_TOKEN + 1) % (2 ** 63)
+        return _PREVIEW_FORCE_TOKEN
+
+
 def _collect_preview_status(bundle_path: Path) -> dict[str, Any]:
+    with _PREVIEW_FORCE_LOCK:
+        token = _PREVIEW_FORCE_TOKEN
     bundle_path = bundle_path.resolve()
     entries: list[str] = []
     latest_ns = 0
@@ -651,12 +664,14 @@ def _collect_preview_status(bundle_path: Path) -> dict[str, Any]:
             latest_ns = max(latest_ns, stat.st_mtime_ns)
             if rel == "manifest.json":
                 manifest_ns = stat.st_mtime_ns
+    entries.append(f"manual:{token}")
     digest_input = "|".join(entries).encode("utf-8")
     signature = hashlib.sha256(digest_input).hexdigest() if entries else "0"
     payload: dict[str, Any] = {
         "signature": signature,
         "files_indexed": len(entries),
         "last_modified_ns": latest_ns or None,
+        "manual_token": token,
     }
     if latest_ns:
         payload["last_modified_iso"] = datetime.fromtimestamp(latest_ns / 1_000_000_000, tz=timezone.utc).isoformat()
@@ -689,6 +704,12 @@ def _start_preview_server(bundle_path: Path, host: str, port: int) -> ThreadingH
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            # Quiet common noisy requests in preview
+            if self.path == "/favicon.ico" or self.path.endswith(".map") or self.path.startswith("/.well-known/"):
+                # Return 204 No Content to avoid browser/server 404 noise
+                self.send_response(204)
+                self.end_headers()
+                return
             return super().do_GET()
 
     server = ThreadingHTTPServer((host, port), PreviewRequestHandler)
@@ -713,29 +734,101 @@ def share_preview(
         console.print(f"[red]Bundle directory not found:[/] {bundle_path}")
         raise typer.Exit(code=1)
 
+    # Ensure latest viewer assets are present (prefer source tree during dev)
+    with suppress(Exception):
+        copy_viewer_assets(bundle_path)
+
     server = _start_preview_server(bundle_path, host, port)
     actual_host, actual_port = server.server_address[:2]
     actual_host = actual_host or host
 
     console.rule("[bold]Static Bundle Preview[/bold]")
     console.print(f"Serving {bundle_path} at http://{actual_host}:{actual_port}/ (Ctrl+C to stop)")
+    console.print("[dim]Commands: press 'r' to force refresh, 'd' to deploy now, 'q' to stop.[/]")
 
     if open_browser:
         with suppress(Exception):
-            webbrowser.open(f"http://{actual_host}:{actual_port}/")
+            webbrowser.open(f"http://{actual_host}:{actual_port}/viewer/")
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    running = True
+    deployment_requested = False
     try:
-        while thread.is_alive():
-            time.sleep(0.5)
+        if os.name != "nt" and sys.stdin.isatty():
+            import select
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_settings = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            try:
+                while running and thread.is_alive():
+                    rlist, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if rlist:
+                        ch = sys.stdin.read(1)
+                        if ch in ("\x03", "\x04"):
+                            raise KeyboardInterrupt
+                        if ch.lower() == "r":
+                            token = _bump_preview_force_token()
+                            console.print(f"[dim]Reload signal sent (token {token}).[/]")
+                        elif ch.lower() == "d":
+                            deployment_requested = True
+                            running = False
+                            break
+                        elif ch.lower() == "q":
+                            running = False
+                            break
+                    else:
+                        continue
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        else:
+            while running and thread.is_alive():
+                time.sleep(0.5)
+                if os.name == "nt":
+                    import msvcrt as _msvcrt
+
+                    while getattr(_msvcrt, "kbhit", lambda: False)():
+                        getwch = getattr(_msvcrt, "getwch", None)
+                        if getwch is not None:
+                            ch = getwch()
+                        else:
+                            getch = getattr(_msvcrt, "getch", None)
+                            if getch is None:
+                                break
+                            raw = getch()
+                            try:
+                                ch = raw.decode("utf-8", "ignore")
+                            except Exception:
+                                ch = str(raw)
+                        if ch in ("\x03", "\x1a"):
+                            raise KeyboardInterrupt
+                        if ch.lower() == "r":
+                            token = _bump_preview_force_token()
+                            console.print(f"[dim]Reload signal sent (token {token}).[/]")
+                        elif ch.lower() == "d":
+                            deployment_requested = True
+                            running = False
+                            break
+                        elif ch.lower() == "q":
+                            running = False
+                            break
+                else:
+                    continue
     except KeyboardInterrupt:
         console.print("\n[dim]Shutting down preview server...[/]")
     finally:
+        if not running:
+            console.print("\n[dim]Stopping preview server (requested).[/]")
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
         console.print("[green]Preview server stopped.[/]")
+        if deployment_requested:
+            # Special exit code indicates deployment requested by user from preview
+            raise typer.Exit(code=42)
 
 
 @share_app.command("verify")
@@ -871,12 +964,12 @@ def share_wizard() -> None:
         if alt_path.exists():
             wizard_script = alt_path
         else:
-            console.print(f"[red]Wizard script not found.[/]")
-            console.print(f"[yellow]Expected locations:[/]")
+            console.print("[red]Wizard script not found.[/]")
+            console.print("[yellow]Expected locations:[/]")
             console.print(f"  • {wizard_script}")
             console.print(f"  • {alt_path}")
-            console.print(f"\n[yellow]This command only works when running from source.[/]")
-            console.print(f"[cyan]Run the wizard directly:[/] python scripts/share_to_github_pages.py")
+            console.print("\n[yellow]This command only works when running from source.[/]")
+            console.print("[cyan]Run the wizard directly:[/] python scripts/share_to_github_pages.py")
             raise typer.Exit(code=1)
 
     try:

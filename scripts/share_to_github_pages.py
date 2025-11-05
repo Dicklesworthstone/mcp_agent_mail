@@ -15,29 +15,34 @@ Requirements:
 
 from __future__ import annotations
 
-import os
+import json
 import re
 import secrets
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import webbrowser
+from contextlib import suppress
+from importlib import resources as _resources
 from pathlib import Path
 from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
 
 # Configuration directory
 CONFIG_DIR = Path.home() / ".mcp-agent-mail"
 CONFIG_FILE = CONFIG_DIR / "wizard-config.json"
+SESSION_DIR = CONFIG_DIR / "wizard-session"
+SESSION_STATE_FILE = SESSION_DIR / "session.json"
+SESSION_BUNDLE_DIR = SESSION_DIR / "bundle"
+SESSION_VERSION = 1
 
 
 def find_available_port(start: int = 9000, end: int = 9100) -> int:
@@ -95,11 +100,88 @@ def load_last_config() -> dict[str, Any] | None:
     if not CONFIG_FILE.exists():
         return None
     try:
-        import json
         with CONFIG_FILE.open("r") as f:
             return json.load(f)
     except Exception:
         return None
+
+
+def clear_resume_state() -> None:
+    """Remove any saved in-progress session and workspace bundle."""
+    with suppress(FileNotFoundError):
+        SESSION_STATE_FILE.unlink()
+    if SESSION_BUNDLE_DIR.exists():
+        shutil.rmtree(SESSION_BUNDLE_DIR, ignore_errors=True)
+
+
+def save_resume_state(state: dict[str, Any]) -> None:
+    """Persist current wizard session state for resuming later."""
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    payload = dict(state)
+    payload["version"] = SESSION_VERSION
+    payload["bundle_path"] = str(SESSION_BUNDLE_DIR)
+    with SESSION_STATE_FILE.open("w") as fh:
+        json.dump(payload, fh, indent=2)
+
+
+def load_resume_state() -> dict[str, Any] | None:
+    """Load in-progress session state if available and consistent."""
+    if not SESSION_STATE_FILE.exists():
+        return None
+    try:
+        with SESSION_STATE_FILE.open("r") as fh:
+            data = json.load(fh)
+    except Exception:
+        clear_resume_state()
+        return None
+
+    if data.get("version") != SESSION_VERSION:
+        clear_resume_state()
+        return None
+
+    bundle_path = Path(data.get("bundle_path", "")).expanduser()
+    if not bundle_path.exists():
+        clear_resume_state()
+        return None
+
+    data["bundle_path"] = bundle_path
+    return data
+def _refresh_viewer_assets(bundle_dir: Path) -> None:
+    """Overwrite viewer assets in an existing bundle with the latest packaged files.
+
+    This ensures CSP and scripts are up to date even when reusing a prior export.
+    """
+    try:
+        viewer_root = bundle_dir / "viewer"
+        viewer_root.mkdir(parents=True, exist_ok=True)
+
+        # Prefer copying from the live source tree in development
+        source_tree = Path(__file__).resolve().parents[1] / "src" / "mcp_agent_mail" / "viewer_assets"
+        if source_tree.exists() and source_tree.is_dir():
+            for src in sorted(p for p in source_tree.rglob("*") if p.is_file()):
+                rel = src.relative_to(source_tree)
+                dst = viewer_root / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+            return
+
+        # Fallback to packaged resources
+        package_root = _resources.files("mcp_agent_mail.viewer_assets")
+
+        def _walk(node: Any, rel: Path) -> None:  # type: ignore[no-any-explicit]
+            for child in node.iterdir():
+                child_rel = rel / child.name
+                if child.is_dir():
+                    _walk(child, child_rel)
+                else:
+                    dest = viewer_root / child_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(child.read_bytes())
+
+        _walk(package_root, Path())
+    except Exception as exc:
+        console.print(f"[yellow]Warning:[/] Failed to refresh viewer assets: {exc}")
+
 
 
 def estimate_bundle_size(projects: list[str]) -> str:
@@ -152,18 +234,18 @@ def show_deployment_summary(
     if deploy_type == "local":
         console.print(f"[bold]Target:[/] Local export to {deployment.get('path', './mailbox-export')}")
     elif deploy_type == "github-new":
-        console.print(f"[bold]Target:[/] GitHub Pages")
+        console.print("[bold]Target:[/] GitHub Pages")
         console.print(f"  Repository: {deployment.get('repo_name', '(not set)')}")
         console.print(f"  Visibility: {'Private' if deployment.get('private', False) else 'Public'}")
     elif deploy_type == "cloudflare-pages":
-        console.print(f"[bold]Target:[/] Cloudflare Pages")
+        console.print("[bold]Target:[/] Cloudflare Pages")
         console.print(f"  Project: {deployment.get('project_name', '(not set)')}")
 
     # Signing
     if signing_key:
-        console.print(f"[bold]Signing:[/] Enabled (Ed25519)")
+        console.print("[bold]Signing:[/] Enabled (Ed25519)")
     else:
-        console.print(f"[bold]Signing:[/] Disabled")
+        console.print("[bold]Signing:[/] Disabled")
 
     console.print()
     return Confirm.ask("[bold]Proceed with export and deployment?[/]", default=True)
@@ -498,7 +580,7 @@ def export_bundle(
     signing_key: Path | None = None,
 ) -> tuple[bool, Path | None]:
     """Export mailbox bundle."""
-    cmd = [
+    base_cmd = [
         "uv",
         "run",
         "python",
@@ -511,6 +593,8 @@ def export_bundle(
         "--no-zip",
     ]
 
+    cmd = list(base_cmd)
+
     if scrub_preset != "none":
         cmd.extend(["--scrub-preset", scrub_preset])
 
@@ -520,12 +604,18 @@ def export_bundle(
     signing_pub_path = None
     if signing_key:
         signing_pub_path = signing_key.with_suffix(".pub")
+        # Always sign; only write public key file if it doesn't already exist
         cmd.extend([
             "--signing-key",
             str(signing_key),
-            "--signing-public-out",
-            str(signing_pub_path),
         ])
+        if not signing_pub_path.exists():
+            cmd.extend([
+                "--signing-public-out",
+                str(signing_pub_path),
+            ])
+        else:
+            console.print(f"[dim]Reusing existing signing public key at {signing_pub_path}[/]")
 
     console.print("\n[bold]Exporting mailbox bundle...[/]")
     with Progress(
@@ -541,7 +631,23 @@ def export_bundle(
             return True, signing_pub_path
         except subprocess.CalledProcessError as e:
             progress.update(task, completed=True)
-            console.print(f"[red]Export failed:[/]\n{e.stderr}")
+            stdout_text = e.stdout or ""
+            stderr_text = e.stderr or ""
+            combined = (stdout_text + "\n" + stderr_text).strip()
+            details = combined if combined else f"Exit code {e.returncode} (no output)"
+            # Fallback: if export failed due to signing dependency, retry without signing
+            if signing_key and ("PyNaCl is required" in details or "Failed to sign manifest" in details or "Public key output file already exists" in details):
+                console.print("[yellow]Signing unavailable or failed. Retrying export without signing...[/]")
+                no_sign_cmd = [arg for arg in cmd if arg not in {"--signing-key", "--signing-public-out", str(signing_key), str(signing_pub_path)}]
+                try:
+                    result2 = subprocess.run(no_sign_cmd, capture_output=True, text=True, check=True)
+                    console.print("[green]✓ Export complete (unsigned)[/]")
+                    return True, None
+                except subprocess.CalledProcessError as e2:
+                    out2 = (e2.stdout or "") + "\n" + (e2.stderr or "")
+                    console.print(f"[red]Export failed (retry without signing):[/]\n{out2.strip()}")
+                    return False, None
+            console.print(f"[red]Export failed:[/]\n{details}")
             return False, None
 
 
@@ -574,15 +680,13 @@ def preview_bundle(output_dir: Path) -> bool:
                 str(output_dir),
                 "--port",
                 str(port),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            ]
         )
 
         # Wait for server to be ready by polling the port
         console.print("[cyan]Waiting for server to start...[/]")
         max_attempts = 30
-        for attempt in range(max_attempts):
+        for _attempt in range(max_attempts):
             try:
                 with socket.create_connection(("127.0.0.1", port), timeout=1):
                     break
@@ -596,12 +700,17 @@ def preview_bundle(output_dir: Path) -> bool:
             process.terminate()
             return False
 
-        # Server is ready, open browser
-        console.print(f"[green]✓ Server ready, opening browser at http://127.0.0.1:{port}[/]")
-        webbrowser.open(f"http://127.0.0.1:{port}")
+        # Server is ready, open browser (viewer entry)
+        console.print(f"[green]✓ Server ready, opening browser at http://127.0.0.1:{port}/viewer/[/]")
+        webbrowser.open(f"http://127.0.0.1:{port}/viewer/")
 
-        # Wait for server process to complete (user will Ctrl+C)
+        # Wait for server process to complete (user will Ctrl+C or 'q'/'d')
         process.wait()
+
+        # Special exit code 42 means the user pressed 'd' to request deployment
+        if process.returncode == 42:
+            console.print("\n[bold green]Deploy requested from preview ('d' key).[/]")
+            return Confirm.ask("Proceed with deployment now?", default=True)
 
         # After server stops, ask if satisfied
         console.print("\n[bold]Preview complete.[/]")
@@ -688,6 +797,7 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
             )
 
             # Print output as it arrives
+            assert process.stdout is not None
             for line in process.stdout:
                 console.print(f"  [dim]{line.rstrip()}[/]")
 
@@ -737,7 +847,7 @@ def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool
         )
         pages_url = result.stdout.strip()
 
-        console.print(f"[green]✓ GitHub Pages enabled[/]")
+        console.print("[green]✓ GitHub Pages enabled[/]")
         return True, pages_url
 
     except subprocess.CalledProcessError as e:
@@ -766,7 +876,7 @@ def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool
 
 def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[bool, str]:
     """Deploy bundle to Cloudflare Pages with real-time output."""
-    console.print(f"\n[bold cyan]Deploying to Cloudflare Pages...[/]")
+    console.print("\n[bold cyan]Deploying to Cloudflare Pages...[/]")
 
     try:
         # Use wrangler pages deploy command with real-time streaming
@@ -789,6 +899,7 @@ def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[boo
         pages_url = ""
 
         # Stream output in real-time
+        assert process.stdout is not None
         for line in process.stdout:
             stripped = line.rstrip()
             console.print(f"  [dim]{stripped}[/]")
@@ -809,7 +920,7 @@ def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[boo
             # Fallback: construct expected URL
             pages_url = f"https://{project_name}.pages.dev"
 
-        console.print(f"\n[bold green]✓ Deployed to Cloudflare Pages[/]")
+        console.print("\n[bold green]✓ Deployed to Cloudflare Pages[/]")
         return True, pages_url
 
     except Exception as e:
@@ -831,42 +942,83 @@ def main() -> None:
         )
     )
 
-    # Check if we have a previous configuration
-    last_config = load_last_config()
-    use_last_config = False
+    resume_state = load_resume_state()
+    resume_configured = False
+    selected_projects: list[str] = []
+    scrub_preset = "standard"
+    deployment: dict[str, Any] = {}
+    use_signing = True
+    generate_new_key = True
+    signing_key: Path | None = None
+    signing_pub: Path | None = None
+    last_known_signing_path: Path | None = None
+    bundle_ready = False
 
+    if resume_state:
+        console.print("\n[bold cyan]Incomplete session detected[/]")
+        console.print(f"  Projects: {len(resume_state.get('selected_projects', []))} selected")
+        console.print(f"  Stage: {resume_state.get('stage', 'preview')}")
+        console.print(f"  Workspace: {resume_state.get('bundle_path')}")
+        if Confirm.ask("Resume where you left off?", default=True):
+            resume_configured = True
+            selected_projects = list(resume_state.get("selected_projects", []))
+            scrub_preset = resume_state.get("scrub_preset", "standard")
+            deployment = resume_state.get("deployment", {})
+            use_signing = resume_state.get("use_signing", True)
+            generate_new_key = resume_state.get("generate_new_key", True)
+            bundle_ready = bool(resume_state.get("bundle_ready", False))
+            if use_signing:
+                signing_candidate = resume_state.get("signing_key_path")
+                if signing_candidate:
+                    candidate_path = Path(signing_candidate).expanduser()
+                    last_known_signing_path = candidate_path
+                    if generate_new_key:
+                        if candidate_path.exists():
+                            signing_key = candidate_path
+                        else:
+                            console.print(
+                                f"[yellow]Saved signing key {candidate_path} is missing; a new key will be generated.[/]"
+                            )
+                            signing_key = None
+            signing_pub_candidate = resume_state.get("signing_pub_path")
+            if signing_pub_candidate:
+                candidate_path = Path(signing_pub_candidate)
+                if candidate_path.exists():
+                    signing_pub = candidate_path
+        else:
+            clear_resume_state()
+
+    last_config = load_last_config() if not resume_configured else None
+    use_last_config = False
     if last_config:
         console.print("\n[bold cyan]Previous Configuration Found[/]")
         console.print(f"  Projects: {last_config.get('project_count', '?')} selected")
         console.print(f"  Redaction: {last_config.get('scrub_preset', 'standard')}")
         console.print(f"  Target: {last_config.get('deployment_type', 'unknown')}")
+        use_last_config = Confirm.ask("\nUse these settings again?", default=True)
 
-        use_last_config = Confirm.ask(
-            "\nUse these settings again?",
-            default=True,
-        )
-
-    # If not using last config, go through interactive setup
-    if not use_last_config:
-        # Get deployment target first to know which CLIs we need
-        deployment = select_deployment_target()
-    else:
-        # Reconstruct deployment config from saved settings
-        deployment = last_config.get("deployment", {})
-
-        # Validate that deployment config is complete
+    if resume_configured:
+        deployment = deployment or {}
         if not deployment.get("type"):
-            console.print("[yellow]Saved deployment config is invalid, please select again[/]")
-            deployment = select_deployment_target()
-            use_last_config = False  # Fall back to interactive mode
+            console.print("[yellow]Saved session missing deployment target; starting a fresh run.[/]")
+            clear_resume_state()
+            resume_configured = False
 
-    # Check prerequisites based on deployment choice
+    if not resume_configured:
+        if not use_last_config:
+            deployment = select_deployment_target()
+        else:
+            deployment = last_config.get("deployment", {})
+            if not deployment.get("type"):
+                console.print("[yellow]Saved deployment config is invalid, please select again[/]")
+                deployment = select_deployment_target()
+                use_last_config = False
+
     require_gh = deployment.get("type") == "github-new"
     require_cf = deployment.get("type") == "cloudflare-pages"
     if not check_prerequisites(require_github=require_gh, require_cloudflare=require_cf):
         sys.exit(1)
 
-    # Get projects
     projects_list = get_projects()
     if not projects_list:
         console.print("[yellow]No projects found. Create some messages first![/]")
@@ -874,171 +1026,242 @@ def main() -> None:
 
     console.print(f"\n[green]Found {len(projects_list)} project(s)[/]")
 
-    # Interactive selections (or use saved config)
-    if not use_last_config:
-        selected_projects = select_projects(projects_list)
-        scrub_preset = select_scrub_preset()
-        # Record selected project indices for saving config later
-        selected_indices = [i for i, p in enumerate(projects_list) if p["human_key"] in selected_projects]
-    else:
-        # Use saved project indices
-        saved_indices = last_config.get("project_indices", list(range(len(projects_list))))
-        # Validate indices are still valid
-        selected_indices = [i for i in saved_indices if i < len(projects_list)]
-        if not selected_indices:
-            console.print("[yellow]Saved project selection invalid, please select again[/]")
+    selected_indices: list[int] = []
+
+    if resume_configured and last_config:
+        last_known = last_config.get("signing_key_path")
+        if last_known:
+            last_known_signing_path = Path(last_known).expanduser()
+
+    if resume_configured:
+        available = {p["human_key"]: idx for idx, p in enumerate(projects_list)}
+        selected_projects = [proj for proj in selected_projects if proj in available]
+        if not selected_projects:
+            console.print("[yellow]Saved session references projects that no longer exist. Starting over.[/]")
+            clear_resume_state()
+            resume_configured = False
+        else:
+            selected_indices = [available[p] for p in selected_projects]
+
+    if not resume_configured:
+        if use_last_config and last_config:
+            saved_indices = last_config.get("project_indices", list(range(len(projects_list))))
+            selected_indices = [i for i in saved_indices if i < len(projects_list)]
+            if not selected_indices:
+                console.print("[yellow]Saved project selection invalid, please select again[/]")
+                selected_projects = select_projects(projects_list)
+                selected_indices = [i for i, p in enumerate(projects_list) if p["human_key"] in selected_projects]
+                scrub_preset = select_scrub_preset()
+            else:
+                selected_projects = [projects_list[idx]["human_key"] for idx in selected_indices]
+                console.print(f"[green]Using saved selection: {len(selected_projects)} project(s)[/]")
+                scrub_preset = last_config.get("scrub_preset", "standard")
+                last_known = last_config.get("signing_key_path")
+                if last_known:
+                    last_known_signing_path = Path(last_known).expanduser()
+        else:
             selected_projects = select_projects(projects_list)
             selected_indices = [i for i, p in enumerate(projects_list) if p["human_key"] in selected_projects]
+            scrub_preset = select_scrub_preset()
+
+        use_signing = True
+        generate_new_key = True
+        signing_key = None
+        if use_last_config and last_config:
+            use_signing = last_config.get("use_signing", True)
+            generate_new_key = last_config.get("generate_new_key", True)
         else:
-            selected_projects = [projects_list[idx]["human_key"] for idx in selected_indices]
-            console.print(f"[green]Using saved selection: {len(selected_projects)} project(s)[/]")
+            use_signing = Confirm.ask("\nSign the bundle with Ed25519?", default=True)
+            generate_new_key = Confirm.ask("Generate a new signing key?", default=True) if use_signing else False
 
-        scrub_preset = last_config.get("scrub_preset", "standard")
-
-    # Signing key (use saved preference if available)
-    signing_key = None
-    if not use_last_config:
-        use_signing = Confirm.ask("\nSign the bundle with Ed25519?", default=True)
-        generate_new_key = False
         if use_signing:
-            generate_new_key = Confirm.ask("Generate a new signing key?", default=True)
             if generate_new_key:
                 signing_key = generate_signing_key()
+                last_known_signing_path = signing_key
             else:
-                key_path = Prompt.ask("Path to existing signing key")
+                if last_known_signing_path:
+                    key_path = Prompt.ask(
+                        "Path to existing signing key",
+                        default=str(last_known_signing_path),
+                    )
+                else:
+                    key_path = Prompt.ask("Path to existing signing key")
                 signing_key = Path(key_path).expanduser().resolve()
+                last_known_signing_path = signing_key
+
+        signing_pub = None
+        bundle_ready = False
     else:
-        use_signing = last_config.get("use_signing", True)
-        generate_new_key = last_config.get("generate_new_key", True)
         if use_signing:
             if generate_new_key:
-                signing_key = generate_signing_key()
+                if signing_key is None or not signing_key.exists():
+                    signing_key = generate_signing_key()
+                    last_known_signing_path = signing_key
             else:
-                # Ask for key path again (don't save sensitive paths)
-                key_path = Prompt.ask("Path to existing signing key")
+                if last_known_signing_path:
+                    key_path = Prompt.ask(
+                        "Path to existing signing key",
+                        default=str(last_known_signing_path),
+                    )
+                else:
+                    key_path = Prompt.ask("Path to existing signing key")
                 signing_key = Path(key_path).expanduser().resolve()
+                last_known_signing_path = signing_key
 
-    # Show deployment summary and ask for confirmation
+    if not selected_projects:
+        console.print("[yellow]No projects selected. Nothing to export.[/]")
+        sys.exit(0)
+
     if not show_deployment_summary(selected_projects, scrub_preset, deployment, signing_key):
         console.print("[yellow]Deployment cancelled by user[/]")
         sys.exit(0)
 
-    # Export to temp directory first for preview
-    with tempfile.TemporaryDirectory(prefix="mailbox-preview-") as temp_dir:
-        temp_path = Path(temp_dir)
+    bundle_path = SESSION_BUNDLE_DIR
+    reuse_existing = resume_configured and bundle_ready and bundle_path.exists()
+    if reuse_existing:
+        reuse_existing = Confirm.ask("\nReuse the previously exported bundle for preview?", default=False)
 
-        success, signing_pub = export_bundle(temp_path, selected_projects, scrub_preset, signing_key)
+    if not reuse_existing:
+        if bundle_path.exists():
+            shutil.rmtree(bundle_path, ignore_errors=True)
+        bundle_path.mkdir(parents=True, exist_ok=True)
+        success, signing_pub = export_bundle(
+            bundle_path,
+            selected_projects,
+            scrub_preset,
+            signing_key if use_signing else None,
+        )
+        if not success:
+            sys.exit(1)
+        bundle_ready = True
+    else:
+        console.print("[green]Reusing existing bundle workspace for preview.[/]")
+        bundle_ready = True
+
+    # Always refresh viewer assets in the bundle to pick up latest CSP/scripts
+    _refresh_viewer_assets(bundle_path)
+
+    saved_path = signing_key or last_known_signing_path
+    save_resume_state({
+        "stage": "preview",
+        "selected_projects": selected_projects,
+        "scrub_preset": scrub_preset,
+        "deployment": deployment,
+        "use_signing": use_signing,
+        "generate_new_key": generate_new_key,
+        "signing_key_path": str(saved_path) if saved_path else None,
+        "signing_pub_path": str(signing_pub) if signing_pub else None,
+        "bundle_ready": bundle_ready,
+        "timestamp": time.time(),
+    })
+
+    if not Confirm.ask("\nPreview the bundle before deploying?", default=True):
+        satisfied = True
+    else:
+        satisfied = preview_bundle(bundle_path)
+
+    if not satisfied:
+        console.print(
+            f"[yellow]Deployment cancelled. The bundle remains at {bundle_path}. Run the wizard again to resume.[/]"
+        )
+        sys.exit(0)
+
+    if deployment.get("type") == "local":
+        output_path = Path(deployment.get("path", "./mailbox-export")).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(bundle_path, output_path, dirs_exist_ok=True)
+        console.print(f"\n[bold green]✓ Exported to: {output_path}[/]")
+
+        if signing_pub:
+            console.print(f"[green]✓ Signing public key: {signing_pub}[/]")
+
+        save_config({
+            "project_indices": selected_indices,
+            "project_count": len(selected_projects),
+            "scrub_preset": scrub_preset,
+            "deployment": deployment,
+            "deployment_type": "local",
+            "use_signing": use_signing,
+            "generate_new_key": generate_new_key,
+            "signing_key_path": str(signing_key) if signing_key else None,
+        })
+        clear_resume_state()
+
+    elif deployment.get("type") == "github-new":
+        success, repo_full_name = create_github_repo(
+            deployment.get("repo_name", "mailbox-viewer"),
+            deployment.get("private", False),
+            deployment.get("description", "MCP Agent Mail static viewer"),
+        )
         if not success:
             sys.exit(1)
 
-        # Preview
-        if not Confirm.ask("\nPreview the bundle before deploying?", default=True):
-            satisfied = True
-        else:
-            satisfied = preview_bundle(temp_path)
+        if not init_and_push_repo(bundle_path, repo_full_name):
+            sys.exit(1)
 
-        if not satisfied:
-            console.print("[yellow]Deployment cancelled[/]")
-            sys.exit(0)
-
-        # Deploy based on target
-        if deployment.get("type") == "local":
-            output_path = Path(deployment.get("path", "./mailbox-export")).expanduser().resolve()
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(temp_path, output_path, dirs_exist_ok=True)
-            console.print(f"\n[bold green]✓ Exported to: {output_path}[/]")
+        success, pages_url = enable_github_pages(repo_full_name)
+        if success:
+            console.print(
+                Panel.fit(
+                    f"[bold green]Deployment Complete![/]\n\n"
+                    f"Repository: https://github.com/{repo_full_name}\n"
+                    f"GitHub Pages: {pages_url}\n\n"
+                    f"[dim]Note: Pages may take 1-2 minutes to become available[/]",
+                    title="Success",
+                    border_style="green",
+                )
+            )
 
             if signing_pub:
-                console.print(f"[green]✓ Signing public key: {signing_pub}[/]")
+                console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
+                console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
 
-            # Save config for next run
             save_config({
                 "project_indices": selected_indices,
                 "project_count": len(selected_projects),
                 "scrub_preset": scrub_preset,
                 "deployment": deployment,
-                "deployment_type": "local",
+                "deployment_type": "github-new",
                 "use_signing": use_signing,
                 "generate_new_key": generate_new_key,
+                "signing_key_path": str(signing_key) if signing_key else None,
             })
+            clear_resume_state()
+        else:
+            console.print("\n[yellow]Repository created but Pages setup failed[/]")
+            console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
 
-        elif deployment.get("type") == "github-new":
-            # Create repo
-            success, repo_full_name = create_github_repo(
-                deployment.get("repo_name", "mailbox-viewer"),
-                deployment.get("private", False),
-                deployment.get("description", "MCP Agent Mail static viewer"),
+    elif deployment.get("type") == "cloudflare-pages":
+        success, pages_url = deploy_to_cloudflare_pages(bundle_path, deployment.get("project_name", "mailbox-viewer"))
+        if success:
+            console.print(
+                Panel.fit(
+                    f"[bold green]Deployment Complete![/]\n\n"
+                    f"Cloudflare Pages: {pages_url}\n\n"
+                    f"[dim]Note: Your site should be live immediately[/]",
+                    title="Success",
+                    border_style="green",
+                )
             )
-            if not success:
-                sys.exit(1)
 
-            # Init and push (use temp_path directly, no need to copy)
-            if not init_and_push_repo(temp_path, repo_full_name):
-                sys.exit(1)
+            if signing_pub:
+                console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
+                console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
 
-            # Enable Pages
-            success, pages_url = enable_github_pages(repo_full_name)
-            if success:
-                console.print(
-                    Panel.fit(
-                        f"[bold green]Deployment Complete![/]\n\n"
-                        f"Repository: https://github.com/{repo_full_name}\n"
-                        f"GitHub Pages: {pages_url}\n\n"
-                        f"[dim]Note: Pages may take 1-2 minutes to become available[/]",
-                        title="Success",
-                        border_style="green",
-                    )
-                )
-
-                if signing_pub:
-                    console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
-                    console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
-
-                # Save config for next run
-                save_config({
-                    "project_indices": selected_indices,
-                    "project_count": len(selected_projects),
-                    "scrub_preset": scrub_preset,
-                    "deployment": deployment,
-                    "deployment_type": "github-new",
-                    "use_signing": use_signing,
-                    "generate_new_key": generate_new_key,
-                })
-            else:
-                console.print(f"\n[yellow]Repository created but Pages setup failed[/]")
-                console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
-
-        elif deployment.get("type") == "cloudflare-pages":
-            # Deploy to Cloudflare Pages
-            success, pages_url = deploy_to_cloudflare_pages(temp_path, deployment.get("project_name", "mailbox-viewer"))
-            if success:
-                console.print(
-                    Panel.fit(
-                        f"[bold green]Deployment Complete![/]\n\n"
-                        f"Cloudflare Pages: {pages_url}\n\n"
-                        f"[dim]Note: Your site should be live immediately[/]",
-                        title="Success",
-                        border_style="green",
-                    )
-                )
-
-                if signing_pub:
-                    console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
-                    console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
-
-                # Save config for next run
-                save_config({
-                    "project_indices": selected_indices,
-                    "project_count": len(selected_projects),
-                    "scrub_preset": scrub_preset,
-                    "deployment": deployment,
-                    "deployment_type": "cloudflare-pages",
-                    "use_signing": use_signing,
-                    "generate_new_key": generate_new_key,
-                })
-            else:
-                console.print(f"\n[yellow]Cloudflare Pages deployment failed[/]")
-                sys.exit(1)
+            save_config({
+                "project_indices": selected_indices,
+                "project_count": len(selected_projects),
+                "scrub_preset": scrub_preset,
+                "deployment": deployment,
+                "deployment_type": "cloudflare-pages",
+                "use_signing": use_signing,
+                "generate_new_key": generate_new_key,
+                "signing_key_path": str(signing_key) if signing_key else None,
+            })
+            clear_resume_state()
+        else:
+            console.print("\n[yellow]Cloudflare Pages deployment failed[/]")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
