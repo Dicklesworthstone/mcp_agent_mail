@@ -35,6 +35,7 @@ const state = {
   lastDatabaseBytes: null,
   databaseSource: "network",
   selectedMessageId: undefined,
+  explainMode: false,
 };
 
 // Trusted Types Policy for secure Markdown rendering
@@ -261,14 +262,42 @@ async function writeToOpfs(key, bytes) {
     console.debug("Unable to request persistent storage", error);
   }
   try {
+    // Write the database file
     const handle = await root.getFileHandle(`${CACHE_PREFIX}-${key}.sqlite3`, { create: true });
     const writable = await handle.createWritable();
     await writable.write(bytes);
     await writable.close();
+
+    // Write version metadata for cache invalidation
+    const metaHandle = await root.getFileHandle(`${CACHE_PREFIX}-${key}.meta.json`, { create: true });
+    const metaWritable = await metaHandle.createWritable();
+    const metadata = {
+      cacheKey: key,
+      cachedAt: new Date().toISOString(),
+      version: 1,
+    };
+    await metaWritable.write(JSON.stringify(metadata));
+    await metaWritable.close();
+
     return true;
   } catch (error) {
     console.warn("Failed to write OPFS cache", error);
     return false;
+  }
+}
+
+async function readOpfsMetadata(key) {
+  const root = await getOpfsRoot();
+  if (!root) {
+    return null;
+  }
+  try {
+    const handle = await root.getFileHandle(`${CACHE_PREFIX}-${key}.meta.json`);
+    const file = await handle.getFile();
+    const text = await file.text();
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }
 
@@ -279,6 +308,7 @@ async function removeFromOpfs(key) {
   }
   try {
     await root.removeEntry(`${CACHE_PREFIX}-${key}.sqlite3`);
+    await root.removeEntry(`${CACHE_PREFIX}-${key}.meta.json`);
   } catch (error) {
     console.debug("No cached file to remove", error);
   }
@@ -344,10 +374,25 @@ async function loadDatabaseBytes(manifest) {
   if (CACHE_SUPPORTED && state.cacheKey) {
     const cached = await readFromOpfs(state.cacheKey);
     if (cached) {
-      state.cacheState = "opfs";
-      state.lastDatabaseBytes = cached;
-      state.databaseSource = "opfs cache";
-      return { bytes: cached, source: "OPFS cache" };
+      // Check cache version to ensure it matches current manifest
+      const metadata = await readOpfsMetadata(state.cacheKey);
+      if (metadata && metadata.cacheKey === state.cacheKey) {
+        console.info("[viewer] Using OPFS cache", { key: state.cacheKey, cachedAt: metadata.cachedAt });
+        state.cacheState = "opfs";
+        state.lastDatabaseBytes = cached;
+        state.databaseSource = "opfs cache";
+        return { bytes: cached, source: "OPFS cache" };
+      } else {
+        // Stale cache detected - invalidate and fetch fresh
+        console.warn("[viewer] Stale OPFS cache detected, invalidating", {
+          cached: metadata?.cacheKey,
+          current: state.cacheKey
+        });
+        await removeFromOpfs(state.cacheKey);
+        if (metadata?.cacheKey) {
+          await removeFromOpfs(metadata.cacheKey);
+        }
+      }
     }
   }
 
@@ -417,6 +462,44 @@ function detectFts(db) {
   } catch (error) {
     console.warn("FTS detection failed", error);
     return false;
+  }
+}
+
+/**
+ * Execute EXPLAIN QUERY PLAN for a SQL query and log the results.
+ * @param {Database} db - sql.js database instance
+ * @param {string} sql - The SQL query to explain
+ * @param {Array} params - Query parameters
+ * @param {string} label - Label for console output
+ */
+function explainQuery(db, sql, params = [], label = "Query") {
+  if (!state.explainMode || !db) {
+    return;
+  }
+
+  try {
+    const explainSql = `EXPLAIN QUERY PLAN ${sql}`;
+    const statement = db.prepare(explainSql);
+    statement.bind(params);
+
+    const plan = [];
+    while (statement.step()) {
+      const row = statement.getAsObject();
+      plan.push(row);
+    }
+    statement.free();
+
+    if (plan.length > 0) {
+      console.group(`[EXPLAIN] ${label}`);
+      console.log("Query:", sql.substring(0, 200) + (sql.length > 200 ? "..." : ""));
+      if (params.length > 0) {
+        console.log("Params:", params);
+      }
+      console.table(plan);
+      console.groupEnd();
+    }
+  } catch (error) {
+    console.warn(`[EXPLAIN] Failed to explain query: ${label}`, error);
   }
 }
 
@@ -826,6 +909,36 @@ function filterThreads(term) {
 }
 
 /**
+ * Show skeleton loading screens while data loads.
+ */
+function showSkeletons() {
+  const threadSkeleton = document.getElementById('thread-skeleton');
+  const messageSkeleton = document.getElementById('message-skeleton');
+  const threadList = document.getElementById('thread-list');
+  const messageList = document.getElementById('message-list');
+
+  if (threadSkeleton) threadSkeleton.classList.remove('hidden');
+  if (messageSkeleton) messageSkeleton.classList.remove('hidden');
+  if (threadList) threadList.classList.add('hidden');
+  if (messageList) messageList.classList.add('hidden');
+}
+
+/**
+ * Hide skeleton loading screens and show actual content.
+ */
+function hideSkeletons() {
+  const threadSkeleton = document.getElementById('thread-skeleton');
+  const messageSkeleton = document.getElementById('message-skeleton');
+  const threadList = document.getElementById('thread-list');
+  const messageList = document.getElementById('message-list');
+
+  if (threadSkeleton) threadSkeleton.classList.add('hidden');
+  if (messageSkeleton) messageSkeleton.classList.add('hidden');
+  if (threadList) threadList.classList.remove('hidden');
+  if (messageList) messageList.classList.remove('hidden');
+}
+
+/**
  * Check if the page is running in a cross-origin isolated context.
  * Display a warning banner if isolation is not available.
  */
@@ -867,6 +980,9 @@ function showIsolationWarning() {
 }
 
 async function bootstrap() {
+  // Show skeleton loading screens
+  showSkeletons();
+
   // Check for cross-origin isolation and show warning if needed
   checkCrossOriginIsolation();
 
@@ -898,6 +1014,9 @@ async function bootstrap() {
     state.messagesContext = "inbox";
     renderMessages(state.messages, { context: "inbox", term: "" });
     updateMessageMeta({ context: "inbox", term: "" });
+
+    // Hide skeleton screens and show actual content
+    hideSkeletons();
 
     clearMessageDetail();
 
@@ -971,6 +1090,94 @@ cacheToggle.addEventListener("click", async () => {
 
 clearDetailButton.addEventListener("click", () => {
   clearMessageDetail();
+});
+
+// Diagnostics Panel
+const diagnosticsPanel = document.getElementById("diagnostics-panel");
+const diagnosticsToggle = document.getElementById("diagnostics-toggle");
+const closeDiagnostics = document.getElementById("close-diagnostics");
+const clearAllCachesButton = document.getElementById("clear-all-caches");
+
+function updateDiagnostics() {
+  // Cross-Origin Isolation
+  const isIsolated = window.crossOriginIsolated === true;
+  document.getElementById("diag-isolation-status").textContent = isIsolated ? "✅ Enabled" : "❌ Disabled";
+  document.getElementById("diag-sab-status").textContent = typeof SharedArrayBuffer !== "undefined" ? "✅ Available" : "❌ Unavailable";
+  document.getElementById("diag-opfs-status").textContent = CACHE_SUPPORTED ? "✅ Available" : "❌ Unavailable";
+
+  // Database Engine
+  document.getElementById("diag-db-source").textContent = state.databaseSource || "-";
+  document.getElementById("diag-db-engine").textContent = "sql.js (WASM)";
+  document.getElementById("diag-fts-status").textContent = state.ftsEnabled ? "✅ Enabled" : "❌ Disabled";
+
+  // Cache Status
+  const cacheStateMap = {
+    opfs: "OPFS (persistent)",
+    memory: "Memory (session only)",
+    none: "No cache",
+    unsupported: "Unsupported"
+  };
+  document.getElementById("diag-cache-state").textContent = cacheStateMap[state.cacheState] || state.cacheState;
+  document.getElementById("diag-cache-key").textContent = state.cacheKey || "-";
+  const cacheLocation = state.cacheState === "opfs" ? "OPFS (origin-private file system)"
+    : state.cacheState === "memory" ? "Browser memory"
+    : "None";
+  document.getElementById("diag-cache-location").textContent = cacheLocation;
+
+  // Performance
+  const bootstrapMs = Math.round(performance.now() - bootstrapStart);
+  document.getElementById("diag-bootstrap-time").textContent = `${bootstrapMs}ms`;
+  document.getElementById("diag-total-messages").textContent = state.totalMessages || "-";
+}
+
+diagnosticsToggle.addEventListener("click", () => {
+  diagnosticsPanel.classList.remove("hidden");
+  updateDiagnostics();
+});
+
+closeDiagnostics.addEventListener("click", () => {
+  diagnosticsPanel.classList.add("hidden");
+});
+
+diagnosticsPanel.addEventListener("click", (event) => {
+  if (event.target === diagnosticsPanel) {
+    diagnosticsPanel.classList.add("hidden");
+  }
+});
+
+clearAllCachesButton.addEventListener("click", async () => {
+  if (!confirm("Clear all caches? This will remove all offline data and require re-downloading the database.")) {
+    return;
+  }
+  clearAllCachesButton.disabled = true;
+  try {
+    if (state.cacheKey) {
+      await removeFromOpfs(state.cacheKey);
+    }
+    // Try to clear any other cached files
+    const root = await getOpfsRoot();
+    if (root) {
+      for await (const [name, handle] of root.entries()) {
+        if (name.startsWith(CACHE_PREFIX)) {
+          try {
+            await root.removeEntry(name);
+            console.info("[viewer] Removed cached file:", name);
+          } catch (err) {
+            console.warn("[viewer] Failed to remove:", name, err);
+          }
+        }
+      }
+    }
+    state.cacheState = CACHE_SUPPORTED ? "memory" : "none";
+    updateCacheToggle();
+    updateDiagnostics();
+    alert("All caches cleared successfully. Refresh the page to reload from network.");
+  } catch (error) {
+    console.error("[viewer] Failed to clear caches:", error);
+    alert(`Failed to clear caches: ${error.message}`);
+  } finally {
+    clearAllCachesButton.disabled = false;
+  }
 });
 
 bootstrap();

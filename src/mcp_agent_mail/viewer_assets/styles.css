@@ -62,6 +62,125 @@ body {
   opacity: 0.6;
 }
 
+.diagnostics-toggle {
+  padding: 0.5rem 1rem;
+  background: #64748b;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.diagnostics-toggle:hover {
+  background: #475569;
+}
+
+/* Diagnostics Panel Modal */
+.diagnostics-panel {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15, 23, 42, 0.95);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.diagnostics-panel.hidden {
+  display: none;
+}
+
+.diagnostics-content {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  max-width: 800px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.3);
+}
+
+.diagnostics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1.5rem;
+  border-bottom: 1px solid #334155;
+  background: #0f172a;
+}
+
+.diagnostics-header h3 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.diagnostics-body {
+  padding: 1.5rem;
+}
+
+.diagnostics-body section {
+  margin-bottom: 2rem;
+}
+
+.diagnostics-body section:last-child {
+  margin-bottom: 0;
+}
+
+.diagnostics-body h4 {
+  margin: 0 0 1rem 0;
+  font-size: 1.1rem;
+  color: #3b82f6;
+}
+
+.diagnostics-body dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 0.75rem;
+}
+
+.diagnostics-body dt {
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.diagnostics-body dd {
+  margin: 0;
+  color: #e2e8f0;
+  word-break: break-all;
+}
+
+.danger-button {
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  background: #dc2626;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.danger-button:hover {
+  background: #b91c1c;
+}
+
+.danger-button:disabled {
+  background: #475569;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 main {
   padding: 2rem;
   max-width: 1200px;

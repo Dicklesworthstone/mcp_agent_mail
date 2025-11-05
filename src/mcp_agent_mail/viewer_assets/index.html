@@ -17,8 +17,66 @@
       <div class="banner-controls">
         <span id="engine-status" class="engine-status">Engine: initializing…</span>
         <button id="cache-toggle" class="cache-toggle">Cache for offline use</button>
+        <button id="diagnostics-toggle" class="diagnostics-toggle">Diagnostics</button>
       </div>
     </header>
+
+    <div id="diagnostics-panel" class="diagnostics-panel hidden">
+      <div class="diagnostics-content">
+        <div class="diagnostics-header">
+          <h3>Viewer Diagnostics</h3>
+          <button id="close-diagnostics" class="close-button">×</button>
+        </div>
+        <div class="diagnostics-body">
+          <section>
+            <h4>Cross-Origin Isolation</h4>
+            <dl>
+              <dt>Status:</dt>
+              <dd id="diag-isolation-status">Checking...</dd>
+              <dt>SharedArrayBuffer:</dt>
+              <dd id="diag-sab-status">Checking...</dd>
+              <dt>OPFS Access:</dt>
+              <dd id="diag-opfs-status">Checking...</dd>
+            </dl>
+          </section>
+
+          <section>
+            <h4>Database Engine</h4>
+            <dl>
+              <dt>Source:</dt>
+              <dd id="diag-db-source">-</dd>
+              <dt>Engine:</dt>
+              <dd id="diag-db-engine">-</dd>
+              <dt>FTS5 Enabled:</dt>
+              <dd id="diag-fts-status">-</dd>
+            </dl>
+          </section>
+
+          <section>
+            <h4>Cache Status</h4>
+            <dl>
+              <dt>Cache State:</dt>
+              <dd id="diag-cache-state">-</dd>
+              <dt>Cache Key:</dt>
+              <dd id="diag-cache-key">-</dd>
+              <dt>Cache Location:</dt>
+              <dd id="diag-cache-location">-</dd>
+            </dl>
+            <button id="clear-all-caches" class="danger-button">Clear All Caches</button>
+          </section>
+
+          <section>
+            <h4>Performance</h4>
+            <dl>
+              <dt>Bootstrap Time:</dt>
+              <dd id="diag-bootstrap-time">-</dd>
+              <dt>Total Messages:</dt>
+              <dd id="diag-total-messages">-</dd>
+            </dl>
+          </section>
+        </div>
+      </div>
+    </div>
 
     <main>
       <section class="panels">

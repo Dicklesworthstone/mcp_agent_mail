@@ -554,7 +554,29 @@ Each bundle contains:
 - **Optional signature**: Ed25519 cryptographic signature over the manifest to prove authenticity and detect tampering.
 - **Security hardening**: Content Security Policy headers, DOMPurify sanitization, and Trusted Types enforcement protect against XSS attacks in message bodies.
 
-### Basic export workflow
+### Quick Start: Interactive GitHub Pages Wizard
+
+The easiest way to export and deploy to GitHub Pages is the interactive wizard:
+
+```bash
+# One command does everything
+./scripts/share_to_github_pages.py
+```
+
+The wizard will:
+1. Show available projects and let you select which to export
+2. Ask about redaction level (standard/strict/none)
+3. Offer to sign the bundle with Ed25519 (generates key automatically)
+4. Let you preview the bundle locally before deploying
+5. Create a GitHub repository (or use existing)
+6. Push and enable GitHub Pages automatically
+7. Give you the final URL
+
+**Requirements**: `gh` CLI installed and authenticated (`gh auth login`)
+
+The wizard handles all git operations, repository creation, and Pages configuration. For manual control or advanced options, see the detailed workflows below.
+
+### Basic export workflow (manual)
 
 **1. Export a bundle**
 
@@ -1662,6 +1684,9 @@ The project exposes a developer CLI for common operations:
 Examples:
 
 ```bash
+# Interactive wizard: export + deploy to GitHub Pages (easiest)
+./scripts/share_to_github_pages.py
+
 # Export a static bundle with signing and encryption
 uv run python -m mcp_agent_mail.cli share export \
   --output ./bundle \

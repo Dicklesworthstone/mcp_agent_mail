@@ -955,6 +955,36 @@ def build_materialized_views(snapshot_path: Path) -> None:
             """
         )
 
+        # FTS search overview materialized view
+        # Pre-computes search result snippets and highlights for efficient rendering
+        # Only created if FTS5 is available
+        try:
+            conn.execute("SELECT 1 FROM fts_messages LIMIT 1")
+            conn.executescript(
+                """
+                DROP TABLE IF EXISTS fts_search_overview_mv;
+                CREATE TABLE fts_search_overview_mv AS
+                SELECT
+                    m.rowid,
+                    m.id,
+                    m.subject,
+                    m.created_ts,
+                    m.importance,
+                    a.name AS sender_name,
+                    SUBSTR(m.body_md, 1, 200) AS snippet
+                FROM messages m
+                JOIN agents a ON m.sender_id = a.id
+                ORDER BY m.created_ts DESC;
+
+                -- Index for FTS result lookups
+                CREATE INDEX idx_fts_overview_rowid ON fts_search_overview_mv(rowid);
+                CREATE INDEX idx_fts_overview_created ON fts_search_overview_mv(created_ts DESC);
+                """
+            )
+        except sqlite3.OperationalError:
+            # FTS5 not available or not configured, skip this view
+            pass
+
         conn.commit()
     finally:
         conn.close()
