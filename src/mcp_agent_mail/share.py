@@ -1144,8 +1144,9 @@ def write_bundle_scaffolding(
         ],
     }
     if viewer_data:
-        fts_flag = viewer_data.get("meta_info", {}).get("fts_enabled", False)
-        manifest["database"]["fts_enabled"] = fts_flag
+        fts_flag = bool(viewer_data.get("meta_info", {}).get("fts_enabled", False))
+        database_section = cast(dict[str, Any], manifest["database"])
+        database_section["fts_enabled"] = fts_flag
         manifest["viewer"] = viewer_data
     _write_json_file(output_dir / "manifest.json", manifest)
 
@@ -1172,8 +1173,8 @@ __all__ = [
     "HostingHint",
     "ShareExportError",
     "apply_project_scope",
-    "build_search_indexes",
     "build_how_to_deploy",
+    "build_search_indexes",
     "bundle_attachments",
     "copy_viewer_assets",
     "create_sqlite_snapshot",

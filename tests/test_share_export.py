@@ -11,9 +11,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import mcp_agent_mail.share as share
 from mcp_agent_mail import cli as cli_module
 from mcp_agent_mail.config import clear_settings_cache
-import mcp_agent_mail.share as share
 from mcp_agent_mail.share import (
     SCRUB_PRESETS,
     ShareExportError,
@@ -289,6 +289,7 @@ def test_manifest_snapshot_structure(monkeypatch, tmp_path: Path) -> None:
         ]
         assert manifest["project_scope"]["removed_count"] == 0
         assert manifest["database"]["chunked"] is False
+        assert isinstance(manifest["database"].get("fts_enabled"), bool)
         detected_hosts = manifest["hosting"].get("detected", [])
         assert isinstance(detected_hosts, list)
         for host_entry in detected_hosts:
@@ -393,6 +394,7 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
     assert manifest["database"]["chunked"] is True
     assert "viewer" in manifest
     assert manifest["scrub"]["preset"] == "standard"
+    assert isinstance(manifest["database"].get("fts_enabled"), bool)
     clear_settings_cache()
 
 

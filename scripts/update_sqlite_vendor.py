@@ -61,7 +61,7 @@ def main() -> int:
         if args.dry_run:
             return 0
 
-        for name, digest in checksums.items():
+        for name, _digest in checksums.items():
             src = tmp_dir / name
             dst = VENDOR_DIR / name
             print(f"Copying {src} -> {dst}")

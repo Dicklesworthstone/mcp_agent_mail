@@ -275,3 +275,4 @@ def test_viewer_playwright_smoke(monkeypatch, tmp_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        clear_settings_cache()
