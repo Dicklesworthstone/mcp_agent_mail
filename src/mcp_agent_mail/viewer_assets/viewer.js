@@ -1411,7 +1411,7 @@ function viewerController() {
       const projectBadge = this.getProjectBadgeClass(msg.project_name || '');
 
       return (
-        `<div class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-inset ${selectedClasses}" data-message-id="${msg.id}" tabindex="0" role="button" aria-label="Message from ${escapeHtml(msg.sender || '')}: ${escapeHtml(msg.subject || '')}" style="animation-delay: ${Math.min(index * 0.02, 0.5)}s;">`
+        `<div class="message-row px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-inset ${selectedClasses}" data-message-id="${msg.id}" tabindex="0" role="button" aria-label="Message from ${escapeHtml(msg.sender || '')}: ${escapeHtml(msg.subject || '')}" style="animation-delay: ${Math.min(index * 0.02, 0.5)}s;">`
         + `<div class="flex items-start gap-3">`
         + `<input type="checkbox" class="mt-1 w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer opacity-0 group-hover:opacity-100" aria-hidden="true">`
         + `<div class="flex-1 min-w-0">`
@@ -1452,6 +1452,16 @@ function viewerController() {
       if (!scrollElem || !contentElem || typeof Clusterize === 'undefined') {
         return;
       }
+      // Ensure the scroll container has a concrete height based on viewport
+      const setHeightFromViewport = () => {
+        try {
+          const rect = scrollElem.getBoundingClientRect();
+          const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+          const h = Math.max(240, Math.floor(vh - rect.top - 12));
+          scrollElem.style.height = h + 'px';
+        } catch (_) {}
+      };
+      setHeightFromViewport();
       const rows = this.buildRowsFromMessages(this.filteredMessages);
       if (this.clusterize) {
         this.clusterize.update(rows);
@@ -1476,7 +1486,7 @@ function viewerController() {
           }
         } catch (_) {}
         // Refresh on resize to keep measurements accurate
-        this._onResize = () => { if (this.clusterize) this.clusterize.refresh(true); };
+        this._onResize = () => { setHeightFromViewport(); if (this.clusterize) this.clusterize.refresh(true); };
         window.addEventListener('resize', this._onResize);
       }
     },
