@@ -1,0 +1,44 @@
+name: Static Mailbox Export
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  export-mailbox:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: ${{ secrets.MAILBOX_DATABASE_URL }}
+      STORAGE_ROOT: ${{ secrets.MAILBOX_STORAGE_ROOT }}
+      APP_ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v1
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Generate static bundle
+        run: |
+          uv run python -m mcp_agent_mail.cli share export \ 
+            --output ./out/mailbox-share \ 
+            --inline-threshold 65536 \ 
+            --detach-threshold 262144 \ 
+            --scrub-preset standard \ 
+            --zip
+
+      - name: Upload mailbox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailbox-share
+          path: out/mailbox-share.zip
+
+      - name: Publish HOW_TO_DEPLOY
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailbox-deployment-guide
+          path: out/mailbox-share/HOW_TO_DEPLOY.md

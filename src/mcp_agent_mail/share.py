@@ -785,6 +785,92 @@ def build_search_indexes(snapshot_path: Path) -> bool:
         return False
 
 
+def summarize_snapshot(
+    snapshot_path: Path,
+    *,
+    storage_root: Path,
+    inline_threshold: int = INLINE_ATTACHMENT_THRESHOLD,
+    detach_threshold: int = DETACH_ATTACHMENT_THRESHOLD,
+) -> dict[str, Any]:
+    storage_root = storage_root.resolve()
+    with sqlite3.connect(str(snapshot_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        total_threads = conn.execute(
+            """
+            SELECT COUNT(DISTINCT(
+                CASE WHEN thread_id IS NULL OR thread_id = ''
+                     THEN printf('msg:%d', id)
+                     ELSE thread_id
+                END
+            ))
+            FROM messages
+            """
+        ).fetchone()[0]
+        projects = [
+            {"slug": row["slug"], "human_key": row["human_key"]}
+            for row in conn.execute("SELECT slug, human_key FROM projects ORDER BY slug")
+        ]
+        importance_counts = {
+            (row["importance"] or "normal"): row["count"]
+            for row in conn.execute(
+                "SELECT COALESCE(importance, 'normal') AS importance, COUNT(*) AS count FROM messages GROUP BY COALESCE(importance, 'normal')"
+            )
+        }
+
+        attachments_stats = {
+            "total": 0,
+            "inline_candidates": 0,
+            "external_candidates": 0,
+            "missing": 0,
+            "largest_bytes": 0,
+        }
+
+        rows = conn.execute("SELECT id, attachments FROM messages").fetchall()
+        for row in rows:
+            raw = row["attachments"]
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, list):
+                continue
+            for entry in data:
+                if not isinstance(entry, dict) or entry.get("type") != "file":
+                    continue
+                attachments_stats["total"] += 1
+                original_path = entry.get("path") or entry.get("original_path")
+                if not original_path:
+                    attachments_stats["missing"] += 1
+                    continue
+                source_path = Path(original_path)
+                if not source_path.is_absolute():
+                    source_path = (storage_root / original_path).resolve()
+                if not source_path.exists():
+                    attachments_stats["missing"] += 1
+                    continue
+                try:
+                    size = source_path.stat().st_size
+                except OSError:
+                    attachments_stats["missing"] += 1
+                    continue
+                attachments_stats["largest_bytes"] = max(attachments_stats["largest_bytes"], size)
+                if size <= inline_threshold:
+                    attachments_stats["inline_candidates"] += 1
+                if size >= detach_threshold:
+                    attachments_stats["external_candidates"] += 1
+
+    return {
+        "messages": int(total_messages),
+        "threads": int(total_threads),
+        "projects": projects,
+        "importance": importance_counts,
+        "attachments": attachments_stats,
+    }
+
+
 def bundle_attachments(
     snapshot_path: Path,
     output_dir: Path,
@@ -1089,6 +1175,121 @@ def _compute_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _compute_sri(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    encoded = base64.b64encode(digest.digest()).decode("ascii")
+    return f"sha256-{encoded}"
+
+
+def _build_viewer_sri(bundle_root: Path) -> dict[str, str]:
+    viewer_root = bundle_root / "viewer"
+    if not viewer_root.exists():
+        return {}
+    sri_map: dict[str, str] = {}
+    for path in viewer_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".js", ".css", ".wasm"}:
+            continue
+        relative = path.relative_to(bundle_root).as_posix()
+        sri_map[relative] = _compute_sri(path)
+    return sri_map
+
+
+def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dict[str, Any]:
+    bundle_root = Path(bundle_path).expanduser().resolve()
+    manifest_path = bundle_root / "manifest.json"
+    if not manifest_path.exists():
+        raise ShareExportError(f"manifest.json not found in bundle at {bundle_root}")
+
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_data = json.loads(manifest_bytes)
+
+    viewer_section = cast(dict[str, Any], manifest_data.get("viewer", {}))
+    sri_entries = cast(dict[str, str], viewer_section.get("sri", {}))
+    sri_failures: list[str] = []
+    for relative_path, expected in sri_entries.items():
+        target = bundle_root / relative_path
+        if not target.exists():
+            sri_failures.append(f"Missing asset for SRI entry: {relative_path}")
+            continue
+        actual = _compute_sri(target)
+        if actual != expected:
+            sri_failures.append(
+                f"SRI mismatch for {relative_path}: expected {expected}, got {actual}"
+            )
+
+    signature_checked = False
+    signature_verified = False
+    sig_path = bundle_root / "manifest.sig.json"
+    if sig_path.exists() or public_key:
+        if not sig_path.exists():
+            raise ShareExportError("manifest.sig.json missing but a public key was provided for verification.")
+        sig_payload = json.loads(sig_path.read_text(encoding="utf-8"))
+        key_b64 = public_key or sig_payload.get("public_key")
+        signature_b64 = sig_payload.get("signature")
+        if not key_b64 or not signature_b64:
+            raise ShareExportError("manifest.sig.json missing public_key or signature fields.")
+        try:
+            from nacl.exceptions import BadSignatureError
+            from nacl.signing import VerifyKey
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ShareExportError("PyNaCl is required to verify manifest signatures.") from exc
+        verify_key = VerifyKey(base64.b64decode(key_b64))
+        try:
+            verify_key.verify(manifest_bytes, base64.b64decode(signature_b64))
+            signature_verified = True
+        except BadSignatureError as exc:
+            raise ShareExportError("Manifest signature verification failed.") from exc
+        signature_checked = True
+
+    if sri_failures:
+        raise ShareExportError("\n".join(sri_failures))
+
+    return {
+        "bundle": str(bundle_root),
+        "sri_checked": bool(sri_entries),
+        "signature_checked": signature_checked,
+        "signature_verified": signature_verified,
+    }
+
+
+def decrypt_with_age(
+    encrypted_path: Path,
+    output_path: Path,
+    *,
+    identity: Optional[Path] = None,
+    passphrase: Optional[str] = None,
+) -> None:
+    age_exe = shutil.which("age")
+    if not age_exe:
+        raise ShareExportError("`age` CLI not found in PATH. Install age to decrypt bundles.")
+    if identity and passphrase:
+        raise ShareExportError("Provide either an identity file or a passphrase, not both.")
+    if not identity and passphrase is None:
+        raise ShareExportError("Decryption requires --identity or --passphrase.")
+
+    output_path = output_path.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [age_exe, "-d", "-o", str(output_path)]
+    input_text: Optional[str] = None
+    if identity:
+        cmd.extend(["-i", str(identity)])
+    elif passphrase is not None:
+        cmd.append("-p")
+        input_text = passphrase + "\n"
+
+    cmd.append(str(encrypted_path))
+    result = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise ShareExportError(f"age decryption failed: {stderr}")
+
+
 def write_bundle_scaffolding(
     output_dir: Path,
     *,
@@ -1108,6 +1309,8 @@ def write_bundle_scaffolding(
         {"slug": record.slug, "human_key": record.human_key}
         for record in scope.projects
     ]
+
+    viewer_sri = _build_viewer_sri(output_dir)
 
     manifest = {
         "schema_version": "0.1.0",
@@ -1139,15 +1342,21 @@ def write_bundle_scaffolding(
             ],
         },
         "notes": [
-            "Prototype manifest. Future revisions will embed scrub configuration, viewer asset hashes, and attachment manifests.",
+            "Prototype manifest. Viewer asset Subresource Integrity hashes recorded under viewer.sri.",
             "Viewer scaffold with diagnostics is bundled; SPA search/thread views arrive in upcoming milestones.",
         ],
     }
-    if viewer_data:
-        fts_flag = bool(viewer_data.get("meta_info", {}).get("fts_enabled", False))
+    viewer_meta: dict[str, Any] = dict(viewer_data or {})
+    if viewer_meta:
+        fts_flag = bool(viewer_meta.get("meta_info", {}).get("fts_enabled", False))
         database_section = cast(dict[str, Any], manifest["database"])
         database_section["fts_enabled"] = fts_flag
-        manifest["viewer"] = viewer_data
+    if viewer_sri:
+        viewer_meta.setdefault("sri", viewer_sri)
+    if viewer_meta:
+        manifest["viewer"] = viewer_meta
+    elif viewer_sri:
+        manifest["viewer"] = {"sri": viewer_sri}
     _write_json_file(output_dir / "manifest.json", manifest)
 
     readme_content = (
@@ -1175,11 +1384,13 @@ __all__ = [
     "apply_project_scope",
     "build_how_to_deploy",
     "build_search_indexes",
+    "summarize_snapshot",
     "bundle_attachments",
     "copy_viewer_assets",
     "create_sqlite_snapshot",
     "detect_hosting_hints",
     "encrypt_bundle",
+    "decrypt_with_age",
     "export_viewer_data",
     "maybe_chunk_database",
     "package_directory_as_zip",
@@ -1187,6 +1398,7 @@ __all__ = [
     "resolve_sqlite_database_path",
     "scrub_snapshot",
     "sign_manifest",
+    "verify_bundle",
     "write_bundle_scaffolding",
 ]
 

@@ -43,6 +43,7 @@ from .share import (
     apply_project_scope,
     build_search_indexes,
     bundle_attachments,
+    summarize_snapshot,
     copy_viewer_assets,
     create_sqlite_snapshot,
     detect_hosting_hints,
@@ -218,6 +219,14 @@ def share_export(
             show_default=True,
         ),
     ] = DEFAULT_CHUNK_SIZE,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run/--no-dry-run",
+            help="Generate a security summary without writing bundle artifacts.",
+            show_default=True,
+        ),
+    ] = False,
     zip_bundle: Annotated[
         bool,
         typer.Option(
@@ -249,10 +258,17 @@ def share_export(
         )
         raise typer.Exit(code=1)
     raw_output = _resolve_path(output)
+    temp_dir: Optional[tempfile.TemporaryDirectory[str]] = None
     try:
-        output_path = prepare_output_directory(raw_output)
+        if dry_run:
+            temp_dir = tempfile.TemporaryDirectory(prefix="mailbox-share-dry-run-")
+            output_path = Path(temp_dir.name)
+        else:
+            output_path = prepare_output_directory(raw_output)
     except ShareExportError as exc:
         console.print(f"[red]Invalid output directory:[/] {exc}")
+        if temp_dir is not None:
+            temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
     console.rule("[bold]Static Mailbox Export[/bold]")
@@ -327,6 +343,61 @@ def share_export(
 
     settings = get_settings()
     storage_root = Path(settings.storage.root).expanduser()
+
+    if dry_run:
+        summary = summarize_snapshot(
+            snapshot_path,
+            storage_root=storage_root,
+            inline_threshold=inline_threshold,
+            detach_threshold=detach_threshold,
+        )
+
+        console.rule("[bold]Dry-Run Summary[/bold]")
+        overview = Table(show_header=False)
+        projects_text = ", ".join(p["slug"] for p in summary["projects"]) or "All projects"
+        overview.add_row("Projects", projects_text)
+        overview.add_row("Messages", str(summary["messages"]))
+        overview.add_row("Threads", str(summary["threads"]))
+        overview.add_row("FTS Search", "enabled" if fts_enabled else "fallback (LIKE)")
+        attachments = summary["attachments"]
+        overview.add_row(
+            "Attachments",
+            (
+                f"total={attachments['total']} inline≤{inline_threshold}B:{attachments['inline_candidates']} "
+                f"external≥{detach_threshold}B:{attachments['external_candidates']} missing:{attachments['missing']}"
+            ),
+        )
+        overview.add_row(
+            "Largest attachment",
+            f"{attachments['largest_bytes']} bytes" if attachments["largest_bytes"] else "n/a",
+        )
+        console.print(overview)
+
+        console.rule("Security Checklist")
+        checklist = [
+            f"Scrub preset: {scrub_summary.preset}",
+            f"Agents pseudonymized: {scrub_summary.agents_pseudonymized}/{scrub_summary.agents_total}",
+            f"Ack flags cleared: {scrub_summary.ack_flags_cleared}",
+            f"Recipients read/ack cleared: {scrub_summary.recipients_cleared}",
+            f"File reservations removed: {scrub_summary.file_reservations_removed}",
+            f"Agent links removed: {scrub_summary.agent_links_removed}",
+            f"Secrets redacted: {scrub_summary.secrets_replaced}",
+            f"Bodies redacted: {scrub_summary.bodies_redacted}",
+            f"Attachments cleared: {scrub_summary.attachments_cleared}",
+        ]
+        for item in checklist:
+            console.print(f" • {item}")
+
+        console.print()
+        console.print(
+            "[cyan]Run without --dry-run to generate the bundle. Consider enabling signing ( --signing-key ) and encryption (--age-recipient ) before publishing.[/]"
+        )
+
+        if temp_dir is not None:
+            temp_dir.cleanup()
+            temp_dir = None
+        return
+
     try:
         attachments_manifest = bundle_attachments(
             snapshot_path,
@@ -425,6 +496,9 @@ def share_export(
             except ShareExportError as exc:
                 console.print(f"[red]Bundle encryption failed:[/] {exc}")
                 raise typer.Exit(code=1) from exc
+
+    if temp_dir is not None:
+        temp_dir.cleanup()
 
     console.print(
         "[dim]Next steps: flesh out the static SPA (search, thread detail) and tighten signing/encryption defaults per the roadmap.[/]"

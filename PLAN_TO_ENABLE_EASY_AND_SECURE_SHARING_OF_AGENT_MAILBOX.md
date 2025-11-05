@@ -227,6 +227,7 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
    - ✅ *(2025-11-04)* `--project` filters limit exports to selected slugs/human keys and manifest records included scope + removed counts.
    - ✅ *(2025-11-04)* Scrubber pseudonymizes agents, clears ack/read markers, removes file reservations/agent links, and redacts common secret tokens before manifest generation.
    - ✅ *(2025-11-04)* Added scrub presets (`standard`, `strict`) available via CLI flag or wizard, captured in manifest summaries.
+   - ✅ *(2025-11-05)* `--dry-run` mode prints a security checklist, attachment breakdown, and search readiness without writing artifacts.
    - ✅ *(2025-11-04)* Attachment bundler hashes assets into `attachments/<sha>/` paths, inlines ≤64 KiB files as data URIs, marks >25 MiB artifacts for external hosting, and records per-message bundle metadata in the manifest.
    - ✅ *(2025-11-04)* `share preview` command serves bundle directories via a local threaded HTTP server with optional browser launch.
    - ✅ *(2025-11-04)* Export now copies shipped viewer scaffold (`viewer/index.html`, `viewer.js`, `styles.css`) so bundles render manifest diagnostics out of the box.
@@ -243,6 +244,10 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
 5. **Beta & Feedback (1 week):**
    - Publish sample bundle in repo `docs/share-demo/`.
    - Gather feedback, tune performance (chunking, query optimization).
+
+### Deployment Automation Samples
+- ✅ *(2025-11-05)* Added GitHub Actions workflow example (`docs/deployment_samples/github-actions-share.yml`).
+- ✅ *(2025-11-05)* Added Cloudflare Pages `wrangler.toml` example (`docs/deployment_samples/cloudflare-pages-example.toml`).
 
 ## Testing Strategy
 - Unit tests for scrubbing rules, pseudonym determinism, and secret redaction.

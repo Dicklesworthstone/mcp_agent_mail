@@ -1,0 +1,16 @@
+name = "mailbox-share"
+
+[site]
+bucket = "./out/mailbox-share"
+
+[build]
+command = "uv run python -m mcp_agent_mail.cli share export --output ./out/mailbox-share --zip"
+
+[vars]
+SCRUB_PRESET = "standard"
+INLINE_THRESHOLD = "65536"
+DETACH_THRESHOLD = "262144"
+
+# Usage:
+#   uv sync --frozen
+#   wrangler pages deploy ./out/mailbox-share --project-name mailbox-share

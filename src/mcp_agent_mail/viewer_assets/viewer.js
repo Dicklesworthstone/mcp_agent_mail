@@ -34,6 +34,7 @@ const state = {
   cacheState: CACHE_SUPPORTED ? "none" : "unsupported",
   lastDatabaseBytes: null,
   databaseSource: "network",
+  selectedMessageId: undefined,
 };
 
 function escapeHtml(value) {
@@ -618,7 +619,7 @@ function selectThread(threadKey) {
   searchInput.value = "";
   state.messages = getThreadMessages(threadKey);
   state.selectedMessageId = undefined;
-  renderThreads(state.filteredThreads);
+  renderThreads(state.filteredThreads.length ? state.filteredThreads : state.threads);
   renderMessages(state.messages, { context: state.messagesContext, term: "" });
   updateMessageMeta({ context: state.messagesContext, term: "" });
   clearMessageDetail();
