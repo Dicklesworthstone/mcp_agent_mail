@@ -1,7 +1,5 @@
 const CACHE_SUPPORTED = typeof navigator.storage?.getDirectory === "function";
 const CACHE_PREFIX = "mailbox-snapshot";
-const VIRTUAL_SCROLL_THRESHOLD = 1000; // Use virtual scrolling when items > this
-
 const state = {
   manifest: null,
   SQL: null,
@@ -578,353 +576,6 @@ function getThreadMessages(threadKey, limit = 50000) {
   return results;
 }
 
-function renderMessages(list, { context, term }) {
-  if (!list.length) {
-    // Destroy Clusterize if it exists
-    if (state.messageClusterize) {
-      state.messageClusterize.destroy(true);
-      state.messageClusterize = null;
-    }
-
-    messageScrollEl.classList.remove("hidden");
-    document.getElementById("message-skeleton").classList.add("hidden");
-    messageListEl.innerHTML = "";
-
-    const empty = document.createElement("li");
-    empty.textContent = context === "search" ? "No messages match your query." : "No messages available.";
-    messageListEl.append(empty);
-    return;
-  }
-
-  // Helper to create HTML string for a message item
-  const createMessageHTML = (message) => {
-    const isActive = Number(state.selectedMessageId) === Number(message.id);
-    const activeClass = isActive ? ' active' : '';
-    const subject = highlightText(message.subject || "(no subject)", term);
-    const timestamp = escapeHtml(formatTimestamp(message.created_ts));
-    const importance = escapeHtml(message.importance || "normal");
-    const snippet = highlightText(message.snippet || "", term);
-
-    return `<li class="${activeClass}" data-id="${escapeHtml(String(message.id))}" data-thread-key="${escapeHtml(message.thread_key)}">
-      <h3>${subject}</h3>
-      <div class="message-meta-line">${timestamp} • importance: ${importance}</div>
-      <div class="message-snippet">${snippet}</div>
-    </li>`;
-  };
-
-  const totalCount = list.length;
-
-  // Use virtual scrolling if items exceed threshold
-  if (totalCount > VIRTUAL_SCROLL_THRESHOLD) {
-    // Show scroll container, hide skeleton
-    messageScrollEl.classList.remove("hidden");
-    document.getElementById("message-skeleton").classList.add("hidden");
-
-    const rows = list.map(message => createMessageHTML(message));
-
-    if (state.messageClusterize) {
-      // Update existing Clusterize instance
-      state.messageClusterize.update(rows);
-    } else {
-      // Initialize new Clusterize instance
-      state.messageClusterize = new Clusterize({
-        rows: rows,
-        scrollElem: messageScrollEl,
-        contentElem: messageListEl,
-        rows_in_block: 20,
-        blocks_in_cluster: 2,
-        tag: "li"  // Use <li> for spacing rows to maintain valid HTML structure
-      });
-    }
-  } else {
-    // Direct DOM rendering for small lists
-    messageScrollEl.classList.remove("hidden");
-    document.getElementById("message-skeleton").classList.add("hidden");
-
-/**
- * Show skeleton loading screens while data loads.
- */
-function showSkeletons() {
-  const threadSkeleton = document.getElementById('thread-skeleton');
-  const messageSkeleton = document.getElementById('message-skeleton');
-  const threadList = document.getElementById('thread-list');
-  const messageList = document.getElementById('message-list');
-
-  if (threadSkeleton) threadSkeleton.classList.remove('hidden');
-  if (messageSkeleton) messageSkeleton.classList.remove('hidden');
-  if (threadList) threadList.classList.add('hidden');
-  if (messageList) messageList.classList.add('hidden');
-}
-
-/**
- * Hide skeleton loading screens and show actual content.
- */
-function hideSkeletons() {
-  const threadSkeleton = document.getElementById('thread-skeleton');
-  const messageSkeleton = document.getElementById('message-skeleton');
-  const threadList = document.getElementById('thread-list');
-  const messageList = document.getElementById('message-list');
-
-  if (threadSkeleton) threadSkeleton.classList.add('hidden');
-  if (messageSkeleton) messageSkeleton.classList.add('hidden');
-  if (threadList) threadList.classList.remove('hidden');
-  if (messageList) messageList.classList.remove('hidden');
-}
-
-/**
- * Check if the page is running in a cross-origin isolated context.
- * Display a warning banner if isolation is not available.
- */
-function checkCrossOriginIsolation() {
-  const isIsolated = window.crossOriginIsolated === true;
-
-  if (!isIsolated) {
-    showIsolationWarning();
-  }
-
-  return isIsolated;
-}
-
-/**
- * Display a warning banner about missing cross-origin isolation.
- */
-function showIsolationWarning() {
-  const header = document.querySelector('header.banner');
-  if (!header) return;
-
-  const warningBanner = document.createElement('div');
-  warningBanner.id = 'isolation-warning';
-  warningBanner.className = 'warning-banner';
-  warningBanner.innerHTML = createTrustedHTML(`
-    <strong>⚠️ Cross-Origin Isolation Not Enabled</strong>
-    <p>This viewer requires Cross-Origin-Opener-Policy (COOP) and Cross-Origin-Embedder-Policy (COEP) headers for optimal performance.</p>
-    <details>
-      <summary>How to fix this</summary>
-      <ul>
-        <li><strong>Cloudflare Pages / Netlify:</strong> The included <code>_headers</code> file should be automatically applied.</li>
-        <li><strong>GitHub Pages:</strong> Uncomment the <code>&lt;script src="./coi-serviceworker.js"&gt;&lt;/script&gt;</code> line in <code>index.html</code> and redeploy.</li>
-        <li><strong>Other hosts:</strong> Configure your server to send COOP and COEP headers. See <code>HOW_TO_DEPLOY.md</code> for details.</li>
-      </ul>
-      <p>Without isolation, advanced features like OPFS caching and SharedArrayBuffer may be unavailable.</p>
-    </details>
-  `);
-
-  header.parentNode.insertBefore(warningBanner, header.nextSibling);
-}
-
-async function bootstrap() {
-  // Show skeleton loading screens
-  showSkeletons();
-
-  // Check for cross-origin isolation and show warning if needed
-  checkCrossOriginIsolation();
-
-  try {
-    const manifest = await loadJSON("../manifest.json");
-    state.manifest = manifest;
-    renderManifest(manifest);
-    renderProjects(manifest);
-    renderScrub(manifest);
-    renderAttachments(manifest);
-    renderBundleInfo(manifest);
-
-    const { bytes, source } = await loadDatabaseBytes(manifest);
-    state.databaseSource = source;
-    updateCacheToggle();
-
-    state.SQL = await ensureSqlJsLoaded();
-    state.db = new state.SQL.Database(bytes);
-    state.ftsEnabled = Boolean(manifest.database?.fts_enabled) && detectFts(state.db);
-    updateEngineStatus();
-
-    state.totalMessages = Number(getScalar(state.db, "SELECT COUNT(*) FROM messages") || 0);
-    loadProjectMap(state.db);
-    state.threads = buildThreadList(state.db);
-    state.filteredThreads = state.threads;
-    renderThreads(state.filteredThreads);
-
-    state.messages = getThreadMessages("all");
-    state.messagesContext = "inbox";
-    renderMessages(state.messages, { context: "inbox", term: "" });
-    updateMessageMeta({ context: "inbox", term: "" });
-
-    // Hide skeleton screens and show actual content
-    hideSkeletons();
-
-    clearMessageDetail();
-
-    const durationMs = Math.round(performance.now() - bootstrapStart);
-    console.info("[viewer] bootstrap complete", {
-      durationMs,
-      ftsEnabled: state.ftsEnabled,
-      totalMessages: state.totalMessages,
-      databaseSource: state.databaseSource,
-      cacheState: state.cacheState,
-    });
-  } catch (error) {
-    console.error(error);
-    manifestOutput.textContent = `Viewer initialization failed: ${error}`;
-  }
-}
-
-threadListEl.addEventListener("click", (event) => {
-  const item = event.target.closest("li.thread-item");
-  if (!item) {
-    return;
-  }
-  const threadKey = item.dataset.threadKey;
-  if (threadKey) {
-    state.threads = state.filteredThreads;
-    selectThread(threadKey);
-  }
-});
-
-threadListEl.addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") {
-    const item = event.target.closest("li.thread-item");
-    if (item?.dataset.threadKey) {
-      selectThread(item.dataset.threadKey);
-      event.preventDefault();
-    }
-  }
-});
-
-messageListEl.addEventListener("click", handleMessageSelection);
-
-searchInput.addEventListener("input", (event) => {
-  performSearch(event.target.value);
-});
-
-threadFilterInput.addEventListener("input", (event) => {
-  filterThreads(event.target.value);
-});
-
-cacheToggle.addEventListener("click", async () => {
-  if (!CACHE_SUPPORTED || !state.cacheKey) {
-    return;
-  }
-  cacheToggle.disabled = true;
-  try {
-    if (state.cacheState === "opfs") {
-      await removeFromOpfs(state.cacheKey);
-      state.cacheState = state.lastDatabaseBytes ? "memory" : "none";
-    } else if (state.lastDatabaseBytes) {
-      const success = await writeToOpfs(state.cacheKey, state.lastDatabaseBytes);
-      if (success) {
-        state.cacheState = "opfs";
-      }
-    }
-  } finally {
-    updateCacheToggle();
-    updateEngineStatus();
-    cacheToggle.disabled = false;
-  }
-});
-
-clearDetailButton.addEventListener("click", () => {
-  clearMessageDetail();
-});
-
-// Diagnostics Panel
-const diagnosticsPanel = document.getElementById("diagnostics-panel");
-const diagnosticsToggle = document.getElementById("diagnostics-toggle");
-const closeDiagnostics = document.getElementById("close-diagnostics");
-const clearAllCachesButton = document.getElementById("clear-all-caches");
-const toggleExplainButton = document.getElementById("toggle-explain");
-
-function updateDiagnostics() {
-  // Cross-Origin Isolation
-  const isIsolated = window.crossOriginIsolated === true;
-  document.getElementById("diag-isolation-status").textContent = isIsolated ? "✅ Enabled" : "❌ Disabled";
-  document.getElementById("diag-sab-status").textContent = typeof SharedArrayBuffer !== "undefined" ? "✅ Available" : "❌ Unavailable";
-  document.getElementById("diag-opfs-status").textContent = CACHE_SUPPORTED ? "✅ Available" : "❌ Unavailable";
-
-  // Database Engine
-  document.getElementById("diag-db-source").textContent = state.databaseSource || "-";
-  document.getElementById("diag-db-engine").textContent = "sql.js (WASM)";
-  document.getElementById("diag-fts-status").textContent = state.ftsEnabled ? "✅ Enabled" : "❌ Disabled";
-  document.getElementById("diag-explain-status").textContent = state.explainMode ? "✅ Enabled (check console)" : "❌ Disabled";
-
-  // Cache Status
-  const cacheStateMap = {
-    opfs: "OPFS (persistent)",
-    memory: "Memory (session only)",
-    none: "No cache",
-    unsupported: "Unsupported"
-  };
-  document.getElementById("diag-cache-state").textContent = cacheStateMap[state.cacheState] || state.cacheState;
-  document.getElementById("diag-cache-key").textContent = state.cacheKey || "-";
-  const cacheLocation = state.cacheState === "opfs" ? "OPFS (origin-private file system)"
-    : state.cacheState === "memory" ? "Browser memory"
-    : "None";
-  document.getElementById("diag-cache-location").textContent = cacheLocation;
-
-  // Performance
-  const bootstrapMs = Math.round(performance.now() - bootstrapStart);
-  document.getElementById("diag-bootstrap-time").textContent = `${bootstrapMs}ms`;
-  document.getElementById("diag-total-messages").textContent = state.totalMessages || "-";
-}
-
-diagnosticsToggle.addEventListener("click", () => {
-  diagnosticsPanel.classList.remove("hidden");
-  updateDiagnostics();
-});
-
-closeDiagnostics.addEventListener("click", () => {
-  diagnosticsPanel.classList.add("hidden");
-});
-
-diagnosticsPanel.addEventListener("click", (event) => {
-  if (event.target === diagnosticsPanel) {
-    diagnosticsPanel.classList.add("hidden");
-  }
-});
-
-toggleExplainButton.addEventListener("click", () => {
-  state.explainMode = !state.explainMode;
-  updateDiagnostics();
-  const message = state.explainMode
-    ? "EXPLAIN mode enabled. Query plans will be logged to the console."
-    : "EXPLAIN mode disabled.";
-  console.info(`[viewer] ${message}`);
-  alert(message);
-});
-
-clearAllCachesButton.addEventListener("click", async () => {
-  if (!confirm("Clear all caches? This will remove all offline data and require re-downloading the database.")) {
-    return;
-  }
-  clearAllCachesButton.disabled = true;
-  try {
-    if (state.cacheKey) {
-      await removeFromOpfs(state.cacheKey);
-    }
-    // Try to clear any other cached files
-    const root = await getOpfsRoot();
-    if (root) {
-      for await (const [name, handle] of root.entries()) {
-        if (name.startsWith(CACHE_PREFIX)) {
-          try {
-            await root.removeEntry(name);
-            console.info("[viewer] Removed cached file:", name);
-          } catch (err) {
-            console.warn("[viewer] Failed to remove:", name, err);
-          }
-        }
-      }
-    }
-    state.cacheState = CACHE_SUPPORTED ? "memory" : "none";
-    updateCacheToggle();
-    updateDiagnostics();
-    alert("All caches cleared successfully. Refresh the page to reload from network.");
-  } catch (error) {
-    console.error("[viewer] Failed to clear caches:", error);
-    alert(`Failed to clear caches: ${error.message}`);
-  } finally {
-    clearAllCachesButton.disabled = false;
-  }
-});
-
 // Alpine.js Controllers
 // These functions must be defined before Alpine.js loads (we use defer on Alpine script)
 
@@ -1092,14 +743,12 @@ window.viewerController = function() {
           CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
           substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
           m.body_md,
-          COALESCE(
-            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = m.id LIMIT 1)),
-            'Unknown'
-          ) AS sender,
+          COALESCE(a.name, 'Unknown') AS sender,
           COALESCE(p.slug, 'unknown') AS project_slug,
           COALESCE(p.human_key, 'Unknown Project') AS project_name
         FROM messages m
         LEFT JOIN projects p ON p.id = m.project_id
+        LEFT JOIN agents a ON a.id = m.sender_id
         ORDER BY datetime(m.created_ts) DESC, m.id DESC
       `);
 
@@ -1135,7 +784,7 @@ window.viewerController = function() {
           mr.message_id,
           COALESCE(a.name, 'Unknown') AS recipient_name
         FROM message_recipients mr
-        LEFT JOIN agents a ON a.id = mr.to_agent_id
+        LEFT JOIN agents a ON a.id = mr.agent_id
         ORDER BY mr.message_id, recipient_name
       `);
 
@@ -1190,20 +839,18 @@ window.viewerController = function() {
       const results = [];
       const stmt = state.db.prepare(`
         SELECT
-          id,
-          subject,
-          created_ts,
-          importance,
-          body_md,
-          COALESCE(
-            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = messages.id LIMIT 1)),
-            'Unknown'
-          ) AS sender
-        FROM messages
+          m.id,
+          m.subject,
+          m.created_ts,
+          m.importance,
+          m.body_md,
+          COALESCE(a.name, 'Unknown') AS sender
+        FROM messages m
+        LEFT JOIN agents a ON a.id = m.sender_id
         WHERE
-          (thread_id = ?)
-          OR (thread_id IS NULL AND printf('msg:%d', id) = ?)
-        ORDER BY datetime(created_ts) ASC, id ASC
+          (m.thread_id = ?)
+          OR (m.thread_id IS NULL AND printf('msg:%d', m.id) = ?)
+        ORDER BY datetime(m.created_ts) ASC, m.id ASC
       `);
 
       try {

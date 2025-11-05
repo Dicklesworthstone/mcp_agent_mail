@@ -134,7 +134,7 @@
             <i data-lucide="mail" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
             Agent Mail
           </h1>
-          <span x-show="manifest" class="text-sm text-slate-500 dark:text-slate-400" x-text="manifest?.projects?.length + ' project(s)'"></span>
+          <span x-show="manifest" class="text-sm text-slate-500 dark:text-slate-400" x-text="((manifest?.project_scope?.included || []).length) + ' project(s)'"></span>
         </div>
 
         <div class="flex items-center gap-3">
@@ -149,10 +149,10 @@
           <!-- Cache Toggle -->
           <button x-show="cacheSupported"
                   @click="toggleCache()"
-                  :class="cacheState === 'cached' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
+                  :class="cacheState === 'opfs' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
                   class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80">
             <i data-lucide="database" class="w-4 h-4"></i>
-            <span x-text="cacheState === 'cached' ? 'Cached' : 'Cache'"></span>
+            <span x-text="cacheState === 'opfs' ? 'Cached' : 'Cache'"></span>
           </button>
 
           <!-- Diagnostics Toggle -->
@@ -194,7 +194,7 @@
           <div>
             <h3 class="font-semibold text-slate-900 dark:text-white mb-2">Bundle</h3>
             <dl class="space-y-1 text-slate-600 dark:text-slate-400">
-              <div class="flex justify-between"><dt>Generated:</dt><dd x-text="manifest?.generated"></dd></div>
+              <div class="flex justify-between"><dt>Generated:</dt><dd x-text="manifest?.generated_at"></dd></div>
               <div class="flex justify-between"><dt>Schema:</dt><dd x-text="manifest?.schema_version"></dd></div>
             </dl>
           </div>
