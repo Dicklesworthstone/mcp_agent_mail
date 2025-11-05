@@ -1422,7 +1422,6 @@ window.viewerController = function() {
     searchQuery: '',
     filteredMessages: [],
     selectedMessage: null,
-    splitView: true,
     sortBy: 'newest',
     isFullscreen: false,
     showDiagnostics: false,
@@ -1523,6 +1522,8 @@ window.viewerController = function() {
 
     getAllMessages() {
       const results = [];
+
+      // First, get all messages with their basic info
       const stmt = state.db.prepare(`
         SELECT
           m.id,
@@ -1547,49 +1548,66 @@ window.viewerController = function() {
 
       try {
         while (stmt.step()) {
-          const row = stmt.getAsObject();
-
-          // Get recipients for this message
-          const recipients = this.getMessageRecipients(row.id);
-
-          // Enrich message with additional fields
-          results.push({
-            ...row,
-            recipients: recipients,
-            excerpt: row.snippet || '',
-            created_relative: this.formatTimestamp(row.created_ts),
-            created_full: this.formatTimestampFull(row.created_ts),
-            read: false // Static viewer doesn't track read state
-          });
+          results.push(stmt.getAsObject());
         }
       } finally {
         stmt.free();
       }
 
-      return results;
+      // Build a recipients map in a single query (MUCH faster than N+1 queries)
+      const recipientsMap = this.buildRecipientsMap();
+
+      // Enrich messages with recipients and formatted dates
+      return results.map(msg => ({
+        ...msg,
+        recipients: recipientsMap.get(msg.id) || 'Unknown',
+        excerpt: msg.snippet || '',
+        created_relative: this.formatTimestamp(msg.created_ts),
+        created_full: this.formatTimestampFull(msg.created_ts),
+        read: false // Static viewer doesn't track read state
+      }));
     },
 
-    getMessageRecipients(messageId) {
+    buildRecipientsMap() {
+      // Build a map of message_id -> comma-separated recipient names
+      // This is done in ONE query instead of N queries!
+      const map = new Map();
+
       const stmt = state.db.prepare(`
-        SELECT COALESCE(a.name, 'Unknown') AS recipient_name
+        SELECT
+          mr.message_id,
+          COALESCE(a.name, 'Unknown') AS recipient_name
         FROM message_recipients mr
         LEFT JOIN agents a ON a.id = mr.to_agent_id
-        WHERE mr.message_id = ?
-        ORDER BY recipient_name
+        ORDER BY mr.message_id, recipient_name
       `);
 
-      const recipients = [];
       try {
-        stmt.bind([messageId]);
+        let currentMessageId = null;
+        let currentRecipients = [];
+
         while (stmt.step()) {
           const row = stmt.getAsObject();
-          recipients.push(row.recipient_name);
+
+          if (currentMessageId !== null && currentMessageId !== row.message_id) {
+            // Store previous message's recipients
+            map.set(currentMessageId, currentRecipients.join(', '));
+            currentRecipients = [];
+          }
+
+          currentMessageId = row.message_id;
+          currentRecipients.push(row.recipient_name);
+        }
+
+        // Don't forget the last message
+        if (currentMessageId !== null) {
+          map.set(currentMessageId, currentRecipients.join(', '));
         }
       } finally {
         stmt.free();
       }
 
-      return recipients.length > 0 ? recipients.join(', ') : 'Unknown';
+      return map;
     },
 
     buildThreadsForAlpine(rawThreads) {
@@ -1720,6 +1738,10 @@ window.viewerController = function() {
 
       // Apply sorting
       this.sortMessages(this.sortBy, filtered);
+
+      // Clear any selected messages that are no longer in the filtered list
+      const filteredIds = new Set(this.filteredMessages.map(msg => msg.id));
+      this.selectedMessages = this.selectedMessages.filter(id => filteredIds.has(id));
     },
 
     clearFilters() {
@@ -1731,6 +1753,7 @@ window.viewerController = function() {
         hasThread: ''
       };
       this.searchQuery = '';
+      this.selectedMessages = []; // Clear selections when clearing filters
       this.filterMessages();
     },
 
@@ -1740,7 +1763,8 @@ window.viewerController = function() {
         this.selectedMessage = null;
       } else {
         this.selectedMessage = msg;
-        this.splitView = true;
+        // Switch to split view when selecting a message
+        this.viewMode = 'split';
       }
     },
 
@@ -1751,7 +1775,6 @@ window.viewerController = function() {
 
     switchToSplitView() {
       this.viewMode = 'split';
-      this.splitView = true;
     },
 
     renderMarkdown(markdown) {
