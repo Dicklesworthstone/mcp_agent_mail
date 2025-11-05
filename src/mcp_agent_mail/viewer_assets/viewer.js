@@ -68,6 +68,21 @@ function escapeHtml(value) {
 }
 
 /**
+ * Create TrustedHTML from escaped HTML string.
+ * @param {string} html - HTML string with escaped entities
+ * @returns {string|TrustedHTML} - Trusted HTML ready for innerHTML
+ */
+function createTrustedHTML(html) {
+  if (trustedTypesPolicy) {
+    // For simple escaped HTML, we can trust it directly
+    // The policy will receive already-escaped HTML, so DOMPurify will pass it through
+    return trustedTypesPolicy.createHTML(html);
+  }
+  // Fallback for browsers without Trusted Types
+  return html;
+}
+
+/**
  * Render Markdown safely using Marked + DOMPurify + Trusted Types.
  * @param {string} markdown - Raw markdown text
  * @returns {string|TrustedHTML} - Sanitized HTML ready for innerHTML
@@ -135,7 +150,7 @@ function renderProjects(manifest) {
   }
   for (const entry of entries) {
     const li = document.createElement("li");
-    li.innerHTML = `<strong>${escapeHtml(entry.slug)}</strong> <span>${escapeHtml(entry.human_key)}</span>`;
+    li.innerHTML = createTrustedHTML(`<strong>${escapeHtml(entry.slug)}</strong> <span>${escapeHtml(entry.human_key)}</span>`);
     projectsList.append(li);
   }
 }
@@ -729,10 +744,10 @@ function renderMessageDetail(message) {
   messageDetailEl.innerHTML = "";
 
   const header = document.createElement("header");
-  header.innerHTML = `
+  header.innerHTML = createTrustedHTML(`
     <h3>${escapeHtml(message.subject || "(no subject)")}</h3>
     <div class="meta-line">${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")} • project: ${escapeHtml(message.project_slug || "-")}</div>
-  `;
+  `);
 
   const body = document.createElement("div");
   body.className = "message-snippet";
@@ -753,16 +768,19 @@ function renderMessageDetail(message) {
           const li = document.createElement("li");
           const mode = entry.type || entry.mode || "file";
           const label = entry.media_type || "application/octet-stream";
-          li.innerHTML = `<strong>${escapeHtml(mode)}</strong> – ${escapeHtml(label)}`;
+
+          // Build complete HTML string, then create TrustedHTML once
+          let html = `<strong>${escapeHtml(mode)}</strong> – ${escapeHtml(label)}`;
           if (entry.sha256) {
-            li.innerHTML += `<br /><span class="meta-line">sha256: ${escapeHtml(entry.sha256)}</span>`;
+            html += `<br /><span class="meta-line">sha256: ${escapeHtml(entry.sha256)}</span>`;
           }
           if (entry.path) {
-            li.innerHTML += `<br /><span class="meta-line">Path: ${escapeHtml(entry.path)}</span>`;
+            html += `<br /><span class="meta-line">Path: ${escapeHtml(entry.path)}</span>`;
           }
           if (entry.original_path) {
-            li.innerHTML += `<br /><span class="meta-line">Original: ${escapeHtml(entry.original_path)}</span>`;
+            html += `<br /><span class="meta-line">Original: ${escapeHtml(entry.original_path)}</span>`;
           }
+          li.innerHTML = createTrustedHTML(html);
           list.append(li);
         }
         const attachmentsHeader = document.createElement("h4");
