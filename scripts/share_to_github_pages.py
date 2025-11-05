@@ -16,6 +16,7 @@ Requirements:
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -148,38 +149,35 @@ def authenticate_wrangler_cli() -> bool:
         return False
 
 
-def check_prerequisites(require_cloudflare: bool = False) -> bool:
+def check_prerequisites(require_github: bool = False, require_cloudflare: bool = False) -> bool:
     """Check if required tools are installed and configured."""
     all_satisfied = True
 
-    # Check gh CLI
-    gh_installed = False
-    try:
-        result = subprocess.run(
-            ["gh", "auth", "status"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode == 0:
-            gh_installed = True
-            console.print("[green]✓ gh CLI installed and authenticated[/]")
-        else:
-            console.print("[yellow]⚠ gh CLI installed but not authenticated[/]")
-            gh_installed = True
-            if not authenticate_gh_cli():
+    # Check gh CLI (only if GitHub deployment selected)
+    if require_github:
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "status"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                console.print("[green]✓ gh CLI installed and authenticated[/]")
+            else:
+                console.print("[yellow]⚠ gh CLI installed but not authenticated[/]")
+                if not authenticate_gh_cli():
+                    all_satisfied = False
+        except FileNotFoundError:
+            if install_gh_cli():
+                # After install, try to authenticate
+                if not authenticate_gh_cli():
+                    all_satisfied = False
+            else:
                 all_satisfied = False
-    except FileNotFoundError:
-        if install_gh_cli():
-            # After install, try to authenticate
-            if not authenticate_gh_cli():
-                all_satisfied = False
-        else:
-            all_satisfied = False
 
     # Check wrangler CLI (only if Cloudflare deployment selected)
     if require_cloudflare:
-        wrangler_installed = False
         try:
             result = subprocess.run(
                 ["wrangler", "whoami"],
@@ -188,11 +186,9 @@ def check_prerequisites(require_cloudflare: bool = False) -> bool:
                 check=False,
             )
             if result.returncode == 0:
-                wrangler_installed = True
                 console.print("[green]✓ wrangler CLI installed and authenticated[/]")
             else:
                 console.print("[yellow]⚠ wrangler CLI installed but not authenticated[/]")
-                wrangler_installed = True
                 if not authenticate_wrangler_cli():
                     all_satisfied = False
         except FileNotFoundError:
@@ -202,16 +198,17 @@ def check_prerequisites(require_cloudflare: bool = False) -> bool:
             else:
                 all_satisfied = False
 
-    # Check git config
-    try:
-        subprocess.run(["git", "config", "user.name"], capture_output=True, check=True, text=True)
-        subprocess.run(["git", "config", "user.email"], capture_output=True, check=True, text=True)
-        console.print("[green]✓ git configured[/]")
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        console.print("[red]❌ git not configured[/]")
-        console.print("[cyan]Run:[/] git config --global user.name \"Your Name\"")
-        console.print("[cyan]Run:[/] git config --global user.email \"you@example.com\"")
-        all_satisfied = False
+    # Check git config (only needed for GitHub deployment)
+    if require_github:
+        try:
+            subprocess.run(["git", "config", "user.name"], capture_output=True, check=True, text=True)
+            subprocess.run(["git", "config", "user.email"], capture_output=True, check=True, text=True)
+            console.print("[green]✓ git configured[/]")
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            console.print("[red]❌ git not configured[/]")
+            console.print("[cyan]Run:[/] git config --global user.name \"Your Name\"")
+            console.print("[cyan]Run:[/] git config --global user.email \"you@example.com\"")
+            all_satisfied = False
 
     if not all_satisfied:
         console.print("\n[yellow]Some prerequisites are missing. Please address them and try again.[/]")
@@ -612,7 +609,6 @@ def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[boo
         for line in result.stdout.split("\n"):
             if ".pages.dev" in line:
                 # Extract URL from the line
-                import re
                 url_match = re.search(r"https://[^\s]+\.pages\.dev[^\s]*", line)
                 if url_match:
                     pages_url = url_match.group(0)
@@ -648,8 +644,9 @@ def main() -> None:
     deployment = select_deployment_target()
 
     # Check prerequisites based on deployment choice
+    require_gh = deployment["type"] == "github-new"
     require_cf = deployment["type"] == "cloudflare-pages"
-    if not check_prerequisites(require_cloudflare=require_cf):
+    if not check_prerequisites(require_github=require_gh, require_cloudflare=require_cf):
         sys.exit(1)
 
     # Get projects

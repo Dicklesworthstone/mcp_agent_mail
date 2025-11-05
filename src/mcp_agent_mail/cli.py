@@ -862,12 +862,22 @@ def share_wizard() -> None:
     import subprocess
     import sys
 
+    # Try to find wizard script - first check if running from source
     wizard_script = Path(__file__).parent.parent.parent / "scripts" / "share_to_github_pages.py"
 
     if not wizard_script.exists():
-        console.print(f"[red]Wizard script not found at:[/] {wizard_script}")
-        console.print("[yellow]Try running the wizard directly:[/] python scripts/share_to_github_pages.py")
-        raise typer.Exit(code=1)
+        # If not in source tree, check if it's in the same directory as this module (for editable installs)
+        alt_path = Path(__file__).parent / "scripts" / "share_to_github_pages.py"
+        if alt_path.exists():
+            wizard_script = alt_path
+        else:
+            console.print(f"[red]Wizard script not found.[/]")
+            console.print(f"[yellow]Expected locations:[/]")
+            console.print(f"  • {wizard_script}")
+            console.print(f"  • {alt_path}")
+            console.print(f"\n[yellow]This command only works when running from source.[/]")
+            console.print(f"[cyan]Run the wizard directly:[/] python scripts/share_to_github_pages.py")
+            raise typer.Exit(code=1)
 
     try:
         # Run the wizard script as a subprocess so it can handle its own console interactions
