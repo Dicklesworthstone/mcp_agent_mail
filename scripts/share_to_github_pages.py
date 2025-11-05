@@ -609,14 +609,19 @@ def preview_bundle(output_dir: Path) -> bool:
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Preview interrupted[/]")
+        return Confirm.ask("Continue with deployment anyway?", default=False)
+
+    finally:
+        # Always clean up the process, regardless of how we exit
         if process is not None and process.poll() is None:
+            console.print("[dim]Stopping preview server...[/]")
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                console.print("[yellow]Warning: Preview server did not stop cleanly[/]")
+                console.print("[yellow]Warning: Preview server did not stop cleanly, forcing shutdown...[/]")
                 process.kill()
-        return Confirm.ask("Continue with deployment anyway?", default=False)
+                process.wait()  # Wait for kill to complete
 
 
 def create_github_repo(name: str, private: bool, description: str) -> tuple[bool, str]:
@@ -901,7 +906,7 @@ def main() -> None:
                 signing_key = generate_signing_key()
             else:
                 key_path = Prompt.ask("Path to existing signing key")
-                signing_key = Path(key_path)
+                signing_key = Path(key_path).expanduser().resolve()
     else:
         use_signing = last_config.get("use_signing", True)
         generate_new_key = last_config.get("generate_new_key", True)
@@ -911,7 +916,7 @@ def main() -> None:
             else:
                 # Ask for key path again (don't save sensitive paths)
                 key_path = Prompt.ask("Path to existing signing key")
-                signing_key = Path(key_path)
+                signing_key = Path(key_path).expanduser().resolve()
 
     # Show deployment summary and ask for confirmation
     if not show_deployment_summary(selected_projects, scrub_preset, deployment, signing_key):
