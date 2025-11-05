@@ -1,0 +1,14 @@
+{
+  "sql_js": {
+    "version": "1.10.1",
+    "source": "https://github.com/sql-js/sql.js/releases/tag/v1.10.1",
+    "files": {
+      "sql-wasm.js": {
+        "sha256": "f5c0404031cc8a1e2d6d856e154536775e4ec520b5471d00306e83d4edeb9fc2"
+      },
+      "sql-wasm.wasm": {
+        "sha256": "0734155c83e493983d1f2ff5b09a4fab6e35a32e9449c7e4e545756439f62d73"
+      }
+    }
+  }
+}

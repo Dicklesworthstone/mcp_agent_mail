@@ -295,7 +295,13 @@ def build_how_to_deploy(hosting_hints: Sequence[HostingHint]) -> str:
     return "\n".join(sections)
 
 
-def export_viewer_data(snapshot_path: Path, output_dir: Path, *, limit: int = 500) -> dict[str, Any]:
+def export_viewer_data(
+    snapshot_path: Path,
+    output_dir: Path,
+    *,
+    limit: int = 500,
+    fts_enabled: bool = False,
+) -> dict[str, Any]:
     viewer_data_dir = output_dir / "viewer" / "data"
     viewer_data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -330,10 +336,15 @@ def export_viewer_data(snapshot_path: Path, output_dir: Path, *, limit: int = 50
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "message_count": total_messages,
         "messages_cached": len(messages),
+        "fts_enabled": fts_enabled,
     }
     meta_path = viewer_data_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    return {"messages": str(messages_path.relative_to(output_dir)), "meta": str(meta_path.relative_to(output_dir))}
+    return {
+        "messages": str(messages_path.relative_to(output_dir)),
+        "meta": str(meta_path.relative_to(output_dir)),
+        "meta_info": meta,
+    }
 
 
 def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path, *, public_out: Optional[Path] = None) -> dict[str, str]:
@@ -991,6 +1002,8 @@ def copy_viewer_assets(output_dir: Path) -> None:
     viewer_root = output_dir / "viewer"
     viewer_root.mkdir(parents=True, exist_ok=True)
 
+    _verify_viewer_vendor_assets()
+
     package_root = resources.files("mcp_agent_mail.viewer_assets")
 
     def _walk(node: abc.Traversable, relative: Path) -> None:  # type: ignore[attr-defined]
@@ -1004,6 +1017,41 @@ def copy_viewer_assets(output_dir: Path) -> None:
                 destination.write_bytes(child.read_bytes())
 
     _walk(package_root, Path())
+
+
+def _load_vendor_manifest() -> dict[str, Any]:
+    manifest_path = resources.files("mcp_agent_mail.viewer_assets") / "vendor_manifest.json"
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as exc:  # pragma: no cover - packaging error
+        raise ShareExportError("Viewer asset manifest missing; reinstall package.") from exc
+
+
+def _verify_viewer_vendor_assets() -> None:
+    manifest = _load_vendor_manifest()
+    vendor_root = resources.files("mcp_agent_mail.viewer_assets") / "vendor"
+    for manifest_group in manifest.values():
+        files = manifest_group.get("files", {})
+        for filename, meta in files.items():
+            expected = meta.get("sha256")
+            if not expected:
+                continue
+            asset_path = vendor_root / filename
+            try:
+                data = asset_path.read_bytes()
+            except FileNotFoundError as exc:
+                raise ShareExportError(
+                    "Viewer vendor asset "
+                    f"'{filename}' missing. Run scripts/update_sqlite_vendor.py to refresh assets."
+                ) from exc
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != expected:
+                raise ShareExportError(
+                    "Checksum mismatch for viewer vendor asset "
+                    f"'{filename}'. Expected {expected}, got {digest}. "
+                    "Run scripts/update_sqlite_vendor.py to refresh assets."
+                )
 
 
 def prepare_output_directory(directory: Path) -> Path:
@@ -1096,6 +1144,8 @@ def write_bundle_scaffolding(
         ],
     }
     if viewer_data:
+        fts_flag = viewer_data.get("meta_info", {}).get("fts_enabled", False)
+        manifest["database"]["fts_enabled"] = fts_flag
         manifest["viewer"] = viewer_data
     _write_json_file(output_dir / "manifest.json", manifest)
 

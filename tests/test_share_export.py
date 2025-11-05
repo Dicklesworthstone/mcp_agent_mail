@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from mcp_agent_mail import cli as cli_module
 from mcp_agent_mail.config import clear_settings_cache
+import mcp_agent_mail.share as share
 from mcp_agent_mail.share import (
     SCRUB_PRESETS,
     ShareExportError,
@@ -393,6 +394,11 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
     assert "viewer" in manifest
     assert manifest["scrub"]["preset"] == "standard"
     clear_settings_cache()
+
+
+def test_verify_viewer_vendor_assets():
+    # Should not raise when bundled vendor assets match recorded checksums.
+    share._verify_viewer_vendor_assets()
 
 
 def test_maybe_chunk_database_rejects_zero_chunk_size(tmp_path: Path) -> None:
