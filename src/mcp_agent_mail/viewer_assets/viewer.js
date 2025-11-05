@@ -523,20 +523,20 @@ function renderThreads(threads) {
     }
 
     const title = document.createElement("h3");
-    title.innerHTML = thread.thread_key === "all"
+    title.innerHTML = createTrustedHTML(thread.thread_key === "all"
       ? "All messages"
-      : escapeHtml(thread.latest_subject || "(no subject)");
+      : escapeHtml(thread.latest_subject || "(no subject)"));
 
     const meta = document.createElement("div");
     meta.className = "thread-meta";
-    meta.innerHTML = `
+    meta.innerHTML = createTrustedHTML(`
       <span class="pill">${thread.message_count} msg</span>
       <span>${thread.last_created_ts ? formatTimestamp(thread.last_created_ts) : ""}</span>
-    `;
+    `);
 
     const preview = document.createElement("div");
     preview.className = "thread-preview";
-    preview.innerHTML = highlightText(thread.latest_snippet || "", state.searchTerm);
+    preview.innerHTML = createTrustedHTML(highlightText(thread.latest_snippet || "", state.searchTerm));
 
     li.append(title, meta, preview);
     threadListEl.append(li);
@@ -602,15 +602,15 @@ function renderMessages(list, { context, term }) {
     }
 
     const title = document.createElement("h3");
-    title.innerHTML = highlightText(message.subject || "(no subject)", term);
+    title.innerHTML = createTrustedHTML(highlightText(message.subject || "(no subject)", term));
 
     const meta = document.createElement("div");
     meta.className = "message-meta-line";
-    meta.innerHTML = `${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")}`;
+    meta.innerHTML = createTrustedHTML(`${formatTimestamp(message.created_ts)} • importance: ${escapeHtml(message.importance || "normal")}`);
 
     const snippet = document.createElement("div");
     snippet.className = "message-snippet";
-    snippet.innerHTML = highlightText(message.snippet || "", term);
+    snippet.innerHTML = createTrustedHTML(highlightText(message.snippet || "", term));
 
     item.append(title, meta, snippet);
     messageListEl.append(item);
@@ -707,7 +707,7 @@ function selectThread(threadKey) {
 
 function clearMessageDetail() {
   state.selectedMessageId = undefined;
-  messageDetailEl.innerHTML = "<p class='meta-line'>Select a message to inspect subject, body, and attachments.</p>";
+  messageDetailEl.innerHTML = createTrustedHTML("<p class='meta-line'>Select a message to inspect subject, body, and attachments.</p>");
   const active = messageListEl.querySelector("li.active");
   if (active) {
     active.classList.remove("active");
