@@ -356,6 +356,64 @@ footer {
   }
 }
 
+/* Skeleton Loading Screens */
+.skeleton {
+  background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}
+
+@keyframes skeleton-loading {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton-text {
+  height: 1rem;
+  margin: 0.5rem 0;
+}
+
+.skeleton-text.short {
+  width: 60%;
+}
+
+.skeleton-text.medium {
+  width: 80%;
+}
+
+.skeleton-text.long {
+  width: 100%;
+}
+
+.skeleton-heading {
+  height: 1.5rem;
+  width: 50%;
+  margin: 1rem 0;
+}
+
+.skeleton-list-item {
+  height: 3rem;
+  margin: 0.5rem 0;
+  border-radius: 8px;
+}
+
+.skeleton-panel {
+  padding: 1rem;
+}
+
+.loading-state {
+  display: block;
+}
+
+.loading-state.hidden {
+  display: none;
+}
+
 /* Warning Banner for Cross-Origin Isolation */
 .warning-banner {
   background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);

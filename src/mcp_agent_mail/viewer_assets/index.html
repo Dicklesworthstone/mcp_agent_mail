@@ -49,7 +49,14 @@
               aria-label="Filter threads"
             />
           </div>
-          <ul id="thread-list" class="thread-list" role="list"></ul>
+          <div id="thread-skeleton" class="loading-state skeleton-panel">
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+          </div>
+          <ul id="thread-list" class="thread-list hidden" role="list"></ul>
         </aside>
 
         <section class="message-pane" aria-labelledby="messages-heading">
@@ -63,7 +70,15 @@
             />
           </div>
           <p id="message-meta" class="meta-line">Loading message index…</p>
-          <ul id="message-list" class="message-list" role="list"></ul>
+          <div id="message-skeleton" class="loading-state skeleton-panel">
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+            <div class="skeleton skeleton-list-item"></div>
+          </div>
+          <ul id="message-list" class="message-list hidden" role="list"></ul>
         </section>
 
         <aside class="detail-pane" aria-labelledby="detail-heading">

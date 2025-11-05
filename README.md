@@ -904,10 +904,12 @@ Alternatively, filter to specific projects with `--project`.
 Verify you're using the correct identity file:
 
 ```bash
-# List recipients in encrypted file
+# Get your public key from your identity file
 age-keygen -y identity.txt
 
-# Ensure this public key matches one of the --age-recipient values used during export
+# Ensure this public key was included in the --age-recipient values during export
+# If you have multiple identity files, try each one
+age -d -i identity.txt bundle.zip.age > bundle.zip
 ```
 
 **Signature verification fails**
