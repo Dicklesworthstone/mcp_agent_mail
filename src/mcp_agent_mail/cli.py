@@ -41,8 +41,10 @@ from .share import (
     SCRUB_PRESETS,
     ShareExportError,
     apply_project_scope,
+    build_materialized_views,
     build_search_indexes,
     bundle_attachments,
+    finalize_snapshot_for_export,
     copy_viewer_assets,
     create_sqlite_snapshot,
     detect_hosting_hints,
@@ -348,6 +350,12 @@ def share_export(
     fts_enabled = build_search_indexes(snapshot_path)
     if not fts_enabled:
         console.print("[yellow]FTS5 not available; viewer will fall back to LIKE search.[/]")
+
+    console.print("[cyan]Building materialized views for httpvfs performance...[/]")
+    build_materialized_views(snapshot_path)
+
+    console.print("[cyan]Finalizing snapshot (SQL hygiene optimizations)...[/]")
+    finalize_snapshot_for_export(snapshot_path)
 
     settings = get_settings()
     storage_root = Path(settings.storage.root).expanduser()

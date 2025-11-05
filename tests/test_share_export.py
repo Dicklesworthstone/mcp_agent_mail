@@ -17,7 +17,9 @@ from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.share import (
     SCRUB_PRESETS,
     ShareExportError,
+    build_materialized_views,
     bundle_attachments,
+    finalize_snapshot_for_export,
     maybe_chunk_database,
     scrub_snapshot,
     summarize_snapshot,
@@ -975,3 +977,191 @@ def test_verify_bundle_with_sri_and_signature_both_valid(tmp_path: Path) -> None
     assert result["sri_checked"] is True
     assert result["signature_checked"] is True
     assert result["signature_verified"] is True
+
+
+def test_finalize_snapshot_sql_hygiene(tmp_path: Path) -> None:
+    """Test SQL hygiene optimizations from finalize_snapshot_for_export."""
+    # Create a test database with some data
+    snapshot = tmp_path / "snapshot.sqlite3"
+    conn = sqlite3.connect(snapshot)
+    try:
+        # Create tables with data
+        conn.executescript(
+            """
+            CREATE TABLE test_data (id INTEGER PRIMARY KEY, data TEXT);
+            INSERT INTO test_data (data) VALUES ('test1'), ('test2'), ('test3');
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Get initial file size
+    initial_size = snapshot.stat().st_size
+
+    # Verify WAL mode might exist (default for some SQLite versions)
+    conn = sqlite3.connect(snapshot)
+    try:
+        # Create some operations that might leave WAL files
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("INSERT INTO test_data (data) VALUES ('wal-test')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Apply SQL hygiene optimizations
+    finalize_snapshot_for_export(snapshot)
+
+    # Verify journal mode is DELETE
+    conn = sqlite3.connect(snapshot)
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert journal_mode.lower() == "delete", f"Expected DELETE mode, got {journal_mode}"
+
+        # Verify page size is 1024
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        assert page_size == 1024, f"Expected page size 1024, got {page_size}"
+
+        # Verify data integrity (VACUUM shouldn't lose data)
+        row_count = conn.execute("SELECT COUNT(*) FROM test_data").fetchone()[0]
+        assert row_count == 4, f"Expected 4 rows after finalization, got {row_count}"
+    finally:
+        conn.close()
+
+    # Verify no WAL or SHM files exist
+    wal_file = Path(f"{snapshot}-wal")
+    shm_file = Path(f"{snapshot}-shm")
+    assert not wal_file.exists(), "WAL file should not exist after finalization"
+    assert not shm_file.exists(), "SHM file should not exist after finalization"
+
+    # Note: File size may increase or decrease depending on initial page size
+    # and fragmentation, so we just verify it's reasonable (not empty, not corrupted)
+    final_size = snapshot.stat().st_size
+    assert final_size > 0, "Snapshot should not be empty after finalization"
+    assert final_size < initial_size * 2, "Snapshot size should be reasonable"
+
+
+def test_build_materialized_views(tmp_path: Path) -> None:
+    """Test materialized view creation for httpvfs performance optimization."""
+    # Create a test database with messages and attachments
+    snapshot = tmp_path / "snapshot.sqlite3"
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                name TEXT,
+                contact_policy TEXT DEFAULT 'auto'
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                sender_id INTEGER,
+                thread_id TEXT,
+                subject TEXT,
+                body_md TEXT,
+                importance TEXT,
+                ack_required INTEGER,
+                created_ts TEXT,
+                attachments TEXT
+            );
+
+            INSERT INTO projects (id, slug, human_key) VALUES (1, 'demo', 'demo-key');
+            INSERT INTO agents (id, project_id, name) VALUES (1, 1, 'AgentAlice');
+            INSERT INTO agents (id, project_id, name) VALUES (2, 1, 'AgentBob');
+
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (
+                1, 1, 1, 'thread-1', 'Test Message 1', 'Body 1', 'high', 1, '2025-01-01T00:00:00Z',
+                '[{"type":"file","path":"test.txt","size_bytes":100,"media_type":"text/plain"}]'
+            );
+
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (
+                2, 1, 2, 'thread-1', 'Test Message 2', 'Body 2', 'normal', 0, '2025-01-02T00:00:00Z',
+                '[{"type":"inline","data_uri":"data:text/plain;base64,dGVzdA=="},{"type":"file","path":"doc.pdf","size_bytes":500,"media_type":"application/pdf"}]'
+            );
+
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (
+                3, 1, 1, 'thread-2', 'Test Message 3', 'Body 3', 'normal', 0, '2025-01-03T00:00:00Z', '[]'
+            );
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Build materialized views
+    build_materialized_views(snapshot)
+
+    # Verify message_overview_mv was created
+    conn = sqlite3.connect(snapshot)
+    try:
+        # Check table exists
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_overview_mv'"
+        ).fetchall()
+        assert len(tables) == 1, "message_overview_mv should exist"
+
+        # Check data is populated
+        rows = conn.execute("SELECT * FROM message_overview_mv ORDER BY id").fetchall()
+        assert len(rows) == 3, f"Expected 3 rows in message_overview_mv, got {len(rows)}"
+
+        # Verify columns
+        row = conn.execute("SELECT * FROM message_overview_mv WHERE id = 1").fetchone()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM message_overview_mv WHERE id = 1").fetchone()
+        assert row["sender_name"] == "AgentAlice"
+        assert row["subject"] == "Test Message 1"
+        assert row["importance"] == "high"
+        assert row["attachment_count"] == 1
+
+        # Verify indexes exist
+        indexes = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND tbl_name='message_overview_mv'
+            AND name LIKE 'idx_msg_overview_%'
+            """
+        ).fetchall()
+        assert len(indexes) >= 4, f"Expected at least 4 covering indexes, got {len(indexes)}"
+
+        # Check attachments_by_message_mv was created
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='attachments_by_message_mv'"
+        ).fetchall()
+        assert len(tables) == 1, "attachments_by_message_mv should exist"
+
+        # Check attachment data is flattened
+        attach_rows = conn.execute("SELECT * FROM attachments_by_message_mv ORDER BY message_id").fetchall()
+        # Message 1: 1 attachment, Message 2: 2 attachments, Message 3: 0 attachments
+        assert len(attach_rows) == 3, f"Expected 3 flattened attachment rows, got {len(attach_rows)}"
+
+        # Verify attachment details
+        attach_row = conn.execute(
+            "SELECT * FROM attachments_by_message_mv WHERE message_id = 1"
+        ).fetchone()
+        conn.row_factory = sqlite3.Row
+        attach_row = conn.execute(
+            "SELECT * FROM attachments_by_message_mv WHERE message_id = 1"
+        ).fetchone()
+        assert attach_row["attachment_type"] == "file"
+        assert attach_row["media_type"] == "text/plain"
+        assert attach_row["path"] == "test.txt"
+        assert attach_row["size_bytes"] == 100
+
+        # Verify attachment indexes exist
+        attach_indexes = conn.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type='index' AND tbl_name='attachments_by_message_mv'
+            AND name LIKE 'idx_attach_%'
+            """
+        ).fetchall()
+        assert len(attach_indexes) >= 3, f"Expected at least 3 attachment indexes, got {len(attach_indexes)}"
+    finally:
+        conn.close()

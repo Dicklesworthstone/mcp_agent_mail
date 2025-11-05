@@ -848,6 +848,106 @@ def build_search_indexes(snapshot_path: Path) -> bool:
         conn.close()
 
 
+def finalize_snapshot_for_export(snapshot_path: Path) -> None:
+    """Apply SQL hygiene optimizations to improve bundle size and httpvfs performance.
+
+    Executes the optimization sequence from the sharing plan:
+    - PRAGMA journal_mode=DELETE (single-file mode)
+    - PRAGMA page_size=1024 (httpvfs-friendly page size)
+    - VACUUM (compact database, improve locality)
+    - PRAGMA optimize (update query planner statistics)
+    """
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
+        # Convert to DELETE mode for single-file simplicity (no -wal/-shm files)
+        conn.execute("PRAGMA journal_mode=DELETE")
+
+        # Set page size for better httpvfs streaming performance
+        # Must be done before VACUUM to take effect
+        conn.execute("PRAGMA page_size=1024")
+
+        # Compact database and improve page locality
+        conn.execute("VACUUM")
+
+        # Update query planner statistics for optimal execution plans
+        conn.execute("PRAGMA optimize")
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def build_materialized_views(snapshot_path: Path) -> None:
+    """Create materialized views and covering indexes for httpvfs performance.
+
+    Creates pre-computed tables optimized for common viewer queries:
+    - message_overview_mv: Denormalized message list with sender info
+    - attachments_by_message_mv: Flattened attachments for easier querying
+
+    Also creates covering indexes to enable efficient httpvfs range scans.
+    """
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
+        # Message overview materialized view
+        # Denormalizes messages with sender names for efficient list rendering
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS message_overview_mv;
+            CREATE TABLE message_overview_mv AS
+            SELECT
+                m.id,
+                m.project_id,
+                m.thread_id,
+                m.subject,
+                m.importance,
+                m.ack_required,
+                m.created_ts,
+                a.name AS sender_name,
+                LENGTH(m.body_md) AS body_length,
+                json_array_length(m.attachments) AS attachment_count
+            FROM messages m
+            JOIN agents a ON m.sender_id = a.id
+            ORDER BY m.created_ts DESC;
+
+            -- Covering indexes for common query patterns
+            CREATE INDEX idx_msg_overview_created ON message_overview_mv(created_ts DESC);
+            CREATE INDEX idx_msg_overview_thread ON message_overview_mv(thread_id, created_ts DESC);
+            CREATE INDEX idx_msg_overview_project ON message_overview_mv(project_id, created_ts DESC);
+            CREATE INDEX idx_msg_overview_importance ON message_overview_mv(importance, created_ts DESC);
+            """
+        )
+
+        # Attachments by message materialized view
+        # Flattens JSON attachments array for easier filtering and counting
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS attachments_by_message_mv;
+            CREATE TABLE attachments_by_message_mv AS
+            SELECT
+                m.id AS message_id,
+                m.project_id,
+                m.thread_id,
+                m.created_ts,
+                json_extract(value, '$.type') AS attachment_type,
+                json_extract(value, '$.media_type') AS media_type,
+                json_extract(value, '$.path') AS path,
+                CAST(json_extract(value, '$.size_bytes') AS INTEGER) AS size_bytes
+            FROM messages m,
+                 json_each(m.attachments)
+            WHERE m.attachments != '[]';
+
+            -- Indexes for attachment queries
+            CREATE INDEX idx_attach_by_msg ON attachments_by_message_mv(message_id);
+            CREATE INDEX idx_attach_by_type ON attachments_by_message_mv(attachment_type, created_ts DESC);
+            CREATE INDEX idx_attach_by_project ON attachments_by_message_mv(project_id, created_ts DESC);
+            """
+        )
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def summarize_snapshot(
     snapshot_path: Path,
     *,
@@ -1482,6 +1582,43 @@ def write_bundle_scaffolding(
 
     how_to_deploy = build_how_to_deploy(hosting_hints)
     _write_text_file(output_dir / "HOW_TO_DEPLOY.md", how_to_deploy)
+
+    # Generate _headers file for Cloudflare/Netlify COOP/COEP support
+    headers_content = _generate_headers_file()
+    _write_text_file(output_dir / "_headers", headers_content)
+
+
+def _generate_headers_file() -> str:
+    """Generate _headers file for Cloudflare Pages and Netlify deployment.
+
+    This file configures Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy
+    headers required for OPFS (Origin Private File System) and SharedArrayBuffer support.
+    """
+    return """# Cross-Origin Isolation headers for OPFS and SharedArrayBuffer support
+# Compatible with Cloudflare Pages and Netlify
+# See: https://web.dev/coop-coep/
+
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+
+# Allow viewer assets to be loaded
+/viewer/*
+  Cross-Origin-Resource-Policy: same-origin
+
+# SQLite database and chunks
+/*.sqlite3
+  Cross-Origin-Resource-Policy: same-origin
+  Content-Type: application/x-sqlite3
+
+/chunks/*
+  Cross-Origin-Resource-Policy: same-origin
+  Content-Type: application/octet-stream
+
+# Attachments
+/attachments/*
+  Cross-Origin-Resource-Policy: same-origin
+"""
 
 
 __all__ = [

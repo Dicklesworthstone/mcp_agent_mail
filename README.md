@@ -89,7 +89,7 @@ uv run python -m mcp_agent_mail.cli config set-port 9000
 
 ## Ready-Made Blurb to Add to Your AGENTS.md or CLAUDE.md Files:
 ```
-## MCP Agent Mail — coordination for multi-agent workflows
+## MCP Agent Mail: coordination for multi-agent workflows
 
 What it is
 - A mail-like layer that lets coding agents coordinate asynchronously via MCP tools and resources.
@@ -255,7 +255,7 @@ Auth notes:
   - Shows a unified, reverse‑chronological inbox of recent messages across all projects with excerpts, relative timestamps, sender/recipients, and project badges.
   - Below the inbox, lists all projects (slug, human name, created time) with sibling suggestions.
   - Suggests **likely sibling projects** when two slugs appear to be parts of the same product (e.g., backend vs. frontend). Suggestions are ranked with heuristics and, when `LLM_ENABLED=true`, an LLM pass across key docs (`README.md`, `AGENTS.md`, etc.).
-  - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross‑project messaging—agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
+  - Humans can **Confirm Link** or **Dismiss** suggestions from the dashboard. Confirmed siblings become highlighted badges but *do not* automatically authorize cross-project messaging; agents must still establish `AgentLink` approvals via `request_contact`/`respond_contact`.
 
 - `/mail/projects` (Projects index)
   - Dedicated projects list view; click a project to drill in.
@@ -294,7 +294,7 @@ Auth notes:
 
 ### Human Overseer: Sending Messages to Agents
 
-Sometimes a human operator needs to guide or redirect agents directly—whether to handle an urgent issue, provide clarification, or adjust priorities. The **Human Overseer** feature provides a web-based message composer that lets humans send high-priority messages to any combination of agents in a project.
+Sometimes a human operator needs to guide or redirect agents directly, whether to handle an urgent issue, provide clarification, or adjust priorities. The **Human Overseer** feature provides a web-based message composer that lets humans send high-priority messages to any combination of agents in a project.
 
 **Access:** Click the prominent **"Send Message"** button (with the Overseer badge) in the header of any project view (`/mail/{project}`), or navigate directly to `/mail/{project}/overseer/compose`.
 
@@ -407,7 +407,7 @@ Agents can reply to overseer messages just like any other message, continuing th
 #### Technical Details
 
 - **Storage**: Overseer messages are stored identically to agent-to-agent messages (Git + SQLite)
-- **Git History**: Fully auditable—message appears in `messages/YYYY/MM/{id}.md` with commit history
+- **Git History**: Fully auditable; message appears in `messages/YYYY/MM/{id}.md` with commit history
 - **Thread Continuity**: Can be part of existing threads or start new ones
 - **No Authentication Bypass**: The overseer compose form still requires proper HTTP server authentication (if enabled)
 
@@ -424,7 +424,7 @@ This creates a clear hierarchy (human → agents) while maintaining the collabor
 
 ### Related Projects Discovery
 
-The Projects index (`/mail`) features an **AI-powered discovery system** that intelligently suggests which projects should be linked together—think frontend + backend, or related microservices.
+The Projects index (`/mail`) features an **AI-powered discovery system** that intelligently suggests which projects should be linked together, such as frontend + backend or related microservices.
 
 #### How Discovery Works
 
@@ -438,8 +438,8 @@ The system uses multiple signals to identify relationships:
 Related projects appear as polished cards on your dashboard with:
 - 🎯 Visual confidence indicators showing match strength
 - 💬 AI-generated rationales explaining the relationship
-- ✅ **Confirm Link** — accept the suggestion
-- ✖️ **Dismiss** — hide irrelevant matches
+- ✅ **Confirm Link** - accept the suggestion
+- ✖️ **Dismiss** - hide irrelevant matches
 
 **3. Quick Navigation**
 Once confirmed, both projects display interactive badges for instant navigation between related codebases.
@@ -448,7 +448,7 @@ Once confirmed, both projects display interactive badges for instant navigation 
 
 > **TL;DR**: We keep you in control. Discovery helps you find relationships; explicit approvals control who can actually communicate.
 
-**Agent Mail uses agent-centric messaging** — every message follows explicit permission chains:
+**Agent Mail uses agent-centric messaging**: every message follows explicit permission chains:
 
 ```
 Send Message → Find Recipient → Check AgentLink Approval → Deliver
@@ -526,6 +526,405 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 - Empty inbox: Verify recipient names match exactly and messages were sent to that agent.
 - Search returns nothing: Try simpler terms or the LIKE fallback (toggle scope/body).
 
+## Static Mailbox Export (Share & Distribute Archives)
+
+The `share` command group provides a complete pipeline for exporting mailbox archives into self-contained static HTML bundles. These bundles can be distributed to stakeholders, auditors, or team members who need read-only access to message history without running the full MCP Agent Mail server.
+
+### Why export to static bundles?
+
+**Compliance and audit trails**: Deliver immutable snapshots of project communication to auditors or compliance officers. The static bundle includes cryptographic signatures for tamper-evident distribution.
+
+**Stakeholder review**: Share conversation history with product managers, executives, or external consultants who don't need write access. They can browse messages, search threads, and view attachments in their browser without authentication.
+
+**Offline access**: Create portable archives for air-gapped environments, disaster recovery backups, or situations where internet connectivity is unreliable.
+
+**Long-term archival**: Preserve project communication in a format that will remain readable decades from now. Static HTML requires no database server, no runtime dependencies, and survives software obsolescence better than proprietary formats.
+
+**Secure distribution**: Encrypt bundles with age for confidential projects. Only recipients with the private key can decrypt and view the contents.
+
+### What's included in an export
+
+Each bundle contains:
+
+- **Static HTML viewer**: A single-page application with three-pane interface (projects, threads, messages) that runs entirely in the browser. No server required after the initial file serving.
+- **SQLite database snapshot**: A read-only copy of the messages, agents, and metadata, loaded via SQL.js (WebAssembly).
+- **Full-text search**: FTS5 search index embedded in the database allows fast subject/body searches entirely client-side.
+- **Attachments**: Images and files, either bundled directly (for small files) or marked as external references (for large files).
+- **Integrity metadata**: SHA-256 hashes for all assets (vendor libraries, database, attachments) stored in `manifest.json` for verification.
+- **Optional signature**: Ed25519 cryptographic signature over the manifest to prove authenticity and detect tampering.
+- **Security hardening**: Content Security Policy headers, DOMPurify sanitization, and Trusted Types enforcement protect against XSS attacks in message bodies.
+
+### Basic export workflow
+
+**1. Export a bundle**
+
+```bash
+# Export all projects to a directory
+uv run python -m mcp_agent_mail.cli share export --output ./my-bundle
+
+# Export specific projects only
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./my-bundle \
+  --project backend-abc123 \
+  --project frontend-xyz789
+
+# Export with Ed25519 signing for tamper-evident distribution
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./my-bundle \
+  --signing-key ./keys/signing.key \
+  --signing-public-out ./keys/signing.pub
+
+# Export and encrypt with age for secure distribution
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./my-bundle \
+  --age-recipient age1abc...xyz \
+  --age-recipient age1def...uvw
+```
+
+The export process:
+
+1. Creates a snapshot of the SQLite database (read-only, no WAL/SHM files)
+2. Copies message bodies, attachments, and metadata into the bundle structure
+3. Applies redaction rules based on the scrub preset (default: `standard`)
+4. Generates `manifest.json` with SHA-256 hashes for all assets
+5. Optionally signs the manifest with Ed25519 (produces `manifest.sig.json`)
+6. Packages everything into a ZIP archive (optional, enabled by default)
+7. Optionally encrypts the ZIP with age (produces `bundle.zip.age`)
+
+**2. Preview locally**
+
+```bash
+# Serve the bundle on localhost:9000
+uv run python -m mcp_agent_mail.cli share preview ./my-bundle
+
+# Custom port and auto-open browser
+uv run python -m mcp_agent_mail.cli share preview ./my-bundle \
+  --port 8080 \
+  --open-browser
+```
+
+This launches a lightweight HTTP server that serves the static files. Open `http://127.0.0.1:9000/` in your browser to explore the archive.
+
+**3. Verify integrity**
+
+```bash
+# Verify SRI hashes and signature
+uv run python -m mcp_agent_mail.cli share verify ./my-bundle
+
+# Verify with explicit public key (overrides manifest.sig.json)
+uv run python -m mcp_agent_mail.cli share verify ./my-bundle \
+  --public-key AAAA...base64...
+```
+
+Verification checks:
+
+- SHA-256 hashes for all vendor libraries (Marked.js, DOMPurify, SQL.js)
+- SHA-256 hashes for the SQLite database and attachments
+- Ed25519 signature over the canonical manifest (if present)
+
+**4. Decrypt (if encrypted)**
+
+```bash
+# Decrypt with age identity file (private key)
+uv run python -m mcp_agent_mail.cli share decrypt bundle.zip.age \
+  --identity ~/.age/key.txt
+
+# Decrypt with passphrase (interactive prompt)
+uv run python -m mcp_agent_mail.cli share decrypt bundle.zip.age \
+  --passphrase
+
+# Specify custom output path
+uv run python -m mcp_agent_mail.cli share decrypt bundle.zip.age \
+  --output ./decrypted-bundle.zip \
+  --identity ~/.age/key.txt
+```
+
+After decryption, unzip the archive and use `share preview` to view it.
+
+### Export options reference
+
+| Option | Type | Default | Description |
+| :-- | :-- | :-- | :-- |
+| `--output`, `-o` | Path | (required) | Directory where the static bundle will be written |
+| `--project`, `-p` | List | All projects | Limit export to specific project slugs or human keys (repeatable) |
+| `--inline-threshold` | Bytes | 65536 (64KB) | Inline attachments smaller than this as base64 data URIs |
+| `--detach-threshold` | Bytes | 5242880 (5MB) | Mark attachments larger than this as external (not bundled) |
+| `--scrub-preset` | String | `standard` | Redaction preset: `standard` (IP addresses, tokens), `strict` (includes email addresses, URLs), or `none` |
+| `--chunk-threshold` | Bytes | 52428800 (50MB) | Split SQLite database into chunks if it exceeds this size |
+| `--chunk-size` | Bytes | 10485760 (10MB) | Chunk size when splitting large databases |
+| `--dry-run` | Flag | false | Generate security summary and preview without writing files |
+| `--zip` / `--no-zip` | Flag | true | Package the bundle into a ZIP archive |
+| `--signing-key` | Path | None | Path to Ed25519 signing key (32-byte raw seed) |
+| `--signing-public-out` | Path | None | Write the Ed25519 public key to this file after signing |
+| `--age-recipient` | String | None | age public key for encryption (repeatable for multiple recipients) |
+| `--interactive`, `-i` | Flag | false | Launch interactive wizard (prints guidance; full wizard TBD) |
+
+### Security features
+
+**XSS protection (DOMPurify + Trusted Types)**
+
+Message bodies are rendered using a defense-in-depth pipeline:
+
+1. **Marked.js** parses GitHub-Flavored Markdown into HTML
+2. **DOMPurify** sanitizes the HTML, removing dangerous tags and attributes
+3. **Trusted Types** enforces that all `innerHTML` assignments use TrustedHTML objects
+4. **Content Security Policy** blocks inline scripts, external resources, and unsafe-eval
+
+This prevents malicious content in message bodies from executing JavaScript or exfiltrating data.
+
+**Cryptographic signing (Ed25519)**
+
+When you provide a signing key, the export process:
+
+1. Generates a canonical JSON representation of `manifest.json`
+2. Signs it with Ed25519 (fast, 64-byte signatures)
+3. Writes the signature and public key to `manifest.sig.json`
+
+Recipients can verify the signature using `share verify` to ensure:
+
+- The bundle hasn't been modified since signing
+- The bundle was created by someone with the private key
+- All assets match their declared SHA-256 hashes
+
+**Encryption (age)**
+
+The `age` encryption tool (https://age-encryption.org/) provides modern, secure file encryption. When you provide recipient public keys, the export process encrypts the final ZIP archive. Only holders of the corresponding private keys can decrypt it.
+
+Generate keys with:
+
+```bash
+# Install age (example for macOS)
+brew install age
+
+# Generate a new key pair
+age-keygen -o key.txt
+
+# Public key is printed to stdout; share it with exporters
+# Private key is saved to key.txt; keep it secret
+```
+
+**Redaction presets**
+
+The export pipeline supports configurable scrubbing to remove sensitive data:
+
+- `standard`: Redacts IP addresses, bearer tokens, API keys, hex secrets
+- `strict`: Also redacts email addresses, URLs, file paths
+- `none`: No redaction (use only for internal/trusted distribution)
+
+Redaction is applied to message bodies and attachment metadata before they're written to the bundle.
+
+### Static viewer features
+
+The bundled HTML viewer provides:
+
+**Three-pane interface**:
+- Left pane: Projects list with message counts
+- Middle pane: Message list for selected project (searchable)
+- Right pane: Message detail with full body, attachments, and thread context
+
+**Full-text search**: Powered by SQLite FTS5, runs entirely in the browser. Search syntax supports phrases (`"build plan"`), boolean operators (`plan AND users`), and field filters (`subject:deploy`).
+
+**Markdown rendering**: Message bodies are rendered with GitHub-Flavored Markdown, supporting code blocks (with syntax highlighting), tables, task lists, and inline images.
+
+**OPFS caching**: The SQLite database is cached in Origin Private File System (OPFS) for instant subsequent loads. First load downloads the database, subsequent loads are instant.
+
+**Attachment preview**: Inline images render directly in message bodies. External attachments show file size and download links.
+
+**Thread navigation**: Click thread IDs to see all messages in a conversation thread.
+
+**No server required**: After the initial HTTP serving (which can be a static file host like S3, GitHub Pages, or Netlify), all functionality runs client-side. No backend, no API calls, no authentication.
+
+### Deployment options
+
+**Option 1: GitHub Pages**
+
+```bash
+# Export and unzip
+uv run python -m mcp_agent_mail.cli share export --output ./bundle --no-zip
+cd bundle
+
+# Initialize git and push to GitHub
+git init
+git add .
+git commit -m "Initial export"
+git remote add origin git@github.com:yourorg/project-archive.git
+git push -u origin main
+
+# Enable GitHub Pages in repo settings (source: main branch, root directory)
+```
+
+**Option 2: S3 + CloudFront**
+
+```bash
+# Export and unzip
+uv run python -m mcp_agent_mail.cli share export --output ./bundle --no-zip
+
+# Upload to S3
+aws s3 sync ./bundle s3://your-bucket/archives/project-2024/ --acl public-read
+
+# Access via CloudFront
+# https://d123abc.cloudfront.net/archives/project-2024/
+```
+
+**Option 3: Nginx static site**
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name archives.example.com;
+
+  ssl_certificate /etc/letsencrypt/live/archives.example.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/archives.example.com/privkey.pem;
+
+  root /var/www/archives/project-2024;
+  index index.html;
+
+  # Enable gzip for efficient transfer
+  gzip on;
+  gzip_types text/html text/css application/javascript application/json application/wasm;
+
+  # Cache static assets
+  location ~* \.(js|css|wasm|png|jpg|webp)$ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+  }
+
+  # CSP headers are already in index.html meta tag
+  # Add HTTPS-only and frame protection
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+  add_header X-Frame-Options "DENY" always;
+  add_header X-Content-Type-Options "nosniff" always;
+}
+```
+
+**Option 4: Encrypted distribution via file sharing**
+
+For confidential archives:
+
+```bash
+# Export with age encryption
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./bundle \
+  --signing-key ./signing.key \
+  --age-recipient age1auditor... \
+  --age-recipient age1manager...
+
+# This produces bundle.zip.age
+# Upload to Dropbox, Google Drive, or send via secure file transfer
+
+# Recipients decrypt locally
+uv run python -m mcp_agent_mail.cli share decrypt bundle.zip.age \
+  --identity ~/.age/key.txt
+
+# Verify integrity
+unzip bundle.zip
+uv run python -m mcp_agent_mail.cli share verify ./bundle
+
+# Preview locally
+uv run python -m mcp_agent_mail.cli share preview ./bundle
+```
+
+### Example workflows
+
+**Quarterly audit package**
+
+```bash
+# Export Q4 2024 communications for audit
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./audit-q4-2024 \
+  --scrub-preset strict \
+  --signing-key ./audit-signing.key \
+  --signing-public-out ./audit-signing.pub \
+  --age-recipient age1auditor@firm.example
+
+# Produces: audit-q4-2024.zip.age
+# Send to auditor with audit-signing.pub
+
+# Auditor verifies:
+age -d -i auditor-key.txt audit-q4-2024.zip.age > audit-q4-2024.zip
+unzip audit-q4-2024.zip
+python -m mcp_agent_mail.cli share verify ./audit-q4-2024 \
+  --public-key $(cat audit-signing.pub)
+```
+
+**Executive summary for stakeholders**
+
+```bash
+# Export high-importance threads only
+# (filter in UI after export, or use SQL to create filtered snapshot)
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./exec-summary \
+  --project backend-prod \
+  --scrub-preset standard
+
+# Host on internal web server
+cp -r ./exec-summary /var/www/exec-archives/2024-12/
+# Share link: https://internal.example.com/exec-archives/2024-12/
+```
+
+**Disaster recovery backup**
+
+```bash
+# Monthly encrypted backup
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./backup-$(date +%Y-%m) \
+  --scrub-preset none \
+  --signing-key ./dr-signing.key \
+  --age-recipient age1dr@company.example
+
+# Store in off-site backup system
+aws s3 cp backup-2024-12.zip.age s3://dr-backups/mcp-mail/ \
+  --storage-class GLACIER_IR
+
+# Restore procedure documented in runbook
+```
+
+### Troubleshooting exports
+
+**Export fails with "Database locked"**
+
+The export takes a snapshot using SQLite's Online Backup API. If the server is actively writing, wait a few seconds and retry. For large databases, consider temporarily stopping the server during export.
+
+**Bundle size is too large**
+
+Use `--detach-threshold` to mark large attachments as external references. These won't be included in the bundle but will show file metadata in the viewer.
+
+```bash
+# Bundle files under 1MB, mark larger files as external
+uv run python -m mcp_agent_mail.cli share export \
+  --output ./bundle \
+  --detach-threshold 1048576
+```
+
+Alternatively, filter to specific projects with `--project`.
+
+**Encrypted bundle won't decrypt**
+
+Verify you're using the correct identity file:
+
+```bash
+# List recipients in encrypted file
+age-keygen -y identity.txt
+
+# Ensure this public key matches one of the --age-recipient values used during export
+```
+
+**Signature verification fails**
+
+Signature verification requires:
+1. The original `manifest.json` (unmodified)
+2. The `manifest.sig.json` file (contains signature and public key)
+3. All assets referenced in the manifest with matching SHA-256 hashes
+
+If verification fails, the bundle may have been tampered with or corrupted during transfer. Re-export and re-transfer.
+
+**Viewer shows blank page or errors**
+
+Check browser console for errors. Common issues:
+
+- **OPFS not supported**: Older browsers may not support Origin Private File System. The viewer will fall back to in-memory mode (slower).
+- **Database too large**: Browsers limit in-memory database size to ~1-2GB. Use chunking (`--chunk-threshold`) for very large archives.
+- **CSP violations**: If hosting the bundle, ensure the web server doesn't add conflicting CSP headers. The viewer's CSP is defined in `index.html` and should not be overridden.
 
 ### On-disk layout (per project)
 
@@ -1061,7 +1460,7 @@ This section has been removed to keep the README focused. Client code samples be
   - FTS5 delivers fast, relevant search with minimal ops. It’s embedded, portable, and easy to back up with the Git archive. If FTS isn’t available, we degrade to SQL LIKE automatically.
 
 - Why is LLM usage optional?
-  - Summaries and discovery should enhance—not gate—core functionality. Keeping LLM usage optional controls cost and latency while allowing richer UX when enabled.
+  - Summaries and discovery should enhance, not gate, core functionality. Keeping LLM usage optional controls cost and latency while allowing richer UX when enabled.
 
 ## API Quick Reference
 
