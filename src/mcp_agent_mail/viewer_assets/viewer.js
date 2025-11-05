@@ -1418,12 +1418,12 @@ window.viewerController = function() {
     // State
     manifest: null,
     isLoading: true,
-    viewMode: 'inbox', // 'inbox' or 'threads'
+    viewMode: 'split', // 'split', 'list', or 'threads'
     searchQuery: '',
     filteredMessages: [],
     selectedMessage: null,
     splitView: true,
-    sortBy: 'date-desc',
+    sortBy: 'newest',
     isFullscreen: false,
     showDiagnostics: false,
     cacheState: 'none',
@@ -1434,6 +1434,29 @@ window.viewerController = function() {
     selectedThread: null,
     allMessages: [],
     allThreads: [],
+
+    // Filters
+    showFilters: false,
+    filters: {
+      project: '',
+      sender: '',
+      recipient: '',
+      importance: '',
+      hasThread: ''
+    },
+    uniqueProjects: [],
+    uniqueSenders: [],
+    uniqueRecipients: [],
+
+    // Bulk Actions
+    selectedMessages: [],
+
+    // Refresh Controls
+    isRefreshing: false,
+    lastRefreshLabel: 'Never',
+    autoRefreshEnabled: false,
+    refreshError: null,
+    refreshInterval: null,
 
     async init() {
       console.info('[Alpine] Initializing viewer controller');
@@ -1472,7 +1495,12 @@ window.viewerController = function() {
 
         const messages = this.getAllMessages();
         this.allMessages = messages;
-        this.filteredMessages = messages;
+
+        // Build unique filter arrays
+        this.buildUniqueFilters(messages);
+
+        // Apply filters
+        this.filterMessages();
 
         // Update cache state
         this.cacheState = state.cacheState;
@@ -1497,30 +1525,71 @@ window.viewerController = function() {
       const results = [];
       const stmt = state.db.prepare(`
         SELECT
-          id,
-          subject,
-          created_ts,
-          importance,
-          CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
-          substr(COALESCE(body_md, ''), 1, 280) AS snippet,
+          m.id,
+          m.subject,
+          m.created_ts,
+          m.importance,
+          m.thread_id,
+          m.project_id,
+          CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
+          substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
+          m.body_md,
           COALESCE(
-            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = messages.id LIMIT 1)),
+            (SELECT name FROM agents WHERE id = (SELECT from_agent_id FROM message_senders WHERE message_id = m.id LIMIT 1)),
             'Unknown'
           ) AS sender,
-          body_md
-        FROM messages
-        ORDER BY datetime(created_ts) DESC, id DESC
+          COALESCE(p.slug, 'unknown') AS project_slug,
+          COALESCE(p.human_key, 'Unknown Project') AS project_name
+        FROM messages m
+        LEFT JOIN projects p ON p.id = m.project_id
+        ORDER BY datetime(m.created_ts) DESC, m.id DESC
       `);
 
       try {
         while (stmt.step()) {
-          results.push(stmt.getAsObject());
+          const row = stmt.getAsObject();
+
+          // Get recipients for this message
+          const recipients = this.getMessageRecipients(row.id);
+
+          // Enrich message with additional fields
+          results.push({
+            ...row,
+            recipients: recipients,
+            excerpt: row.snippet || '',
+            created_relative: this.formatTimestamp(row.created_ts),
+            created_full: this.formatTimestampFull(row.created_ts),
+            read: false // Static viewer doesn't track read state
+          });
         }
       } finally {
         stmt.free();
       }
 
       return results;
+    },
+
+    getMessageRecipients(messageId) {
+      const stmt = state.db.prepare(`
+        SELECT COALESCE(a.name, 'Unknown') AS recipient_name
+        FROM message_recipients mr
+        LEFT JOIN agents a ON a.id = mr.to_agent_id
+        WHERE mr.message_id = ?
+        ORDER BY recipient_name
+      `);
+
+      const recipients = [];
+      try {
+        stmt.bind([messageId]);
+        while (stmt.step()) {
+          const row = stmt.getAsObject();
+          recipients.push(row.recipient_name);
+        }
+      } finally {
+        stmt.free();
+      }
+
+      return recipients.length > 0 ? recipients.join(', ') : 'Unknown';
     },
 
     buildThreadsForAlpine(rawThreads) {
@@ -1574,30 +1643,101 @@ window.viewerController = function() {
       return results;
     },
 
-    filterMessages() {
-      const query = this.searchQuery.trim().toLowerCase();
+    buildUniqueFilters(messages) {
+      const projects = new Set();
+      const senders = new Set();
+      const recipients = new Set();
 
-      if (!query) {
-        this.filteredMessages = this.allMessages;
-        return;
-      }
-
-      // Simple client-side filtering for now
-      // TODO: Use FTS5 for better search performance
-      this.filteredMessages = this.allMessages.filter(msg => {
-        return (
-          (msg.subject && msg.subject.toLowerCase().includes(query)) ||
-          (msg.body_md && msg.body_md.toLowerCase().includes(query)) ||
-          (msg.sender && msg.sender.toLowerCase().includes(query))
-        );
+      messages.forEach(msg => {
+        if (msg.project_name) projects.add(msg.project_name);
+        if (msg.sender) senders.add(msg.sender);
+        if (msg.recipients) {
+          // Recipients is a comma-separated string, split it
+          msg.recipients.split(',').forEach(r => {
+            const trimmed = r.trim();
+            if (trimmed) recipients.add(trimmed);
+          });
+        }
       });
+
+      this.uniqueProjects = Array.from(projects).sort();
+      this.uniqueSenders = Array.from(senders).sort();
+      this.uniqueRecipients = Array.from(recipients).sort();
     },
 
-    selectMessage(msg) {
+    get filtersActive() {
+      return !!(
+        this.filters.project ||
+        this.filters.sender ||
+        this.filters.recipient ||
+        this.filters.importance ||
+        this.filters.hasThread
+      );
+    },
+
+    filterMessages() {
+      let filtered = this.allMessages;
+
+      // Apply search query
+      const query = this.searchQuery.trim().toLowerCase();
+      if (query) {
+        filtered = filtered.filter(msg => {
+          return (
+            (msg.subject && msg.subject.toLowerCase().includes(query)) ||
+            (msg.body_md && msg.body_md.toLowerCase().includes(query)) ||
+            (msg.sender && msg.sender.toLowerCase().includes(query)) ||
+            (msg.recipients && msg.recipients.toLowerCase().includes(query))
+          );
+        });
+      }
+
+      // Apply filters
+      if (this.filters.project) {
+        filtered = filtered.filter(msg => msg.project_name === this.filters.project);
+      }
+
+      if (this.filters.sender) {
+        filtered = filtered.filter(msg => msg.sender === this.filters.sender);
+      }
+
+      if (this.filters.recipient) {
+        filtered = filtered.filter(msg => {
+          return msg.recipients && msg.recipients.includes(this.filters.recipient);
+        });
+      }
+
+      if (this.filters.importance) {
+        filtered = filtered.filter(msg => msg.importance === this.filters.importance);
+      }
+
+      if (this.filters.hasThread) {
+        const hasThread = this.filters.hasThread === 'true';
+        filtered = filtered.filter(msg => {
+          const msgHasThread = msg.thread_id && msg.thread_id !== '';
+          return hasThread ? msgHasThread : !msgHasThread;
+        });
+      }
+
+      // Apply sorting
+      this.sortMessages(this.sortBy, filtered);
+    },
+
+    clearFilters() {
+      this.filters = {
+        project: '',
+        sender: '',
+        recipient: '',
+        importance: '',
+        hasThread: ''
+      };
+      this.searchQuery = '';
+      this.filterMessages();
+    },
+
+    handleMessageClick(msg) {
       if (this.selectedMessage?.id === msg.id) {
         // Deselect if clicking the same message
         this.selectedMessage = null;
-        this.splitView = false;
       } else {
         this.selectedMessage = msg;
         this.splitView = true;
@@ -1607,6 +1747,11 @@ window.viewerController = function() {
     selectThread(thread) {
       this.selectedThread = thread;
       this.viewMode = 'threads';
+    },
+
+    switchToSplitView() {
+      this.viewMode = 'split';
+      this.splitView = true;
     },
 
     renderMarkdown(markdown) {
@@ -1671,28 +1816,147 @@ window.viewerController = function() {
       }
     },
 
-    sortMessages(sortBy) {
+    sortMessages(sortBy, messages = null) {
       this.sortBy = sortBy;
 
-      const messages = [...this.filteredMessages];
+      const toSort = messages || [...this.filteredMessages];
 
       switch (sortBy) {
-        case 'date-desc':
-          messages.sort((a, b) => new Date(b.created_ts) - new Date(a.created_ts));
+        case 'newest':
+          toSort.sort((a, b) => new Date(b.created_ts) - new Date(a.created_ts));
           break;
-        case 'date-asc':
-          messages.sort((a, b) => new Date(a.created_ts) - new Date(b.created_ts));
+        case 'oldest':
+          toSort.sort((a, b) => new Date(a.created_ts) - new Date(b.created_ts));
           break;
         case 'subject':
-          messages.sort((a, b) => (a.subject || '').localeCompare(b.subject || ''));
+          toSort.sort((a, b) => (a.subject || '').localeCompare(b.subject || ''));
           break;
         case 'sender':
-          messages.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
+          toSort.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
           break;
       }
 
-      this.filteredMessages = messages;
-    }
+      this.filteredMessages = toSort;
+    },
+
+    // Bulk Actions
+    toggleSelectAll() {
+      if (this.selectedMessages.length === this.filteredMessages.length) {
+        // Deselect all
+        this.selectedMessages = [];
+      } else {
+        // Select all filtered messages
+        this.selectedMessages = this.filteredMessages.map(msg => msg.id);
+      }
+    },
+
+    toggleMessageSelection(id) {
+      const index = this.selectedMessages.indexOf(id);
+      if (index > -1) {
+        this.selectedMessages.splice(index, 1);
+      } else {
+        this.selectedMessages.push(id);
+      }
+    },
+
+    markSelectedAsRead() {
+      // In static viewer, we can't actually mark as read in database
+      // But we can update the local state
+      this.allMessages.forEach(msg => {
+        if (this.selectedMessages.includes(msg.id)) {
+          msg.read = true;
+        }
+      });
+
+      // Clear selection after marking as read
+      this.selectedMessages = [];
+
+      // Re-filter to update UI
+      this.filterMessages();
+    },
+
+    // Refresh Controls
+    async fetchLatestMessages() {
+      // In static viewer, we can't actually fetch new messages
+      // But we can simulate a refresh for UI feedback
+      this.isRefreshing = true;
+      this.refreshError = null;
+
+      try {
+        // Simulate network delay
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Update timestamp
+        this.lastRefreshLabel = 'Just now';
+
+        console.info('[Alpine] Refreshed messages (static viewer - no new data)');
+      } catch (error) {
+        console.error('[Alpine] Refresh error', error);
+        this.refreshError = 'Failed to refresh';
+      } finally {
+        this.isRefreshing = false;
+      }
+    },
+
+    handleAutoRefreshToggle() {
+      if (this.autoRefreshEnabled) {
+        // Start auto-refresh (every 30 seconds)
+        this.refreshInterval = setInterval(() => {
+          this.fetchLatestMessages();
+        }, 30000);
+        console.info('[Alpine] Auto-refresh enabled');
+      } else {
+        // Stop auto-refresh
+        if (this.refreshInterval) {
+          clearInterval(this.refreshInterval);
+          this.refreshInterval = null;
+        }
+        console.info('[Alpine] Auto-refresh disabled');
+      }
+    },
+
+    // Helper Functions
+    getProjectBadgeClass(projectName) {
+      // Return Tailwind classes for project badge based on project name
+      // Use a hash to get consistent colors for same project
+      const hash = projectName.split('').reduce((acc, char) => {
+        return char.charCodeAt(0) + ((acc << 5) - acc);
+      }, 0);
+
+      const colors = [
+        'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
+        'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300',
+        'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300',
+        'bg-pink-100 dark:bg-pink-900/30 text-pink-700 dark:text-pink-300',
+        'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300',
+        'bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300',
+      ];
+
+      return colors[Math.abs(hash) % colors.length];
+    },
+
+    formatTimestampFull(timestamp) {
+      if (!timestamp) {
+        return 'Unknown';
+      }
+
+      try {
+        const date = new Date(timestamp);
+        if (Number.isNaN(date.getTime())) {
+          return timestamp;
+        }
+
+        return date.toLocaleDateString([], {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      } catch {
+        return timestamp;
+      }
+    },
   };
 };
 
