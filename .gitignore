@@ -217,3 +217,7 @@ temp.lock
 temp.lock.owner.json
 # Share export test output
 out/
+
+# Cryptographic signing keys (Ed25519 key pairs for bundle signing)
+signing-*.key
+signing-*.pub

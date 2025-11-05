@@ -53,6 +53,7 @@ dependencies = [
   "litellm>=1.40.0,<2",
   "pytest>=8.4.2",
   "ruff>=0.14.1",
+  "pynacl>=1.6.0",
 ]
 
 [project.optional-dependencies]

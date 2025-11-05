@@ -362,6 +362,8 @@ async function ensureSqlJsLoaded() {
       ? trustedScriptURLPolicy.createScriptURL(scriptURL)
       : scriptURL;
     script.async = true;
+    try { script.crossOrigin = "anonymous"; } catch (_) {}
+    try { script.fetchPriority = "high"; } catch (_) {}
     script.dataset.sqljs = "true";
     script.onload = () => resolve();
     script.onerror = () => reject(new Error("Failed to load sql-wasm.js"));
@@ -583,7 +585,7 @@ function getThreadMessages(threadKey, limit = 50000) {
  * Dark mode controller for Alpine.js
  * Manages dark mode toggle with localStorage persistence
  */
-window.darkModeController = function() {
+function darkModeController() {
   return {
     darkMode: false,
 
@@ -615,13 +617,13 @@ window.darkModeController = function() {
       }
     }
   };
-};
+}
 
 /**
  * Main viewer controller for Alpine.js
  * Manages all viewer state and interactions
  */
-window.viewerController = function() {
+function viewerController() {
   return {
     // State
     manifest: null,
@@ -643,7 +645,7 @@ window.viewerController = function() {
     allThreads: [],
 
     // Filters
-    showFilters: false,
+    showFilters: true,
     filters: {
       project: '',
       sender: '',
@@ -665,8 +667,24 @@ window.viewerController = function() {
     refreshError: null,
     refreshInterval: null,
 
+    // Dark mode (moved here so components can reference `darkMode` directly)
+    darkMode: false,
+
     async init() {
       console.info('[Alpine] Initializing viewer controller');
+      // Initialize dark mode state
+      try {
+        const stored = localStorage.getItem('darkMode');
+        const prefers = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        this.darkMode = stored === 'true' || (stored === null && prefers);
+      } catch (_err) {
+        this.darkMode = document.documentElement.classList.contains('dark');
+      }
+      if (this.darkMode) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
       await this.initViewer();
     },
 
@@ -709,6 +727,10 @@ window.viewerController = function() {
         // Apply filters
         this.filterMessages();
 
+        // Initialize virtual list and select the first message
+        this.initVirtualList();
+        this.selectFirstMessage();
+
         // Update cache state
         this.cacheState = state.cacheState;
 
@@ -720,6 +742,23 @@ window.viewerController = function() {
           databaseSource: this.databaseSource,
           cacheState: this.cacheState
         });
+
+        // Opportunistic background cache to OPFS after first successful load
+        if (CACHE_SUPPORTED && state.cacheKey && state.cacheState !== 'opfs' && state.lastDatabaseBytes) {
+          const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 200));
+          idle(async () => {
+            try {
+              const ok = await writeToOpfs(state.cacheKey, state.lastDatabaseBytes);
+              if (ok) {
+                state.cacheState = 'opfs';
+                this.cacheState = 'opfs';
+                console.info('[viewer] Cached database to OPFS', { key: state.cacheKey });
+              }
+            } catch (err) {
+              console.debug('[viewer] OPFS cache write skipped', err);
+            }
+          });
+        }
 
       } catch (error) {
         console.error('[Alpine] Initialization failed', error);
@@ -742,7 +781,6 @@ window.viewerController = function() {
           m.project_id,
           CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
           substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
-          m.body_md,
           COALESCE(a.name, 'Unknown') AS sender,
           COALESCE(p.slug, 'unknown') AS project_slug,
           COALESCE(p.human_key, 'Unknown Project') AS project_name
@@ -772,6 +810,200 @@ window.viewerController = function() {
         created_full: this.formatTimestampFull(msg.created_ts),
         read: false // Static viewer doesn't track read state
       }));
+    },
+
+    async loadMessageBodyById(id) {
+      let body = '';
+      const stmt = state.db.prepare(`SELECT COALESCE(body_md, '') AS body_md FROM messages WHERE id = ? LIMIT 1`);
+      try {
+        stmt.bind([id]);
+        if (stmt.step()) {
+          const row = stmt.getAsObject();
+          body = row.body_md || '';
+        }
+      } finally {
+        stmt.free();
+      }
+      return body;
+    },
+
+    // Search across ALL messages using SQL: FTS when available, otherwise LIKE.
+    // Supports parentheses, NOT, quoted phrases, and OR with proper precedence (NOT > AND > OR).
+    searchDatabaseIds(query) {
+      if (!state.db) return new Set();
+      const raw = String(query || '').trim();
+      if (!raw) return new Set();
+
+      // 1) Tokenize: terms, quoted phrases, operators, parentheses
+      const tokens = [];
+      const re = /\s*(\(|\)|"([^"]*)"|AND|OR|NOT|\||[^\s()"]+)\s*/gi;
+      let m;
+      while ((m = re.exec(raw)) !== null) {
+        const full = m[1];
+        if (full === '(' || full === ')') {
+          tokens.push({ kind: full });
+        } else if (/^AND$/i.test(full)) {
+          tokens.push({ kind: 'op', value: 'AND' });
+        } else if (/^(OR|\|)$/i.test(full)) {
+          tokens.push({ kind: 'op', value: 'OR' });
+        } else if (/^NOT$/i.test(full)) {
+          tokens.push({ kind: 'op', value: 'NOT' });
+        } else if (m[2] != null) {
+          tokens.push({ kind: 'term', value: m[2] });
+        } else if (full && full.trim()) {
+          tokens.push({ kind: 'term', value: full.trim() });
+        }
+      }
+      if (tokens.length === 0) return new Set();
+
+      // 2) Shunting-yard → RPN with precedence: NOT(3) > AND(2) > OR(1)
+      const prec = { NOT: 3, AND: 2, OR: 1 };
+      const rightAssoc = { NOT: true };
+      const output = [];
+      const ops = [];
+      for (const t of tokens) {
+        if (t.kind === 'term') {
+          output.push(t);
+        } else if (t.kind === 'op') {
+          while (
+            ops.length > 0 && ops[ops.length - 1].kind === 'op' && (
+              (rightAssoc[t.value] !== true && prec[ops[ops.length - 1].value] >= prec[t.value]) ||
+              (rightAssoc[t.value] === true && prec[ops[ops.length - 1].value] > prec[t.value])
+            )
+          ) {
+            output.push(ops.pop());
+          }
+          ops.push(t);
+        } else if (t.kind === '(') {
+          ops.push(t);
+        } else if (t.kind === ')') {
+          while (ops.length > 0 && ops[ops.length - 1].kind !== '(') {
+            output.push(ops.pop());
+          }
+          if (ops.length > 0 && ops[ops.length - 1].kind === '(') ops.pop();
+        }
+      }
+      while (ops.length > 0) output.push(ops.pop());
+
+      // 3) Build AST from RPN
+      function buildAst(rpn) {
+        const stack = [];
+        for (const t of rpn) {
+          if (t.kind === 'term') {
+            stack.push({ type: 'term', value: t.value });
+          } else if (t.kind === 'op') {
+            if (t.value === 'NOT') {
+              const a = stack.pop();
+              stack.push({ type: 'not', child: a });
+            } else {
+              const b = stack.pop();
+              const a = stack.pop();
+              stack.push({ type: t.value.toLowerCase(), left: a, right: b });
+            }
+          }
+        }
+        return stack.pop() || null;
+      }
+      const ast = buildAst(output);
+      if (!ast) return new Set();
+
+      const ids = new Set();
+
+      // 4) Try FTS
+      const ftsQuote = (s) => `"${String(s).replace(/"/g, '"')}"`;
+      function buildFts(node) {
+        if (!node) return '';
+        switch (node.type) {
+          case 'term':
+            return /\s/.test(node.value) ? ftsQuote(node.value) : node.value;
+          case 'not':
+            return `(NOT ${buildFts(node.child)})`;
+          case 'and':
+            return `(${buildFts(node.left)} AND ${buildFts(node.right)})`;
+          case 'or':
+            return `(${buildFts(node.left)} OR ${buildFts(node.right)})`;
+        }
+        return '';
+      }
+
+      if (this.ftsEnabled) {
+        const ftsExpr = buildFts(ast).trim();
+        if (ftsExpr) {
+          const sql = `SELECT rowid AS id FROM fts_messages WHERE fts_messages MATCH ?`;
+          let stmt;
+          try {
+            explainQuery(state.db, sql, [ftsExpr], 'searchDatabaseIds (FTS)');
+            stmt = state.db.prepare(sql);
+            stmt.bind([ftsExpr]);
+            while (stmt.step()) {
+              const row = stmt.getAsObject();
+              if (row.id != null) ids.add(Number(row.id));
+            }
+          } catch (error) {
+            console.warn('[viewer] FTS search failed, falling back to LIKE', error);
+          } finally {
+            if (stmt) stmt.free();
+          }
+          if (ids.size > 0) return ids;
+        }
+      }
+
+      // 5) LIKE fallback
+      function buildLike(node, acc) {
+        switch (node.type) {
+          case 'term': {
+            const needle = `%${String(node.value).toLowerCase()}%`;
+            acc.sql.push('(LOWER(subject) LIKE ? OR LOWER(COALESCE(body_md, "")) LIKE ?)');
+            acc.params.push(needle, needle);
+            break;
+          }
+          case 'not': {
+            const sub = { sql: [], params: [] };
+            buildLike(node.child, sub);
+            acc.sql.push(`NOT (${sub.sql.join(' ')})`);
+            acc.params.push(...sub.params);
+            break;
+          }
+          case 'and': {
+            const left = { sql: [], params: [] };
+            const right = { sql: [], params: [] };
+            buildLike(node.left, left);
+            buildLike(node.right, right);
+            acc.sql.push(`(${left.sql.join(' ')} AND ${right.sql.join(' ')})`);
+            acc.params.push(...left.params, ...right.params);
+            break;
+          }
+          case 'or': {
+            const left = { sql: [], params: [] };
+            const right = { sql: [], params: [] };
+            buildLike(node.left, left);
+            buildLike(node.right, right);
+            acc.sql.push(`(${left.sql.join(' ')} OR ${right.sql.join(' ')})`);
+            acc.params.push(...left.params, ...right.params);
+            break;
+          }
+        }
+      }
+
+      const acc = { sql: [], params: [] };
+      buildLike(ast, acc);
+      const likeSql = `SELECT id FROM messages WHERE ${acc.sql.join(' ')}`;
+      let likeStmt;
+      try {
+        explainQuery(state.db, likeSql, acc.params, 'searchDatabaseIds (LIKE)');
+        likeStmt = state.db.prepare(likeSql);
+        likeStmt.bind(acc.params);
+        while (likeStmt.step()) {
+          const row = likeStmt.getAsObject();
+          if (row.id != null) ids.add(Number(row.id));
+        }
+      } catch (error) {
+        console.error('[viewer] LIKE search failed', error);
+      } finally {
+        if (likeStmt) likeStmt.free();
+      }
+
+      return ids;
     },
 
     buildRecipientsMap() {
@@ -900,17 +1132,11 @@ window.viewerController = function() {
     filterMessages() {
       let filtered = this.allMessages;
 
-      // Apply search query
-      const query = this.searchQuery.trim().toLowerCase();
+      // Apply search query (pass raw; the engine handles case/phrases/operators)
+      const query = this.searchQuery.trim();
       if (query) {
-        filtered = filtered.filter(msg => {
-          return (
-            (msg.subject && msg.subject.toLowerCase().includes(query)) ||
-            (msg.body_md && msg.body_md.toLowerCase().includes(query)) ||
-            (msg.sender && msg.sender.toLowerCase().includes(query)) ||
-            (msg.recipients && msg.recipients.toLowerCase().includes(query))
-          );
-        });
+        const idSet = this.searchDatabaseIds(query);
+        filtered = filtered.filter(msg => idSet.has(msg.id));
       }
 
       // Apply filters
@@ -950,6 +1176,7 @@ window.viewerController = function() {
       // Clear any selected messages that are no longer in the filtered list
       const filteredIds = new Set(this.filteredMessages.map(msg => msg.id));
       this.selectedMessages = this.selectedMessages.filter(id => filteredIds.has(id));
+      this.updateVirtualList();
     },
 
     clearFilters() {
@@ -965,15 +1192,19 @@ window.viewerController = function() {
       this.filterMessages();
     },
 
-    handleMessageClick(msg) {
+    async handleMessageClick(msg) {
       if (this.selectedMessage?.id === msg.id) {
         // Deselect if clicking the same message
         this.selectedMessage = null;
-      } else {
-        this.selectedMessage = msg;
-        // Switch to split view when selecting a message
-        this.viewMode = 'split';
+        this.updateVirtualList();
+        return;
       }
+      const fullBody = await this.loadMessageBodyById(msg.id);
+      this.selectedMessage = { ...msg, body_md: fullBody };
+      // Switch to split view when selecting a message
+      this.viewMode = 'split';
+      // Refresh list to reflect selected styling
+      this.updateVirtualList();
     },
 
     selectThread(thread) {
@@ -1068,6 +1299,7 @@ window.viewerController = function() {
       }
 
       this.filteredMessages = toSort;
+      this.updateVirtualList();
     },
 
     // Bulk Actions
@@ -1129,6 +1361,14 @@ window.viewerController = function() {
       }
     },
 
+    // Debounced search input handler to avoid hammering SQL.js on each keystroke
+    onSearchInput() {
+      if (this._searchDebounce) clearTimeout(this._searchDebounce);
+      this._searchDebounce = setTimeout(() => {
+        this.filterMessages();
+      }, 140);
+    },
+
     handleAutoRefreshToggle() {
       if (this.autoRefreshEnabled) {
         // Start auto-refresh (every 30 seconds)
@@ -1143,6 +1383,120 @@ window.viewerController = function() {
           this.refreshInterval = null;
         }
         console.info('[Alpine] Auto-refresh disabled');
+      }
+    },
+
+    toggleDarkMode() {
+      this.darkMode = !this.darkMode;
+      try {
+        localStorage.setItem('darkMode', String(this.darkMode));
+      } catch (_err) {
+        // ignore storage errors in static viewer
+      }
+      if (this.darkMode) {
+        document.documentElement.classList.add('dark');
+      } else {
+        document.documentElement.classList.remove('dark');
+      }
+    },
+
+    // Virtual list (Clusterize.js)
+    clusterize: null,
+    buildMessageRow(msg, index) {
+      const isSelected = this.selectedMessage?.id === msg.id;
+      const selectedClasses = isSelected
+        ? 'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500'
+        : 'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900';
+
+      const projectBadge = this.getProjectBadgeClass(msg.project_name || '');
+
+      return (
+        `<div class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-inset ${selectedClasses}" data-message-id="${msg.id}" tabindex="0" role="button" aria-label="Message from ${escapeHtml(msg.sender || '')}: ${escapeHtml(msg.subject || '')}" style="animation-delay: ${Math.min(index * 0.02, 0.5)}s;">`
+        + `<div class="flex items-start gap-3">`
+        + `<input type="checkbox" class="mt-1 w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer opacity-0 group-hover:opacity-100" aria-hidden="true">`
+        + `<div class="flex-1 min-w-0">`
+        + `<div class="flex items-center gap-2 mb-1">`
+        + `<span class="text-sm font-semibold text-slate-900 dark:text-white truncate">${escapeHtml(msg.sender || '')}</span>`
+        + `<i data-lucide="arrow-right" class="w-3 h-3 text-slate-400 flex-shrink-0"></i>`
+        + `<span class="text-sm text-slate-600 dark:text-slate-400 truncate">${escapeHtml(msg.recipients || '')}</span>`
+        + `</div>`
+        + `<div class="flex items-center gap-2 mb-1.5 flex-wrap">`
+        + `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${projectBadge}" title="${escapeHtml(msg.project_name || '')}">`
+        + `<i data-lucide="folder" class="w-3 h-3"></i>`
+        + `<span class="truncate max-w-[100px]">${escapeHtml(msg.project_name || '')}</span>`
+        + `</span>`
+        + (msg.importance === 'urgent'
+          ? `<span class=\"inline-flex items-center gap-1 px-2 py-0.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-bold rounded-full\"><i data-lucide=\"alert-circle\" class=\"w-3 h-3\"></i>Urgent</span>`
+          : msg.importance === 'high'
+            ? `<span class=\"inline-flex items-center gap-1 px-2 py-0.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full\"><i data-lucide=\"alert-triangle\" class=\"w-3 h-3\"></i>High</span>`
+            : '')
+        + `</div>`
+        + `<div class="text-sm mb-1 text-slate-900 dark:text-white truncate">${escapeHtml(msg.subject || '')}</div>`
+        + `<div class="text-xs text-slate-600 dark:text-slate-400 line-clamp-2">${escapeHtml(msg.excerpt || '')}</div>`
+        + `<div class="text-xs text-slate-500 dark:text-slate-500 mt-1">${escapeHtml(msg.created_relative || '')}</div>`
+        + `</div>`
+        + `</div>`
+        + `</div>`
+      );
+    },
+    buildRowsFromMessages(messages) {
+      const rows = [];
+      for (let i = 0; i < messages.length; i += 1) {
+        rows.push(this.buildMessageRow(messages[i], i));
+      }
+      return rows;
+    },
+    initVirtualList() {
+      const scrollElem = document.getElementById('virtual-message-list');
+      const contentElem = document.getElementById('virtual-message-content');
+      if (!scrollElem || !contentElem || typeof Clusterize === 'undefined') {
+        return;
+      }
+      const rows = this.buildRowsFromMessages(this.filteredMessages);
+      if (this.clusterize) {
+        this.clusterize.update(rows);
+      } else {
+        this.clusterize = new Clusterize({ scrollElem, contentElem, rows, no_data_text: '<div class="py-20 text-center text-slate-500">No messages found</div>' });
+        // Delegate clicks to rows
+        scrollElem.addEventListener('click', (event) => {
+          const row = event.target.closest('[data-message-id]');
+          if (!row) return;
+          const id = Number(row.getAttribute('data-message-id'));
+          const msg = this.filteredMessages.find(m => m.id === id);
+          if (msg) {
+            this.handleMessageClick(msg);
+          }
+        });
+        // Refresh measurements after fonts are ready
+        try {
+          if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(() => {
+              if (this.clusterize) this.clusterize.refresh(true);
+            }).catch(() => {});
+          }
+        } catch (_) {}
+        // Refresh on resize to keep measurements accurate
+        this._onResize = () => { if (this.clusterize) this.clusterize.refresh(true); };
+        window.addEventListener('resize', this._onResize);
+      }
+    },
+    updateVirtualList() {
+      // Keep Clusterize rows in sync with filtered messages and selection state
+      if (!this.clusterize) {
+        this.initVirtualList();
+        return;
+      }
+      if (this._clusterizeFrame) cancelAnimationFrame(this._clusterizeFrame);
+      this._clusterizeFrame = requestAnimationFrame(() => {
+        this.clusterize.update(this.buildRowsFromMessages(this.filteredMessages));
+        // A second pass to ensure measurements are accurate after DOM settles
+        requestAnimationFrame(() => { if (this.clusterize) this.clusterize.refresh(true); });
+        this._clusterizeFrame = null;
+      });
+    },
+    selectFirstMessage() {
+      if (this.filteredMessages.length > 0 && !this.selectedMessage) {
+        this.handleMessageClick(this.filteredMessages[0]);
       }
     },
 
@@ -1197,9 +1551,46 @@ window.viewerController = function() {
         this.refreshInterval = null;
         console.info('[Alpine] Cleaned up auto-refresh interval');
       }
+      if (this.clusterize) {
+        try { this.clusterize.destroy(true); } catch (_) {}
+        this.clusterize = null;
+      }
+      if (this._onResize) {
+        try { window.removeEventListener('resize', this._onResize); } catch (_) {}
+        this._onResize = null;
+      }
     },
   };
+}
+
+// Expose controllers on window so x-data can call them directly
+if (typeof window !== 'undefined') {
+  window.darkModeController = darkModeController;
+  window.viewerController = viewerController;
+}
+
+const registerAlpineControllers = () => {
+  if (!window.Alpine) {
+    return;
+  }
+  // Also register with Alpine (not strictly required when using window.viewerController())
+  window.Alpine.data('viewerController', viewerController);
 };
+
+if (window.Alpine) {
+  registerAlpineControllers();
+} else {
+  document.addEventListener('alpine:init', registerAlpineControllers, { once: true });
+}
+
+// If Alpine deferred startup for us, start it now after controllers are in place
+if (typeof window !== 'undefined' && typeof window.__alpineStart === 'function') {
+  try {
+    window.__alpineStart();
+  } finally {
+    window.__alpineStart = null;
+  }
+}
 
 // Alpine.js controllers are now the ONLY way to initialize the viewer
 // No backwards compatibility - we only support the Alpine.js version that matches the Python webui
