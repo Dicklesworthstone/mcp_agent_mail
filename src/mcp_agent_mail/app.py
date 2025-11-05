@@ -3068,7 +3068,8 @@ def build_mcp_server() -> FastMCP:
                         )
 
                     rec = rows.first() if rows else None
-                    if not rec:
+                    allow_auto_cross = not settings_local.contact_enforcement_enabled
+                    if not rec and allow_auto_cross:
                         if explicit_override and target_project_override is not None:
                             try:
                                 target_agent = await _get_or_create_agent(
@@ -3561,7 +3562,8 @@ def build_mcp_server() -> FastMCP:
                             .limit(1)
                         )
                     rec = rows.first()
-                    if not rec:
+                    allow_auto_cross = not settings_local.contact_enforcement_enabled
+                    if not rec and allow_auto_cross:
                         if explicit_override and target_project_override is not None:
                             try:
                                 target_agent = await _get_or_create_agent(
