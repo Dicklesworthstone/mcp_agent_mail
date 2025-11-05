@@ -1182,7 +1182,7 @@ When two repos represent the same underlying project (e.g., `frontend` and `back
      - `respond_contact(project_key="/abs/path/backend", to_agent="BlueLake", from_agent="GreenCastle", accept=true)`
    - After approval, messages can be exchanged; in default `auto` policy the server allows follow-up threads/reservation-based coordination without re-requesting.
 
-Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is on by default (CONTACT_ENFORCEMENT_ENABLED=true) but is designed to be non-blocking in obvious collaboration contexts.
+Important: You can also create reciprocal links or set `open` policy for trusted pairs. The consent layer is **off by default** (CONTACT_ENFORCEMENT_ENABLED=false) to enable frictionless cross-project collaboration; set CONTACT_ENFORCEMENT_ENABLED=true to require explicit handshakes for all cross-project messaging.
 
 <!-- Consolidated in API Quick Reference → Tools below to avoid duplication -->
 
@@ -1366,7 +1366,7 @@ Common variables you may set:
 | `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation file reservations |
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
-| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
+| `CONTACT_ENFORCEMENT_ENABLED` | `false` | Enforce contact policy before messaging |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for auto-approved contacts (1 day) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
 | `MESSAGING_AUTO_REGISTER_RECIPIENTS` | `true` | Automatically create missing local recipients during `send_message` and retry routing |

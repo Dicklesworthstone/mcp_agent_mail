@@ -44,7 +44,7 @@ from .storage import (
     write_file_reservation_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
+from .utils import generate_agent_name, sanitize_agent_name, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -1069,25 +1069,11 @@ async def _generate_unique_agent_name(
         if mode == "always_auto":
             sanitized = None
         if sanitized:
-            # When coercing, if the provided hint is not in the valid adjective+noun set,
-            # silently fall back to auto-generation instead of erroring.
-            if validate_agent_name_format(sanitized):
-                if not await available(sanitized):
-                    # In strict mode, indicate conflict; in coerce, fall back to generation
-                    if mode == "strict":
-                        raise ValueError(f"Agent name '{sanitized}' is already in use.")
-                else:
-                    return sanitized
-            else:
-                if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name_hint' parameter to auto-generate a valid name."
-                    )
+            if await available(sanitized):
+                return sanitized
+            if mode == "strict":
+                raise ValueError(f"Agent name '{sanitized}' is already in use.")
         else:
-            # No alphanumerics remain; only strict mode should error
             if mode == "strict":
                 raise ValueError("Name hint must contain alphanumeric characters.")
 
@@ -1142,18 +1128,7 @@ async def _get_or_create_agent(
                 raise ValueError("Agent name must contain alphanumeric characters.")
             desired_name = await _generate_unique_agent_name(project, settings, None)
         else:
-            if validate_agent_name_format(sanitized):
-                desired_name = sanitized
-            else:
-                if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name."
-                    )
-                # coerce -> ignore invalid provided name and auto-generate
-                desired_name = await _generate_unique_agent_name(project, settings, None)
+            desired_name = sanitized
     await ensure_schema()
     async with get_session() as session:
         # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
@@ -1184,6 +1159,84 @@ async def _get_or_create_agent(
     async with _archive_write_lock(archive):
         await write_agent_profile(archive, _agent_to_dict(agent))
     return agent
+
+
+async def _ensure_cross_project_link(
+    source_project: Project,
+    source_agent: Agent,
+    target_project: Project,
+    target_agent: Agent,
+    *,
+    ttl_seconds: int,
+    reason: str = "auto-cross-project",
+) -> AgentLink:
+    """Ensure a directed AgentLink exists and is approved between two projects."""
+
+    if any(item is None for item in (source_project.id, source_agent.id, target_project.id, target_agent.id)):
+        raise ValueError("Projects and agents must be persisted before creating cross-project links.")
+
+    await ensure_schema()
+    now = datetime.now(timezone.utc)
+    ttl = max(0, int(ttl_seconds or 0))
+    expires = now + timedelta(seconds=max(60, ttl)) if ttl else None
+
+    async with get_session() as session:
+        stmt = select(AgentLink).where(
+            AgentLink.a_project_id == source_project.id,
+            AgentLink.a_agent_id == source_agent.id,
+            AgentLink.b_project_id == target_project.id,
+            AgentLink.b_agent_id == target_agent.id,
+        )
+        existing = (await session.execute(stmt)).scalars().first()
+        if existing:
+            updated = False
+            if existing.status != "approved":
+                existing.status = "approved"
+                updated = True
+            if expires and (existing.expires_ts is None or existing.expires_ts < expires):
+                existing.expires_ts = expires
+                updated = True
+            if reason and reason not in (existing.reason or ""):
+                existing.reason = reason
+                updated = True
+            if updated:
+                existing.updated_ts = now
+                session.add(existing)
+                await session.commit()
+                await session.refresh(existing)
+            return existing
+
+        link = AgentLink(
+            a_project_id=source_project.id or 0,
+            a_agent_id=source_agent.id or 0,
+            b_project_id=target_project.id or 0,
+            b_agent_id=target_agent.id or 0,
+            status="approved",
+            reason=reason,
+            created_ts=now,
+            updated_ts=now,
+            expires_ts=expires,
+        )
+        session.add(link)
+        await session.commit()
+        await session.refresh(link)
+        return link
+
+
+async def _lookup_agents_any_project(name: str) -> list[tuple[Project, Agent]]:
+    """Return all (project, agent) pairs matching a given agent name globally."""
+
+    target = (name or "").strip()
+    if not target:
+        return []
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Project, Agent)
+            .join(Agent, Agent.project_id == Project.id)
+            .where(func.lower(Agent.name) == target.lower())
+        )
+        return [(proj, agent) for proj, agent in result.all() if proj and agent]
 
 
 async def _get_agent(project: Project, name: str) -> Agent:
@@ -3015,6 +3068,59 @@ def build_mcp_server() -> FastMCP:
                         )
 
                     rec = rows.first() if rows else None
+                    allow_auto_cross = not settings_local.contact_enforcement_enabled
+                    if not rec and allow_auto_cross:
+                        if explicit_override and target_project_override is not None:
+                            try:
+                                target_agent = await _get_or_create_agent(
+                                    target_project_override,
+                                    canonical,
+                                    sender.program,
+                                    sender.model,
+                                    sender.task_description,
+                                    settings_local,
+                                )
+                                ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                link = await _ensure_cross_project_link(
+                                    project,
+                                    sender,
+                                    target_project_override,
+                                    target_agent,
+                                    ttl_seconds=ttl_seconds,
+                                    reason="auto-cross-project",
+                                )
+                                rec = (link, target_project_override, target_agent)
+                            except Exception:
+                                rec = None
+                        else:
+                            try:
+                                global_matches = [
+                                    (proj, agent)
+                                    for proj, agent in await _lookup_agents_any_project(canonical)
+                                    if proj.id != project.id
+                                ]
+                            except Exception:
+                                global_matches = []
+                            if len(global_matches) == 1:
+                                target_project_override, target_agent = global_matches[0]
+                                try:
+                                    ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                    link = await _ensure_cross_project_link(
+                                        project,
+                                        sender,
+                                        target_project_override,
+                                        target_agent,
+                                        ttl_seconds=ttl_seconds,
+                                        reason="auto-cross-project",
+                                    )
+                                    rec = (link, target_project_override, target_agent)
+                                except Exception:
+                                    rec = None
+                            elif len(global_matches) > 1:
+                                for proj, _agent in global_matches:
+                                    label = proj.human_key or proj.slug or "(unknown project)"
+                                    unknown_external[label].append(display_value or candidate.strip() or candidate)
+                                continue
                     if rec:
                         _link, target_project, target_agent = rec
                         pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
@@ -3058,7 +3164,7 @@ def build_mcp_server() -> FastMCP:
                                 sender.program,
                                 sender.model,
                                 sender.task_description,
-                                settings,
+                                settings_local,
                             )
                             newly_registered.add(missing)
                         except Exception:
@@ -3244,7 +3350,7 @@ def build_mcp_server() -> FastMCP:
         for _pid, group in external.items():
             p: Project = group["project"]
             try:
-                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
+                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings_local)
                 payload_ext = await _deliver_message(
                     ctx,
                     "send_message",
@@ -3382,24 +3488,45 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_names = {row[0] for row in existing.fetchall()}
+            unknown_local: set[str] = set()
+            unknown_external: dict[str, list[str]] = defaultdict(list)
 
             class _ContactBlocked(Exception):
                 pass
 
             async def _route(name_list: list[str], kind: str) -> None:
-                for nm in name_list:
+                for raw in name_list:
+                    candidate = (raw or "").strip()
+                    if not candidate:
+                        continue
+                    nm = candidate
+                    explicit_override = False
                     target_project_override: Project | None = None
                     target_name_override: str | None = None
-                    if nm.startswith("project:") and "#" in nm:
+                    if candidate.startswith("project:") and "#" in candidate:
+                        explicit_override = True
                         try:
-                            _, rest = nm.split(":", 1)
+                            _, rest = candidate.split(":", 1)
                             slug_part, agent_part = rest.split("#", 1)
-                            target_project_override = await _get_project_by_identifier(slug_part)
+                            target_project_override = await _get_project_by_identifier(slug_part.strip())
                             target_name_override = agent_part.strip()
+                            nm = target_name_override or nm
                         except Exception:
-                            target_project_override = None
-                            target_name_override = None
-                    if nm in local_names:
+                            unknown_external["(invalid project)"].append(candidate)
+                            continue
+                    elif "@" in candidate and not explicit_override:
+                        name_part, project_part = candidate.split("@", 1)
+                        if name_part.strip() and project_part.strip():
+                            explicit_override = True
+                            try:
+                                target_project_override = await _get_project_by_identifier(project_part.strip())
+                                target_name_override = name_part.strip()
+                                nm = target_name_override
+                            except Exception:
+                                label = project_part.strip() or "(invalid project)"
+                                unknown_external[label].append(candidate)
+                                continue
+                    if not explicit_override and nm in local_names:
                         if kind == "to":
                             local_to.append(nm)
                         elif kind == "cc":
@@ -3436,6 +3563,59 @@ def build_mcp_server() -> FastMCP:
                             .limit(1)
                         )
                     rec = rows.first()
+                    allow_auto_cross = not settings_local.contact_enforcement_enabled
+                    if not rec and allow_auto_cross:
+                        if explicit_override and target_project_override is not None:
+                            try:
+                                target_agent = await _get_or_create_agent(
+                                    target_project_override,
+                                    target_name_override,
+                                    sender.program,
+                                    sender.model,
+                                    sender.task_description,
+                                    settings_local,
+                                )
+                                ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                link = await _ensure_cross_project_link(
+                                    project,
+                                    sender,
+                                    target_project_override,
+                                    target_agent,
+                                    ttl_seconds=ttl_seconds,
+                                    reason="auto-cross-project",
+                                )
+                                rec = (link, target_project_override, target_agent)
+                            except Exception:
+                                rec = None
+                        else:
+                            try:
+                                global_matches = [
+                                    (proj, agent)
+                                    for proj, agent in await _lookup_agents_any_project(nm)
+                                    if proj.id != project.id
+                                ]
+                            except Exception:
+                                global_matches = []
+                            if len(global_matches) == 1:
+                                target_project_override, target_agent = global_matches[0]
+                                try:
+                                    ttl_seconds = int(getattr(settings_local, "contact_auto_ttl_seconds", 86400))
+                                    link = await _ensure_cross_project_link(
+                                        project,
+                                        sender,
+                                        target_project_override,
+                                        target_agent,
+                                        ttl_seconds=ttl_seconds,
+                                        reason="auto-cross-project",
+                                    )
+                                    rec = (link, target_project_override, target_agent)
+                                except Exception:
+                                    rec = None
+                            elif len(global_matches) > 1:
+                                for proj, _agent in global_matches:
+                                    label = proj.human_key or proj.slug or "(unknown project)"
+                                    unknown_external.setdefault(label, []).append(nm)
+                                continue
                     if rec:
                         _link, target_project, target_agent = rec
                         recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
@@ -3445,12 +3625,16 @@ def build_mcp_server() -> FastMCP:
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
+                        # No link found - add to unknown recipients for later validation
+                        if explicit_override:
+                            label = (
+                                target_project_override.human_key or target_project_override.slug
+                                if target_project_override
+                                else "(unknown project)"
+                            )
+                            unknown_external[label].append(candidate)
                         else:
-                            local_bcc.append(nm)
+                            unknown_local.add(candidate)
 
         try:
             await _route(to_names, "to")
@@ -3458,6 +3642,41 @@ def build_mcp_server() -> FastMCP:
             await _route(bcc_list, "bcc")
         except _ContactBlocked:
             return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+
+        # Validate all recipients were resolved
+        if unknown_local or unknown_external:
+            parts: list[str] = []
+            data_payload: dict[str, Any] = {}
+            if unknown_local:
+                missing_local = sorted({name for name in unknown_local if name})
+                parts.append(
+                    f"local recipients {', '.join(missing_local)} are not registered in project '{project.human_key}'"
+                )
+                data_payload["unknown_local"] = missing_local
+            if unknown_external:
+                formatted_external = {
+                    label: sorted({name for name in names if name})
+                    for label, names in unknown_external.items()
+                }
+                ext_parts = [
+                    f"{', '.join(names)} @ {label}"
+                    for label, names in sorted(formatted_external.items())
+                    if names
+                ]
+                if ext_parts:
+                    parts.append(
+                        "external recipients missing approved contact links: " + "; ".join(ext_parts)
+                    )
+                data_payload["unknown_external"] = formatted_external
+            hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
+            parts.append(hint)
+            message = "Unable to send reply — " + "; ".join(parts)
+            raise ToolExecutionError(
+                "RECIPIENT_UNKNOWN",
+                message,
+                recoverable=True,
+                data=data_payload,
+            )
 
         deliveries: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
@@ -3596,8 +3815,8 @@ def build_mcp_server() -> FastMCP:
         try:
             b = await _get_agent(target_project, target_name)
         except NoResultFound:
-            if register_if_missing and validate_agent_name_format(target_name):
-                # Create the missing target identity using provided metadata (best effort)
+            cleaned_target = sanitize_agent_name(target_name or "")
+            if register_if_missing and cleaned_target:
                 b = await _get_or_create_agent(
                     target_project,
                     target_name,

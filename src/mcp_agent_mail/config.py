@@ -292,7 +292,7 @@ def get_settings() -> Settings:
         log_rich_enabled=_bool(_decouple_config("LOG_RICH_ENABLED", default="true"), default=True),
         log_level=_decouple_config("LOG_LEVEL", default="INFO"),
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),
-        contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="true"), default=True),
+        contact_enforcement_enabled=_bool(_decouple_config("CONTACT_ENFORCEMENT_ENABLED", default="false"), default=False),
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
         contact_auto_retry_enabled=_bool(_decouple_config("CONTACT_AUTO_RETRY_ENABLED", default="true"), default=True),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),

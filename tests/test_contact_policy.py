@@ -7,8 +7,12 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
+from sqlalchemy import select
+
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_session
+from mcp_agent_mail.models import AgentLink
 from mcp_agent_mail.utils import slugify
 
 
@@ -283,3 +287,76 @@ async def test_send_message_supports_at_address(isolated_env):
         )
         deliveries = response.data.get("deliveries") or []
         assert deliveries and any(item.get("project") == frontend for item in deliveries)
+
+
+@pytest.mark.asyncio
+async def test_cross_project_auto_link_without_enforcement(isolated_env, monkeypatch):
+    monkeypatch.setenv("CONTACT_ENFORCEMENT_ENABLED", "false")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool("ensure_project", {"human_key": "/frontend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "AlphaBot"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Frontend", "program": "codex", "model": "gpt-5", "name": "beta-reviewer!!"},
+        )
+
+        res = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "AlphaBot",
+                "to": ["beta-reviewer!!"],
+                "subject": "cross",
+                "body_md": "auto link expected",
+            },
+        )
+        deliveries = res.data.get("deliveries") or []
+        assert any(d.get("project") in {"Frontend", "/frontend"} for d in deliveries)
+
+    async with get_session() as session:
+        link = await session.execute(select(AgentLink).where(AgentLink.status == "approved"))
+        assert link.first() is not None
+
+
+@pytest.mark.asyncio
+async def test_cross_project_enforcement_blocks_auto_link(isolated_env, monkeypatch):
+    monkeypatch.setenv("CONTACT_ENFORCEMENT_ENABLED", "true")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool("ensure_project", {"human_key": "/frontend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "AlphaBot"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Frontend", "program": "codex", "model": "gpt-5", "name": "beta-reviewer!!"},
+        )
+
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": "Backend",
+                    "sender_name": "AlphaBot",
+                    "to": ["beta-reviewer!!"],
+                    "subject": "blocked",
+                    "body_md": "enforcement enabled",
+                },
+            )
+
+    async with get_session() as session:
+        link = await session.execute(select(AgentLink.id))
+        assert link.first() is None

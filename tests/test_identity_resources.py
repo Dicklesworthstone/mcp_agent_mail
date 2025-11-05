@@ -32,3 +32,26 @@ async def test_whois_and_projects_resources(isolated_env):
         assert blocks2 and "BlueLake" in (blocks2[0].text or "")
 
 
+@pytest.mark.asyncio
+async def test_register_agent_accepts_freeform_names(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        result = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "Backend-Harmonizer!!",
+            },
+        )
+        stored = result.data or {}
+        assert stored.get("name") == "BackendHarmonizer"
+
+        who = await client.call_tool(
+            "whois",
+            {"project_key": "Backend", "agent_name": "BackendHarmonizer"},
+        )
+        assert who.data.get("name") == "BackendHarmonizer"
+
