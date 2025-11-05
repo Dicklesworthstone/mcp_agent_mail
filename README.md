@@ -578,7 +578,7 @@ The wizard provides a fully automated end-to-end deployment experience:
    - Shows all available projects in a formatted table
    - Supports multiple selection modes: `all`, single number (`1`), lists (`1,3,5`), or ranges (`1-3`, `2-5,8`)
    - Remembers your previous selection for quick re-export
-6. **Redaction configuration**: Choose between `standard` (pseudonymize agents, scrub secrets) or `strict` (redact all message bodies)
+6. **Redaction configuration**: Choose between `standard` (scrub secrets like API keys/tokens, keep agent names) or `strict` (redact all message bodies)
 7. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or use your existing key
 8. **Pre-flight validation**: Checks that GitHub repo names are available before starting the export
 9. **Deployment summary**: Shows what will be deployed (project count, bundle size, target, signing status) and asks for confirmation
@@ -884,7 +884,7 @@ age-keygen -o key.txt
 
 The export pipeline supports configurable scrubbing to remove sensitive data:
 
-- `standard`: Pseudonymizes agent names, clears acknowledgment/read state, removes file reservations and agent links, scrubs secrets (GitHub tokens, Slack tokens, OpenAI keys, bearer tokens, JWTs) from message bodies and attachment metadata. Retains full message bodies and attachments.
+- `standard`: Clears acknowledgment/read state, removes file reservations and agent links, scrubs secrets (GitHub tokens, Slack tokens, OpenAI keys, bearer tokens, JWTs) from message bodies and attachment metadata. Retains agent names (which are already meaningless pseudonyms like "BlueMountain"), full message bodies, and attachments.
 
 - `strict`: All standard redactions plus replaces entire message bodies with "[Message body redacted]" placeholder and removes all attachments from the bundle.
 

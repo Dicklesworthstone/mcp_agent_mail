@@ -75,7 +75,7 @@ Running the command with only `--output` (no extra flags) exports all projects, 
 |----------------------|-------------|
 | Scope resolution     | Match project slugs or human keys via `--project`; default is all projects. Persist included list + removed count in manifest. |
 | Consistent snapshot  | Use SQLite `backup` API (preferred) or `VACUUM ... INTO` to materialize the live WAL database into a single `.sqlite3` file before further processing. |
-| Scrubbing            | Pseudonymize agents via HMAC salt, clear ack metadata, purge file reservations/agent links, and redact common token patterns across subjects, bodies, and attachment metadata. |
+| Scrubbing            | Clear ack metadata, purge file reservations/agent links, and redact common token patterns (API keys, tokens) across subjects, bodies, and attachment metadata. Agent names are retained as-is (already meaningless pseudonyms like "BlueMountain"). |
 | Attachment handling  | Inline ≤64 KB assets as data URIs; larger files stored under `attachments/<xx>/<sha256>.<ext>` (content-addressed). Detach >25 MiB files to external object storage when necessary, retaining hashes/URLs in manifest.[3][11] |
 | Manifest build       | Record export metadata, schema versions, compile options snapshot, hashed artifacts, applied redactions, CLI version, build timestamp (UTC), optional Ed25519 signing key. |
 | Bundle assembly      | Emit viewer assets (pre-built) + data files; automatically compress into `.zip`, generate `HOW_TO_DEPLOY.md`, and include optional `deploy/` helper scripts. |
@@ -83,11 +83,11 @@ Running the command with only `--output` (no extra flags) exports all projects, 
 ### Data Minimization
 - Redact fields not needed for read-only viewing (internal IDs, read/ack markers, file reservation metadata).
 - Replace absolute project paths with friendly slugs and optional display names supplied via CLI.
-- Deterministically pseudonymize agent identities via `HMAC-SHA256(agent_name, export_salt)` truncated to 12 chars so repeated exports remain linkable without revealing originals.
+- Agent names (BlueMountain, GreenCastle, etc.) are already meaningless pseudonyms by design and are retained as-is for readability.
 - Strip bearer tokens, JWTs, and common secret formats (e.g., GitHub, Slack tokens) before writing frontmatter or manifest entries.
 - Remove contact policies and policy histories; retain only data required for rendering.
 - Provide pluggable redaction hooks so teams can mask sensitive phrases prior to export.
-- ✅ *(2025-11-04)* CLI export scrubs ack/read markers, deletes file reservations and agent links, pseudonymizes all agents, and redacts common token patterns before manifest generation.
+- ✅ *(2025-11-04)* CLI export scrubs ack/read markers, deletes file reservations and agent links, and redacts common token patterns (API keys, secrets) before manifest generation. Agent names are retained for readability.
 
 ## Export SQL Hygiene
 Execute before packaging each bundle:
