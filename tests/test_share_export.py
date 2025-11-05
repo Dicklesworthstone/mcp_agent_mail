@@ -701,7 +701,7 @@ def test_build_viewer_sri(tmp_path: Path) -> None:
     assert "viewer/README.txt" not in sri_map
 
     # All values should be SRI hashes
-    for path, sri in sri_map.items():
+    for _path, sri in sri_map.items():
         assert sri.startswith("sha256-")
 
 

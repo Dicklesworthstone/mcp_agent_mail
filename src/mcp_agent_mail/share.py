@@ -309,7 +309,8 @@ def export_viewer_data(
     messages: list[dict[str, Any]] = []
     total_messages = 0
 
-    with sqlite3.connect(str(snapshot_path)) as conn:
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
         conn.row_factory = sqlite3.Row
         total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         rows = conn.execute(
@@ -329,6 +330,8 @@ def export_viewer_data(
                     "snippet": snippet,
                 }
             )
+    finally:
+        conn.close()
 
     messages_path = viewer_data_dir / "messages.json"
     messages_path.write_text(json.dumps(messages, indent=2), encoding="utf-8")
@@ -356,13 +359,39 @@ def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path
             "PyNaCl is required for Ed25519 signing. Install it with `uv add PyNaCl`."
         ) from exc
 
-    manifest_bytes = manifest_path.read_bytes()
-    key_raw = signing_key_path.read_bytes()
+    # Expand and validate manifest path
+    manifest_path = manifest_path.expanduser().resolve()
+    if not manifest_path.exists():
+        raise ShareExportError(f"Manifest file not found: {manifest_path}")
+    if not manifest_path.is_file():
+        raise ShareExportError(f"Manifest path must be a file: {manifest_path}")
+
+    # Expand and validate signing key path
+    signing_key_path = signing_key_path.expanduser().resolve()
+    if not signing_key_path.exists():
+        raise ShareExportError(f"Signing key file not found: {signing_key_path}")
+    if not signing_key_path.is_file():
+        raise ShareExportError(f"Signing key path must be a file: {signing_key_path}")
+
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+    except (IOError, OSError) as exc:
+        raise ShareExportError(f"Failed to read manifest file {manifest_path}: {exc}") from exc
+
+    try:
+        key_raw = signing_key_path.read_bytes()
+    except (IOError, OSError) as exc:
+        raise ShareExportError(f"Failed to read signing key file {signing_key_path}: {exc}") from exc
+
     if len(key_raw) not in (32, 64):
         raise ShareExportError("Signing key must be 32-byte seed or 64-byte expanded Ed25519 key.")
-    signing_key = SigningKey(key_raw[:32])
-    signature = signing_key.sign(manifest_bytes).signature
-    public_key = signing_key.verify_key.encode()
+
+    try:
+        signing_key = SigningKey(key_raw[:32])
+        signature = signing_key.sign(manifest_bytes).signature
+        public_key = signing_key.verify_key.encode()
+    except Exception as exc:
+        raise ShareExportError(f"Failed to sign manifest with Ed25519 key: {exc}") from exc
 
     payload = {
         "algorithm": "ed25519",
@@ -376,7 +405,21 @@ def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path
     _write_json_file(sig_path, payload)
 
     if public_out is not None:
-        public_out.write_text(base64.b64encode(public_key).decode("ascii"), encoding="utf-8")
+        # Expand and validate public key output path
+        public_out = public_out.expanduser().resolve()
+        if public_out.exists():
+            raise ShareExportError(f"Public key output file already exists: {public_out}")
+
+        # Ensure parent directory exists
+        try:
+            public_out.parent.mkdir(parents=True, exist_ok=True)
+        except (IOError, OSError) as exc:
+            raise ShareExportError(f"Failed to create parent directory for public key: {exc}") from exc
+
+        try:
+            public_out.write_text(base64.b64encode(public_key).decode("ascii"), encoding="utf-8")
+        except (IOError, OSError) as exc:
+            raise ShareExportError(f"Failed to write public key to {public_out}: {exc}") from exc
 
     return payload
 
@@ -458,17 +501,22 @@ def create_sqlite_snapshot(source: Path, destination: Path, *, checkpoint: bool 
             f"Destination snapshot already exists at {destination}. Choose a new path or remove it manually."
         )
 
-    with sqlite3.connect(str(source)) as source_conn:
+    source_conn = sqlite3.connect(str(source))
+    try:
         if checkpoint:
             try:
                 source_conn.execute("PRAGMA wal_checkpoint(PASSIVE);")
             except sqlite3.Error as exc:  # pragma: no cover - defensive
                 raise ShareExportError(f"Failed to run WAL checkpoint: {exc}") from exc
+        dest_conn = sqlite3.connect(str(destination))
         try:
-            with sqlite3.connect(str(destination)) as dest_conn:
-                source_conn.backup(dest_conn)
+            source_conn.backup(dest_conn)
         except sqlite3.Error as exc:
             raise ShareExportError(f"Failed to create SQLite snapshot: {exc}") from exc
+        finally:
+            dest_conn.close()
+    finally:
+        source_conn.close()
     return destination
 
 
@@ -479,7 +527,8 @@ def _format_in_clause(count: int) -> str:
 def apply_project_scope(snapshot_path: Path, identifiers: Sequence[str]) -> ProjectScopeResult:
     """Restrict the snapshot to the requested projects and return retained records."""
 
-    with sqlite3.connect(str(snapshot_path)) as conn:
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
 
@@ -562,6 +611,8 @@ def apply_project_scope(snapshot_path: Path, identifiers: Sequence[str]) -> Proj
         conn.commit()
 
         return ProjectScopeResult(projects=selected, removed_count=len(disallowed_ids))
+    finally:
+        conn.close()
 
 
 def _scrub_text(value: str) -> tuple[str, int]:
@@ -635,7 +686,8 @@ def scrub_snapshot(
     bodies_redacted = 0
     attachments_cleared = 0
 
-    with sqlite3.connect(str(snapshot_path)) as conn:
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
 
@@ -727,6 +779,8 @@ def scrub_snapshot(
                 attachments_sanitized += 1
 
         conn.commit()
+    finally:
+        conn.close()
 
     return ScrubSummary(
         preset=preset_key,
@@ -747,43 +801,46 @@ def scrub_snapshot(
 def build_search_indexes(snapshot_path: Path) -> bool:
     """Create or refresh FTS5 indexes for full-text search. Returns True on success."""
 
+    conn = sqlite3.connect(str(snapshot_path))
     try:
-        with sqlite3.connect(str(snapshot_path)) as conn:
-            conn.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
-                    subject,
-                    body,
-                    importance UNINDEXED,
-                    project_slug UNINDEXED,
-                    thread_key UNINDEXED,
-                    created_ts UNINDEXED
-                )
-                """
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+                subject,
+                body,
+                importance UNINDEXED,
+                project_slug UNINDEXED,
+                thread_key UNINDEXED,
+                created_ts UNINDEXED
             )
-            conn.execute("DELETE FROM fts_messages")
-            conn.execute(
-                """
-                INSERT INTO fts_messages(rowid, subject, body, importance, project_slug, thread_key, created_ts)
-                SELECT
-                    m.id,
-                    COALESCE(m.subject, ''),
-                    COALESCE(m.body_md, ''),
-                    COALESCE(m.importance, ''),
-                    COALESCE(p.slug, ''),
-                    CASE
-                        WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id)
-                        ELSE m.thread_id
-                    END,
-                    COALESCE(m.created_ts, '')
-                FROM messages AS m
-                LEFT JOIN projects AS p ON p.id = m.project_id
-                """
-            )
-            conn.execute("INSERT INTO fts_messages(fts_messages) VALUES('optimize')")
+            """
+        )
+        conn.execute("DELETE FROM fts_messages")
+        conn.execute(
+            """
+            INSERT INTO fts_messages(rowid, subject, body, importance, project_slug, thread_key, created_ts)
+            SELECT
+                m.id,
+                COALESCE(m.subject, ''),
+                COALESCE(m.body_md, ''),
+                COALESCE(m.importance, ''),
+                COALESCE(p.slug, ''),
+                CASE
+                    WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id)
+                    ELSE m.thread_id
+                END,
+                COALESCE(m.created_ts, '')
+            FROM messages AS m
+            LEFT JOIN projects AS p ON p.id = m.project_id
+            """
+        )
+        conn.execute("INSERT INTO fts_messages(fts_messages) VALUES('optimize')")
+        conn.commit()
         return True
     except sqlite3.OperationalError:
         return False
+    finally:
+        conn.close()
 
 
 def summarize_snapshot(
@@ -794,7 +851,8 @@ def summarize_snapshot(
     detach_threshold: int = DETACH_ATTACHMENT_THRESHOLD,
 ) -> dict[str, Any]:
     storage_root = storage_root.resolve()
-    with sqlite3.connect(str(snapshot_path)) as conn:
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
         conn.row_factory = sqlite3.Row
         total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         try:
@@ -865,6 +923,8 @@ def summarize_snapshot(
                     attachments_stats["inline_candidates"] += 1
                 if size >= detach_threshold:
                     attachments_stats["external_candidates"] += 1
+    finally:
+        conn.close()
 
     return {
         "messages": int(total_messages),
@@ -896,7 +956,8 @@ def bundle_attachments(
     missing_count = 0
     bytes_copied = 0
 
-    with sqlite3.connect(str(snapshot_path)) as conn:
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT id, attachments FROM messages").fetchall()
         for row in rows:
@@ -1031,6 +1092,8 @@ def bundle_attachments(
                     (json.dumps(updated_list, separators=(",", ":"), sort_keys=True), row["id"]),
                 )
         conn.commit()
+    finally:
+        conn.close()
 
     return {
         "stats": {

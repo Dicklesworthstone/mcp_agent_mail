@@ -525,16 +525,18 @@ def share_export(
 
 def _list_projects_for_wizard(database_path: Path) -> list[tuple[str, str]]:
     projects: list[tuple[str, str]] = []
+    conn = sqlite3.connect(str(database_path))
     try:
-        with sqlite3.connect(str(database_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("SELECT slug, human_key FROM projects ORDER BY slug COLLATE NOCASE").fetchall()
-            for row in rows:
-                slug = row["slug"] or ""
-                human_key = row["human_key"] or ""
-                projects.append((slug, human_key))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT slug, human_key FROM projects ORDER BY slug COLLATE NOCASE").fetchall()
+        for row in rows:
+            slug = row["slug"] or ""
+            human_key = row["human_key"] or ""
+            projects.append((slug, human_key))
     except sqlite3.Error:
         pass
+    finally:
+        conn.close()
     return projects
 
 
