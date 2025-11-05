@@ -522,7 +522,7 @@ function loadProjectMap(db) {
   }
 }
 
-function buildThreadList(db, limit = 200) {
+function buildThreadList(db, limit = 50000) {
   const threads = [];
   const sql = `
     WITH normalized AS (
@@ -637,7 +637,7 @@ function renderThreads(threads) {
   }
 }
 
-function getThreadMessages(threadKey, limit = 200) {
+function getThreadMessages(threadKey, limit = 50000) {
   const results = [];
   let statement;
   let sql;
@@ -743,7 +743,7 @@ function performSearch(term) {
          JOIN messages ON messages.id = fts_messages.rowid
          WHERE fts_messages MATCH ?
          ORDER BY datetime(messages.created_ts) DESC
-         LIMIT 100`;
+         LIMIT 10000`;
       explainQuery(state.db, ftsSql, [query], "performSearch (FTS)");
       const stmt = state.db.prepare(ftsSql);
       stmt.bind([query]);
@@ -769,7 +769,7 @@ function performSearch(term) {
        FROM messages
        WHERE subject LIKE ? OR body_md LIKE ?
        ORDER BY datetime(created_ts) DESC
-       LIMIT 100`;
+       LIMIT 10000`;
     const pattern = `%${query}%`;
     explainQuery(state.db, likeSql, [pattern, pattern], "performSearch (LIKE)");
     const stmt = state.db.prepare(likeSql);

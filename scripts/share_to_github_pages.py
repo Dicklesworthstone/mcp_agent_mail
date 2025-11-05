@@ -82,7 +82,7 @@ def get_projects() -> list[dict[str, str]]:
         import json
         projects_data = json.loads(result.stdout)
         return [{"slug": p["slug"], "human_key": p["human_key"]} for p in projects_data]
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, TypeError):
         return []
 
 
@@ -153,7 +153,6 @@ def select_deployment_target() -> dict[str, Any]:
         "repo_name": repo_name,
         "private": is_private,
         "description": description,
-        "path": "root",
     }
 
 
@@ -229,6 +228,7 @@ def preview_bundle(output_dir: Path) -> bool:
     console.print("\n[bold cyan]Launching preview server...[/]")
     console.print("[dim]Press Ctrl+C in the preview window to stop the server[/]")
 
+    process = None
     try:
         # Start preview server in background
         process = subprocess.Popen(
@@ -278,9 +278,13 @@ def preview_bundle(output_dir: Path) -> bool:
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Preview interrupted[/]")
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.terminate()
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                console.print("[yellow]Warning: Preview server did not stop cleanly[/]")
+                process.kill()
         return Confirm.ask("Continue with deployment anyway?", default=False)
 
 
