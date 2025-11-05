@@ -566,6 +566,8 @@ function buildThreadList(db, limit = 200) {
     LIMIT ?;
   `;
 
+  explainQuery(db, sql, [limit], "buildThreadList");
+
   const statement = db.prepare(sql);
   try {
     statement.bind([limit]);
@@ -634,26 +636,31 @@ function renderThreads(threads) {
 function getThreadMessages(threadKey, limit = 200) {
   const results = [];
   let statement;
+  let sql;
+  let params;
+
   if (threadKey === "all") {
-    statement = state.db.prepare(
-      `SELECT id, subject, created_ts, importance,
+    sql = `SELECT id, subject, created_ts, importance,
               CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
               substr(COALESCE(body_md, ''), 1, 280) AS snippet
        FROM messages
        ORDER BY datetime(created_ts) DESC, id DESC
-       LIMIT ?`
-    );
-    statement.bind([limit]);
+       LIMIT ?`;
+    params = [limit];
+    explainQuery(state.db, sql, params, "getThreadMessages (all)");
+    statement = state.db.prepare(sql);
+    statement.bind(params);
   } else {
-    statement = state.db.prepare(
-      `SELECT id, subject, created_ts, importance,
+    sql = `SELECT id, subject, created_ts, importance,
               CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
               substr(COALESCE(body_md, ''), 1, 280) AS snippet
        FROM messages
        WHERE (thread_id = ?) OR (thread_id IS NULL AND printf('msg:%d', id) = ?)
-       ORDER BY datetime(created_ts) ASC, id ASC`
-    );
-    statement.bind([threadKey, threadKey]);
+       ORDER BY datetime(created_ts) ASC, id ASC`;
+    params = [threadKey, threadKey];
+    explainQuery(state.db, sql, params, "getThreadMessages (specific)");
+    statement = state.db.prepare(sql);
+    statement.bind(params);
   }
 
   try {
@@ -725,16 +732,16 @@ function performSearch(term) {
   let results = [];
   if (state.ftsEnabled) {
     try {
-      const stmt = state.db.prepare(
-        `SELECT messages.id, messages.subject, messages.created_ts, messages.importance,
+      const ftsSql = `SELECT messages.id, messages.subject, messages.created_ts, messages.importance,
                 CASE WHEN messages.thread_id IS NULL OR messages.thread_id = '' THEN printf('msg:%d', messages.id) ELSE messages.thread_id END AS thread_key,
                 COALESCE(snippet(fts_messages, 1, '<mark>', '</mark>', '…', 32), substr(messages.body_md, 1, 280)) AS snippet
          FROM fts_messages
          JOIN messages ON messages.id = fts_messages.rowid
          WHERE fts_messages MATCH ?
          ORDER BY datetime(messages.created_ts) DESC
-         LIMIT 100`
-      );
+         LIMIT 100`;
+      explainQuery(state.db, ftsSql, [query], "performSearch (FTS)");
+      const stmt = state.db.prepare(ftsSql);
       stmt.bind([query]);
       while (stmt.step()) {
         const row = stmt.getAsObject();
@@ -752,16 +759,16 @@ function performSearch(term) {
   }
 
   if (!state.ftsEnabled) {
-    const stmt = state.db.prepare(
-      `SELECT id, subject, created_ts, importance,
+    const likeSql = `SELECT id, subject, created_ts, importance,
               CASE WHEN thread_id IS NULL OR thread_id = '' THEN printf('msg:%d', id) ELSE thread_id END AS thread_key,
               substr(COALESCE(body_md, ''), 1, 280) AS snippet
        FROM messages
        WHERE subject LIKE ? OR body_md LIKE ?
        ORDER BY datetime(created_ts) DESC
-       LIMIT 100`
-    );
+       LIMIT 100`;
     const pattern = `%${query}%`;
+    explainQuery(state.db, likeSql, [pattern, pattern], "performSearch (LIKE)");
+    const stmt = state.db.prepare(likeSql);
     stmt.bind([pattern, pattern]);
     while (stmt.step()) {
       results.push(stmt.getAsObject());
@@ -1097,6 +1104,7 @@ const diagnosticsPanel = document.getElementById("diagnostics-panel");
 const diagnosticsToggle = document.getElementById("diagnostics-toggle");
 const closeDiagnostics = document.getElementById("close-diagnostics");
 const clearAllCachesButton = document.getElementById("clear-all-caches");
+const toggleExplainButton = document.getElementById("toggle-explain");
 
 function updateDiagnostics() {
   // Cross-Origin Isolation
@@ -1109,6 +1117,7 @@ function updateDiagnostics() {
   document.getElementById("diag-db-source").textContent = state.databaseSource || "-";
   document.getElementById("diag-db-engine").textContent = "sql.js (WASM)";
   document.getElementById("diag-fts-status").textContent = state.ftsEnabled ? "✅ Enabled" : "❌ Disabled";
+  document.getElementById("diag-explain-status").textContent = state.explainMode ? "✅ Enabled (check console)" : "❌ Disabled";
 
   // Cache Status
   const cacheStateMap = {
@@ -1143,6 +1152,16 @@ diagnosticsPanel.addEventListener("click", (event) => {
   if (event.target === diagnosticsPanel) {
     diagnosticsPanel.classList.add("hidden");
   }
+});
+
+toggleExplainButton.addEventListener("click", () => {
+  state.explainMode = !state.explainMode;
+  updateDiagnostics();
+  const message = state.explainMode
+    ? "EXPLAIN mode enabled. Query plans will be logged to the console."
+    : "EXPLAIN mode disabled.";
+  console.info(`[viewer] ${message}`);
+  alert(message);
 });
 
 clearAllCachesButton.addEventListener("click", async () => {

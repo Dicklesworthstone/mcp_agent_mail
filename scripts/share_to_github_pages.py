@@ -125,11 +125,10 @@ def select_scrub_preset() -> str:
     console.print("\n[bold]Redaction Preset:[/]")
     console.print("  [cyan]standard[/]: Pseudonymize agents, scrub secrets, keep message bodies")
     console.print("  [cyan]strict[/]: Replace all message bodies with placeholders, remove attachments")
-    console.print("  [dim]none[/]: No redaction (use only for private repos/local testing)")
 
     return Prompt.ask(
         "Choose preset",
-        choices=["standard", "strict", "none"],
+        choices=["standard", "strict"],
         default="standard",
     )
 
