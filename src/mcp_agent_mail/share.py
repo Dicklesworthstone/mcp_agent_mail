@@ -115,28 +115,37 @@ SCRUB_PRESETS: dict[str, dict[str, Any]] = {
 HOSTING_GUIDES: dict[str, dict[str, object]] = {
     "github_pages": {
         "title": "GitHub Pages",
-        "summary": "Deploy the bundle via docs/ or gh-pages branch with correct MIME types.",
+        "summary": "Deploy the bundle via docs/ or gh-pages branch with coi-serviceworker.js for cross-origin isolation.",
         "instructions": [
             "Copy `viewer/`, `manifest.json`, and `mailbox.sqlite3` into your `docs/` folder or gh-pages branch.",
-            "Add a `.nojekyll` file so `.wasm` assets are served, and ensure `.wasm` is mapped to `application/wasm` (via `static.json` or repository settings).",
-            "Commit and push, then confirm GitHub Pages is enabled for the repository branch."
+            "Add a `.nojekyll` file so `.wasm` assets are served with correct MIME types.",
+            "**CRITICAL**: Edit `viewer/index.html` and uncomment the line `<script src=\"./coi-serviceworker.js\"></script>` (around line 63).",
+            "This service worker enables Cross-Origin-Isolation (COOP/COEP headers) required for OPFS caching and optimal sqlite-wasm performance.",
+            "GitHub Pages does not support the `_headers` file, so the service worker intercepts requests and adds the required headers.",
+            "Commit and push, then enable GitHub Pages for your repository branch in repository settings.",
+            "On first visit, the page will reload automatically once the service worker activates (this is normal behavior).",
+            "Verify isolation: open browser DevTools console and check that `window.crossOriginIsolated === true`."
         ],
     },
     "cloudflare_pages": {
         "title": "Cloudflare Pages",
-        "summary": "Deploy with wrangler or Pages UI and enable COOP/COEP headers for sqlite-wasm.",
+        "summary": "Deploy with wrangler or Pages UI; the included _headers file automatically enables COOP/COEP.",
         "instructions": [
             "Ensure `wrangler.toml` references the bundle directory (or upload the ZIP directly via the dashboard).",
-            "Add headers: `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` to unlock sqlite-wasm fast-path.",
+            "The included `_headers` file will automatically apply `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers.",
+            "These headers are required for OPFS caching and optimal sqlite-wasm performance.",
+            "Verify isolation: open browser DevTools console and check that `window.crossOriginIsolated === true`.",
             "For attachments >25 MiB, push them to R2 and reference the signed URLs in the manifest."
         ],
     },
     "netlify": {
         "title": "Netlify",
-        "summary": "Use Netlify Drop or git deployment with matching COOP/COEP headers.",
+        "summary": "Use Netlify Drop or git deployment; the included _headers file automatically enables COOP/COEP.",
         "instructions": [
-            "Add or update `netlify.toml` with custom headers for COOP/COEP (apply to `/*`).",
+            "The included `_headers` file will automatically apply `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers.",
+            "These headers are required for OPFS caching and optimal sqlite-wasm performance.",
             "Deploy the bundle directory (or ZIP) via CLI or the Netlify UI.",
+            "Verify isolation: open browser DevTools console and check that `window.crossOriginIsolated === true`.",
             "Verify `.wasm` assets are served with `application/wasm` using Netlify's response headers tooling."
         ],
     },
@@ -154,7 +163,10 @@ HOSTING_GUIDES: dict[str, dict[str, object]] = {
 GENERIC_HOSTING_NOTES: list[str] = [
     "Serve the directory via any static host that honours `Content-Type` metadata (e.g., nginx, Vercel static, Firebase Hosting).",
     "Ensure `.wasm` files return `application/wasm` and SQLite databases return `application/octet-stream` or `application/vnd.sqlite3`.",
-    "When sqlite-wasm cannot run (missing COOP/COEP), the viewer will fall back to streaming mode; document the expected performance for your release.",
+    "For optimal performance, enable Cross-Origin-Isolation (COOP/COEP headers). The included `_headers` file is automatically applied by Cloudflare Pages and Netlify.",
+    "If your host doesn't support `_headers` (e.g., GitHub Pages), uncomment the `coi-serviceworker.js` script in `viewer/index.html` to enable isolation via service worker.",
+    "If cross-origin isolation is unavailable, the viewer will show a warning banner with platform-specific instructions and fall back to streaming mode.",
+    "Verify isolation: open browser DevTools console and check that `window.crossOriginIsolated === true`.",
 ]
 
 

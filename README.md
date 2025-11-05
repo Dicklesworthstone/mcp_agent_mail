@@ -648,10 +648,10 @@ After decryption, unzip the archive and use `share preview` to view it.
 | `--output`, `-o` | Path | (required) | Directory where the static bundle will be written |
 | `--project`, `-p` | List | All projects | Limit export to specific project slugs or human keys (repeatable) |
 | `--inline-threshold` | Bytes | 65536 (64KB) | Inline attachments smaller than this as base64 data URIs |
-| `--detach-threshold` | Bytes | 5242880 (5MB) | Mark attachments larger than this as external (not bundled) |
-| `--scrub-preset` | String | `standard` | Redaction preset: `standard` (IP addresses, tokens), `strict` (includes email addresses, URLs), or `none` |
-| `--chunk-threshold` | Bytes | 52428800 (50MB) | Split SQLite database into chunks if it exceeds this size |
-| `--chunk-size` | Bytes | 10485760 (10MB) | Chunk size when splitting large databases |
+| `--detach-threshold` | Bytes | 26214400 (25MB) | Mark attachments larger than this as external (not bundled) |
+| `--scrub-preset` | String | `standard` | Redaction preset: `standard` or `strict` (see Redaction presets section) |
+| `--chunk-threshold` | Bytes | 20971520 (20MB) | Split SQLite database into chunks if it exceeds this size |
+| `--chunk-size` | Bytes | 4194304 (4MB) | Chunk size when splitting large databases |
 | `--dry-run` | Flag | false | Generate security summary and preview without writing files |
 | `--zip` / `--no-zip` | Flag | true | Package the bundle into a ZIP archive |
 | `--signing-key` | Path | None | Path to Ed25519 signing key (32-byte raw seed) |
@@ -707,11 +707,11 @@ age-keygen -o key.txt
 
 The export pipeline supports configurable scrubbing to remove sensitive data:
 
-- `standard`: Redacts IP addresses, bearer tokens, API keys, hex secrets
-- `strict`: Also redacts email addresses, URLs, file paths
-- `none`: No redaction (use only for internal/trusted distribution)
+- `standard`: Pseudonymizes agent names, clears acknowledgment/read state, removes file reservations and agent links, scrubs secrets (GitHub tokens, Slack tokens, OpenAI keys, bearer tokens, JWTs) from message bodies and attachment metadata. Retains full message bodies and attachments.
 
-Redaction is applied to message bodies and attachment metadata before they're written to the bundle.
+- `strict`: All standard redactions plus replaces entire message bodies with "[Message body redacted]" placeholder and removes all attachments from the bundle.
+
+All presets apply redaction to message subjects, bodies, and attachment metadata before the bundle is written.
 
 ### Static viewer features
 
@@ -731,7 +731,7 @@ The bundled HTML viewer provides:
 
 **Attachment preview**: Inline images render directly in message bodies. External attachments show file size and download links.
 
-**Thread navigation**: Click thread IDs to see all messages in a conversation thread.
+**Message detail view**: Click any message in the list to view its full body, metadata (sender, recipients, timestamp, importance), and attachments.
 
 **No server required**: After the initial HTTP serving (which can be a static file host like S3, GitHub Pages, or Netlify), all functionality runs client-side. No backend, no API calls, no authentication.
 

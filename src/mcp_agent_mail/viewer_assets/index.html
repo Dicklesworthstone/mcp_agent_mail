@@ -14,6 +14,10 @@
     <header class="banner">
       <h1>MCP Agent Mail: Static Viewer</h1>
       <p id="bundle-info">Loading bundle metadata…</p>
+      <div class="banner-controls">
+        <span id="engine-status" class="engine-status">Engine: initializing…</span>
+        <button id="cache-toggle" class="cache-toggle">Cache for offline use</button>
+      </div>
     </header>
 
     <main>
@@ -34,16 +38,45 @@
         </article>
       </section>
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Message Overview</h2>
-          <div class="search">
-            <label for="search-input">Search</label>
-            <input id="search-input" type="search" placeholder="Filter by subject or snippet" />
+      <section class="three-pane-viewer">
+        <aside class="thread-pane" aria-labelledby="threads-heading">
+          <div class="pane-header">
+            <h2 id="threads-heading">Threads</h2>
+            <input
+              id="thread-filter"
+              type="search"
+              placeholder="Filter threads..."
+              aria-label="Filter threads"
+            />
           </div>
-        </div>
-        <p id="message-meta" class="meta-line">Loading message index…</p>
-        <ul id="message-list" class="message-list"></ul>
+          <ul id="thread-list" class="thread-list" role="list"></ul>
+        </aside>
+
+        <section class="message-pane" aria-labelledby="messages-heading">
+          <div class="pane-header">
+            <h2 id="messages-heading">Messages</h2>
+            <input
+              id="search-input"
+              type="search"
+              placeholder="Search messages..."
+              aria-label="Search messages"
+            />
+          </div>
+          <p id="message-meta" class="meta-line">Loading message index…</p>
+          <ul id="message-list" class="message-list" role="list"></ul>
+        </section>
+
+        <aside class="detail-pane" aria-labelledby="detail-heading">
+          <div class="pane-header">
+            <h2 id="detail-heading">Message Detail</h2>
+            <button id="clear-detail" class="clear-button" aria-label="Close message detail">
+              ×
+            </button>
+          </div>
+          <div id="message-detail" class="message-detail">
+            <p class="placeholder">Select a message to view details</p>
+          </div>
+        </aside>
       </section>
 
       <section class="panel">

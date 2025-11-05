@@ -23,6 +23,45 @@ body {
   font-size: 1.8rem;
 }
 
+.banner-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.engine-status {
+  font-size: 0.85rem;
+  color: #94a3b8;
+  padding: 0.35rem 0.75rem;
+  background: #0f172a;
+  border-radius: 6px;
+  border: 1px solid #475569;
+}
+
+.cache-toggle {
+  padding: 0.5rem 1rem;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.cache-toggle:hover:not(:disabled) {
+  background: #2563eb;
+}
+
+.cache-toggle:disabled {
+  background: #475569;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 main {
   padding: 2rem;
   max-width: 1200px;
@@ -168,6 +207,153 @@ footer {
 .message-snippet {
   white-space: pre-line;
   line-height: 1.4;
+}
+
+/* Three-Pane Viewer Layout */
+.three-pane-viewer {
+  display: grid;
+  grid-template-columns: 250px 1fr 1fr;
+  gap: 1rem;
+  margin: 2rem 0;
+  height: 600px;
+}
+
+.thread-pane,
+.message-pane,
+.detail-pane {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pane-header {
+  padding: 1rem;
+  border-bottom: 1px solid #334155;
+  background: #0f172a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.pane-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.pane-header input {
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-size: 0.9rem;
+}
+
+.pane-header input:focus {
+  outline: 2px solid #3b82f6;
+}
+
+.thread-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.thread-list li {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #334155;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.thread-list li:hover {
+  background: #0f172a;
+}
+
+.thread-list li.active {
+  background: #1e3a5f;
+  border-left: 3px solid #3b82f6;
+}
+
+.message-pane {
+  display: flex;
+  flex-direction: column;
+}
+
+.message-pane .message-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.detail-pane .pane-header {
+  flex-direction: row;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.clear-button {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 2rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  width: 2rem;
+  height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.clear-button:hover {
+  background: #334155;
+  color: #e2e8f0;
+}
+
+.message-detail {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.message-detail .placeholder {
+  color: #94a3b8;
+  text-align: center;
+  padding: 2rem;
+}
+
+@media (max-width: 1024px) {
+  .three-pane-viewer {
+    grid-template-columns: 200px 1fr;
+    height: 500px;
+  }
+
+  .detail-pane {
+    grid-column: 1 / -1;
+    height: 400px;
+  }
+}
+
+@media (max-width: 768px) {
+  .three-pane-viewer {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .thread-pane,
+  .message-pane,
+  .detail-pane {
+    height: 400px;
+  }
 }
 
 /* Warning Banner for Cross-Origin Isolation */
