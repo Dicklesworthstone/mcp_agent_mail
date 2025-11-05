@@ -732,6 +732,48 @@ def scrub_snapshot(
     )
 
 
+def build_search_indexes(snapshot_path: Path) -> bool:
+    """Create or refresh FTS5 indexes for full-text search. Returns True on success."""
+
+    try:
+        with sqlite3.connect(str(snapshot_path)) as conn:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+                    subject,
+                    body,
+                    importance UNINDEXED,
+                    project_slug UNINDEXED,
+                    thread_key UNINDEXED,
+                    created_ts UNINDEXED
+                )
+                """
+            )
+            conn.execute("DELETE FROM fts_messages")
+            conn.execute(
+                """
+                INSERT INTO fts_messages(rowid, subject, body, importance, project_slug, thread_key, created_ts)
+                SELECT
+                    m.id,
+                    COALESCE(m.subject, ''),
+                    COALESCE(m.body_md, ''),
+                    COALESCE(m.importance, ''),
+                    COALESCE(p.slug, ''),
+                    CASE
+                        WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id)
+                        ELSE m.thread_id
+                    END,
+                    COALESCE(m.created_ts, '')
+                FROM messages AS m
+                LEFT JOIN projects AS p ON p.id = m.project_id
+                """
+            )
+            conn.execute("INSERT INTO fts_messages(fts_messages) VALUES('optimize')")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
 def bundle_attachments(
     snapshot_path: Path,
     output_dir: Path,
@@ -1080,6 +1122,7 @@ __all__ = [
     "HostingHint",
     "ShareExportError",
     "apply_project_scope",
+    "build_search_indexes",
     "build_how_to_deploy",
     "bundle_attachments",
     "copy_viewer_assets",
