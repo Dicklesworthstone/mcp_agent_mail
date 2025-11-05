@@ -46,6 +46,8 @@ def _build_snapshot(tmp_path: Path) -> Path:
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER,
+                sender_id INTEGER,
+                thread_id TEXT,
                 subject TEXT,
                 body_md TEXT,
                 importance TEXT,
@@ -90,8 +92,8 @@ def _build_snapshot(tmp_path: Path) -> Path:
         ]
         conn.execute(
             """
-            INSERT INTO messages (id, project_id, subject, body_md, importance, ack_required, created_ts, attachments)
-            VALUES (1, 1, ?, ?, 'normal', 1, '2025-01-01T00:00:00Z', ?)
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (1, 1, 1, 'thread-1', ?, ?, 'normal', 1, '2025-01-01T00:00:00Z', ?)
             """,
             (
                 "Token sk-" + "A" * 24,
