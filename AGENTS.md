@@ -12,6 +12,18 @@ We only use uv in this project, NEVER pip. And we use a venv. And we ONLY target
 
 In general, you should try to follow all suggested best practices listed in the file `third_party_docs/PYTHON_FASTMCP_BEST_PRACTICES.md`
 
+## Starting the MCP Agent Mail server (background requirement)
+
+Always launch the server via a background `bash -lc` invocation so you can capture the PID and keep stdout/stderr in a log file. From the repo root run:
+
+```bash
+bash -lc "cd /Users/jleechan/mcp_agent_mail && ./scripts/run_server_with_token.sh >/tmp/mcp_agent_mail_server.log 2>&1 & echo \$!"
+```
+
+- The printed PID lets you stop the server later with `kill <PID>` (never `kill -9` unless the normal signal fails).
+- Logs live in `/tmp/mcp_agent_mail_server.log`; tail that file to debug startup issues.
+- Do **not** run the helper script directly in the foreground—Claude/Codex agents should assume a persistent background process started exactly as above.
+
 You can also consult `third_party_docs/fastmcp_distilled_docs.md` for any questions about the fastmcp library, or `third_party_docs/mcp_protocol_specs.md` for any questions about the MCP protocol in general. For anything relating to Postgres, be sure to read `third_party_docs/POSTGRES18_AND_PYTHON_BEST_PRACTICES.md`.
 
 We load all configuration details from the existing .env file (even if you can't see this file, it DOES exist, and must NEVER be overwritten!). We NEVER use os.getenv() or dotenv or other methods to get variables from our .env file other than using python-decouple in this very specific pattern of usage (this is just an example but it always follows the same basic pattern):
@@ -139,4 +151,3 @@ Event mirroring (optional automation)
 Pitfalls to avoid
 - Don’t create or manage tasks in Mail; treat Beads as the single task queue.
 - Always include `bd-###` in message `thread_id` to avoid ID drift across tools.
-
