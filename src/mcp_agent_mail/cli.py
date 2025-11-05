@@ -41,6 +41,7 @@ from .share import (
     SCRUB_PRESETS,
     ShareExportError,
     apply_project_scope,
+    build_search_indexes,
     bundle_attachments,
     copy_viewer_assets,
     create_sqlite_snapshot,
@@ -320,6 +321,10 @@ def share_export(
         console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
+    fts_enabled = build_search_indexes(snapshot_path)
+    if not fts_enabled:
+        console.print("[yellow]FTS5 not available; viewer will fall back to LIKE search.[/]")
+
     settings = get_settings()
     storage_root = Path(settings.storage.root).expanduser()
     try:
@@ -346,7 +351,7 @@ def share_export(
         )
 
     copy_viewer_assets(output_path)
-    viewer_data = export_viewer_data(snapshot_path, output_path)
+    viewer_data = export_viewer_data(snapshot_path, output_path, fts_enabled=fts_enabled)
 
     console.print("[cyan]Writing manifest and helper docs...[/]")
     try:
@@ -397,6 +402,10 @@ def share_export(
         f"{att_stats.get('missing', 0)} missing "
         f"(inline ≤ {inline_threshold} B, external ≥ {detach_threshold} B).[/]"
     )
+    if fts_enabled:
+        console.print("[green]✓ Built FTS5 index for full-text viewer search.[/]")
+    else:
+        console.print("[yellow]Search fallback active (FTS5 unavailable in current sqlite build).[/]")
     console.print("[green]✓ Generated manifest, README.txt, HOW_TO_DEPLOY.md, and viewer assets.[/]")
 
     if zip_bundle:
