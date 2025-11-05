@@ -20,6 +20,7 @@ from mcp_agent_mail.share import (
     bundle_attachments,
     maybe_chunk_database,
     scrub_snapshot,
+    summarize_snapshot,
 )
 
 warnings.filterwarnings("ignore", category=ResourceWarning)
@@ -235,6 +236,44 @@ def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
     assert modes == {"inline", "file", "external", "missing"}
 
 
+def test_summarize_snapshot(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+    storage_root = tmp_path / "storage"
+    attachments_dir = storage_root / "attachments" / "raw"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    (attachments_dir / "inline.txt").write_bytes(b"inline")
+    (attachments_dir / "large.bin").write_bytes(b"L" * 1024)
+
+    attachments = [
+        {"type": "file", "path": "attachments/raw/inline.txt", "media_type": "text/plain"},
+        {"type": "file", "path": "attachments/raw/large.bin", "media_type": "application/octet-stream"},
+        {"type": "file", "path": "attachments/raw/missing.bin", "media_type": "application/octet-stream"},
+    ]
+
+    with sqlite3.connect(snapshot) as conn:
+        conn.execute(
+            "UPDATE messages SET attachments = ? WHERE id = 1",
+            (json.dumps(attachments),),
+        )
+        conn.commit()
+
+    summary = summarize_snapshot(
+        snapshot,
+        storage_root=storage_root,
+        inline_threshold=64,
+        detach_threshold=512,
+    )
+
+    assert summary["messages"] == 1
+    assert summary["threads"] == 1
+    assert summary["projects"]
+    stats = summary["attachments"]
+    assert stats["total"] == 3
+    assert stats["inline_candidates"] == 1
+    assert stats["external_candidates"] == 1
+    assert stats["missing"] == 1
+
+
 def test_manifest_snapshot_structure(monkeypatch, tmp_path: Path) -> None:
     snapshot = _build_snapshot(tmp_path)
     storage_root = tmp_path / "env" / "storage"
@@ -320,6 +359,39 @@ def test_run_share_export_wizard(monkeypatch, tmp_path: Path) -> None:
     assert result["chunk_size"] == 131_072
     assert result["zip_bundle"] is False
     assert result["scrub_preset"] == "strict"
+
+
+def test_share_export_dry_run(monkeypatch, tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+    storage_root = tmp_path / "env" / "storage"
+    attachments_dir = storage_root / "attachments" / "raw"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    (attachments_dir / "inline.txt").write_bytes(b"data")
+
+    monkeypatch.setenv("STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{snapshot}")
+    monkeypatch.setenv("HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("HTTP_PORT", "8765")
+    monkeypatch.setenv("HTTP_PATH", "/mcp/")
+    monkeypatch.setenv("APP_ENVIRONMENT", "test")
+
+    runner = CliRunner()
+    clear_settings_cache()
+    output_placeholder = tmp_path / "dry-run-out"
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "share",
+            "export",
+            "--output",
+            str(output_placeholder),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Dry-Run Summary" in result.output
+    assert "Security Checklist" in result.output
+    clear_settings_cache()
 
 
 def test_start_preview_server_serves_content(tmp_path: Path) -> None:

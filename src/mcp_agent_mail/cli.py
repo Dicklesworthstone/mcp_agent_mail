@@ -43,7 +43,6 @@ from .share import (
     apply_project_scope,
     build_search_indexes,
     bundle_attachments,
-    summarize_snapshot,
     copy_viewer_assets,
     create_sqlite_snapshot,
     detect_hosting_hints,
@@ -55,6 +54,7 @@ from .share import (
     resolve_sqlite_database_path,
     scrub_snapshot,
     sign_manifest,
+    summarize_snapshot,
     write_bundle_scaffolding,
 )
 from .utils import slugify
