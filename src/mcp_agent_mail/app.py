@@ -1945,6 +1945,69 @@ async def _update_recipient_timestamp(
     return now
 
 
+# Tool exposure configuration for lazy loading
+# Core tools (~9k tokens): Essential coordination functionality
+CORE_TOOLS = {
+    "health_check",
+    "ensure_project",
+    "register_agent",
+    "whois",
+    "send_message",
+    "reply_message",
+    "fetch_inbox",
+    "mark_message_read",
+}
+
+# Extended tools (~16k tokens): Advanced features available via meta-tools  
+EXTENDED_TOOLS = {
+    "create_agent_identity",
+    "acknowledge_message",
+    "search_messages",
+    "request_contact",
+    "respond_contact",
+    "list_contacts",
+    "set_contact_policy",
+    "file_reservation_paths",
+    "release_file_reservations",
+    "force_release_file_reservation",
+    "renew_file_reservations",
+    "summarize_thread",
+    "summarize_threads",
+    "macro_start_session",
+    "macro_prepare_thread",
+    "macro_file_reservation_cycle",
+    "macro_contact_handshake",
+    "install_precommit_guard",
+    "uninstall_precommit_guard",
+}
+
+# Tool metadata for discovery
+EXTENDED_TOOL_METADATA = {
+    "acknowledge_message": {"category": "messaging", "description": "Acknowledge a message (sets both read_ts and ack_ts)"},
+    "search_messages": {"category": "search", "description": "Full-text search over subject and body"},
+    "create_agent_identity": {"category": "identity", "description": "Create a new unique agent identity"},
+    "request_contact": {"category": "contact", "description": "Request contact approval to message another agent"},
+    "respond_contact": {"category": "contact", "description": "Approve or deny a contact request"},
+    "list_contacts": {"category": "contact", "description": "List contact links for an agent"},
+    "set_contact_policy": {"category": "contact", "description": "Set contact policy (open/auto/contacts_only/block_all)"},
+    "file_reservation_paths": {"category": "file_reservations", "description": "Reserve file paths/globs for exclusive or shared access"},
+    "release_file_reservations": {"category": "file_reservations", "description": "Release active file reservations"},
+    "force_release_file_reservation": {"category": "file_reservations", "description": "Force-release stale reservation from another agent"},
+    "renew_file_reservations": {"category": "file_reservations", "description": "Extend expiry for active reservations"},
+    "summarize_thread": {"category": "search", "description": "Extract participants, key points, and action items for a thread"},
+    "summarize_threads": {"category": "search", "description": "Produce digest across multiple threads"},
+    "macro_start_session": {"category": "workflow_macros", "description": "Boot project session with registration and inbox fetch"},
+    "macro_prepare_thread": {"category": "workflow_macros", "description": "Align agent with existing thread context"},
+    "macro_file_reservation_cycle": {"category": "workflow_macros", "description": "Reserve and optionally release file paths in one operation"},
+    "macro_contact_handshake": {"category": "workflow_macros", "description": "Request contact and optionally auto-approve with welcome message"},
+    "install_precommit_guard": {"category": "infrastructure", "description": "Install pre-commit guard for a code repository"},
+    "uninstall_precommit_guard": {"category": "infrastructure", "description": "Remove pre-commit guard from repository"},
+}
+
+# Registry for extended tool functions (for future dynamic invocation)
+_EXTENDED_TOOL_REGISTRY: dict[str, Any] = {}
+
+
 def build_mcp_server() -> FastMCP:
     """Create and configure the FastMCP server instance."""
     settings: Settings = get_settings()
