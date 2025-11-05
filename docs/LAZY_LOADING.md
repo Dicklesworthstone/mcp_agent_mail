@@ -36,19 +36,19 @@ Advanced features for specialized workflows:
 
 ## Current Implementation
 
-### What's Included (v1 - Foundation)
+### What's Included (v2 - Meta-Tools)
 
 ✅ **Tool Categorization**: Constants define core vs extended tools
 ✅ **Metadata**: Each extended tool has category and description
-✅ **Registry Placeholder**: `_EXTENDED_TOOL_REGISTRY` prepared for future use
+✅ **Tool Registry**: Extended tools registered for dynamic invocation
+✅ **Meta-Tools**: `list_extended_tools` and `call_extended_tool` functional
+✅ **Environment Variable**: `MCP_TOOLS_MODE` support (behavior in Phase 3)
 ✅ **Zero Breaking Changes**: All 27 tools remain functional
 
 ### What's Not Yet Implemented
 
-⚠️ **Meta-Tools**: `list_extended_tools` and `call_extended_tool` (future)
-⚠️ **Environment Variable**: `MCP_TOOLS_MODE=core` support (future)
 ⚠️ **Conditional Registration**: Runtime tool filtering (future)
-⚠️ **Context Savings**: Requires meta-tools + conditional registration
+⚠️ **Context Savings**: Requires conditional registration (Phase 3)
 
 ## Context Reduction Potential
 
@@ -59,18 +59,18 @@ Advanced features for specialized workflows:
 
 ## Roadmap
 
-### Phase 1: Foundation (Current)
+### Phase 1: Foundation (Complete ✅)
 - ✅ Tool categorization constants
 - ✅ Metadata for discovery
 - ✅ Registry placeholder
 
-### Phase 2: Meta-Tools (Next)
-- [ ] Implement `list_extended_tools`
-- [ ] Implement `call_extended_tool`
-- [ ] Add environment variable support
-- [ ] Integration tests
+### Phase 2: Meta-Tools (Complete ✅)
+- ✅ Implement `list_extended_tools`
+- ✅ Implement `call_extended_tool`
+- ✅ Add environment variable support
+- ✅ Integration tests
 
-### Phase 3: Runtime Filtering (Future)
+### Phase 3: Runtime Filtering (Next)
 - [ ] Conditional tool registration
 - [ ] FastMCP enhancement or workaround
 - [ ] Full context savings validation
@@ -110,8 +110,32 @@ This foundation enables multiple implementation paths:
 
 The constants in `app.py` serve as the source of truth for all approaches.
 
+## Using Meta-Tools
+
+### List Available Extended Tools
+
+```json
+{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"list_extended_tools","arguments":{}}}
+```
+
+Returns all 19 extended tools with their categories and descriptions.
+
+### Call an Extended Tool Dynamically
+
+```json
+{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"call_extended_tool","arguments":{
+  "tool_name": "list_contacts",
+  "arguments": {
+    "project_key": "/path/to/project",
+    "agent_name": "AgentName"
+  }
+}}}
+```
+
+This allows programmatic access to extended tools without exposing them all in the tools list.
+
 ---
 
-**Status**: Foundation complete, meta-tools pending
+**Status**: Phase 2 complete (Meta-Tools functional)
 **Risk**: Zero (additive only, no behavior changes)
-**Impact**: Documents categorization, enables future work
+**Impact**: Enables programmatic tool discovery and invocation, foundation for Phase 3
