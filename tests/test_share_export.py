@@ -13,7 +13,13 @@ from typer.testing import CliRunner
 
 from mcp_agent_mail import cli as cli_module
 from mcp_agent_mail.config import clear_settings_cache
-from mcp_agent_mail.share import bundle_attachments, scrub_snapshot
+from mcp_agent_mail.share import (
+    SCRUB_PRESETS,
+    ShareExportError,
+    bundle_attachments,
+    maybe_chunk_database,
+    scrub_snapshot,
+)
 
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -228,6 +234,70 @@ def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
     assert modes == {"inline", "file", "external", "missing"}
 
 
+def test_manifest_snapshot_structure(monkeypatch, tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+    storage_root = tmp_path / "env" / "storage"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    attachments_dir = storage_root / "attachments" / "raw"
+    attachments_dir.mkdir(parents=True, exist_ok=True)
+    (attachments_dir / "binary.bin").write_bytes(b"binary data")
+
+    monkeypatch.setenv("STORAGE_ROOT", str(storage_root))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{snapshot}")
+    monkeypatch.setenv("HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("HTTP_PORT", "8123")
+    monkeypatch.setenv("HTTP_PATH", "/mcp/")
+    monkeypatch.setenv("APP_ENVIRONMENT", "test")
+
+    output_dir = tmp_path / "bundle"
+    runner = CliRunner()
+    clear_settings_cache()
+    try:
+        result = runner.invoke(
+            cli_module.app,
+            [
+                "share",
+                "export",
+                "--output",
+                str(output_dir),
+                "--inline-threshold",
+                "64",
+                "--detach-threshold",
+                "1024",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        manifest_path = output_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+
+        assert manifest["schema_version"] == "0.1.0"
+        assert manifest["scrub"]["preset"] == "standard"
+        assert manifest["scrub"]["agents_total"] == 1
+        assert manifest["scrub"]["agents_pseudonymized"] == 1
+        assert manifest["scrub"]["ack_flags_cleared"] == 1
+        assert manifest["scrub"]["recipients_cleared"] == 1
+        assert manifest["scrub"]["file_reservations_removed"] == 1
+        assert manifest["scrub"]["agent_links_removed"] == 1
+        assert manifest["scrub"]["bodies_redacted"] == 0
+        assert manifest["scrub"]["attachments_cleared"] == 0
+        assert manifest["scrub"]["attachments_sanitized"] == 1
+        assert manifest["scrub"]["secrets_replaced"] >= 2
+        assert manifest["project_scope"]["included"] == [
+            {"slug": "demo", "human_key": "demo-human"}
+        ]
+        assert manifest["project_scope"]["removed_count"] == 0
+        assert manifest["database"]["chunked"] is False
+        detected_hosts = manifest["hosting"].get("detected", [])
+        assert isinstance(detected_hosts, list)
+        for host_entry in detected_hosts:
+            assert {"id", "title", "summary", "signals"}.issubset(host_entry.keys())
+
+        assert set(SCRUB_PRESETS) >= {"standard", "strict"}
+    finally:
+        clear_settings_cache()
+
+
 def test_run_share_export_wizard(monkeypatch, tmp_path: Path) -> None:
     db = tmp_path / "wizard.sqlite3"
     with sqlite3.connect(db) as conn:
@@ -299,7 +369,7 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
             "--chunk-threshold",
             "1",
             "--chunk-size",
-            "64",
+            "2048",
         ],
     )
     assert result.exit_code == 0, result.output
@@ -323,3 +393,16 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
     assert "viewer" in manifest
     assert manifest["scrub"]["preset"] == "standard"
     clear_settings_cache()
+
+
+def test_maybe_chunk_database_rejects_zero_chunk_size(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+    output_dir = tmp_path / "bundle"
+    output_dir.mkdir()
+    with pytest.raises(ShareExportError):
+        maybe_chunk_database(
+            snapshot,
+            output_dir,
+            threshold_bytes=1,
+            chunk_bytes=0,
+        )

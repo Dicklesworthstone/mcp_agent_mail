@@ -693,8 +693,10 @@ def scrub_snapshot(
                 attachment_replacements += rep_count
                 attachment_keys_removed += removed_count
                 if sanitized != attachments_data:
+                    attachments_data = sanitized
                     attachments_updated = True
-                    sanitized_json = json.dumps(sanitized, separators=(",", ":"), sort_keys=True)
+                if attachments_updated:
+                    sanitized_json = json.dumps(attachments_data, separators=(",", ":"), sort_keys=True)
                     conn.execute(
                         "UPDATE messages SET attachments = ? WHERE id = ?",
                         (sanitized_json, msg["id"]),
@@ -910,6 +912,9 @@ def maybe_chunk_database(
     threshold_bytes: int = DEFAULT_CHUNK_THRESHOLD,
     chunk_bytes: int = DEFAULT_CHUNK_SIZE,
 ) -> Optional[dict[str, Any]]:
+    if chunk_bytes <= 0:
+        raise ShareExportError("chunk_bytes must be greater than 0 when chunking the database.")
+
     size = snapshot_path.stat().st_size
     if size <= threshold_bytes:
         return None

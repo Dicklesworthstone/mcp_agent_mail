@@ -228,14 +228,12 @@ def share_export(
     signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")]=None,
     signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")]=None,
     age_recipients: Annotated[
-        tuple[str, ...] | None,
+        list[str],
         typer.Option(
-            None,
             "--age-recipient",
-            help="Encrypt ZIP with age using the provided recipient(s).",
-            multiple=True,
-        ),  # type: ignore[arg-type]
-    ] = None,
+            help="Encrypt the ZIP archive with age using the provided recipient(s).",
+        ),
+    ] = (),
 ) -> None:
     """Export the MCP Agent Mail mailbox into a shareable static bundle (snapshot + scaffolding prototype)."""
 

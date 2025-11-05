@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
+import threading
+import time
 import warnings
 from pathlib import Path
 from zipfile import ZipFile
@@ -14,7 +17,7 @@ from rich.table import Table
 from typer.testing import CliRunner
 
 from mcp_agent_mail import cli as cli_module
-from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.config import clear_settings_cache, get_settings
 
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
@@ -93,7 +96,16 @@ def _seed_mailbox(db_path: Path, storage_root: Path) -> None:
         conn.execute(
             """
             INSERT INTO messages (id, project_id, subject, body_md, importance, ack_required, created_ts, attachments)
-            VALUES (1, 1, 'Integration Test', 'Body with bearer TOKEN', 'normal', 1, '2025-01-01T00:00:00Z', ?)
+            VALUES (
+                1,
+                1,
+                'Integration Test',
+                'Body with bearer TOKEN <script>window._xss=1</script>',
+                'normal',
+                1,
+                '2025-01-01T00:00:00Z',
+                ?
+            )
             """,
             (json.dumps(attachments),),
         )
@@ -201,3 +213,65 @@ def test_share_export_end_to_end(monkeypatch, tmp_path: Path) -> None:
 
     deployment_text = (output_dir / "HOW_TO_DEPLOY.md").read_text(encoding="utf-8")
     assert "## GitHub Pages (detected)" in deployment_text
+
+
+@pytest.mark.usefixtures("isolated_env")
+def test_viewer_playwright_smoke(monkeypatch, tmp_path: Path) -> None:
+    playwright_sync = pytest.importorskip("playwright.sync_api")
+
+    db_path = tmp_path / "playwright.sqlite3"
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("STORAGE_ROOT", str(storage_root))
+    clear_settings_cache()
+    get_settings()  # prime settings with new env values
+
+    if db_path.exists():
+        db_path.unlink()
+    if storage_root.exists():
+        shutil.rmtree(storage_root)
+
+    _seed_mailbox(db_path, storage_root)
+
+    output_dir = tmp_path / "bundle_playwright"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        [
+            "share",
+            "export",
+            "--output",
+            str(output_dir),
+            "--inline-threshold",
+            "64",
+            "--detach-threshold",
+            "10240",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    server = cli_module._start_preview_server(output_dir, "127.0.0.1", 0)
+    host, port = server.server_address[:2]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    time.sleep(0.25)
+
+    try:
+        with playwright_sync.sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context()
+            page = context.new_page()
+            server_host = host or "127.0.0.1"
+            page.goto(f"http://{server_host}:{port}/viewer/index.html", wait_until="networkidle")
+            page.wait_for_selector("#message-list li")
+            first_entry = page.inner_text("#message-list li:nth-child(1)")
+            assert "Integration Test" in (first_entry or "")
+            # Ensure sanitization removed inline script execution.
+            xss_value = page.evaluate("window._xss || null")
+            assert xss_value is None
+            context.close()
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
