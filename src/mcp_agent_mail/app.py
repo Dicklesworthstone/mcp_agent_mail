@@ -44,7 +44,7 @@ from .storage import (
     write_file_reservation_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
+from .utils import generate_agent_name, sanitize_agent_name, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -1069,25 +1069,11 @@ async def _generate_unique_agent_name(
         if mode == "always_auto":
             sanitized = None
         if sanitized:
-            # When coercing, if the provided hint is not in the valid adjective+noun set,
-            # silently fall back to auto-generation instead of erroring.
-            if validate_agent_name_format(sanitized):
-                if not await available(sanitized):
-                    # In strict mode, indicate conflict; in coerce, fall back to generation
-                    if mode == "strict":
-                        raise ValueError(f"Agent name '{sanitized}' is already in use.")
-                else:
-                    return sanitized
-            else:
-                if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name_hint' parameter to auto-generate a valid name."
-                    )
+            if await available(sanitized):
+                return sanitized
+            if mode == "strict":
+                raise ValueError(f"Agent name '{sanitized}' is already in use.")
         else:
-            # No alphanumerics remain; only strict mode should error
             if mode == "strict":
                 raise ValueError("Name hint must contain alphanumeric characters.")
 
@@ -1142,18 +1128,7 @@ async def _get_or_create_agent(
                 raise ValueError("Agent name must contain alphanumeric characters.")
             desired_name = await _generate_unique_agent_name(project, settings, None)
         else:
-            if validate_agent_name_format(sanitized):
-                desired_name = sanitized
-            else:
-                if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name."
-                    )
-                # coerce -> ignore invalid provided name and auto-generate
-                desired_name = await _generate_unique_agent_name(project, settings, None)
+            desired_name = sanitized
     await ensure_schema()
     async with get_session() as session:
         # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
@@ -3512,24 +3487,44 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_names = {row[0] for row in existing.fetchall()}
+            unknown_external: dict[str, list[str]] = defaultdict(list)
 
             class _ContactBlocked(Exception):
                 pass
 
             async def _route(name_list: list[str], kind: str) -> None:
-                for nm in name_list:
+                for raw in name_list:
+                    candidate = (raw or "").strip()
+                    if not candidate:
+                        continue
+                    nm = candidate
+                    explicit_override = False
                     target_project_override: Project | None = None
                     target_name_override: str | None = None
-                    if nm.startswith("project:") and "#" in nm:
+                    if candidate.startswith("project:") and "#" in candidate:
+                        explicit_override = True
                         try:
-                            _, rest = nm.split(":", 1)
+                            _, rest = candidate.split(":", 1)
                             slug_part, agent_part = rest.split("#", 1)
-                            target_project_override = await _get_project_by_identifier(slug_part)
+                            target_project_override = await _get_project_by_identifier(slug_part.strip())
                             target_name_override = agent_part.strip()
+                            nm = target_name_override or nm
                         except Exception:
-                            target_project_override = None
-                            target_name_override = None
-                    if nm in local_names:
+                            unknown_external["(invalid project)"].append(candidate)
+                            continue
+                    elif "@" in candidate and not explicit_override:
+                        name_part, project_part = candidate.split("@", 1)
+                        if name_part.strip() and project_part.strip():
+                            explicit_override = True
+                            try:
+                                target_project_override = await _get_project_by_identifier(project_part.strip())
+                                target_name_override = name_part.strip()
+                                nm = target_name_override
+                            except Exception:
+                                label = project_part.strip() or "(invalid project)"
+                                unknown_external[label].append(candidate)
+                                continue
+                    if not explicit_override and nm in local_names:
                         if kind == "to":
                             local_to.append(nm)
                         elif kind == "cc":
@@ -3778,8 +3773,8 @@ def build_mcp_server() -> FastMCP:
         try:
             b = await _get_agent(target_project, target_name)
         except NoResultFound:
-            if register_if_missing and validate_agent_name_format(target_name):
-                # Create the missing target identity using provided metadata (best effort)
+            cleaned_target = sanitize_agent_name(target_name or "")
+            if register_if_missing and cleaned_target:
                 b = await _get_or_create_agent(
                     target_project,
                     target_name,
