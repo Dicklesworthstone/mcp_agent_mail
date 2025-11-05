@@ -566,22 +566,168 @@ uv run python -m mcp_agent_mail.cli share wizard
 ./scripts/share_to_github_pages.py
 ```
 
-The wizard will:
-1. Let you choose deployment target (GitHub Pages, Cloudflare Pages, or local export)
-2. **Auto-install CLIs** if missing (`gh` for GitHub, `wrangler` for Cloudflare)
-3. **Guide authentication** with step-by-step browser login flows
-4. Show available projects and let you select which to export
-5. Ask about redaction level (standard or strict)
-6. Offer to sign the bundle with Ed25519 (generates key automatically)
-7. Let you preview the bundle locally before deploying
-8. Deploy automatically (creates repos, enables Pages, pushes code)
-9. Give you the final live URL
+#### What the wizard does
 
-**For GitHub Pages**: The wizard will install `gh` CLI (via brew/apt/dnf), authenticate you with `gh auth login`, create a new repository, and enable Pages automatically.
+The wizard provides a fully automated end-to-end deployment experience:
 
-**For Cloudflare Pages**: The wizard will install `wrangler` CLI (via npm), authenticate you with `wrangler login`, and deploy directly to Cloudflare's global CDN (no repo needed).
+1. **Configuration management**: Remembers your last settings and offers to reuse them, saving time on repeated exports
+2. **Deployment target selection**: Choose between GitHub Pages, Cloudflare Pages, or local export
+3. **Automatic CLI installation**: Detects and installs missing tools (`gh` for GitHub, `wrangler` for Cloudflare)
+4. **Guided authentication**: Step-by-step browser login flows for GitHub and Cloudflare
+5. **Smart project selection**:
+   - Shows all available projects in a formatted table
+   - Supports multiple selection modes: `all`, single number (`1`), lists (`1,3,5`), or ranges (`1-3`, `2-5,8`)
+   - Remembers your previous selection for quick re-export
+6. **Redaction configuration**: Choose between `standard` (pseudonymize agents, scrub secrets) or `strict` (redact all message bodies)
+7. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or use your existing key
+8. **Pre-flight validation**: Checks that GitHub repo names are available before starting the export
+9. **Deployment summary**: Shows what will be deployed (project count, bundle size, target, signing status) and asks for confirmation
+10. **Export and preview**: Exports the bundle and launches a local preview server with automatic port detection (tries 9000-9100)
+11. **Real-time deployment**: Streams git and deployment output in real-time so you can follow the progress
+12. **Automatic deployment**: Creates repos, enables Pages, pushes code, and gives you the live URL
 
-**Local export**: Saves the bundle to a directory on your machine for manual deployment or inspection.
+#### Configuration persistence
+
+The wizard saves your configuration to `~/.mcp-agent-mail/wizard-config.json` after each successful deployment. On subsequent runs, it will show:
+
+```
+Previous Configuration Found
+  Projects: 3 selected
+  Redaction: standard
+  Target: github-new
+
+Use these settings again? (Y/n):
+```
+
+This allows rapid re-deployment with the same settings. The saved configuration includes:
+- Selected project indices (validates against current project list)
+- Redaction preset
+- Deployment target and parameters (repo name, privacy, project name)
+- Signing preferences (whether to sign, whether to generate new key)
+
+Configuration is project-agnostic: if you add or remove projects, the wizard validates saved indices and prompts for re-selection if needed.
+
+#### Multi-project selection
+
+The project selector supports flexible selection syntax:
+
+```
+Available Projects:
+#  Slug                Path
+1  backend-abc123      /abs/path/backend
+2  frontend-xyz789     /abs/path/frontend
+3  infra-def456        /abs/path/infra
+4  scripts-ghi789      /abs/path/scripts
+
+Select projects to export (e.g., 'all', '1,3,5', or '1-3'):
+```
+
+**Selection modes:**
+- `all`: Export all projects (default)
+- `1`: Export project #1 only
+- `1,3,5`: Export projects #1, #3, and #5
+- `1-3`: Export projects #1, #2, and #3 (inclusive range)
+- `2-4,7`: Export projects #2, #3, #4, and #7 (combined range and list)
+
+Invalid selections (out of range, malformed) are rejected with helpful error messages and the wizard prompts again.
+
+#### Dynamic port allocation
+
+The preview server automatically detects an available port in the range 9000-9100 instead of failing if port 9000 is in use. The actual port is displayed:
+
+```
+Launching preview server...
+Using port 9001 (Ctrl+C to stop server)
+Waiting for server to start...
+✓ Server ready, opening browser at http://127.0.0.1:9001
+```
+
+This prevents port conflicts when multiple previews are running or when port 9000 is used by other services.
+
+#### Deployment summary panel
+
+Before starting the export, the wizard shows a comprehensive summary:
+
+```
+═══ Deployment Summary ═══
+
+Projects: 3 selected
+Bundle size: ~32 MB
+Redaction: standard
+Target: GitHub Pages
+  Repository: mailbox-viewer-2024
+  Visibility: Private
+Signing: Enabled (Ed25519)
+
+Proceed with export and deployment? (Y/n):
+```
+
+This gives you a final chance to review all settings and cancel if needed. The bundle size is estimated based on ~10 MB per project plus ~2 MB for static assets.
+
+#### Real-time deployment streaming
+
+Git operations and Cloudflare deployments stream output in real-time so you can see exactly what's happening:
+
+```
+Initializing git repository and pushing...
+Initializing repository...
+  Initialized empty Git repository in /tmp/mailbox-preview-abc123/.git/
+✓ Initializing repository complete
+Adding files...
+✓ Adding files complete
+Creating commit...
+  [main (root-commit) 1a2b3c4] Initial mailbox export
+   425 files changed, 123456 insertions(+)
+✓ Creating commit complete
+Pushing to GitHub...
+  Enumerating objects: 430, done.
+  Counting objects: 100% (430/430), done.
+  Delta compression using up to 8 threads
+  Compressing objects: 100% (425/425), done.
+  Writing objects: 100% (430/430), 12.34 MiB | 5.67 MiB/s, done.
+✓ Pushing to GitHub complete
+
+✓ Successfully pushed to owner/mailbox-viewer-2024
+```
+
+This provides transparency and helps diagnose issues if deployment fails.
+
+#### Platform-specific details
+
+**For GitHub Pages:**
+- Wizard detects your package manager (brew/apt/dnf) and offers automated installation of `gh` CLI
+- For apt/dnf, shows complete manual installation instructions (including repo setup) since automation requires sudo
+- Runs `gh auth login` interactively to authenticate via browser
+- Creates new repository with your specified name and visibility (public/private)
+- Initializes git, commits, and pushes with streaming output
+- Enables GitHub Pages automatically via the GitHub API
+- Provides the GitHub Pages URL (may take 1-2 minutes to become live)
+
+**For Cloudflare Pages:**
+- Detects npm and offers automated installation of `wrangler` CLI
+- Runs `wrangler login` interactively to authenticate via browser
+- Deploys directly to Cloudflare's global CDN (no git repository needed)
+- Streams wrangler output in real-time
+- Provides the `.pages.dev` URL immediately (site is live instantly)
+- Benefits: instant deployment, 275+ global locations, automatic HTTPS, unlimited requests on free tier
+
+**For local export:**
+- Saves bundle to specified directory
+- No CLI installation or authentication required
+- Suitable for manual deployment to custom hosting or inspection
+
+#### Error handling and recovery
+
+The wizard includes comprehensive error handling:
+
+- **Pre-flight validation**: Checks GitHub repo availability before starting export to avoid conflicts
+- **Port conflict resolution**: Automatically finds an available port for preview server
+- **Invalid selection handling**: Validates project selections and prompts for correction
+- **CLI installation failures**: Shows manual installation instructions if automatic installation fails
+- **Git operation failures**: Each git step is validated; stops on first failure with clear error message
+- **Deployment failures**: Distinguishes between repo creation, push, and Pages enablement failures
+
+If deployment fails after export, the bundle remains in the temp directory and can be deployed manually using the git commands shown in the manual deployment section below.
 
 The wizard handles all operations automatically. For manual control or advanced options, see the detailed workflows below.
 
