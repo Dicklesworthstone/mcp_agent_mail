@@ -73,20 +73,16 @@ def get_projects() -> list[dict[str, str]]:
     """Get list of projects from the database."""
     try:
         result = subprocess.run(
-            ["uv", "run", "python", "-m", "mcp_agent_mail.cli", "list-projects"],
+            ["uv", "run", "python", "-m", "mcp_agent_mail.cli", "list-projects", "--json"],
             capture_output=True,
             text=True,
             check=True,
         )
-        # Parse output (format: "slug | human_key | created")
-        projects = []
-        for line in result.stdout.strip().split("\n"):
-            if "|" in line and "slug" not in line.lower():  # Skip header
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 2:
-                    projects.append({"slug": parts[0], "human_key": parts[1]})
-        return projects
-    except subprocess.CalledProcessError:
+        # Parse JSON output
+        import json
+        projects_data = json.loads(result.stdout)
+        return [{"slug": p["slug"], "human_key": p["human_key"]} for p in projects_data]
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError):
         return []
 
 
@@ -137,44 +133,38 @@ def select_deployment_target() -> dict[str, Any]:
     """Select where to deploy."""
     console.print("\n[bold]Deployment Target:[/]")
     console.print("  1. New GitHub repository (we'll create it)")
-    console.print("  2. Existing repo - docs/ subdirectory")
-    console.print("  3. Existing repo - root directory")
-    console.print("  4. Export locally only (no GitHub)")
+    console.print("  2. Export locally only (no GitHub)")
 
-    choice = Prompt.ask("Choose option", choices=["1", "2", "3", "4"], default="1")
+    choice = Prompt.ask("Choose option", choices=["1", "2"], default="1")
 
-    if choice == "4":
+    if choice == "2":
         output_dir = Prompt.ask("Output directory", default="./mailbox-export")
         return {"type": "local", "path": output_dir}
 
-    # GitHub deployment
-    if choice == "1":
-        repo_name = Prompt.ask("Repository name", default="mailbox-viewer")
-        is_private = Confirm.ask("Make repository private?", default=False)
-        description = Prompt.ask(
-            "Repository description",
-            default="MCP Agent Mail static viewer",
-        )
-        return {
-            "type": "github-new",
-            "repo_name": repo_name,
-            "private": is_private,
-            "description": description,
-            "path": "root",
-        }
-    elif choice == "2":
-        repo = Prompt.ask("Repository (owner/name)", default="")
-        return {"type": "github-existing", "repo": repo, "path": "docs/mailbox"}
-    else:  # choice == "3"
-        repo = Prompt.ask("Repository (owner/name)", default="")
-        return {"type": "github-existing", "repo": repo, "path": "root"}
+    # GitHub deployment - create new repo
+    repo_name = Prompt.ask("Repository name", default="mailbox-viewer")
+    is_private = Confirm.ask("Make repository private?", default=False)
+    description = Prompt.ask(
+        "Repository description",
+        default="MCP Agent Mail static viewer",
+    )
+    return {
+        "type": "github-new",
+        "repo_name": repo_name,
+        "private": is_private,
+        "description": description,
+        "path": "root",
+    }
 
 
 def generate_signing_key() -> Path:
-    """Generate Ed25519 signing key."""
-    key_path = Path(tempfile.gettempdir()) / f"signing-{secrets.token_hex(4)}.key"
+    """Generate Ed25519 signing key in current directory."""
+    # Save to current directory (not /tmp) so it persists
+    key_path = Path.cwd() / f"signing-{secrets.token_hex(4)}.key"
     key_path.write_bytes(secrets.token_bytes(32))
     key_path.chmod(0o600)
+    console.print(f"[yellow]⚠ Private signing key saved to:[/] {key_path}")
+    console.print("[yellow]⚠ Back up this file securely - you'll need it to update the bundle[/]")
     return key_path
 
 
@@ -234,16 +224,14 @@ def export_bundle(
 
 def preview_bundle(output_dir: Path) -> bool:
     """Launch preview server and ask user to confirm."""
+    import socket
+
     console.print("\n[bold cyan]Launching preview server...[/]")
     console.print("[dim]Press Ctrl+C in the preview window to stop the server[/]")
 
     try:
-        # Open browser first
-        time.sleep(1)
-        webbrowser.open("http://127.0.0.1:9000")
-
-        # Start preview server (blocking)
-        subprocess.run(
+        # Start preview server in background
+        process = subprocess.Popen(
             [
                 "uv",
                 "run",
@@ -256,8 +244,33 @@ def preview_bundle(output_dir: Path) -> bool:
                 "--port",
                 "9000",
             ],
-            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
+
+        # Wait for server to be ready by polling the port
+        console.print("[cyan]Waiting for server to start...[/]")
+        max_attempts = 30
+        for attempt in range(max_attempts):
+            try:
+                with socket.create_connection(("127.0.0.1", 9000), timeout=1):
+                    break
+            except (ConnectionRefusedError, OSError):
+                if process.poll() is not None:
+                    console.print("[red]Preview server failed to start[/]")
+                    return False
+                time.sleep(0.5)
+        else:
+            console.print("[red]Preview server did not start in time[/]")
+            process.terminate()
+            return False
+
+        # Server is ready, open browser
+        console.print("[green]✓ Server ready, opening browser...[/]")
+        webbrowser.open("http://127.0.0.1:9000")
+
+        # Wait for server process to complete (user will Ctrl+C)
+        process.wait()
 
         # After server stops, ask if satisfied
         console.print("\n[bold]Preview complete.[/]")
@@ -265,6 +278,9 @@ def preview_bundle(output_dir: Path) -> bool:
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Preview interrupted[/]")
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
         return Confirm.ask("Continue with deployment anyway?", default=False)
 
 
@@ -308,27 +324,28 @@ def create_github_repo(name: str, private: bool, description: str) -> tuple[bool
 def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "main") -> bool:
     """Initialize git repo and push to GitHub."""
     try:
-        os.chdir(output_dir)
-
-        # Init and commit
-        subprocess.run(["git", "init"], check=True, capture_output=True)
-        subprocess.run(["git", "add", "."], check=True, capture_output=True)
+        # Use cwd parameter instead of os.chdir() to avoid side effects
+        subprocess.run(["git", "init"], cwd=output_dir, check=True, capture_output=True)
+        subprocess.run(["git", "add", "."], cwd=output_dir, check=True, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Initial mailbox export"],
+            cwd=output_dir,
             check=True,
             capture_output=True,
         )
-        subprocess.run(["git", "branch", "-M", branch], check=True, capture_output=True)
+        subprocess.run(["git", "branch", "-M", branch], cwd=output_dir, check=True, capture_output=True)
 
         # Add remote and push
         repo_url = f"git@github.com:{repo_full_name}.git"
         subprocess.run(
             ["git", "remote", "add", "origin", repo_url],
+            cwd=output_dir,
             check=True,
             capture_output=True,
         )
         subprocess.run(
             ["git", "push", "-u", "origin", branch],
+            cwd=output_dir,
             check=True,
             capture_output=True,
         )
@@ -341,13 +358,10 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
         return False
 
 
-def enable_github_pages(repo_full_name: str, branch: str = "main", path: str = "/") -> tuple[bool, str]:
-    """Enable GitHub Pages for the repository."""
+def enable_github_pages(repo_full_name: str, branch: str = "main") -> tuple[bool, str]:
+    """Enable GitHub Pages for the repository (root directory)."""
     try:
-        # Enable Pages via gh API
-        # The path should be "/" for root or "/docs" for docs directory
-        gh_path = "/docs" if path.startswith("docs") else "/"
-
+        # Enable Pages via gh API (always use root "/" for our use case)
         subprocess.run(
             [
                 "gh",
@@ -358,7 +372,7 @@ def enable_github_pages(repo_full_name: str, branch: str = "main", path: str = "
                 "-f",
                 f"source[branch]={branch}",
                 "-f",
-                f"source[path]={gh_path}",
+                "source[path]=/",
             ],
             check=True,
             capture_output=True,
@@ -436,7 +450,6 @@ def main() -> None:
     if Confirm.ask("\nSign the bundle with Ed25519?", default=True):
         if Confirm.ask("Generate a new signing key?", default=True):
             signing_key = generate_signing_key()
-            console.print(f"[green]✓ Generated signing key: {signing_key}[/]")
         else:
             key_path = Prompt.ask("Path to existing signing key")
             signing_key = Path(key_path)
@@ -481,12 +494,8 @@ def main() -> None:
             if not success:
                 sys.exit(1)
 
-            # Copy to final location
-            final_path = Path(temp_dir) / "final"
-            shutil.copytree(temp_path, final_path)
-
-            # Init and push
-            if not init_and_push_repo(final_path, repo_full_name):
+            # Init and push (use temp_path directly, no need to copy)
+            if not init_and_push_repo(temp_path, repo_full_name):
                 sys.exit(1)
 
             # Enable Pages
@@ -509,10 +518,6 @@ def main() -> None:
             else:
                 console.print(f"\n[yellow]Repository created but Pages setup failed[/]")
                 console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
-
-        else:  # github-existing
-            console.print("\n[yellow]Existing repo deployment not yet implemented[/]")
-            console.print("Use 'local' export and push to your repo manually for now")
 
 
 if __name__ == "__main__":

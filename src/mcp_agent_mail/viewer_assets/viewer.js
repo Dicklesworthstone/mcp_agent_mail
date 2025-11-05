@@ -477,9 +477,10 @@ function explainQuery(db, sql, params = [], label = "Query") {
     return;
   }
 
+  let statement;
   try {
     const explainSql = `EXPLAIN QUERY PLAN ${sql}`;
-    const statement = db.prepare(explainSql);
+    statement = db.prepare(explainSql);
     statement.bind(params);
 
     const plan = [];
@@ -487,7 +488,6 @@ function explainQuery(db, sql, params = [], label = "Query") {
       const row = statement.getAsObject();
       plan.push(row);
     }
-    statement.free();
 
     if (plan.length > 0) {
       console.group(`[EXPLAIN] ${label}`);
@@ -500,6 +500,10 @@ function explainQuery(db, sql, params = [], label = "Query") {
     }
   } catch (error) {
     console.warn(`[EXPLAIN] Failed to explain query: ${label}`, error);
+  } finally {
+    if (statement) {
+      statement.free();
+    }
   }
 }
 

@@ -942,7 +942,10 @@ def migrate() -> None:
 
 
 @app.command("list-projects")
-def list_projects(include_agents: bool = typer.Option(False, help="Include agent counts.")) -> None:
+def list_projects(
+    include_agents: bool = typer.Option(False, help="Include agent counts."),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON for machine parsing."),
+) -> None:
     """List known projects."""
 
     settings = get_settings()
@@ -964,21 +967,43 @@ def list_projects(include_agents: bool = typer.Option(False, help="Include agent
                 rows = [(project, 0) for project in projects]
             return rows
 
-    with console.status("Collecting project data..."):
+    if not json_output:
+        with console.status("Collecting project data..."):
+            rows = asyncio.run(_collect())
+    else:
         rows = asyncio.run(_collect())
-    table = Table(title="Projects", show_lines=False)
-    table.add_column("ID")
-    table.add_column("Slug")
-    table.add_column("Human Key")
-    table.add_column("Created")
-    if include_agents:
-        table.add_column("Agents")
-    for project, agent_count in rows:
-        row = [str(project.id), project.slug, project.human_key, project.created_at.isoformat()]
+
+    if json_output:
+        # Machine-readable JSON output
+        projects_json = []
+        for project, agent_count in rows:
+            entry = {
+                "id": project.id,
+                "slug": project.slug,
+                "human_key": project.human_key,
+                "created_at": project.created_at.isoformat(),
+            }
+            if include_agents:
+                entry["agent_count"] = agent_count
+            projects_json.append(entry)
+        import sys
+        json.dump(projects_json, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    else:
+        # Human-readable Rich table output
+        table = Table(title="Projects", show_lines=False)
+        table.add_column("ID")
+        table.add_column("Slug")
+        table.add_column("Human Key")
+        table.add_column("Created")
         if include_agents:
-            row.append(str(agent_count))
-        table.add_row(*row)
-    console.print(table)
+            table.add_column("Agents")
+        for project, agent_count in rows:
+            row = [str(project.id), project.slug, project.human_key, project.created_at.isoformat()]
+            if include_agents:
+                row.append(str(agent_count))
+            table.add_row(*row)
+        console.print(table)
 
 
 @guard_app.command("install")
