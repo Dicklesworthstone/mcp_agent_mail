@@ -15,8 +15,8 @@ into concrete, repeatable actions for the ops and client-integration teams.
    will now receive deterministic `CAPABILITY_DENIED` errors instead of failing
    silently.
 4. **Macro defaults:** Configure small-model workers to prefer macro tools
-   (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`,
-   `macro_contact_handshake`) before the atomic verbs. This mirrors the
+   (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`)
+   before the atomic verbs. This mirrors the
    “workflow mode” recommendations that boosted success rates in field studies.citeturn0academia12
 5. **Security testing:** Add the MSB prompt-attack suite to your CI/CD gate (see
    `docs/GUIDE_TO_OPTIMAL_MCP_SERVER_DESIGN.md`, section 7). Record Net Resilient

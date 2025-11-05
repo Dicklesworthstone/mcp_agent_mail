@@ -6,16 +6,18 @@ This guide explains how to coordinate agents working across different parts of a
 
 **Example Format**: Code examples use simplified pseudo-JSON for clarity. Your MCP client library handles the actual JSON-RPC protocol - focus on understanding the tool calls and architectural patterns shown here.
 
-## Current State: Project Isolation
+## Current State: Direct Cross-Project Messaging
 
-**IMPORTANT:** In the current implementation, **projects are isolated namespaces**. This means:
+Projects are independent namespaces, but agents can now **send messages directly across projects** without requiring prior approval or contact requests.
 
-- Agents registered in different projects **cannot see each other**
-- Agents in different projects **cannot send messages to each other**
-- File reservations are scoped to a single project
-- Inbox/outbox are per-project
+**Key capabilities:**
 
-**Example of what DOES NOT work:**
+- Agents in different projects can discover each other via resources
+- Agents can send messages to agents in other projects using `send_message()`
+- File reservations remain scoped to individual projects
+- Each project maintains its own inbox/outbox
+
+**Example that DOES work:**
 
 ```
 Project A: /data/projects/frontend
@@ -24,7 +26,7 @@ Project A: /data/projects/frontend
 Project B: /data/projects/backend
   - Agent: "BackendDev"
 
-Result: FrontendDev and BackendDev CANNOT communicate.
+Result: FrontendDev and BackendDev CAN communicate directly via send_message().
 ```
 
 ## Recommended Approach: Single Shared Project
@@ -178,45 +180,26 @@ Project B: /data/projects/client-globex
 Result: Complete isolation between client projects.
 ```
 
-**Important:** Agents in separate projects **cannot** currently communicate. This is by design for security and privacy.
+**Important:** Agents in separate projects can now communicate directly without requiring prior approval.
 
-## Future: Cross-Project Coordination Features
+## Cross-Project Messaging
 
-The following features are **planned** but **not yet implemented**:
-
-### 1. Cross-Project Agent Links
-
-Future capability to establish links between agents in different projects:
+Agents can send messages across project boundaries:
 
 ```json
-// FUTURE - NOT YET AVAILABLE
-{
-  "tool": "request_contact",
-  "arguments": {
-    "project_key": "/data/projects/frontend",
-    "from_agent": "FrontendDev",
-    "to_agent": "BackendDev",
-    "to_project": "/data/projects/backend"  // ← Cross-project
-  }
-}
-```
-
-### 2. Cross-Project Message Routing
-
-Future capability to send messages across project boundaries:
-
-```json
-// FUTURE - NOT YET AVAILABLE
 {
   "tool": "send_message",
   "arguments": {
     "project_key": "/data/projects/frontend",
     "sender_name": "FrontendDev",
-    "to": ["BackendDev@/data/projects/backend"],  // ← Cross-project addressing
-    "subject": "API contract discussion"
+    "to": ["BackendDev"],  // Agent in another project
+    "subject": "API contract discussion",
+    "body_md": "Let's coordinate on the new endpoints"
   }
 }
 ```
+
+**Note:** While cross-project messaging is supported, using a single shared project (as recommended above) is simpler for most use cases.
 
 ### 3. Federated Agent Directory
 

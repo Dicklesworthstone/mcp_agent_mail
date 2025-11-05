@@ -2735,257 +2735,7 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
         sender = await _get_agent(project, sender_name)
-        # Enforce contact policies (per-recipient) with auto-allow heuristics
-        settings_local = get_settings()
-        # Allow ack-required messages to bypass contact enforcement entirely
-        if settings_local.contact_enforcement_enabled and not ack_required:
-            # allow replies always; if thread present and recipient already on thread, allow
-            auto_ok_names: set[str] = set()
-            if thread_id:
-                try:
-                    thread_rows: list[tuple[Message, str]]
-                    sender_alias = aliased(Agent)
-                    # Build criteria: thread_id match or numeric id seed
-                    criteria = [Message.thread_id == thread_id]
-                    try:
-                        seed_id = int(thread_id)
-                        criteria.append(Message.id == seed_id)
-                    except Exception:
-                        pass
-                    async with get_session() as s:
-                        stmt = (
-                            select(Message, sender_alias.name)
-                            .join(sender_alias, Message.sender_id == sender_alias.id)
-                            .where(Message.project_id == project.id, or_(*criteria))
-                            .limit(500)
-                        )
-                        thread_rows = list((await s.execute(stmt)).all())
-                    # collect participants (sender names and recipients)
-                    participants: set[str] = {n for _m, n in thread_rows}
-                    auto_ok_names.update(participants)
-                except Exception:
-                    pass
-            # allow recent overlapping file_reservations contact (shared surfaces) by default
-            # best-effort: if both agents hold any file_reservation currently active, auto allow
-            now_utc = datetime.now(timezone.utc)
-            try:
-                async with get_session() as s2:
-                    file_reservation_rows = await s2.execute(
-                        select(FileReservation, Agent.name)
-                        .join(Agent, FileReservation.agent_id == Agent.id)
-                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), FileReservation.expires_ts > now_utc)
-                    )
-                    name_to_file_reservations: dict[str, list[str]] = {}
-                    for c, nm in file_reservation_rows.all():
-                        name_to_file_reservations.setdefault(nm, []).append(c.path_pattern)
-                sender_file_reservations = name_to_file_reservations.get(sender.name, [])
-                for nm in to + (cc or []) + (bcc or []):
-                    # Always allow self-messages
-                    if nm == sender.name:
-                        continue
-                    their = name_to_file_reservations.get(nm, [])
-                    if sender_file_reservations and their and _file_reservations_patterns_overlap(sender_file_reservations, their):
-                        auto_ok_names.add(nm)
-            except Exception:
-                pass
-            # For each recipient, require link unless policy/open or in auto_ok
-            blocked_recipients: list[str] = []
-            async with get_session() as s3:
-                for nm in to + (cc or []) + (bcc or []):
-                    if nm in auto_ok_names:
-                        continue
-                    # recipient lookup
-                    try:
-                        rec = await _get_agent(project, nm)
-                    except Exception:
-                        continue
-                    rec_policy = getattr(rec, "contact_policy", "auto").lower()
-                    # allow self always
-                    if rec.name == sender.name:
-                        continue
-                    if rec_policy == "open":
-                        continue
-                    if rec_policy == "block_all":
-                        await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
-                        raise ToolExecutionError(
-                            "CONTACT_BLOCKED",
-                            "Recipient is not accepting messages.",
-                            recoverable=True,
-                        )
-                    # contacts_only or auto -> must have approved link or prior contact within TTL
-                    ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
-                    recent_ok = False
-                    try:
-                        # check any message between these two within TTL
-                        since_dt = now_utc - ttl
-                        q = text(
-                            """
-                            SELECT 1 FROM messages m
-                            WHERE m.project_id = :pid
-                              AND m.created_ts > :since
-                              AND (
-                                   (m.sender_id = :sid AND EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :rname))
-                                   OR
-                                   (EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :sname) AND m.sender_id = (SELECT id FROM agents WHERE project_id=:pid AND name=:rname))
-                              )
-                            LIMIT 1
-                            """
-                        )
-                        row = await s3.execute(q, {"pid": project.id, "since": since_dt, "sid": sender.id, "sname": sender.name, "rname": rec.name})
-                        recent_ok = row.first() is not None
-                    except Exception:
-                        recent_ok = False
-                    if rec_policy == "auto" and recent_ok:
-                        continue
-                    # check approved AgentLink (local project)
-                    try:
-                        link = await s3.execute(
-                            select(AgentLink)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.b_project_id == project.id,
-                                AgentLink.b_agent_id == rec.id,
-                                AgentLink.status == "approved",
-                            )
-                            .limit(1)
-                        )
-                        if link.first() is not None:
-                            continue
-                    except Exception:
-                        pass
-                    # If message requires acknowledgement and recipient is local, allow to proceed without a link
-                    if ack_required:
-                        continue
-                    blocked_recipients.append(rec.name)
-
-            if blocked_recipients:
-                remedies = [
-                    "Call request_contact(project_key, from_agent, to_agent) to request approval",
-                    "Call macro_contact_handshake(project_key, requester, target, auto_accept=true) to automate",
-                ]
-                attempted: list[str] = []
-                # Respect explicit flag or server default ergonomics
-                effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
-                if effective_auto_contact:
-                    try:
-                        from fastmcp.tools.tool import FunctionTool  # type: ignore
-                        # Prefer a single handshake with auto_accept=true
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
-                        for nm in blocked_recipients:
-                            try:
-                                await handshake.run({
-                                    "project_key": project.human_key,
-                                    "requester": sender.name,
-                                    "target": nm,
-                                    "reason": "auto-handshake by send_message",
-                                    "auto_accept": True,
-                                    "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                })
-                                attempted.append(nm)
-                            except Exception:
-                                pass
-
-                        # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
-                        if settings_local.contact_auto_retry_enabled and attempted:
-                            blocked_recipients = []
-                            async with get_session() as s3b:
-                                for nm in to + (cc or []) + (bcc or []):
-                                    try:
-                                        rec = await _get_agent(project, nm)
-                                    except Exception:
-                                        continue
-                                    if rec.name == sender.name:
-                                        continue
-                                    rec_policy = getattr(rec, "contact_policy", "auto").lower()
-                                    if rec_policy == "open":
-                                        continue
-                                    # After auto-approval, link should exist; double-check
-                                    link = await s3b.execute(
-                                        select(AgentLink)
-                                        .where(
-                                            AgentLink.a_project_id == project.id,
-                                            AgentLink.a_agent_id == sender.id,
-                                            AgentLink.b_project_id == project.id,
-                                            AgentLink.b_agent_id == rec.id,
-                                            AgentLink.status == "approved",
-                                        )
-                                        .limit(1)
-                                    )
-                                    if link.first() is None and not ack_required:
-                                        blocked_recipients.append(rec.name)
-                    except Exception:
-                        pass
-                if blocked_recipients:
-                    err_type: str = "CONTACT_REQUIRED"
-                    blocked_sorted = sorted(set(blocked_recipients))
-                    recipient_list = ", ".join(blocked_sorted)
-                    sample_target = blocked_sorted[0]
-                    project_expr = repr(project.human_key)
-                    sender_expr = repr(sender.name)
-                    target_expr = repr(sample_target)
-                    err_msg_parts = [
-                        f"Contact approval required for recipients: {recipient_list}.",
-                        (
-                            "Before retrying, request approval with "
-                            f"`request_contact(project_key={project_expr}, from_agent={sender_expr}, "
-                            f"to_agent={target_expr})` or run "
-                            f"`macro_contact_handshake(project_key={project_expr}, requester={sender_expr}, "
-                            f"target={target_expr}, auto_accept=True)`."
-                        ),
-                        "Alternatively, send your message inside a recent thread that already includes them by reusing its thread_id.",
-                    ]
-                    if attempted:
-                        err_msg_parts.append(
-                            f"Automatic handshake attempts already ran for: {', '.join(attempted)}; wait for approval or retry the suggested calls explicitly."
-                        )
-                    err_msg: str = " ".join(err_msg_parts)
-                    err_data: dict[str, Any] = {
-                        "recipients_blocked": sorted(set(blocked_recipients)),
-                        "remedies": remedies,
-                        "auto_contact_attempted": attempted,
-                    }
-                    # Provide actionable sample calls
-                    try:
-                        if blocked_recipients:
-                            examples: list[dict[str, Any]] = []
-                            # Show a macro example for the first blocked recipient
-                            examples.append(
-                                {
-                                    "tool": "macro_contact_handshake",
-                                    "arguments": {
-                                        "project_key": project.human_key,
-                                        "requester": sender.name,
-                                        "target": blocked_recipients[0],
-                                        "auto_accept": True,
-                                        "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                    },
-                                }
-                            )
-                            # Also include direct request_contact examples
-                            for nm in blocked_recipients[:3]:
-                                examples.append(
-                                    {
-                                        "tool": "request_contact",
-                                        "arguments": {
-                                            "project_key": project.human_key,
-                                            "from_agent": sender.name,
-                                            "to_agent": nm,
-                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                        },
-                                    }
-                                )
-                            err_data["suggested_tool_calls"] = examples
-                    except Exception:
-                        pass
-                    await ctx.error(f"{err_type}: {err_msg}")
-                    raise ToolExecutionError(
-                        err_type,
-                        err_msg,
-                        recoverable=True,
-                        data=err_data,
-                    )
-        # Split recipients into local vs external (approved links)
+        # Split recipients into local vs external
         local_to: list[str] = []
         local_cc: list[str] = []
         local_bcc: list[str] = []
@@ -3812,15 +3562,16 @@ def build_mcp_server() -> FastMCP:
                 primary_payload.setdefault("attachments", attachments)
         return primary_payload
 
-    @mcp.tool(name="request_contact")
-    @_instrument_tool(
-        "request_contact",
-        cluster=CLUSTER_CONTACT,
-        capabilities={"contact"},
-        project_arg="project_key",
-        agent_arg="from_agent",
-    )
-    async def request_contact(
+    # DEPRECATED: Contact request requirement has been removed. Messages can now be sent directly.
+    # @mcp.tool(name="request_contact")
+    # @_instrument_tool(
+    #     "request_contact",
+    #     cluster=CLUSTER_CONTACT,
+    #     capabilities={"contact"},
+    #     project_arg="project_key",
+    #     agent_arg="from_agent",
+    # )
+    async def _deprecated_request_contact(
         ctx: Context,
         project_key: str,
         from_agent: str,
@@ -3944,15 +3695,16 @@ def build_mcp_server() -> FastMCP:
         )
         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
-    @mcp.tool(name="respond_contact")
-    @_instrument_tool(
-        "respond_contact",
-        cluster=CLUSTER_CONTACT,
-        capabilities={"contact"},
-        project_arg="project_key",
-        agent_arg="to_agent",
-    )
-    async def respond_contact(
+    # DEPRECATED: Contact request requirement has been removed. Messages can now be sent directly.
+    # @mcp.tool(name="respond_contact")
+    # @_instrument_tool(
+    #     "respond_contact",
+    #     cluster=CLUSTER_CONTACT,
+    #     capabilities={"contact"},
+    #     project_arg="project_key",
+    #     agent_arg="to_agent",
+    # )
+    async def _deprecated_respond_contact(
         ctx: Context,
         project_key: str,
         to_agent: str,
@@ -4004,15 +3756,16 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
         return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
 
-    @mcp.tool(name="list_contacts")
-    @_instrument_tool(
-        "list_contacts",
-        cluster=CLUSTER_CONTACT,
-        capabilities={"contact", "audit"},
-        project_arg="project_key",
-        agent_arg="agent_name",
-    )
-    async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
+    # DEPRECATED: Contact request requirement has been removed. Messages can now be sent directly.
+    # @mcp.tool(name="list_contacts")
+    # @_instrument_tool(
+    #     "list_contacts",
+    #     cluster=CLUSTER_CONTACT,
+    #     capabilities={"contact", "audit"},
+    #     project_arg="project_key",
+    #     agent_arg="agent_name",
+    # )
+    async def _deprecated_list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
         """List contact links for an agent in a project."""
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
@@ -4033,15 +3786,16 @@ def build_mcp_server() -> FastMCP:
                 })
         return out
 
-    @mcp.tool(name="set_contact_policy")
-    @_instrument_tool(
-        "set_contact_policy",
-        cluster=CLUSTER_CONTACT,
-        capabilities={"contact", "configure"},
-        project_arg="project_key",
-        agent_arg="agent_name",
-    )
-    async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
+    # DEPRECATED: Contact request requirement has been removed. Messages can now be sent directly.
+    # @mcp.tool(name="set_contact_policy")
+    # @_instrument_tool(
+    #     "set_contact_policy",
+    #     cluster=CLUSTER_CONTACT,
+    #     capabilities={"contact", "configure"},
+    #     project_arg="project_key",
+    #     agent_arg="agent_name",
+    # )
+    async def _deprecated_set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
@@ -4447,15 +4201,16 @@ def build_mcp_server() -> FastMCP:
             "released": release_result,
         }
 
-    @mcp.tool(name="macro_contact_handshake")
-    @_instrument_tool(
-        "macro_contact_handshake",
-        cluster=CLUSTER_MACROS,
-        capabilities={"workflow", "contact", "messaging"},
-        project_arg="project_key",
-        agent_arg="requester",
-    )
-    async def macro_contact_handshake(
+    # DEPRECATED: Contact request requirement has been removed. Messages can now be sent directly.
+    # @mcp.tool(name="macro_contact_handshake")
+    # @_instrument_tool(
+    #     "macro_contact_handshake",
+    #     cluster=CLUSTER_MACROS,
+    #     capabilities={"workflow", "contact", "messaging"},
+    #     project_arg="project_key",
+    #     agent_arg="requester",
+    # )
+    async def _deprecated_macro_contact_handshake(
         ctx: Context,
         project_key: str,
         requester: Optional[str] = None,

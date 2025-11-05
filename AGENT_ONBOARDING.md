@@ -204,23 +204,9 @@ See if anyone has sent you messages:
 - Adds "Re:" prefix to subject if not already present
 - Inherits `importance` and `ack_required` from original message
 
-### Workflow 3: Requesting Contact Approval
+### Workflow 3: Direct Messaging
 
-Before messaging an agent for the first time, you may want to request approval:
-
-```json
-{
-  "tool": "request_contact",
-  "arguments": {
-    "project_key": "/data/projects/my-project",
-    "from_agent": "BackendDev",
-    "to_agent": "DatabaseAdmin",
-    "reason": "Need to coordinate database migration"
-  }
-}
-```
-
-**Note:** Contact policies are configurable. By default, agents can message each other without approval.
+Agents can message each other directly without requiring prior approval or contact requests. Simply use `send_message` with the appropriate recipient details.
 
 ### Workflow 3.5: Discovering Related Projects
 
@@ -288,44 +274,21 @@ Instead, we split the problem:
 └────────────────┬────────────────────────────────────────────┘
                  ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 3. Agent requests contact (explicit permission request)     │
-│    request_contact(from_agent, to_agent, to_project)        │
-└────────────────┬────────────────────────────────────────────┘
-                 ↓
-┌─────────────────────────────────────────────────────────────┐
-│ 4. You approve contact (authorize messaging)                │
-│    respond_contact(accept=true)                             │
-└────────────────┬────────────────────────────────────────────┘
-                 ↓
-┌─────────────────────────────────────────────────────────────┐
-│ 5. Messages flow (agents can now communicate)               │
-│    AgentLink established → Messages delivered               │
+│ 3. Agents can now send messages directly across projects    │
+│    send_message() works immediately                         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Think of it like your phone's contact list**:
-- Discovery = "People you may know" suggestions
-- Authorization = Actually adding them to your contacts
+**Think of it like project organization**:
+- Discovery = Understanding which projects are related
+- Visibility = UI shows these relationships for better context
 
 #### Your Next Steps
 
 When you see a sibling suggestion you agree with:
 
 1. **Confirm the link** in the UI (updates navigation badges)
-2. **Run the contact workflow** so agents can actually communicate:
-   ```json
-   {
-     "tool": "request_contact",
-     "arguments": {
-       "project_key": "/data/projects/my-app-frontend",
-       "from_agent": "FrontendDev",
-       "to_agent": "BackendDev",
-       "to_project": "/data/projects/my-app-backend",
-       "reason": "Need to coordinate API changes"
-     }
-   }
-   ```
-3. **Approve the request** to establish the messaging link
+2. **Agents can immediately send messages** across projects using `send_message()`
 
 ### Workflow 4: Reserving Files Before Editing
 
@@ -562,27 +525,6 @@ Align with an existing discussion thread:
 2. Summarizes the thread
 3. Fetches recent inbox
 4. Returns context to jump into the discussion
-
-### Contact Policies
-
-Configure how other agents can reach you:
-
-```json
-{
-  "tool": "set_contact_policy",
-  "arguments": {
-    "project_key": "/data/projects/my-project",
-    "agent_name": "BackendDev",
-    "policy": "auto"
-  }
-}
-```
-
-**Policies:**
-- `open` - Anyone can message you without approval
-- `auto` - Auto-approve contacts with reservation overlap or same thread
-- `contacts_only` - Only approved contacts can message you
-- `block_all` - No incoming messages allowed
 
 ## Getting Help
 

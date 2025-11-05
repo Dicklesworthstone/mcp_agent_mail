@@ -26,11 +26,9 @@ Advanced features for specialized workflows:
 
 **Identity**: `create_agent_identity`
 
-**Contacts**: `request_contact`, `respond_contact`, `list_contacts`, `set_contact_policy`
-
 **File Reservations**: `file_reservation_paths`, `release_file_reservations`, `force_release_file_reservation`, `renew_file_reservations`
 
-**Macros**: `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`
+**Macros**: `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`
 
 **Infrastructure**: `install_precommit_guard`, `uninstall_precommit_guard`
 
