@@ -232,9 +232,9 @@ Repeat the `INSERT ... VALUES('optimize')` step for every FTS table. This sequen
    - ✅ *(2025-11-04)* Export now copies shipped viewer scaffold (`viewer/index.html`, `viewer.js`, `styles.css`) so bundles render manifest diagnostics out of the box.
    - ✅ *(2025-11-04)* End-to-end integration test exercises `share export` CLI, validates manifest/ZIP outputs, and emits rich diagnostics for traceability.
 3. **Viewer (3 weeks):**
-   - Build UI shell, implement inbox/thread/detail/search flows.
+   - ✅ *(2025-11-05)* Built SPA viewer shell with inbox/thread/detail flows, FTS-backed search, and thread navigation.
    - ✅ *(2025-11-04)* Viewer loads bundled SQLite via sql.js (with chunk reassembly fallback) and hydrates message list without server APIs.
-   - ✅ *(2025-11-04)* Client logs local performance metrics to the browser console (analytics-free telemetry).
+   - ✅ *(2025-11-05)* Added OPFS-aware caching toggle plus analytics-free bootstrap telemetry (console diagnostics only).
 4. **Security & Hardening (1 week):**
    - Hash/signing pipeline.
    - Optional encryption module.
