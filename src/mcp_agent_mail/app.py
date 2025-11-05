@@ -1945,7 +1945,109 @@ async def _update_recipient_timestamp(
     return now
 
 
+
+# Tool exposure configuration for lazy loading
+# Core tools (~9k tokens): Essential coordination functionality
+CORE_TOOLS = {
+    "health_check",
+    "ensure_project",
+    "register_agent",
+    "whois",
+    "send_message",
+    "reply_message",
+    "fetch_inbox",
+    "mark_message_read",
+}
+
+# Extended tools (~16k tokens): Advanced features available via meta-tools
+EXTENDED_TOOLS = {
+    "create_agent_identity",
+    "acknowledge_message",
+    "search_messages",
+    "request_contact",
+    "respond_contact",
+    "list_contacts",
+    "set_contact_policy",
+    "file_reservation_paths",
+    "release_file_reservations",
+    "force_release_file_reservation",
+    "renew_file_reservations",
+    "summarize_thread",
+    "summarize_threads",
+    "macro_start_session",
+    "macro_prepare_thread",
+    "macro_file_reservation_cycle",
+    "macro_contact_handshake",
+    "install_precommit_guard",
+    "uninstall_precommit_guard",
+}
+
+# Tool metadata for discovery
+EXTENDED_TOOL_METADATA = {
+    "acknowledge_message": {"category": "messaging", "description": "Acknowledge a message (sets both read_ts and ack_ts)"},
+    "search_messages": {"category": "search", "description": "Full-text search over subject and body"},
+    "create_agent_identity": {"category": "identity", "description": "Create a new unique agent identity"},
+    "request_contact": {"category": "contact", "description": "Request contact approval to message another agent"},
+    "respond_contact": {"category": "contact", "description": "Approve or deny a contact request"},
+    "list_contacts": {"category": "contact", "description": "List contact links for an agent"},
+    "set_contact_policy": {"category": "contact", "description": "Set contact policy (open/auto/contacts_only/block_all)"},
+    "file_reservation_paths": {"category": "file_reservations", "description": "Reserve file paths/globs for exclusive or shared access"},
+    "release_file_reservations": {"category": "file_reservations", "description": "Release active file reservations"},
+    "force_release_file_reservation": {"category": "file_reservations", "description": "Force-release stale reservation from another agent"},
+    "renew_file_reservations": {"category": "file_reservations", "description": "Extend expiry for active reservations"},
+    "summarize_thread": {"category": "search", "description": "Extract participants, key points, and action items for a thread"},
+    "summarize_threads": {"category": "search", "description": "Produce digest across multiple threads"},
+    "macro_start_session": {"category": "workflow_macros", "description": "Boot project session with registration and inbox fetch"},
+    "macro_prepare_thread": {"category": "workflow_macros", "description": "Align agent with existing thread context"},
+    "macro_file_reservation_cycle": {"category": "workflow_macros", "description": "Reserve and optionally release file paths in one operation"},
+    "macro_contact_handshake": {"category": "workflow_macros", "description": "Request contact and optionally auto-approve with welcome message"},
+    "install_precommit_guard": {"category": "infrastructure", "description": "Install pre-commit guard for a code repository"},
+    "uninstall_precommit_guard": {"category": "infrastructure", "description": "Remove pre-commit guard from repository"},
+}
+
+
 def build_mcp_server() -> FastMCP:
+
+# Registry to store extended tool functions for dynamic invocation
+_EXTENDED_TOOL_REGISTRY: dict[str, Any] = {}
+
+def _register_extended_tool(func):
+    """Decorator to register extended tools for dynamic invocation."""
+    _EXTENDED_TOOL_REGISTRY[func.__name__] = func
+    return func
+
+import os
+
+# Check environment variable for tool exposure mode
+TOOLS_MODE = os.getenv("MCP_TOOLS_MODE", "extended").lower()
+
+def _conditional_mcp_tool(mcp_instance, name: str, **kwargs):
+    """
+    Conditionally register a tool with FastMCP based on TOOLS_MODE.
+    
+    - In "extended" mode (default): All tools are registered with MCP
+    - In "core" mode: Only core tools are registered with MCP, extended tools go to internal registry only
+    """
+    is_core_tool = name in CORE_TOOLS
+    is_extended_tool = name in EXTENDED_TOOLS
+    
+    if TOOLS_MODE == "core" and is_extended_tool:
+        # Extended tool in core mode: Register internally only, not with MCP
+        def decorator(func):
+            _EXTENDED_TOOL_REGISTRY[name] = func
+            return func
+        return decorator
+    else:
+        # Core tool or extended mode: Register with MCP normally
+        def decorator(func):
+            if is_extended_tool:
+                _EXTENDED_TOOL_REGISTRY[name] = func
+            # Apply the actual MCP tool decorator
+            return mcp_instance.tool(name=name, **kwargs)(func)
+        return decorator
+
+
+
     """Create and configure the FastMCP server instance."""
     settings: Settings = get_settings()
     lifespan = _lifespan_factory(settings)
@@ -2178,6 +2280,135 @@ def build_mcp_server() -> FastMCP:
             "http_port": settings.http.port,
             "database_url": settings.database.url,
         }
+
+    @mcp.tool(name="list_extended_tools", description="List all extended tools not loaded by default in core mode.")
+    @_instrument_tool("list_extended_tools", cluster=CLUSTER_SETUP, capabilities={"discovery"}, complexity="low")
+    async def list_extended_tools(ctx: Context) -> dict[str, Any]:
+        """
+        Return metadata for all extended tools available via call_extended_tool.
+        
+        When to use
+        -----------
+        - When you need advanced functionality not available in the core tool set
+        - To discover what categories of extended tools are available
+        - Before calling call_extended_tool to see available options
+        
+        Returns
+        -------
+        dict
+            {
+              "total_extended_tools": int,
+              "categories": dict[str, list[str]],
+              "tools": list[dict] with name, category, description
+            }
+        
+        Examples
+        --------
+        ```json
+        {"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"list_extended_tools","arguments":{}}}
+        ```
+        """
+        await ctx.info("Listing extended tools")
+        
+        # Group by category
+        by_category: dict[str, list[str]] = {}
+        tools_list = []
+        
+        for tool_name in sorted(EXTENDED_TOOLS):
+            metadata = EXTENDED_TOOL_METADATA.get(tool_name, {})
+            category = metadata.get("category", "uncategorized")
+            description = metadata.get("description", "")
+            
+            by_category.setdefault(category, []).append(tool_name)
+            tools_list.append({
+                "name": tool_name,
+                "category": category,
+                "description": description
+            })
+        
+        return {
+            "total_extended_tools": len(EXTENDED_TOOLS),
+            "categories": by_category,
+            "tools": tools_list
+        }
+    
+    @mcp.tool(name="call_extended_tool", description="Invoke an extended tool by name with provided arguments.")
+    @_instrument_tool("call_extended_tool", cluster=CLUSTER_SETUP, capabilities={"proxy"}, complexity="medium")
+    async def call_extended_tool(ctx: Context, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """
+        Dynamically invoke an extended tool not exposed by default.
+        
+        When to use
+        -----------
+        - When you need functionality from an extended tool in core mode
+        - After calling list_extended_tools to discover available tools
+        - For advanced workflows requiring file reservations, contacts, or macros
+        
+        Parameters
+        ----------
+        tool_name : str
+            Name of the extended tool to invoke (e.g., "file_reservation_paths")
+        arguments : dict
+            Tool-specific arguments as key-value pairs
+        
+        Returns
+        -------
+        dict
+            The result from the invoked extended tool
+        
+        Errors
+        ------
+        - Raises ValueError if tool_name is not in EXTENDED_TOOLS
+        - Passes through any errors from the invoked tool
+        
+        Examples
+        --------
+        Reserve file paths:
+        ```json
+        {
+          "jsonrpc":"2.0","id":"2","method":"tools/call",
+          "params":{
+            "name":"call_extended_tool",
+            "arguments":{
+              "tool_name":"file_reservation_paths",
+              "arguments":{
+                "project_key":"/abs/path/project",
+                "agent_name":"BlueLake",
+                "paths":["src/**/*.py"],
+                "ttl_seconds":3600,
+                "exclusive":true
+              }
+            }
+          }
+        }
+        ```
+        """
+        if tool_name not in EXTENDED_TOOLS:
+            raise ValueError(
+                f"Unknown extended tool: {tool_name}. "
+                f"Use list_extended_tools to see available options."
+            )
+        
+        await ctx.info(f"Invoking extended tool: {tool_name}")
+        
+        # Get the actual function from the mcp instance
+        # This assumes tools are registered and accessible via mcp's internal registry
+        # We'll need to store tool functions during registration
+        tool_func = _EXTENDED_TOOL_REGISTRY.get(tool_name)
+        if not tool_func:
+            raise RuntimeError(
+                f"Extended tool {tool_name} is not properly registered. "
+                f"This is an internal server error."
+            )
+        
+        # Invoke the tool with provided arguments
+        try:
+            result = await tool_func(ctx, **arguments)
+            return result
+        except Exception as e:
+            await ctx.error(f"Error invoking {tool_name}: {str(e)}")
+            raise
+
 
     @mcp.tool(name="ensure_project")
     @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "storage"}, complexity="low", project_arg="human_key")
