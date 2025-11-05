@@ -41,9 +41,9 @@ CONFIG_FILE = CONFIG_DIR / "wizard-config.json"
 
 
 def find_available_port(start: int = 9000, end: int = 9100) -> int:
-    """Find an available port in the given range."""
+    """Find an available port in the given range (inclusive)."""
     import socket
-    for port in range(start, end):
+    for port in range(start, end + 1):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("127.0.0.1", port))
@@ -148,15 +148,16 @@ def show_deployment_summary(
     console.print(f"[bold]Redaction:[/] {scrub_preset}")
 
     # Deployment target
-    if deployment["type"] == "local":
-        console.print(f"[bold]Target:[/] Local export to {deployment['path']}")
-    elif deployment["type"] == "github-new":
+    deploy_type = deployment.get("type", "unknown")
+    if deploy_type == "local":
+        console.print(f"[bold]Target:[/] Local export to {deployment.get('path', './mailbox-export')}")
+    elif deploy_type == "github-new":
         console.print(f"[bold]Target:[/] GitHub Pages")
-        console.print(f"  Repository: {deployment['repo_name']}")
-        console.print(f"  Visibility: {'Private' if deployment['private'] else 'Public'}")
-    elif deployment["type"] == "cloudflare-pages":
+        console.print(f"  Repository: {deployment.get('repo_name', '(not set)')}")
+        console.print(f"  Visibility: {'Private' if deployment.get('private', False) else 'Public'}")
+    elif deploy_type == "cloudflare-pages":
         console.print(f"[bold]Target:[/] Cloudflare Pages")
-        console.print(f"  Project: {deployment['project_name']}")
+        console.print(f"  Project: {deployment.get('project_name', '(not set)')}")
 
     # Signing
     if signing_key:
@@ -781,12 +782,10 @@ def deploy_to_cloudflare_pages(output_dir: Path, project_name: str) -> tuple[boo
 
         # Collect output and parse for deployment URL
         pages_url = ""
-        output_lines = []
 
         # Stream output in real-time
         for line in process.stdout:
             stripped = line.rstrip()
-            output_lines.append(stripped)
             console.print(f"  [dim]{stripped}[/]")
 
             # Parse for deployment URL
@@ -850,9 +849,15 @@ def main() -> None:
         # Reconstruct deployment config from saved settings
         deployment = last_config.get("deployment", {})
 
+        # Validate that deployment config is complete
+        if not deployment.get("type"):
+            console.print("[yellow]Saved deployment config is invalid, please select again[/]")
+            deployment = select_deployment_target()
+            use_last_config = False  # Fall back to interactive mode
+
     # Check prerequisites based on deployment choice
-    require_gh = deployment["type"] == "github-new"
-    require_cf = deployment["type"] == "cloudflare-pages"
+    require_gh = deployment.get("type") == "github-new"
+    require_cf = deployment.get("type") == "cloudflare-pages"
     if not check_prerequisites(require_github=require_gh, require_cloudflare=require_cf):
         sys.exit(1)
 
@@ -932,8 +937,8 @@ def main() -> None:
             sys.exit(0)
 
         # Deploy based on target
-        if deployment["type"] == "local":
-            output_path = Path(deployment["path"]).expanduser().resolve()
+        if deployment.get("type") == "local":
+            output_path = Path(deployment.get("path", "./mailbox-export")).expanduser().resolve()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(temp_path, output_path, dirs_exist_ok=True)
             console.print(f"\n[bold green]✓ Exported to: {output_path}[/]")
@@ -952,12 +957,12 @@ def main() -> None:
                 "generate_new_key": generate_new_key,
             })
 
-        elif deployment["type"] == "github-new":
+        elif deployment.get("type") == "github-new":
             # Create repo
             success, repo_full_name = create_github_repo(
-                deployment["repo_name"],
-                deployment["private"],
-                deployment["description"],
+                deployment.get("repo_name", "mailbox-viewer"),
+                deployment.get("private", False),
+                deployment.get("description", "MCP Agent Mail static viewer"),
             )
             if not success:
                 sys.exit(1)
@@ -998,9 +1003,9 @@ def main() -> None:
                 console.print(f"\n[yellow]Repository created but Pages setup failed[/]")
                 console.print(f"Visit https://github.com/{repo_full_name}/settings/pages to enable manually")
 
-        elif deployment["type"] == "cloudflare-pages":
+        elif deployment.get("type") == "cloudflare-pages":
             # Deploy to Cloudflare Pages
-            success, pages_url = deploy_to_cloudflare_pages(temp_path, deployment["project_name"])
+            success, pages_url = deploy_to_cloudflare_pages(temp_path, deployment.get("project_name", "mailbox-viewer"))
             if success:
                 console.print(
                     Panel.fit(
