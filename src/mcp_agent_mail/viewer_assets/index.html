@@ -1,204 +1,468 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" x-data="darkModeController()" x-init="init()" :class="{ 'dark': darkMode }" x-cloak>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types mailViewerDOMPurify dompurify default;"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net https://unpkg.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net https://unpkg.com https://cdnjs.cloudflare.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types mailViewerDOMPurify dompurify default;"
     />
-    <title>MCP Agent Mail Viewer</title>
-    <link rel="stylesheet" href="./styles.css" />
-    <link
-      rel="stylesheet"
-      href="./vendor/clusterize.min.css"
-      integrity="sha256-IoY0mRl15723XeZvl/t8zDwMQwuZ8ZkZLnmcCgZBgRM="
-      crossorigin="anonymous"
-    />
+    <title>Agent Mail Viewer</title>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+    <script>
+      (function () {
+        try {
+          const stored = localStorage.getItem('darkMode');
+          const prefers = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (stored === 'true' || (stored === null && prefers)) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
+        } catch (error) {
+          document.documentElement.classList.remove('dark');
+        }
+      })();
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            },
+            colors: {
+              primary: {
+                50: '#eef2ff',
+                100: '#e0e7ff',
+                200: '#c7d2fe',
+                300: '#a5b4fc',
+                400: '#818cf8',
+                500: '#6366f1',
+                600: '#4f46e5',
+                700: '#4338ca',
+                800: '#3730a3',
+                900: '#312e81',
+                950: '#1e1b4b',
+              },
+            },
+            animation: {
+              'fade-in': 'fadeIn 0.2s ease-in-out',
+              'slide-in': 'slideIn 0.3s ease-out',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0' },
+                '100%': { opacity: '1' },
+              },
+              slideIn: {
+                '0%': { transform: 'translateX(-10px)', opacity: '0' },
+                '100%': { transform: 'translateX(0)', opacity: '1' },
+              },
+            },
+          },
+        },
+      }
+    </script>
+
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Marked.js for markdown rendering -->
+    <script src="./vendor/marked.min.js" integrity="sha256-iiOIwxmH8YPwUHaWKofAvi6NTUI9pec6g05elbtCB+8=" crossorigin="anonymous"></script>
+
+    <!-- DOMPurify for HTML sanitization -->
+    <script src="./vendor/dompurify.min.js" integrity="sha256-0kaYYq3qitkkVZpP/6uKTJwfTpqFNM6OHDbsaYzw9Uw=" crossorigin="anonymous"></script>
+
+    <!-- Clusterize.js for virtual scrolling -->
+    <link rel="stylesheet" href="./vendor/clusterize.min.css" integrity="sha256-IoY0mRl15723XeZvl/t8zDwMQwuZ8ZkZLnmcCgZBgRM=" crossorigin="anonymous" />
+    <script src="./vendor/clusterize.min.js" integrity="sha256-kZrY+ddUOM0611/m0WOv4sSCBjS1SX32kf23mZ+dXyk=" crossorigin="anonymous"></script>
+
+    <style>
+      [x-cloak] { display: none !important; }
+
+      /* Prose styling for markdown content */
+      .prose { max-width: 65ch; }
+      .prose p { margin-top: 1.25em; margin-bottom: 1.25em; }
+      .prose h1 { font-size: 2.25em; margin-top: 0; margin-bottom: 0.8888889em; line-height: 1.1111111; font-weight: 800; }
+      .prose h2 { font-size: 1.5em; margin-top: 2em; margin-bottom: 1em; line-height: 1.3333333; font-weight: 700; }
+      .prose h3 { font-size: 1.25em; margin-top: 1.6em; margin-bottom: 0.6em; line-height: 1.6; font-weight: 600; }
+      .prose code { font-size: 0.875em; }
+      .prose pre { font-size: 0.875em; line-height: 1.7142857; margin-top: 1.7142857em; margin-bottom: 1.7142857em; border-radius: 0.375rem; padding: 0.8571429em 1.1428571em; overflow-x: auto; }
+      .prose pre code { background-color: transparent; border-width: 0; border-radius: 0; padding: 0; font-weight: inherit; color: inherit; font-size: inherit; font-family: inherit; line-height: inherit; }
+      .prose ul { margin-top: 1.25em; margin-bottom: 1.25em; padding-left: 1.625em; }
+      .prose li { margin-top: 0.5em; margin-bottom: 0.5em; }
+      .prose blockquote { font-style: italic; border-left-width: 0.25rem; padding-left: 1em; margin-top: 1.6em; margin-bottom: 1.6em; }
+    </style>
   </head>
-  <body>
-    <header class="banner">
-      <h1>MCP Agent Mail: Static Viewer</h1>
-      <p id="bundle-info">Loading bundle metadata…</p>
-      <div class="banner-controls">
-        <span id="engine-status" class="engine-status">Engine: initializing…</span>
-        <button id="cache-toggle" class="cache-toggle">Cache for offline use</button>
-        <button id="diagnostics-toggle" class="diagnostics-toggle">Diagnostics</button>
+
+  <body class="bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white min-h-screen">
+
+    <!-- Fullscreen Backdrop -->
+    <div x-show="isFullscreen"
+         x-transition:enter="transition ease-out duration-200"
+         x-transition:enter-start="opacity-0"
+         x-transition:enter-end="opacity-100"
+         x-transition:leave="transition ease-in duration-200"
+         x-transition:leave-start="opacity-100"
+         x-transition:leave-end="opacity-0"
+         @click="isFullscreen = false"
+         class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-40"
+         aria-hidden="true"
+         style="display: none;">
+    </div>
+
+    <!-- Main Container -->
+    <div class="flex flex-col" x-data="viewerController()" x-init="initViewer()">
+
+      <!-- Top Navigation Bar -->
+      <nav class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-3 flex items-center justify-between sticky top-0 z-30">
+        <div class="flex items-center gap-4">
+          <h1 class="text-xl font-bold text-slate-900 dark:text-white flex items-center gap-2">
+            <i data-lucide="mail" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
+            Agent Mail
+          </h1>
+          <span x-show="manifest" class="text-sm text-slate-500 dark:text-slate-400" x-text="manifest?.projects?.length + ' project(s)'"></span>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <!-- Dark Mode Toggle -->
+          <button @click="toggleDarkMode()"
+                  class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
+                  aria-label="Toggle dark mode">
+            <i x-show="!darkMode" data-lucide="moon" class="w-5 h-5 text-slate-600 dark:text-slate-400"></i>
+            <i x-show="darkMode" data-lucide="sun" class="w-5 h-5 text-slate-400"></i>
+          </button>
+
+          <!-- Cache Toggle -->
+          <button x-show="cacheSupported"
+                  @click="toggleCache()"
+                  :class="cacheState === 'cached' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
+                  class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80">
+            <i data-lucide="database" class="w-4 h-4"></i>
+            <span x-text="cacheState === 'cached' ? 'Cached' : 'Cache'"></span>
+          </button>
+
+          <!-- Diagnostics Toggle -->
+          <button @click="showDiagnostics = !showDiagnostics"
+                  :class="showDiagnostics ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
+                  class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80">
+            <i data-lucide="activity" class="w-4 h-4"></i>
+            <span>Diagnostics</span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Diagnostics Panel (Collapsible) -->
+      <div x-show="showDiagnostics"
+           x-transition:enter="transition ease-out duration-200"
+           x-transition:enter-start="opacity-0 -translate-y-2"
+           x-transition:enter-end="opacity-100 translate-y-0"
+           x-transition:leave="transition ease-in duration-150"
+           x-transition:leave-start="opacity-100 translate-y-0"
+           x-transition:leave-end="opacity-0 -translate-y-2"
+           class="bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4"
+           style="display: none;">
+        <div class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+          <div>
+            <h3 class="font-semibold text-slate-900 dark:text-white mb-2">Database</h3>
+            <dl class="space-y-1 text-slate-600 dark:text-slate-400">
+              <div class="flex justify-between"><dt>Source:</dt><dd x-text="databaseSource"></dd></div>
+              <div class="flex justify-between"><dt>Messages:</dt><dd x-text="totalMessages"></dd></div>
+              <div class="flex justify-between"><dt>FTS5:</dt><dd x-text="ftsEnabled ? 'Yes' : 'No'"></dd></div>
+            </dl>
+          </div>
+          <div>
+            <h3 class="font-semibold text-slate-900 dark:text-white mb-2">Cache</h3>
+            <dl class="space-y-1 text-slate-600 dark:text-slate-400">
+              <div class="flex justify-between"><dt>State:</dt><dd x-text="cacheState"></dd></div>
+              <div class="flex justify-between"><dt>Supported:</dt><dd x-text="cacheSupported ? 'Yes' : 'No'"></dd></div>
+            </dl>
+          </div>
+          <div>
+            <h3 class="font-semibold text-slate-900 dark:text-white mb-2">Bundle</h3>
+            <dl class="space-y-1 text-slate-600 dark:text-slate-400">
+              <div class="flex justify-between"><dt>Generated:</dt><dd x-text="manifest?.generated"></dd></div>
+              <div class="flex justify-between"><dt>Schema:</dt><dd x-text="manifest?.schema_version"></dd></div>
+            </dl>
+          </div>
+        </div>
       </div>
-    </header>
 
-    <div id="diagnostics-panel" class="diagnostics-panel hidden">
-      <div class="diagnostics-content">
-        <div class="diagnostics-header">
-          <h3>Viewer Diagnostics</h3>
-          <button id="close-diagnostics" class="close-button">×</button>
+      <!-- Gmail-style Search Header -->
+      <div class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4 flex items-center gap-4 sticky top-16 z-20"
+           :class="isFullscreen ? 'z-50' : 'z-20'">
+
+        <!-- Search Bar -->
+        <div class="flex-1 relative group">
+          <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+            <i data-lucide="search" class="w-5 h-5 text-slate-400 group-focus-within:text-primary-500 transition-colors"></i>
+          </div>
+          <input
+            x-model="searchQuery"
+            @input="filterMessages()"
+            @keydown.escape="searchQuery = ''; filterMessages()"
+            type="search"
+            placeholder="Search all messages..."
+            class="w-full pl-12 pr-4 py-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 focus:border-primary-500 dark:focus:border-primary-500 rounded-xl text-slate-900 dark:text-white placeholder-slate-500 dark:placeholder-slate-400 transition-all duration-200 focus:ring-2 focus:ring-primary-500/20"
+            autocomplete="off"
+          />
+          <div class="absolute inset-y-0 right-0 pr-3 flex items-center">
+            <button x-show="searchQuery" @click="searchQuery = ''; filterMessages()" class="p-1 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors">
+              <i data-lucide="x" class="w-4 h-4 text-slate-500"></i>
+            </button>
+          </div>
         </div>
-        <div class="diagnostics-body">
-          <section>
-            <h4>Cross-Origin Isolation</h4>
-            <dl>
-              <dt>Status:</dt>
-              <dd id="diag-isolation-status">Checking...</dd>
-              <dt>SharedArrayBuffer:</dt>
-              <dd id="diag-sab-status">Checking...</dd>
-              <dt>OPFS Access:</dt>
-              <dd id="diag-opfs-status">Checking...</dd>
-            </dl>
-          </section>
 
-          <section>
-            <h4>Database Engine</h4>
-            <dl>
-              <dt>Source:</dt>
-              <dd id="diag-db-source">-</dd>
-              <dt>Engine:</dt>
-              <dd id="diag-db-engine">-</dd>
-              <dt>FTS5 Enabled:</dt>
-              <dd id="diag-fts-status">-</dd>
-              <dt>EXPLAIN Mode:</dt>
-              <dd id="diag-explain-status">-</dd>
-            </dl>
-            <button id="toggle-explain" class="diagnostics-button">Toggle EXPLAIN Mode</button>
-          </section>
-
-          <section>
-            <h4>Cache Status</h4>
-            <dl>
-              <dt>Cache State:</dt>
-              <dd id="diag-cache-state">-</dd>
-              <dt>Cache Key:</dt>
-              <dd id="diag-cache-key">-</dd>
-              <dt>Cache Location:</dt>
-              <dd id="diag-cache-location">-</dd>
-            </dl>
-            <button id="clear-all-caches" class="danger-button">Clear All Caches</button>
-          </section>
-
-          <section>
-            <h4>Performance</h4>
-            <dl>
-              <dt>Bootstrap Time:</dt>
-              <dd id="diag-bootstrap-time">-</dd>
-              <dt>Total Messages:</dt>
-              <dd id="diag-total-messages">-</dd>
-            </dl>
-          </section>
+        <!-- View Mode Toggle -->
+        <div class="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+          <button @click="viewMode = 'inbox'"
+                  :class="viewMode === 'inbox' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
+                  class="px-3 py-2 rounded transition-colors text-sm font-medium">
+            <i data-lucide="inbox" class="w-4 h-4"></i>
+          </button>
+          <button @click="viewMode = 'threads'"
+                  :class="viewMode === 'threads' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
+                  class="px-3 py-2 rounded transition-colors text-sm font-medium">
+            <i data-lucide="messages-square" class="w-4 h-4"></i>
+          </button>
         </div>
+
+        <!-- Fullscreen Toggle -->
+        <button @click="isFullscreen = !isFullscreen"
+                :class="isFullscreen ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
+                class="px-4 py-2.5 rounded-lg transition-all duration-200 flex items-center gap-2 font-medium">
+          <i x-show="!isFullscreen" data-lucide="maximize-2" class="w-4 h-4"></i>
+          <i x-show="isFullscreen" data-lucide="minimize-2" class="w-4 h-4"></i>
+          <span class="hidden lg:inline" x-text="isFullscreen ? 'Exit' : 'Fullscreen'"></span>
+        </button>
+      </div>
+
+      <!-- Loading State -->
+      <div x-show="isLoading" class="flex items-center justify-center py-20">
+        <div class="text-center">
+          <div class="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+          <p class="mt-4 text-slate-600 dark:text-slate-400">Loading mailbox...</p>
+        </div>
+      </div>
+
+      <!-- Inbox View (Gmail-style Split Pane) -->
+      <div x-show="!isLoading && viewMode === 'inbox'"
+           class="flex overflow-hidden transition-all duration-300"
+           :class="isFullscreen ? 'fixed inset-0 top-40 z-50' : 'min-h-[600px]'"
+           style="display: none;">
+
+        <!-- Left: Message List -->
+        <aside :class="splitView ? 'w-full md:w-2/5 lg:w-1/3 border-r border-slate-200 dark:border-slate-700' : 'w-full'"
+               class="bg-white dark:bg-slate-800 flex flex-col overflow-hidden">
+
+          <!-- List Header -->
+          <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between bg-slate-50 dark:bg-slate-900">
+            <div class="flex items-center gap-3">
+              <span class="font-semibold text-slate-900 dark:text-white" x-text="filteredMessages.length + ' messages'"></span>
+            </div>
+
+            <!-- Sort Dropdown -->
+            <div class="relative" x-data="{ sortOpen: false }">
+              <button @click="sortOpen = !sortOpen"
+                      class="px-2 py-1 text-xs bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1">
+                <i data-lucide="arrow-down-up" class="w-3 h-3"></i>
+                <span x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : 'Sender'"></span>
+              </button>
+              <div x-show="sortOpen"
+                   @click.outside="sortOpen = false"
+                   x-transition
+                   class="absolute right-0 mt-1 w-40 bg-white dark:bg-slate-800 rounded-lg shadow-xl border border-slate-200 dark:border-slate-700 py-1 z-20"
+                   style="display: none;">
+                <button @click="sortBy = 'newest'; filterMessages(); sortOpen = false"
+                        class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Newest First</button>
+                <button @click="sortBy = 'oldest'; filterMessages(); sortOpen = false"
+                        class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors">Oldest First</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Message List (Scrollable) -->
+          <div class="flex-1 overflow-y-auto">
+            <template x-if="filteredMessages.length === 0">
+              <div class="flex flex-col items-center justify-center py-20 text-center">
+                <i data-lucide="inbox" class="w-16 h-16 text-slate-300 dark:text-slate-700 mb-4"></i>
+                <p class="text-slate-600 dark:text-slate-400">No messages found</p>
+              </div>
+            </template>
+
+            <div class="divide-y divide-slate-200 dark:divide-slate-700">
+              <template x-for="msg in filteredMessages.slice(0, 100)" :key="msg.id">
+                <!-- Message Item -->
+                <div @click="selectMessage(msg)"
+                     :class="selectedMessage?.id === msg.id ? 'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-600' : 'hover:bg-slate-50 dark:hover:bg-slate-900/50 border-l-4 border-l-transparent'"
+                     class="px-4 py-3 cursor-pointer transition-colors">
+                  <div class="flex items-start gap-3">
+                    <!-- Avatar -->
+                    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center flex-shrink-0 text-white text-xs font-semibold">
+                      <span x-text="msg.sender.substring(0, 1).toUpperCase()"></span>
+                    </div>
+
+                    <!-- Message Info -->
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-baseline justify-between gap-2 mb-1">
+                        <span class="font-semibold text-slate-900 dark:text-white text-sm truncate" x-text="msg.sender"></span>
+                        <span class="text-xs text-slate-500 dark:text-slate-400 flex-shrink-0" x-text="formatTimestamp(msg.created_ts)"></span>
+                      </div>
+                      <p class="text-sm font-medium text-slate-700 dark:text-slate-300 truncate mb-1" x-text="msg.subject"></p>
+                      <p class="text-xs text-slate-500 dark:text-slate-400 truncate" x-text="msg.project_slug"></p>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </aside>
+
+        <!-- Right: Message Detail -->
+        <section x-show="splitView"
+                 class="flex-1 bg-white dark:bg-slate-800 overflow-y-auto"
+                 style="display: none;">
+          <template x-if="selectedMessage">
+            <div class="max-w-4xl mx-auto p-8">
+              <!-- Message Header -->
+              <div class="mb-6">
+                <h2 class="text-2xl font-bold text-slate-900 dark:text-white mb-2" x-text="selectedMessage.subject"></h2>
+                <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400">
+                  <div class="flex items-center gap-2">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center text-white font-semibold">
+                      <span x-text="selectedMessage.sender.substring(0, 1).toUpperCase()"></span>
+                    </div>
+                    <div>
+                      <div class="font-semibold text-slate-900 dark:text-white" x-text="selectedMessage.sender"></div>
+                      <div x-text="formatTimestamp(selectedMessage.created_ts)"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Message Body -->
+              <div class="prose prose-slate dark:prose-invert max-w-none" x-html="renderMarkdown(selectedMessage.body_md)"></div>
+            </div>
+          </template>
+
+          <template x-if="!selectedMessage">
+            <div class="flex items-center justify-center h-full">
+              <div class="text-center">
+                <i data-lucide="mail-open" class="w-16 h-16 text-slate-300 dark:text-slate-700 mx-auto mb-4"></i>
+                <p class="text-slate-600 dark:text-slate-400">Select a message to view</p>
+              </div>
+            </div>
+          </template>
+        </section>
+      </div>
+
+      <!-- Thread View -->
+      <div x-show="!isLoading && viewMode === 'threads'"
+           class="max-w-5xl mx-auto p-6 space-y-4"
+           style="display: none;">
+
+        <template x-if="selectedThread">
+          <div class="space-y-4">
+            <!-- Thread Header -->
+            <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-6">
+              <div class="flex items-center gap-3 mb-2">
+                <i data-lucide="messages-square" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
+                <h1 class="text-2xl font-bold text-slate-900 dark:text-white" x-text="selectedThread.subject"></h1>
+              </div>
+              <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400">
+                <span x-text="selectedThread.messages.length + ' messages'"></span>
+              </div>
+            </div>
+
+            <!-- Thread Messages -->
+            <template x-for="(msg, index) in selectedThread.messages" :key="msg.id">
+              <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:shadow-md hover:border-primary-300 dark:hover:border-primary-600 transition-all duration-200"
+                   x-data="{ expanded: index === selectedThread.messages.length - 1 }">
+
+                <!-- Message Header -->
+                <div @click="expanded = !expanded"
+                     class="p-5 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors"
+                     :class="expanded ? 'bg-slate-50 dark:bg-slate-900/30' : ''">
+                  <div class="flex items-start justify-between gap-4">
+                    <div class="flex items-start gap-3 flex-1">
+                      <div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center text-white font-semibold">
+                        <span x-text="msg.sender.substring(0, 1).toUpperCase()"></span>
+                      </div>
+                      <div class="flex-1">
+                        <div class="flex items-baseline gap-2 mb-1">
+                          <span class="font-semibold text-slate-900 dark:text-white" x-text="msg.sender"></span>
+                          <span class="text-sm text-slate-500 dark:text-slate-400" x-text="formatTimestamp(msg.created_ts)"></span>
+                        </div>
+                        <div x-show="!expanded" class="text-sm text-slate-600 dark:text-slate-400 line-clamp-2" x-text="msg.body_md.substring(0, 150) + '...'"></div>
+                      </div>
+                    </div>
+                    <div class="text-slate-400 transition-transform duration-200" :class="expanded ? 'rotate-180' : ''">
+                      <i data-lucide="chevron-down" class="w-5 h-5"></i>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Message Body (Expandable) -->
+                <div x-show="expanded"
+                     x-transition
+                     class="px-5 pb-5 pt-2"
+                     style="display: none;">
+                  <div class="mb-4 -mx-5 px-5">
+                    <div class="border-t border-slate-200 dark:border-slate-700"></div>
+                  </div>
+                  <div class="prose prose-slate dark:prose-invert max-w-none" x-html="renderMarkdown(msg.body_md)"></div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <template x-if="!selectedThread">
+          <div class="flex items-center justify-center py-20">
+            <div class="text-center">
+              <i data-lucide="messages-square" class="w-16 h-16 text-slate-300 dark:text-slate-700 mx-auto mb-4"></i>
+              <p class="text-slate-600 dark:text-slate-400">Select a thread to view conversation</p>
+            </div>
+          </div>
+        </template>
       </div>
     </div>
 
-    <main>
-      <section class="panels">
-        <article class="panel" aria-labelledby="projects-heading">
-          <h2 id="projects-heading">Projects Included</h2>
-          <ul id="projects-list"></ul>
-        </article>
-
-        <article class="panel" aria-labelledby="attachments-heading">
-          <h2 id="attachments-heading">Attachment Summary</h2>
-          <dl id="attachment-stats"></dl>
-        </article>
-
-        <article class="panel" aria-labelledby="scrub-heading">
-          <h2 id="scrub-heading">Scrubbing Summary</h2>
-          <dl id="scrub-stats"></dl>
-        </article>
-      </section>
-
-      <section class="three-pane-viewer">
-        <aside class="thread-pane" aria-labelledby="threads-heading">
-          <div class="pane-header">
-            <h2 id="threads-heading">Threads</h2>
-            <input
-              id="thread-filter"
-              type="search"
-              placeholder="Filter threads..."
-              aria-label="Filter threads"
-            />
-          </div>
-          <div id="thread-skeleton" class="loading-state skeleton-panel">
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-          </div>
-          <div id="thread-scroll" class="clusterize-scroll hidden">
-            <ul id="thread-list" class="thread-list clusterize-content" role="list"></ul>
-          </div>
-        </aside>
-
-        <section class="message-pane" aria-labelledby="messages-heading">
-          <div class="pane-header">
-            <h2 id="messages-heading">Messages</h2>
-            <input
-              id="search-input"
-              type="search"
-              placeholder="Search messages..."
-              aria-label="Search messages"
-            />
-          </div>
-          <p id="message-meta" class="meta-line">Loading message index…</p>
-          <div id="message-skeleton" class="loading-state skeleton-panel">
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-            <div class="skeleton skeleton-list-item"></div>
-          </div>
-          <div id="message-scroll" class="clusterize-scroll hidden">
-            <ul id="message-list" class="message-list clusterize-content" role="list"></ul>
-          </div>
-        </section>
-
-        <aside class="detail-pane" aria-labelledby="detail-heading">
-          <div class="pane-header">
-            <h2 id="detail-heading">Message Detail</h2>
-            <button id="clear-detail" class="clear-button" aria-label="Close message detail">
-              ×
-            </button>
-          </div>
-          <div id="message-detail" class="message-detail">
-            <p class="placeholder">Select a message to view details</p>
-          </div>
-        </aside>
-      </section>
-
-      <section class="panel">
-        <h2>Raw Manifest</h2>
-        <pre id="manifest-json" class="code-block">Loading manifest.json…</pre>
-      </section>
-    </main>
-
-    <footer>
-      <small>
-        Generated bundle; diagnostics based on <code>manifest.json</code>.
-      </small>
-    </footer>
-
-    <!-- Cross-Origin Isolation Service Worker (for GitHub Pages and hosts without custom headers) -->
-    <!-- Uncomment this script if deploying to GitHub Pages or a host that doesn't support _headers -->
-    <!-- <script src="./coi-serviceworker.js"></script> -->
-
-    <!-- Vendor libraries for secure markdown rendering -->
-    <script
-      src="./vendor/marked.min.js"
-      integrity="sha256-iiOIwxmH8YPwUHaWKofAvi6NTUI9pec6g05elbtCB+8="
-      crossorigin="anonymous"
-    ></script>
-    <script
-      src="./vendor/dompurify.min.js"
-      integrity="sha256-0kaYYq3qitkkVZpP/6uKTJwfTpqFNM6OHDbsaYzw9Uw="
-      crossorigin="anonymous"
-    ></script>
-    <script
-      src="./vendor/clusterize.min.js"
-      integrity="sha256-kZrY+ddUOM0611/m0WOv4sSCBjS1SX32kf23mZ+dXyk="
-      crossorigin="anonymous"
-    ></script>
-
+    <!-- Scripts -->
     <script type="module" src="./preview-reload.js"></script>
     <script type="module" src="./viewer.js"></script>
+
+    <script>
+      // Initialize Lucide icons
+      document.addEventListener('alpine:init', () => {
+        setTimeout(() => {
+          if (typeof lucide !== 'undefined') {
+            lucide.createIcons();
+          }
+        }, 100);
+      });
+
+      // Re-create icons after Alpine updates
+      document.addEventListener('alpine:initialized', () => {
+        setInterval(() => {
+          if (typeof lucide !== 'undefined') {
+            lucide.createIcons();
+          }
+        }, 500);
+      });
+    </script>
   </body>
 </html>
