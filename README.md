@@ -554,27 +554,36 @@ Each bundle contains:
 - **Optional signature**: Ed25519 cryptographic signature over the manifest to prove authenticity and detect tampering.
 - **Security hardening**: Content Security Policy headers, DOMPurify sanitization, and Trusted Types enforcement protect against XSS attacks in message bodies.
 
-### Quick Start: Interactive GitHub Pages Wizard
+### Quick Start: Interactive Deployment Wizard
 
-The easiest way to export and deploy to GitHub Pages is the interactive wizard:
+The easiest way to export and deploy is the interactive wizard, which supports both GitHub Pages and Cloudflare Pages:
 
 ```bash
-# One command does everything
+# Via CLI (recommended)
+uv run python -m mcp_agent_mail.cli share wizard
+
+# Or run the script directly
 ./scripts/share_to_github_pages.py
 ```
 
 The wizard will:
-1. Show available projects and let you select which to export
-2. Ask about redaction level (standard/strict/none)
-3. Offer to sign the bundle with Ed25519 (generates key automatically)
-4. Let you preview the bundle locally before deploying
-5. Create a GitHub repository (or use existing)
-6. Push and enable GitHub Pages automatically
-7. Give you the final URL
+1. Let you choose deployment target (GitHub Pages, Cloudflare Pages, or local export)
+2. **Auto-install CLIs** if missing (`gh` for GitHub, `wrangler` for Cloudflare)
+3. **Guide authentication** with step-by-step browser login flows
+4. Show available projects and let you select which to export
+5. Ask about redaction level (standard or strict)
+6. Offer to sign the bundle with Ed25519 (generates key automatically)
+7. Let you preview the bundle locally before deploying
+8. Deploy automatically (creates repos, enables Pages, pushes code)
+9. Give you the final live URL
 
-**Requirements**: `gh` CLI installed and authenticated (`gh auth login`)
+**For GitHub Pages**: The wizard will install `gh` CLI (via brew/apt/dnf), authenticate you with `gh auth login`, create a new repository, and enable Pages automatically.
 
-The wizard handles all git operations, repository creation, and Pages configuration. For manual control or advanced options, see the detailed workflows below.
+**For Cloudflare Pages**: The wizard will install `wrangler` CLI (via npm), authenticate you with `wrangler login`, and deploy directly to Cloudflare's global CDN (no repo needed).
+
+**Local export**: Saves the bundle to a directory on your machine for manual deployment or inspection.
+
+The wizard handles all operations automatically. For manual control or advanced options, see the detailed workflows below.
 
 ### Basic export workflow (manual)
 
@@ -759,7 +768,15 @@ The bundled HTML viewer provides:
 
 ### Deployment options
 
-**Option 1: GitHub Pages**
+**Option 1: GitHub Pages (automated via wizard)**
+
+```bash
+# Use the wizard for fully automated deployment
+uv run python -m mcp_agent_mail.cli share wizard
+# Select: GitHub Pages → provide repo name → wizard handles everything
+```
+
+Or manually:
 
 ```bash
 # Export and unzip
@@ -776,7 +793,32 @@ git push -u origin main
 # Enable GitHub Pages in repo settings (source: main branch, root directory)
 ```
 
-**Option 2: S3 + CloudFront**
+**Option 2: Cloudflare Pages (automated via wizard)**
+
+```bash
+# Use the wizard for instant global CDN deployment
+uv run python -m mcp_agent_mail.cli share wizard
+# Select: Cloudflare Pages → provide project name → wizard deploys directly
+```
+
+Or manually with wrangler CLI:
+
+```bash
+# Export and deploy
+uv run python -m mcp_agent_mail.cli share export --output ./bundle --no-zip
+npx wrangler pages deploy ./bundle --project-name=project-archive
+
+# Your site is live at: https://project-archive.pages.dev
+```
+
+**Benefits of Cloudflare Pages:**
+- Instant deployment (no git repo required)
+- Global CDN with 275+ locations
+- Automatic HTTPS and DDoS protection
+- Zero-downtime updates
+- Generous free tier (500 builds/month, unlimited requests)
+
+**Option 3: S3 + CloudFront**
 
 ```bash
 # Export and unzip
@@ -789,7 +831,7 @@ aws s3 sync ./bundle s3://your-bucket/archives/project-2024/ --acl public-read
 # https://d123abc.cloudfront.net/archives/project-2024/
 ```
 
-**Option 3: Nginx static site**
+**Option 4: Nginx static site**
 
 ```nginx
 server {
@@ -820,7 +862,7 @@ server {
 }
 ```
 
-**Option 4: Encrypted distribution via file sharing**
+**Option 5: Encrypted distribution via file sharing**
 
 For confidential archives:
 
@@ -1666,6 +1708,7 @@ The project exposes a developer CLI for common operations:
 - `list-projects [--include-agents]`: enumerate projects
 - `guard install <project_key> <code_repo_path>`: install the pre-commit guard into a repo
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
+- `share wizard`: launch interactive deployment wizard (auto-installs CLIs, authenticates, exports, deploys to GitHub Pages or Cloudflare Pages)
 - `share export --output <path> [options]`: export mailbox to a static HTML bundle (see Static Mailbox Export section for full options)
 - `share preview <bundle_path> [--port N] [--open-browser]`: serve a static bundle locally for inspection
 - `share verify <bundle_path> [--public-key <key>]`: verify bundle integrity (SRI hashes and Ed25519 signature)

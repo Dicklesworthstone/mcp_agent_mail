@@ -853,6 +853,31 @@ def share_decrypt(
         raise typer.Exit(code=1) from exc
 
 
+@share_app.command("wizard")
+def share_wizard() -> None:
+    """Launch interactive deployment wizard for GitHub Pages or Cloudflare Pages."""
+    console.print("[cyan]Launching deployment wizard...[/]")
+
+    # Import and run the wizard script
+    import subprocess
+    import sys
+
+    wizard_script = Path(__file__).parent.parent.parent / "scripts" / "share_to_github_pages.py"
+
+    if not wizard_script.exists():
+        console.print(f"[red]Wizard script not found at:[/] {wizard_script}")
+        console.print("[yellow]Try running the wizard directly:[/] python scripts/share_to_github_pages.py")
+        raise typer.Exit(code=1)
+
+    try:
+        # Run the wizard script as a subprocess so it can handle its own console interactions
+        result = subprocess.run([sys.executable, str(wizard_script)], check=False)
+        raise typer.Exit(code=result.returncode)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Wizard cancelled by user[/]")
+        raise typer.Exit(code=0)
+
+
 def _resolve_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
