@@ -164,7 +164,7 @@ function markdownToPlainText(markdown) {
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`[^`]*`/g, " ")
     .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
-    .replace(/\[[^\]]*]\(([^)]+)\)/g, "$1")
+    .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
     .replace(/[#>*_~\-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -1413,6 +1413,30 @@ function viewerController() {
     selectThread(thread) {
       this.selectedThread = thread;
       this.viewMode = 'threads';
+      this.$nextTick(() => {
+        try {
+          const list = this.$refs?.threadList;
+          if (!list) {
+            return;
+          }
+          const rawId = thread && thread.id ? String(thread.id) : "";
+          if (!rawId) {
+            return;
+          }
+          const escapedId =
+            typeof CSS !== "undefined" && typeof CSS.escape === "function"
+              ? CSS.escape(rawId)
+              : rawId.replace(/"/g, '\\"');
+          const button = list.querySelector(
+            `[data-thread-id="${escapedId}"]`,
+          );
+          if (button && typeof button.scrollIntoView === "function") {
+            button.scrollIntoView({ block: "nearest", behavior: "smooth" });
+          }
+        } catch (error) {
+          console.debug("[threads] scroll into view skipped", error);
+        }
+      });
     },
 
     switchToSplitView() {
