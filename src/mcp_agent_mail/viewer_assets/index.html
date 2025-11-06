@@ -119,6 +119,19 @@
     crossorigin="anonymous"></script>
 
   <style>
+    html,
+    body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+      touch-action: pan-y;
+    }
+
+    body.mobile-modal-open {
+      overflow: hidden;
+      touch-action: none;
+    }
+
     [x-cloak] {
       display: none !important;
     }
@@ -129,12 +142,27 @@
     }
     .virtual-scroll {
       overflow: auto;
+      overflow-x: hidden;
       -webkit-overflow-scrolling: touch;
+      width: 100%;
+      padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 5rem);
     }
     .message-row { min-height: 68px; }
-    .virtual-scroll {
-      contain: content;
+    .virtual-scroll-content {
+      width: 100%;
+      overflow-x: hidden;
     }
+    .message-row {
+      width: 100%;
+      overflow-x: hidden;
+    }
+
+    @media (min-width: 640px) {
+      .virtual-scroll {
+        padding-bottom: 2rem;
+      }
+    }
+
 
     .prose p {
       margin-top: 1.25em;
@@ -317,7 +345,7 @@
           x-text="((manifest?.project_scope?.included || []).length) + ' project(s)'"></span>
       </div>
 
-      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-3">
         <!-- Dark Mode Toggle -->
         <button @click="toggleDarkMode()"
           class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors"
@@ -329,17 +357,20 @@
         <!-- Cache Toggle -->
         <button x-show="cacheSupported" @click="toggleCache()"
           :class="cacheState === 'opfs' ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
-          class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80">
+          class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80 group">
           <i data-lucide="database" class="w-4 h-4"></i>
-          <span x-text="cacheState === 'opfs' ? 'Cached' : 'Cache'"></span>
+          <span class="hidden sm:inline" x-text="cacheState === 'opfs' ? 'Cached' : 'Cache'"></span>
+          <span class="sm:hidden text-xs font-semibold"
+            x-text="cacheState === 'opfs' ? 'Cached' : 'Cache'"></span>
         </button>
 
         <!-- Diagnostics Toggle -->
         <button @click="showDiagnostics = !showDiagnostics"
           :class="showDiagnostics ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
-          class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80">
+          class="px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 hover:opacity-80 group">
           <i data-lucide="activity" class="w-4 h-4"></i>
-          <span>Diagnostics</span>
+          <span class="hidden sm:inline">Diagnostics</span>
+          <span class="sm:hidden text-xs font-semibold" x-text="showDiagnostics ? 'Diag ✓' : 'Diag'"></span>
         </button>
       </div>
     </nav>
@@ -349,7 +380,7 @@
       x-transition:enter-start="opacity-0 -translate-y-2" x-transition:enter-end="opacity-100 translate-y-0"
       x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 translate-y-0"
       x-transition:leave-end="opacity-0 -translate-y-2"
-      class="bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4"
+      class="bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-4 sm:px-6 py-4"
       style="display: none;">
       <div class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
         <div>
@@ -400,7 +431,7 @@
 
     <!-- Gmail-style Search Header -->
     <div
-      class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4 flex items-center gap-4 sticky top-16 shadow-sm transition-all duration-300"
+      class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-4 sm:px-6 py-4 flex items-center gap-4 sticky top-16 shadow-sm transition-all duration-300"
       :class="isFullscreen ? 'z-50' : 'z-10'">
 
       <!-- Search Bar -->
@@ -440,14 +471,14 @@
       </button>
 
       <!-- View Options -->
-      <div
-        class="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+    <div
+      class="hidden sm:flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
         <button @click="switchToSplitView()"
           :class="viewMode === 'split' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
           class="p-2 rounded transition-colors" aria-label="Split view (Gmail style)">
           <i data-lucide="columns-2" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
         </button>
-        <button @click="viewMode = 'list'"
+        <button @click="viewMode = 'list'; showMobileMessage = false"
           :class="viewMode === 'list' ? 'bg-white dark:bg-slate-800 shadow-sm' : 'hover:bg-slate-200 dark:hover:bg-slate-800'"
           class="p-2 rounded transition-colors" aria-label="List view only">
           <i data-lucide="list" class="w-4 h-4 text-slate-700 dark:text-slate-300"></i>
@@ -473,7 +504,7 @@
       x-transition:enter-start="opacity-0 -translate-y-2" x-transition:enter-end="opacity-100 translate-y-0"
       x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100 translate-y-0"
       x-transition:leave-end="opacity-0 -translate-y-2"
-      class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4 sticky top-40 transition-all duration-300"
+      class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-4 sm:px-6 py-4 sticky top-40 transition-all duration-300"
       :class="isFullscreen ? 'z-50' : 'z-10'">
       <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
         <!-- Project Filter -->
@@ -557,6 +588,13 @@
           </button>
         </div>
       </div>
+      <div class="mt-3 flex justify-end sm:hidden">
+        <button @click="showFilters = false"
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 shadow-sm">
+          <i data-lucide="chevron-up" class="w-4 h-4"></i>
+          Collapse
+        </button>
+      </div>
     </div>
 
     <!-- Loading State -->
@@ -570,12 +608,15 @@
     <!-- Inbox View (Gmail-style Split Pane) -->
     <div x-show="!isLoading && (viewMode === 'split' || viewMode === 'list')"
       class="flex overflow-hidden transition-all duration-300"
-      :class="isFullscreen ? 'fixed inset-0 top-40 z-50' : 'min-h-[600px]'" style="display: none;">
+      :class="[
+        isFullscreen ? 'fixed inset-0 top-40 z-50' : 'min-h-[600px]',
+        isMobile ? 'pb-[6.5rem]' : ''
+      ]" style="display: none;">
 
       <!-- Left: Message List -->
       <aside
         :class="viewMode === 'split' ? 'w-full md:w-2/5 lg:w-1/3 border-r border-slate-200 dark:border-slate-700' : 'w-full'"
-        class="bg-white dark:bg-slate-800 flex flex-col overflow-hidden">
+        class="bg-white dark:bg-slate-800 flex flex-col overflow-hidden min-w-0">
 
         <!-- List Header with Bulk Actions -->
         <div
@@ -749,22 +790,24 @@
                   </div>
 
                   <!-- Thread (if applicable) -->
-                  <div class="flex items-center gap-3 col-span-full">
-                    <div
-                      class="w-10 h-10 bg-gradient-to-br from-pink-500 to-pink-700 rounded-xl flex items-center justify-center shadow-medium">
-                      <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
+                  <template x-if="selectedMessage.thread_reference">
+                    <div class="flex items-center gap-3 col-span-full">
+                      <div
+                        class="w-10 h-10 bg-gradient-to-br from-pink-500 to-pink-700 rounded-xl flex items-center justify-center shadow-medium">
+                        <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
+                      </div>
+                      <div>
+                        <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">
+                          Thread</div>
+                        <button type="button"
+                          @click="openThreadById(selectedMessage.thread_reference)"
+                          class="inline-flex items-center gap-2 px-2.5 py-1 bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-mono rounded-md border border-primary-100 dark:border-primary-800 hover:bg-primary-100 dark:hover:bg-primary-900/50 transition-colors">
+                          <i data-lucide="link-2" class="w-3 h-3"></i>
+                          <span x-text="selectedMessage.thread_reference"></span>
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">
-                        Thread</div>
-                      <button type="button"
-                        @click="openThreadById(selectedMessage.thread_id || ('msg:' + selectedMessage.id))"
-                        class="inline-flex items-center gap-2 px-2.5 py-1 bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-mono rounded-md border border-primary-100 dark:border-primary-800 hover:bg-primary-100 dark:hover:bg-primary-900/50 transition-colors">
-                        <i data-lucide="link-2" class="w-3 h-3"></i>
-                        <span x-text="selectedMessage.thread_id || ('msg:' + selectedMessage.id)"></span>
-                      </button>
-                    </div>
-                  </div>
+                  </template>
                 </div>
               </div>
 
@@ -800,7 +843,8 @@
     </div>
 
     <!-- Thread View -->
-    <div x-show="!isLoading && viewMode === 'threads'" class="max-w-5xl mx-auto space-y-6 pb-12" style="display: none;">
+    <div x-show="!isLoading && viewMode === 'threads'" class="max-w-5xl mx-auto space-y-6 pb-12"
+      :class="isMobile ? 'pb-[7rem]' : ''" style="display: none;">
 
       <div class="grid gap-6 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)] xl:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
         <aside class="space-y-4">
@@ -1049,8 +1093,135 @@
           </template>
         </section>
       </div>
+  </div>
+</div>
+
+  <!-- Mobile Action Bar -->
+    <div class="sm:hidden fixed inset-x-0 bottom-0 z-40 px-4"
+    :class="showMobileMessage ? 'pointer-events-none opacity-0 translate-y-4' : 'pointer-events-auto opacity-100 translate-y-0'"
+    x-transition:enter="transition transform ease-out duration-200"
+    x-transition:enter-start="opacity-0 translate-y-4"
+    x-transition:enter-end="opacity-100 translate-y-0"
+    x-transition:leave="transition transform ease-in duration-150"
+    x-transition:leave-start="opacity-100 translate-y-0"
+    x-transition:leave-end="opacity-0 translate-y-4">
+    <div class="mx-auto max-w-xl">
+      <div
+        class="bg-white/95 dark:bg-slate-900/95 border border-slate-200 dark:border-slate-700 shadow-xl rounded-2xl backdrop-blur-md px-3 py-2 flex items-center justify-between gap-2"
+        style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem); touch-action: none;">
+        <button @click="showFilters = !showFilters"
+          class="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-semibold rounded-xl bg-primary-50 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 border border-primary-200 dark:border-primary-700 transition-colors">
+          <i data-lucide="sliders-horizontal" class="w-4 h-4"></i>
+          <span x-text="showFilters ? 'Hide Filters' : 'Show Filters'"></span>
+        </button>
+        <div class="flex flex-1 items-center justify-center gap-1">
+          <button @click="switchToSplitView()"
+            :class="viewMode === 'split' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'"
+            class="inline-flex items-center justify-center gap-1 px-2.5 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 transition-colors">
+            <i data-lucide="columns-2" class="w-3.5 h-3.5"></i>
+            Split
+          </button>
+          <button @click="viewMode = 'list'; showMobileMessage = false"
+            :class="viewMode === 'list' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'"
+            class="inline-flex items-center justify-center gap-1 px-2.5 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 transition-colors">
+            <i data-lucide="list" class="w-3.5 h-3.5"></i>
+            List
+          </button>
+          <button @click="switchToThreadsView()"
+            :class="viewMode === 'threads' ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'"
+            class="inline-flex items-center justify-center gap-1 px-2.5 py-2 text-xs font-semibold rounded-xl border border-slate-200 dark:border-slate-700 transition-colors">
+            <i data-lucide="messages-square" class="w-3.5 h-3.5"></i>
+            Threads
+          </button>
+        </div>
+        <button @click="scrollToTop()"
+          class="inline-flex items-center justify-center gap-1 px-3 py-2 text-sm font-semibold rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition-colors">
+          <i data-lucide="arrow-up" class="w-4 h-4"></i>
+          Top
+        </button>
+      </div>
     </div>
   </div>
+
+  <!-- Mobile Message Modal -->
+  <template x-if="isMobile && selectedMessage">
+    <div x-show="showMobileMessage"
+      class="fixed inset-0 z-50 flex items-end sm:hidden"
+      x-transition:enter="transition ease-out duration-200"
+      x-transition:enter-start="opacity-0 translate-y-4"
+      x-transition:enter-end="opacity-100 translate-y-0"
+      x-transition:leave="transition ease-in duration-150"
+      x-transition:leave-start="opacity-100 translate-y-0"
+      x-transition:leave-end="opacity-0 translate-y-4"
+      @keydown.escape.window="closeMobileMessage()">
+      <div class="absolute inset-0 bg-slate-900/70 backdrop-blur-sm" @click="closeMobileMessage()"></div>
+      <article
+        class="relative w-full max-h-[90vh] bg-white dark:bg-slate-900 rounded-t-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-y-auto">
+        <header class="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex items-start justify-between gap-3">
+          <div class="flex-1 min-w-0">
+            <p class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400 mb-1 font-semibold">Message
+              Preview</p>
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-white leading-snug"
+              x-text="selectedMessage.subject || '(no subject)'"></h2>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400 flex items-center gap-2">
+              <span x-text="selectedMessage.sender || 'Unknown sender'"></span>
+              <span class="w-1 h-1 rounded-full bg-slate-400"></span>
+              <span x-text="formatTimestampFull(selectedMessage.created_ts)"></span>
+            </p>
+          </div>
+          <div class="flex items-center gap-2">
+            <template x-if="selectedMessage.importance === 'urgent'">
+              <span
+                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-semibold">
+                <i data-lucide="alert-circle" class="w-3 h-3"></i>
+                Urgent
+              </span>
+            </template>
+            <template x-if="selectedMessage.importance === 'high'">
+              <span
+                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 text-xs font-semibold">
+                <i data-lucide="alert-triangle" class="w-3 h-3"></i>
+                High
+              </span>
+            </template>
+            <button @click="closeMobileMessage()"
+              class="p-2 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-300 transition-colors"
+              aria-label="Close message view">
+              <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </header>
+        <section class="px-5 py-4 space-y-5">
+          <div class="flex flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <template x-if="selectedMessage.recipients && selectedMessage.recipients !== 'Unknown'">
+              <span class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-slate-100 dark:bg-slate-800">
+                <i data-lucide="users" class="w-3 h-3"></i>
+                <span x-text="selectedMessage.recipients"></span>
+              </span>
+            </template>
+            <template x-if="selectedMessage.thread_reference">
+              <span
+                class="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-200">
+                <i data-lucide="hash" class="w-3 h-3"></i>
+                <span x-text="selectedMessage.thread_reference"></span>
+              </span>
+            </template>
+          </div>
+          <div class="prose prose-slate dark:prose-invert max-w-none text-sm leading-relaxed"
+            x-html="renderMarkdown(selectedMessage.body_md)"></div>
+        </section>
+        <footer
+          class="px-5 py-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+          <span>Message ID <span class="font-mono" x-text="selectedMessage.id"></span></span>
+          <button @click="closeMobileMessage()"
+            class="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-semibold transition-colors">
+            <i data-lucide="chevron-down" class="w-4 h-4"></i>
+            Close
+          </button>
+        </footer>
+      </article>
+    </div>
+  </template>
 
   <!-- Scripts -->
   <script type="module" src="./preview-reload.js"></script>
