@@ -1001,18 +1001,38 @@ def test_create_performance_indexes(tmp_path: Path) -> None:
 
     conn = sqlite3.connect(snapshot)
     try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        assert "subject_lower" in columns
+        assert "sender_lower" in columns
+
         index_rows = conn.execute(
             "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='messages'"
         ).fetchall()
         index_map = {row[0]: row[1] for row in index_rows}
+
+        sample = conn.execute(
+            "SELECT subject_lower, sender_lower FROM messages ORDER BY id LIMIT 1"
+        ).fetchone()
     finally:
         conn.close()
 
     assert "idx_messages_created_ts" in index_map
     assert "idx_messages_thread" in index_map
     assert "idx_messages_sender" in index_map
-    for name in ("idx_messages_created_ts", "idx_messages_thread", "idx_messages_sender"):
+    assert "idx_messages_subject_lower" in index_map
+    assert "idx_messages_sender_lower" in index_map
+    for name in (
+        "idx_messages_created_ts",
+        "idx_messages_thread",
+        "idx_messages_sender",
+        "idx_messages_subject_lower",
+        "idx_messages_sender_lower",
+    ):
         assert index_map[name], f"Expected SQL definition for index {name}"
+
+    assert sample is not None
+    assert isinstance(sample[0], str)
+    assert isinstance(sample[1], str)
 
 
 def test_finalize_snapshot_sql_hygiene(tmp_path: Path) -> None:

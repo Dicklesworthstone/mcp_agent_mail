@@ -13,6 +13,7 @@ import shutil
 import sqlite3
 import subprocess
 from collections import defaultdict
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib import abc, resources
@@ -968,6 +969,28 @@ def create_performance_indexes(snapshot_path: Path) -> None:
 
     conn = sqlite3.connect(str(snapshot_path))
     try:
+        # Ensure derived lowercase columns exist for case-insensitive search
+        for column in ("subject_lower", "sender_lower"):
+            try:
+                conn.execute(f"ALTER TABLE messages ADD COLUMN {column} TEXT")
+            except sqlite3.OperationalError:
+                # Column already exists
+                pass
+
+        conn.execute(
+            """
+            UPDATE messages
+            SET
+                subject_lower = LOWER(COALESCE(subject, '')),
+                sender_lower = LOWER(
+                    COALESCE(
+                        (SELECT name FROM agents WHERE agents.id = messages.sender_id),
+                        ''
+                    )
+                )
+            """
+        )
+
         conn.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_messages_created_ts
@@ -978,8 +1001,17 @@ def create_performance_indexes(snapshot_path: Path) -> None:
 
             CREATE INDEX IF NOT EXISTS idx_messages_sender
               ON messages(sender_id, created_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_subject_lower
+              ON messages(subject_lower);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_sender_lower
+              ON messages(sender_lower);
             """
         )
+        conn.execute("PRAGMA analysis_limit=400")
+        conn.execute("ANALYZE")
+
         conn.commit()
     finally:
         conn.close()

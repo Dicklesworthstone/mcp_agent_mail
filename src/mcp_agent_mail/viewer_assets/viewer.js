@@ -980,7 +980,7 @@ function viewerController() {
         switch (node.type) {
           case 'term': {
             const needle = `%${String(node.value).toLowerCase()}%`;
-            acc.sql.push('(LOWER(subject) LIKE ? OR LOWER(COALESCE(body_md, "")) LIKE ?)');
+            acc.sql.push('(subject_lower LIKE ? OR LOWER(COALESCE(body_md, "")) LIKE ?)');
             acc.params.push(needle, needle);
             break;
           }
