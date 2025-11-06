@@ -678,6 +678,7 @@ function viewerController() {
     allMessages: [],
     allThreads: [],
     recipientsMap: null,
+    threadMessageCounts: null,
 
     // Filters
     showFilters: true,
@@ -709,6 +710,14 @@ function viewerController() {
     // Dark mode (moved here so components can reference `darkMode` directly)
     darkMode: false,
 
+    // Responsive flags
+    isMobile: false,
+    lastScrollY: 0,
+    showMobileMessage: false,
+    _mobileMedia: null,
+    _mobileMediaListener: null,
+    _onMobileScroll: null,
+
     async init() {
       console.info('[Alpine] Initializing viewer controller');
       // Initialize dark mode state
@@ -725,6 +734,20 @@ function viewerController() {
         document.documentElement.classList.remove('dark');
       }
       await this.initViewer();
+      this.setupResponsiveHandlers();
+      if (typeof this.$watch === 'function') {
+        this.$watch('showMobileMessage', (value) => {
+          const body = typeof document !== 'undefined' ? document.body : null;
+          if (!body) {
+            return;
+          }
+          if (this.isMobile && value) {
+            body.classList.add('mobile-modal-open');
+          } else {
+            body.classList.remove('mobile-modal-open');
+          }
+        });
+      }
     },
 
     async initViewer() {
@@ -755,6 +778,9 @@ function viewerController() {
 
         // Build threads and messages
         const threads = buildThreadList(state.db);
+        this.threadMessageCounts = new Map(
+          threads.map((row) => [row.thread_key, Number(row.message_count || 0)])
+        );
         this.allThreads = this.buildThreadsForAlpine(threads);
 
         const messages = this.getAllMessages();
@@ -805,6 +831,46 @@ function viewerController() {
         alert(`Failed to initialize viewer: ${error.message}`);
       }
     },
+    setupResponsiveHandlers() {
+      if (typeof window === 'undefined' || typeof window.matchMedia === 'undefined') {
+        return;
+      }
+      const query = window.matchMedia('(max-width: 768px)');
+      const updateMobile = () => {
+        const wasMobile = this.isMobile;
+        this.isMobile = Boolean(query.matches);
+        if (!this.isMobile) {
+          this.showFilters = true;
+          this.showMobileMessage = false;
+          const body = typeof document !== 'undefined' ? document.body : null;
+          if (body) {
+            body.classList.remove('mobile-modal-open');
+          }
+        } else if (!wasMobile && this.isMobile) {
+          this.showFilters = false;
+        }
+      };
+      this._mobileMedia = query;
+      this._mobileMediaListener = updateMobile;
+      if (typeof query.addEventListener === 'function') {
+        query.addEventListener('change', updateMobile);
+      } else if (typeof query.addListener === 'function') {
+        query.addListener(updateMobile);
+      }
+      updateMobile();
+      this.lastScrollY = window.scrollY || 0;
+      this._onMobileScroll = () => {
+        if (!this.isMobile) {
+          return;
+        }
+        const currentY = window.scrollY || 0;
+        if (currentY > this.lastScrollY && currentY > 120 && this.showFilters) {
+          this.showFilters = false;
+        }
+        this.lastScrollY = currentY;
+      };
+      window.addEventListener('scroll', this._onMobileScroll, { passive: true });
+    },
 
     getAllMessages() {
       const results = [];
@@ -849,6 +915,15 @@ function viewerController() {
         const bodyLength = Number(msg.body_length) || 0;
         const excerpt = msg.latest_snippet || msg.snippet || '';
         const isAdministrative = this.isAdministrativeMessage(msg);
+        const threadKey =
+          msg.thread_id && msg.thread_id !== ''
+            ? msg.thread_id
+            : `msg:${msg.id}`;
+        const threadCount = this.threadMessageCounts?.get(threadKey) || 1;
+        const hasThread = Boolean(msg.thread_id && msg.thread_id !== '') || threadCount > 1;
+        const threadReference = hasThread
+          ? (msg.thread_id && msg.thread_id !== '' ? msg.thread_id : threadKey)
+          : null;
 
         return {
           ...msg,
@@ -860,7 +935,10 @@ function viewerController() {
           created_full: this.formatTimestampFull(msg.created_ts),
           read: false, // Static viewer doesn't track read state
           isAdministrative,
-          message_category: isAdministrative ? 'admin' : 'user'
+          message_category: isAdministrative ? 'admin' : 'user',
+          thread_count: threadCount,
+          thread_reference: threadReference,
+          has_thread: hasThread,
         };
       });
     },
@@ -1175,6 +1253,10 @@ function viewerController() {
         const recipients = msg.recipients || recipientsFromMap || 'Unknown';
         const previewSource = msg.latest_snippet || msg.body_md || '';
         const preview_plain = buildPreviewSnippet(previewSource);
+        const threadReference =
+          msg.thread_id && msg.thread_id !== ''
+            ? msg.thread_id
+            : threadKey;
         return {
           ...msg,
           importance,
@@ -1182,6 +1264,8 @@ function viewerController() {
           recipients,
           isAdministrative,
           preview_plain,
+          thread_reference: threadReference,
+          has_thread: true,
         };
       });
     },
@@ -1372,6 +1456,7 @@ function viewerController() {
 
       if (this.selectedMessage && !filteredIds.has(this.selectedMessage.id)) {
         this.selectedMessage = null;
+        this.showMobileMessage = false;
       }
 
       if (this.selectedThread && !this.isThreadVisible(this.selectedThread)) {
@@ -1392,6 +1477,7 @@ function viewerController() {
       this.threadSearch = '';
       this.selectedMessages = []; // Clear selections when clearing filters
       this.selectedThread = null;
+      this.showMobileMessage = false;
       this.filterMessages();
     },
 
@@ -1399,20 +1485,30 @@ function viewerController() {
       if (this.selectedMessage?.id === msg.id) {
         // Deselect if clicking the same message
         this.selectedMessage = null;
+        this.showMobileMessage = false;
         this.syncVisibleSelectionHighlight();
         return;
       }
       const fullBody = await this.loadMessageBodyById(msg.id);
-      this.selectedMessage = { ...msg, body_md: fullBody };
+      this.selectedMessage = {
+        ...msg,
+        body_md: fullBody,
+      };
       // Switch to split view when selecting a message
       this.viewMode = 'split';
       // Update highlight without rebuilding rows to preserve scroll position
       this.syncVisibleSelectionHighlight();
+      if (this.isMobile) {
+        this.showMobileMessage = true;
+      } else {
+        this.showMobileMessage = false;
+      }
     },
 
     selectThread(thread) {
       this.selectedThread = thread;
       this.viewMode = 'threads';
+      this.showMobileMessage = false;
       this.$nextTick(() => {
         try {
           const list = this.$refs?.threadList;
@@ -1445,6 +1541,7 @@ function viewerController() {
 
     switchToThreadsView() {
       this.viewMode = 'threads';
+      this.showMobileMessage = false;
       if (!this.selectedThread) {
         const firstVisibleThread = this.filteredThreads()[0];
         if (firstVisibleThread) {
@@ -1504,6 +1601,16 @@ function viewerController() {
         default:
           return 'Normal';
       }
+    },
+
+    scrollToTop() {
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    },
+
+    closeMobileMessage() {
+      this.showMobileMessage = false;
     },
 
     async toggleCache() {
@@ -1921,6 +2028,22 @@ function viewerController() {
         clearInterval(this.refreshInterval);
         this.refreshInterval = null;
         console.info('[Alpine] Cleaned up auto-refresh interval');
+      }
+      if (typeof window !== 'undefined' && this._onMobileScroll) {
+        window.removeEventListener('scroll', this._onMobileScroll);
+        this._onMobileScroll = null;
+      }
+      if (this._mobileMedia && this._mobileMediaListener) {
+        if (typeof this._mobileMedia.removeEventListener === 'function') {
+          this._mobileMedia.removeEventListener('change', this._mobileMediaListener);
+        } else if (typeof this._mobileMedia.removeListener === 'function') {
+          this._mobileMedia.removeListener(this._mobileMediaListener);
+        }
+      }
+      this._mobileMedia = null;
+      this._mobileMediaListener = null;
+      if (typeof document !== 'undefined' && document.body) {
+        document.body.classList.remove('mobile-modal-open');
       }
       if (this.virtualList && this.virtualList.scrollElem) {
         try {
