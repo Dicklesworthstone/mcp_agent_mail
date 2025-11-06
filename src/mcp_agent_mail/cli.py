@@ -476,7 +476,7 @@ def share_export(
         console.print("[green]✓ Built FTS5 index for full-text viewer search.[/]")
     else:
         console.print("[yellow]Search fallback active (FTS5 unavailable in current sqlite build).[/]")
-    console.print("[green]✓ Generated manifest, README.txt, HOW_TO_DEPLOY.md, and viewer assets.[/]")
+    console.print("[green]✓ Generated manifest, README.md, HOW_TO_DEPLOY.md, and viewer assets.[/]")
 
     if zip_bundle:
         archive_path = output_path.parent / f"{output_path.name}.zip"
