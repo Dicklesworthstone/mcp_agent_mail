@@ -858,9 +858,9 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
             return False
     console.print("[green]✓ Configuring GitHub remote complete[/]")
 
-    console.print("[cyan]Pushing to GitHub...[/]")
+    console.print("[cyan]Pushing to GitHub (force update)...[/]")
     push = subprocess.run(
-        ["git", "push", "-u", "origin", branch],
+        ["git", "push", "-u", "origin", branch, "--force"],
         cwd=output_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
