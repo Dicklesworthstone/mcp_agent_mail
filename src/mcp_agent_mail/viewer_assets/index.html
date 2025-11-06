@@ -518,10 +518,11 @@
           <select x-model="filters.importance" @change="filterMessages()"
             class="w-full px-3 py-2 text-sm bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent">
             <option value="">All</option>
-            <option value="urgent">Urgent</option>
-            <option value="high">High</option>
-            <option value="normal">Normal</option>
-            <option value="low">Low</option>
+            <template x-for="item in uniqueImportance" :key="item.value">
+              <option :value="item.value"
+                x-text="formatImportanceLabel(item.value) + ' (' + item.count + ')'">
+              </option>
+            </template>
           </select>
         </div>
 
