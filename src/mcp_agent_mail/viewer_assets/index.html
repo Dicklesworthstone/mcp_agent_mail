@@ -917,27 +917,41 @@
           <!-- Thread Messages -->
           <template x-for="(msg, index) in selectedThread.messages" :key="msg.id">
             <article
-              class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
-              <div
-                class="border-b border-slate-200 dark:border-slate-700 p-6 flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+              class="bg-white dark:bg-slate-800 rounded-xl border-2 transition-all duration-200 overflow-hidden"
+              x-data="{ expanded: index === selectedThread.messages.length - 1 }"
+              :class="expanded
+                ? 'border-primary-300 dark:border-primary-600 shadow-md'
+                : 'border-slate-200 dark:border-slate-700 hover:border-primary-300 dark:hover:border-primary-600 hover:shadow-sm'">
+              <header
+                @click="expanded = !expanded"
+                class="p-5 cursor-pointer flex items-start justify-between gap-4 transition-colors"
+                :class="expanded ? 'bg-slate-50 dark:bg-slate-900/30' : 'hover:bg-slate-50 dark:hover:bg-slate-900/40'">
                 <div class="flex items-start gap-3 flex-1 min-w-0">
                   <div
-                    class="w-12 h-12 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center text-white font-semibold shadow-sm">
-                    <span x-text="msg.sender ? msg.sender.substring(0, 1).toUpperCase() : '?' "></span>
+                    class="w-12 h-12 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center text-white font-semibold shadow-sm flex-shrink-0">
+                    <span x-text="(msg.sender || '?').substring(0, 1).toUpperCase()"></span>
                   </div>
-                  <div class="flex-1 min-w-0 space-y-1">
+                  <div class="flex-1 min-w-0">
                     <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <span class="font-semibold text-slate-900 dark:text-white" x-text="msg.sender"></span>
+                      <span class="font-semibold text-slate-900 dark:text-white" x-text="msg.sender || 'Unknown sender'"></span>
                       <span class="text-sm text-slate-500 dark:text-slate-400"
-                        x-text="formatTimestamp(msg.created_ts)"></span>
-                      <span class="text-xs text-slate-400 dark:text-slate-500">
-                        #<span x-text="index + 1"></span>
+                        x-text="formatTimestampFull(msg.created_ts)"></span>
+                      <span class="text-xs text-slate-400 dark:text-slate-500 font-mono">
+                        Message <span x-text="index + 1"></span> · <span x-text="selectedThread.messages.length"></span> total
                       </span>
                     </div>
                     <template x-if="msg.recipients && msg.recipients !== 'Unknown'">
                       <div class="text-sm text-slate-500 dark:text-slate-400 truncate max-w-full"
                         x-text="msg.recipients"></div>
                     </template>
+                    <div x-show="!expanded" x-cloak class="mt-2 text-sm text-slate-600 dark:text-slate-400 line-clamp-2">
+                      <template x-if="msg.preview_plain">
+                        <span x-text="msg.preview_plain"></span>
+                      </template>
+                      <template x-if="!msg.preview_plain">
+                        <em class="text-slate-400">No content</em>
+                      </template>
+                    </div>
                   </div>
                 </div>
                 <div class="flex items-center gap-2 flex-shrink-0">
@@ -955,13 +969,42 @@
                       High
                     </span>
                   </template>
+                  <div class="text-slate-400 transition-transform duration-200"
+                    :class="expanded ? 'rotate-180' : ''">
+                    <i data-lucide="chevron-down" class="w-5 h-5"></i>
+                  </div>
                 </div>
-              </div>
-              <div class="p-6 space-y-4">
-                <h2 class="text-lg font-semibold text-slate-900 dark:text-white"
-                  x-text="msg.subject || '(no subject)'"></h2>
-                <div class="prose prose-slate dark:prose-invert max-w-none"
-                  x-html="renderMarkdown(msg.body_md)"></div>
+              </header>
+              <div x-show="expanded"
+                x-transition:enter="transition ease-out duration-200"
+                x-transition:enter-start="opacity-0 transform -translate-y-2"
+                x-transition:enter-end="opacity-100 transform translate-y-0"
+                x-transition:leave="transition ease-in duration-150"
+                x-transition:leave-start="opacity-100 transform translate-y-0"
+                x-transition:leave-end="opacity-0 transform -translate-y-2"
+                class="px-5 pb-5 pt-0">
+                <div class="mt-4 -mx-5 px-5">
+                  <div class="border-t border-slate-200 dark:border-slate-700"></div>
+                </div>
+                <div class="pt-4 space-y-4">
+                  <h2 class="text-lg font-semibold text-slate-900 dark:text-white"
+                    x-text="msg.subject || '(no subject)'"></h2>
+                  <div class="prose prose-slate dark:prose-invert max-w-none"
+                    x-html="renderMarkdown(msg.body_md)"></div>
+                </div>
+                <div class="mt-6 pt-4 border-t border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3">
+                  <div class="flex items-center gap-2">
+                    <button type="button"
+                      @click.stop="handleMessageClick(msg)"
+                      class="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors text-sm font-medium">
+                      <i data-lucide="split-square-horizontal" class="w-3.5 h-3.5"></i>
+                      Open in Split View
+                    </button>
+                  </div>
+                  <div class="text-xs text-slate-400 dark:text-slate-500 font-mono">
+                    Message ID <span x-text="msg.id"></span>
+                  </div>
+                </div>
               </div>
             </article>
           </template>
