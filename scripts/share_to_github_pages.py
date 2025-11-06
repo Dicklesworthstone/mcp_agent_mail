@@ -765,7 +765,30 @@ def create_github_repo(name: str, private: bool, description: str) -> tuple[bool
         return True, full_name
 
     except subprocess.CalledProcessError as e:
-        console.print(f"[red]Failed to create repository:[/]\n{e.stderr}")
+        stdout_msg = (e.stdout or "").strip()
+        stderr_msg = (e.stderr or "").strip()
+        combined = "\n".join(part for part in (stdout_msg, stderr_msg) if part)
+        # If the repository already exists, reuse it instead of failing.
+        if "already exists" in combined.lower():
+            console.print("[yellow]Repository already exists; reusing existing repo.[/]")
+            try:
+                view = subprocess.run(
+                    ["gh", "repo", "view", name, "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                full_name = view.stdout.strip()
+                console.print(f"[green]✓ Using existing repository: {full_name}[/]")
+                return True, full_name
+            except subprocess.CalledProcessError as view_error:
+                console.print(
+                    "[red]Failed to look up existing repository:[/]\n"
+                    f"{(view_error.stdout or '').strip()}\n{(view_error.stderr or '').strip()}"
+                )
+                return False, ""
+
+        console.print(f"[red]Failed to create repository:[/]\n{combined}")
         return False, ""
 
 
@@ -778,8 +801,6 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
         (["git", "add", "."], "Adding files"),
         (["git", "commit", "-m", "Initial mailbox export"], "Creating commit"),
         (["git", "branch", "-M", branch], f"Setting branch to {branch}"),
-        (["git", "remote", "add", "origin", f"git@github.com:{repo_full_name}.git"], "Adding remote"),
-        (["git", "push", "-u", "origin", branch], "Pushing to GitHub"),
     ]
 
     for cmd, description in commands:
@@ -810,6 +831,47 @@ def init_and_push_repo(output_dir: Path, repo_full_name: str, branch: str = "mai
         except Exception as e:
             console.print(f"[red]Git operation failed:[/] {e}")
             return False
+
+    remote_url = f"https://github.com/{repo_full_name}.git"
+
+    console.print("[cyan]Configuring GitHub remote...[/]")
+    add_remote = subprocess.run(
+        ["git", "remote", "add", "origin", remote_url],
+        cwd=output_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    if add_remote.returncode != 0:
+        # If remote already exists, replace it with the HTTPS URL
+        set_remote = subprocess.run(
+            ["git", "remote", "set-url", "origin", remote_url],
+            cwd=output_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if set_remote.returncode != 0:
+            console.print("[red]✗ Adding remote failed[/]")
+            console.print(f"  [dim]{(add_remote.stdout or '').strip()}[/]")
+            console.print(f"  [dim]{(set_remote.stdout or '').strip()}[/]")
+            return False
+    console.print("[green]✓ Configuring GitHub remote complete[/]")
+
+    console.print("[cyan]Pushing to GitHub...[/]")
+    push = subprocess.run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=output_dir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    for line in (push.stdout or "").splitlines():
+        console.print(f"  [dim]{line}[/]")
+    if push.returncode != 0:
+        console.print("[red]✗ Pushing to GitHub failed[/]")
+        return False
+    console.print("[green]✓ Pushing to GitHub complete[/]")
 
     console.print(f"\n[bold green]✓ Successfully pushed to {repo_full_name}[/]")
     return True
