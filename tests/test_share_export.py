@@ -19,6 +19,7 @@ from mcp_agent_mail.share import (
     ShareExportError,
     build_materialized_views,
     bundle_attachments,
+    create_performance_indexes,
     finalize_snapshot_for_export,
     maybe_chunk_database,
     scrub_snapshot,
@@ -978,6 +979,40 @@ def test_verify_bundle_with_sri_and_signature_both_valid(tmp_path: Path) -> None
     assert result["sri_checked"] is True
     assert result["signature_checked"] is True
     assert result["signature_verified"] is True
+
+
+def test_create_performance_indexes(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+
+    # Ensure base schema has no indexes initially
+    conn = sqlite3.connect(snapshot)
+    try:
+        indexes_before = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='messages'"
+            )
+        }
+    finally:
+        conn.close()
+    assert not indexes_before
+
+    create_performance_indexes(snapshot)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        index_rows = conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='messages'"
+        ).fetchall()
+        index_map = {row[0]: row[1] for row in index_rows}
+    finally:
+        conn.close()
+
+    assert "idx_messages_created_ts" in index_map
+    assert "idx_messages_thread" in index_map
+    assert "idx_messages_sender" in index_map
+    for name in ("idx_messages_created_ts", "idx_messages_thread", "idx_messages_sender"):
+        assert index_map[name], f"Expected SQL definition for index {name}"
 
 
 def test_finalize_snapshot_sql_hygiene(tmp_path: Path) -> None:
