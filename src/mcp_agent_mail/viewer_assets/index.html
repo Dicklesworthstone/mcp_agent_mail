@@ -916,71 +916,54 @@
 
           <!-- Thread Messages -->
           <template x-for="(msg, index) in selectedThread.messages" :key="msg.id">
-            <div
-              class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border-2 border-slate-200 dark:border-slate-700 overflow-hidden hover:shadow-md hover:border-primary-300 dark:hover:border-primary-600 transition-all duration-200"
-              x-data="{ expanded: index === selectedThread.messages.length - 1 }">
-
-              <!-- Message Header (Always Visible) -->
-              <div @click="expanded = !expanded"
-                class="p-5 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900/50 transition-colors"
-                :class="expanded ? 'bg-slate-50 dark:bg-slate-900/30' : ''">
-                <div class="flex items-start justify-between gap-4">
-                  <div class="flex items-start gap-3 flex-1 min-w-0">
-                    <!-- Avatar -->
-                    <div
-                      class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center flex-shrink-0 shadow-sm">
-                      <span class="text-white font-semibold text-sm"
-                        x-text="msg.sender.substring(0, 1).toUpperCase()"></span>
-                    </div>
-
-                    <!-- Sender Info -->
-                    <div class="flex-1 min-w-0">
-                      <div class="flex items-baseline gap-2 mb-1">
-                        <span class="font-semibold text-slate-900 dark:text-white" x-text="msg.sender"></span>
-                        <span class="text-sm text-slate-500 dark:text-slate-400"
-                          x-text="formatTimestamp(msg.created_ts)"></span>
-                      </div>
-
-                      <!-- Preview (when collapsed) -->
-                      <div x-show="!expanded" class="text-sm text-slate-600 dark:text-slate-400 line-clamp-2"
-                        x-text="msg.body_md.substring(0, 150) + '...'"></div>
-                    </div>
+            <article
+              class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+              <div
+                class="border-b border-slate-200 dark:border-slate-700 p-6 flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                <div class="flex items-start gap-3 flex-1 min-w-0">
+                  <div
+                    class="w-12 h-12 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center text-white font-semibold shadow-sm">
+                    <span x-text="msg.sender ? msg.sender.substring(0, 1).toUpperCase() : '?' "></span>
                   </div>
-
-                  <!-- Right side badges and expand icon -->
-                  <div class="flex items-center gap-2 flex-shrink-0">
-                    <!-- Importance Badge -->
-                    <template x-if="msg.importance === 'urgent'">
-                      <span
-                        class="px-2.5 py-1 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-semibold rounded-full flex items-center gap-1">
-                        <i data-lucide="alert-circle" class="w-3 h-3"></i>
-                        Urgent
+                  <div class="flex-1 min-w-0 space-y-1">
+                    <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <span class="font-semibold text-slate-900 dark:text-white" x-text="msg.sender"></span>
+                      <span class="text-sm text-slate-500 dark:text-slate-400"
+                        x-text="formatTimestamp(msg.created_ts)"></span>
+                      <span class="text-xs text-slate-400 dark:text-slate-500">
+                        #<span x-text="index + 1"></span>
                       </span>
-                    </template>
-                    <template x-if="msg.importance === 'high'">
-                      <span
-                        class="px-2.5 py-1 bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 text-xs font-semibold rounded-full flex items-center gap-1">
-                        <i data-lucide="alert-triangle" class="w-3 h-3"></i>
-                        High
-                      </span>
-                    </template>
-
-                    <!-- Expand/Collapse Icon -->
-                    <div class="text-slate-400 transition-transform duration-200" :class="expanded ? 'rotate-180' : ''">
-                      <i data-lucide="chevron-down" class="w-5 h-5"></i>
                     </div>
+                    <template x-if="msg.recipients && msg.recipients !== 'Unknown'">
+                      <div class="text-sm text-slate-500 dark:text-slate-400 truncate max-w-full"
+                        x-text="msg.recipients"></div>
+                    </template>
                   </div>
                 </div>
-              </div>
-
-              <!-- Message Body (Expandable) -->
-              <div x-show="expanded" x-transition class="px-5 pb-5 pt-2" style="display: none;">
-                <div class="mb-4 -mx-5 px-5">
-                  <div class="border-t border-slate-200 dark:border-slate-700"></div>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <template x-if="msg.importance === 'urgent'">
+                    <span
+                      class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 text-xs font-semibold">
+                      <i data-lucide="alert-circle" class="w-3 h-3"></i>
+                      Urgent
+                    </span>
+                  </template>
+                  <template x-if="msg.importance === 'high'">
+                    <span
+                      class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 text-xs font-semibold">
+                      <i data-lucide="alert-triangle" class="w-3 h-3"></i>
+                      High
+                    </span>
+                  </template>
                 </div>
-                <div class="prose prose-slate dark:prose-invert max-w-none" x-html="renderMarkdown(msg.body_md)"></div>
               </div>
-            </div>
+              <div class="p-6 space-y-4">
+                <h2 class="text-lg font-semibold text-slate-900 dark:text-white"
+                  x-text="msg.subject || '(no subject)'"></h2>
+                <div class="prose prose-slate dark:prose-invert max-w-none"
+                  x-html="renderMarkdown(msg.body_md)"></div>
+              </div>
+            </article>
           </template>
         </div>
       </template>

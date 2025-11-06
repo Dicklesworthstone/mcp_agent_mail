@@ -652,6 +652,7 @@ function viewerController() {
     selectedThread: null,
     allMessages: [],
     allThreads: [],
+    recipientsMap: null,
 
     // Filters
     showFilters: true,
@@ -814,6 +815,7 @@ function viewerController() {
 
       // Build a recipients map in a single query (MUCH faster than N+1 queries)
       const recipientsMap = this.buildRecipientsMap();
+      this.recipientsMap = recipientsMap;
 
       // Enrich messages with recipients and formatted dates
       return results.map((msg) => {
@@ -1137,10 +1139,14 @@ function viewerController() {
           subject: msg.subject,
           body_md: msg.body_md,
         });
+        const recipients = this.recipientsMap && this.recipientsMap.get(msg.id)
+          ? this.recipientsMap.get(msg.id)
+          : 'Unknown';
         return {
           ...msg,
           importance,
           body_length: msg.body_md ? msg.body_md.length : 0,
+          recipients,
           isAdministrative,
         };
       });
