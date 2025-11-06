@@ -156,6 +156,31 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function markdownToPlainText(markdown) {
+  if (!markdown) {
+    return "";
+  }
+  return markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/!\[[^\]]*]\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*]\(([^)]+)\)/g, "$1")
+    .replace(/[#>*_~\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildPreviewSnippet(sourceText) {
+  const plain = markdownToPlainText(sourceText);
+  if (!plain) {
+    return "";
+  }
+  if (plain.length <= 160) {
+    return plain;
+  }
+  return `${plain.slice(0, 157)}...`;
+}
+
 function highlightText(text, term) {
   if (!term) {
     return escapeHtml(text);
@@ -1116,9 +1141,13 @@ function viewerController() {
           m.created_ts,
           m.importance,
           m.body_md,
+          COALESCE(ov.latest_snippet, '') AS latest_snippet,
+          COALESCE(ov.attachment_count, 0) AS attachment_count,
+          COALESCE(ov.recipients, '') AS recipients,
           COALESCE(a.name, 'Unknown') AS sender
         FROM messages m
         LEFT JOIN agents a ON a.id = m.sender_id
+        LEFT JOIN message_overview_mv ov ON ov.id = m.id
         WHERE
           (m.thread_id = ?)
           OR (m.thread_id IS NULL AND printf('msg:%d', m.id) = ?)
@@ -1140,15 +1169,19 @@ function viewerController() {
           subject: msg.subject,
           body_md: msg.body_md,
         });
-        const recipients = this.recipientsMap && this.recipientsMap.get(msg.id)
+        const recipientsFromMap = this.recipientsMap && this.recipientsMap.get(msg.id)
           ? this.recipientsMap.get(msg.id)
-          : 'Unknown';
+          : '';
+        const recipients = msg.recipients || recipientsFromMap || 'Unknown';
+        const previewSource = msg.latest_snippet || msg.body_md || '';
+        const preview_plain = buildPreviewSnippet(previewSource);
         return {
           ...msg,
           importance,
           body_length: msg.body_md ? msg.body_md.length : 0,
           recipients,
           isAdministrative,
+          preview_plain,
         };
       });
     },
@@ -1257,7 +1290,7 @@ function viewerController() {
           last_created_relative: latestMessage ? this.formatTimestamp(latestMessage.created_ts) : '',
           message_count: messages.length,
           latest_importance: latestMessage?.importance || '',
-          latest_snippet: latestMessage?.body_md?.substring(0, 160) || '',
+          latest_snippet: latestMessage?.latest_snippet || latestMessage?.preview_plain || '',
           hasAdministrative,
           hasNonAdministrative,
           thread_category: hasAdministrative
