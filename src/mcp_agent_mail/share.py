@@ -963,6 +963,28 @@ def build_materialized_views(snapshot_path: Path) -> None:
         conn.close()
 
 
+def create_performance_indexes(snapshot_path: Path) -> None:
+    """Create covering indexes on hot message lookup paths used by the static viewer."""
+
+    conn = sqlite3.connect(str(snapshot_path))
+    try:
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_created_ts
+              ON messages(created_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_thread
+              ON messages(thread_id, created_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_sender
+              ON messages(sender_id, created_ts DESC);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def summarize_snapshot(
     snapshot_path: Path,
     *,
