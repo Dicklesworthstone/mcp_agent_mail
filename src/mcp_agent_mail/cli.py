@@ -47,6 +47,7 @@ from .share import (
     bundle_attachments,
     copy_viewer_assets,
     create_sqlite_snapshot,
+    create_performance_indexes,
     detect_hosting_hints,
     encrypt_bundle,
     export_viewer_data,
@@ -357,6 +358,9 @@ def share_export(
 
     console.print("[cyan]Building materialized views for httpvfs performance...[/]")
     build_materialized_views(snapshot_path)
+
+    console.print("[cyan]Adding SQLite indexes for viewer performance...[/]")
+    create_performance_indexes(snapshot_path)
 
     console.print("[cyan]Finalizing snapshot (SQL hygiene optimizations)...[/]")
     finalize_snapshot_for_export(snapshot_path)

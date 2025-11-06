@@ -21,6 +21,15 @@ const state = {
   explainMode: false,
 };
 
+const ADMIN_SUBJECT_PATTERNS = [
+  /^contact request from/i,
+  /\bauto-handshake\b/i,
+];
+
+const ADMIN_BODY_PATTERNS = [
+  /\bauto-handshake\b/i,
+];
+
 // Trusted Types Policy for secure Markdown rendering
 // See plan document lines 190-205 for security requirements
 let trustedTypesPolicy;
@@ -651,11 +660,13 @@ function viewerController() {
       sender: '',
       recipient: '',
       importance: '',
-      hasThread: ''
+      hasThread: '',
+      messageKind: 'user'
     },
     uniqueProjects: [],
     uniqueSenders: [],
     uniqueRecipients: [],
+    threadSearch: '',
 
     // Bulk Actions
     selectedMessages: [],
@@ -777,14 +788,15 @@ function viewerController() {
           m.subject,
           m.created_ts,
           m.importance,
-          m.thread_id,
-          m.project_id,
-          CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
-          substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
-          COALESCE(a.name, 'Unknown') AS sender,
-          COALESCE(p.slug, 'unknown') AS project_slug,
-          COALESCE(p.human_key, 'Unknown Project') AS project_name
-        FROM messages m
+        m.thread_id,
+        m.project_id,
+        CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
+        LENGTH(COALESCE(m.body_md, '')) AS body_length,
+        substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
+        COALESCE(a.name, 'Unknown') AS sender,
+        COALESCE(p.slug, 'unknown') AS project_slug,
+        COALESCE(p.human_key, 'Unknown Project') AS project_name
+      FROM messages m
         LEFT JOIN projects p ON p.id = m.project_id
         LEFT JOIN agents a ON a.id = m.sender_id
         ORDER BY datetime(m.created_ts) DESC, m.id DESC
@@ -802,14 +814,25 @@ function viewerController() {
       const recipientsMap = this.buildRecipientsMap();
 
       // Enrich messages with recipients and formatted dates
-      return results.map(msg => ({
-        ...msg,
-        recipients: recipientsMap.get(msg.id) || 'Unknown',
-        excerpt: msg.snippet || '',
-        created_relative: this.formatTimestamp(msg.created_ts),
-        created_full: this.formatTimestampFull(msg.created_ts),
-        read: false // Static viewer doesn't track read state
-      }));
+      return results.map((msg) => {
+        const importance = (msg.importance || '').toLowerCase();
+        const bodyLength = Number(msg.body_length) || 0;
+        const excerpt = msg.snippet || '';
+        const isAdministrative = this.isAdministrativeMessage(msg);
+
+        return {
+          ...msg,
+          importance,
+          body_length: bodyLength,
+          recipients: recipientsMap.get(msg.id) || 'Unknown',
+          excerpt,
+          created_relative: this.formatTimestamp(msg.created_ts),
+          created_full: this.formatTimestampFull(msg.created_ts),
+          read: false, // Static viewer doesn't track read state
+          isAdministrative,
+          message_category: isAdministrative ? 'admin' : 'user'
+        };
+      });
     },
 
     async loadMessageBodyById(id) {
@@ -1054,13 +1077,25 @@ function viewerController() {
       for (const thread of rawThreads) {
         // Get all messages in this thread
         const messages = this.getMessagesInThread(thread.thread_key);
+        const adminCount = messages.filter((msg) => msg.isAdministrative).length;
+        const hasAdministrative = adminCount > 0;
+        const hasNonAdministrative = adminCount < messages.length;
+        const threadCategory = hasAdministrative
+          ? (hasNonAdministrative ? 'mixed' : 'admin')
+          : 'user';
 
         threads.push({
           id: thread.thread_key,
           subject: thread.latest_subject || '(no subject)',
           messages: messages,
           last_created_ts: thread.last_created_ts,
-          message_count: thread.message_count
+          last_created_relative: this.formatTimestamp(thread.last_created_ts),
+          message_count: thread.message_count,
+          latest_importance: (thread.latest_importance || '').toLowerCase(),
+          latest_snippet: thread.latest_snippet || '',
+          hasAdministrative,
+          hasNonAdministrative,
+          thread_category: threadCategory
         });
       }
 
@@ -1094,7 +1129,19 @@ function viewerController() {
         stmt.free();
       }
 
-      return results;
+      return results.map((msg) => {
+        const importance = (msg.importance || '').toLowerCase();
+        const isAdministrative = this.isAdministrativeMessage({
+          subject: msg.subject,
+          body_md: msg.body_md,
+        });
+        return {
+          ...msg,
+          importance,
+          body_length: msg.body_md ? msg.body_md.length : 0,
+          isAdministrative,
+        };
+      });
     },
 
     buildUniqueFilters(messages) {
@@ -1119,13 +1166,84 @@ function viewerController() {
       this.uniqueRecipients = Array.from(recipients).sort();
     },
 
+    isAdministrativeMessage(message) {
+      const subject = message?.subject || '';
+      const snippetSource = message?.snippet ?? message?.body_md ?? '';
+      if (ADMIN_SUBJECT_PATTERNS.some((pattern) => pattern.test(subject))) {
+        return true;
+      }
+      if (ADMIN_BODY_PATTERNS.some((pattern) => pattern.test(snippetSource))) {
+        return true;
+      }
+      return false;
+    },
+
+    isThreadVisible(thread) {
+      if (!thread) return false;
+      const kind = this.filters.messageKind || 'user';
+      if (kind === 'all') {
+        return true;
+      }
+      if (kind === 'admin') {
+        return thread.hasAdministrative;
+      }
+      return thread.hasNonAdministrative;
+    },
+
+    filteredThreads() {
+      const query = this.threadSearch.trim().toLowerCase();
+      return this.allThreads.filter((thread) => {
+        if (!this.isThreadVisible(thread)) {
+          return false;
+        }
+        if (!query) {
+          return true;
+        }
+        const subject = (thread.subject || '').toLowerCase();
+        const identifier = (thread.id || '').toLowerCase();
+        const snippet = (thread.latest_snippet || '').toLowerCase();
+        return subject.includes(query) || identifier.includes(query) || snippet.includes(query);
+      });
+    },
+
+    openThreadById(threadId) {
+      if (!threadId) return;
+      const normalizedId = String(threadId);
+      let thread = this.allThreads.find((t) => t.id === normalizedId);
+      if (!thread) {
+        const messages = this.getMessagesInThread(normalizedId);
+        const hasAdministrative = messages.some((msg) => msg.isAdministrative);
+        const hasNonAdministrative = messages.some((msg) => !msg.isAdministrative);
+        const latestMessage = messages[messages.length - 1];
+        thread = {
+          id: normalizedId,
+          subject: latestMessage?.subject || '(no subject)',
+          messages,
+          last_created_ts: latestMessage?.created_ts ?? null,
+          last_created_relative: latestMessage ? this.formatTimestamp(latestMessage.created_ts) : '',
+          message_count: messages.length,
+          latest_importance: latestMessage?.importance || '',
+          latest_snippet: latestMessage?.body_md?.substring(0, 160) || '',
+          hasAdministrative,
+          hasNonAdministrative,
+          thread_category: hasAdministrative
+            ? (hasNonAdministrative ? 'mixed' : 'admin')
+            : 'user',
+        };
+        this.allThreads.push(thread);
+      }
+      this.selectThread(thread);
+      this.threadSearch = '';
+    },
+
     get filtersActive() {
       return !!(
         this.filters.project ||
         this.filters.sender ||
         this.filters.recipient ||
         this.filters.importance ||
-        this.filters.hasThread
+        this.filters.hasThread ||
+        this.filters.messageKind !== 'user'
       );
     },
 
@@ -1159,7 +1277,8 @@ function viewerController() {
       }
 
       if (this.filters.importance) {
-        filtered = filtered.filter(msg => msg.importance === this.filters.importance);
+        const importanceFilter = this.filters.importance.toLowerCase();
+        filtered = filtered.filter(msg => (msg.importance || '').toLowerCase() === importanceFilter);
       }
 
       if (this.filters.hasThread) {
@@ -1170,13 +1289,27 @@ function viewerController() {
         });
       }
 
+      const messageKind = this.filters.messageKind || 'user';
+      if (messageKind === 'user') {
+        filtered = filtered.filter(msg => !msg.isAdministrative);
+      } else if (messageKind === 'admin') {
+        filtered = filtered.filter(msg => msg.isAdministrative);
+      }
+
       // Apply sorting
       this.sortMessages(this.sortBy, filtered);
 
       // Clear any selected messages that are no longer in the filtered list
       const filteredIds = new Set(this.filteredMessages.map(msg => msg.id));
       this.selectedMessages = this.selectedMessages.filter(id => filteredIds.has(id));
-      this.updateVirtualList();
+
+      if (this.selectedMessage && !filteredIds.has(this.selectedMessage.id)) {
+        this.selectedMessage = null;
+      }
+
+      if (this.selectedThread && !this.isThreadVisible(this.selectedThread)) {
+        this.selectedThread = null;
+      }
     },
 
     clearFilters() {
@@ -1185,10 +1318,13 @@ function viewerController() {
         sender: '',
         recipient: '',
         importance: '',
-        hasThread: ''
+        hasThread: '',
+        messageKind: 'user'
       };
       this.searchQuery = '';
+      this.threadSearch = '';
       this.selectedMessages = []; // Clear selections when clearing filters
+      this.selectedThread = null;
       this.filterMessages();
     },
 
@@ -1214,6 +1350,16 @@ function viewerController() {
 
     switchToSplitView() {
       this.viewMode = 'split';
+    },
+
+    switchToThreadsView() {
+      this.viewMode = 'threads';
+      if (!this.selectedThread) {
+        const firstVisibleThread = this.filteredThreads()[0];
+        if (firstVisibleThread) {
+          this.selectThread(firstVisibleThread);
+        }
+      }
     },
 
     renderMarkdown(markdown) {
@@ -1295,6 +1441,9 @@ function viewerController() {
           break;
         case 'sender':
           toSort.sort((a, b) => (a.sender || '').localeCompare(b.sender || ''));
+          break;
+        case 'longest':
+          toSort.sort((a, b) => (b.body_length || 0) - (a.body_length || 0));
           break;
       }
 
