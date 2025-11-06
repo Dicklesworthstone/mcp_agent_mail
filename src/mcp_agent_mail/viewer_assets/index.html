@@ -802,7 +802,7 @@
     <!-- Thread View -->
     <div x-show="!isLoading && viewMode === 'threads'" class="max-w-5xl mx-auto space-y-6 pb-12" style="display: none;">
 
-      <div class="grid gap-6 lg:grid-cols-[minmax(0,340px)_minmax(0,1fr)]">
+      <div class="grid gap-6 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)] xl:grid-cols-[minmax(0,360px)_minmax(0,1fr)]">
         <aside class="space-y-4">
           <div
             class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-5 space-y-4">
@@ -835,7 +835,7 @@
             </div>
           </div>
           <div
-            class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-1 max-h-[min(70vh,560px)] overflow-hidden flex flex-col">
+            class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-2 max-h-[min(72vh,600px)] overflow-hidden flex flex-col">
             <div class="flex items-center justify-between px-4 py-3">
               <span class="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">All
                 Threads</span>
@@ -901,7 +901,7 @@
           </div>
         </aside>
 
-        <section class="space-y-4">
+        <section class="space-y-5">
           <template x-if="selectedThread">
             <div class="space-y-4">
           <!-- Thread Header - Gmail Style -->
@@ -943,7 +943,7 @@
           <template x-for="(msg, index) in selectedThread.messages" :key="msg.id">
             <article
               class="bg-white dark:bg-slate-800 rounded-xl border-2 transition-all duration-200 overflow-hidden"
-              x-data="{ expanded: index === selectedThread.messages.length - 1 }"
+              x-data="{ expanded: true }"
               :class="expanded
                 ? 'border-primary-300 dark:border-primary-600 shadow-md'
                 : 'border-slate-200 dark:border-slate-700 hover:border-primary-300 dark:hover:border-primary-600 hover:shadow-sm'">
@@ -1011,7 +1011,7 @@
                 <div class="mt-4 -mx-5 px-5">
                   <div class="border-t border-slate-200 dark:border-slate-700"></div>
                 </div>
-                <div class="pt-4 space-y-4">
+                <div class="pt-4 space-y-3">
                   <h2 class="text-lg font-semibold text-slate-900 dark:text-white"
                     x-text="msg.subject || '(no subject)'"></h2>
                   <div class="prose prose-slate dark:prose-invert max-w-none"
