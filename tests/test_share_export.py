@@ -484,6 +484,12 @@ def test_share_export_chunking_and_viewer_data(monkeypatch, tmp_path: Path) -> N
     chunks_dir = output_dir / "chunks"
     assert any(chunks_dir.iterdir())
 
+    checksum_path = output_dir / "chunks.sha256"
+    assert checksum_path.is_file()
+    checksum_lines = checksum_path.read_text().strip().splitlines()
+    assert len(checksum_lines) == chunk_config["chunk_count"]
+    assert checksum_lines[0].count(" ") >= 1
+
     viewer_data_dir = output_dir / "viewer" / "data"
     messages_json = viewer_data_dir / "messages.json"
     assert messages_json.is_file()
