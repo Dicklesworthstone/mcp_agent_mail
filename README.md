@@ -807,6 +807,28 @@ The export process:
 7. If chunking is enabled, writes the segmented database plus a `chunks.sha256` manifest so streamed pages can be verified cheaply
 8. Optionally encrypts the ZIP with age (produces `bundle.zip.age`)
 
+### Refresh an existing bundle
+
+Once you have published a bundle you can refresh it in place without re-running the full wizard. Every export records the settings that were used (projects, scrub preset, attachment thresholds, chunking config) inside `manifest.json`. The new `share update` command reads those defaults, regenerates the SQLite snapshot and viewer assets in a temporary directory, and then replaces the bundle atomically—removing obsolete chunked files or attachments along the way.
+
+```bash
+# Refresh bundle using the originally recorded settings
+uv run python -m mcp_agent_mail.cli share update ./my-bundle
+
+# Override one or more export options while updating
+uv run python -m mcp_agent_mail.cli share update ./my-bundle \
+  --project backend-abc123 \
+  --inline-threshold 16384 \
+  --chunk-threshold 104857600
+
+# Re-sign and package the refreshed bundle
+uv run python -m mcp_agent_mail.cli share update ./my-bundle \
+  --zip \
+  --signing-key ./keys/signing.key
+```
+
+When chunking was enabled previously but the refreshed snapshot no longer needs it, `share update` cleans up the `chunks/` directory, `chunks.sha256`, and `mailbox.sqlite3.config.json` automatically, ensuring the bundle tree matches the new manifest. You can still tweak any setting at update time; overrides are written back into the `export_config` section of `manifest.json` for the next refresh.
+
 **2. Preview locally**
 
 ```bash
@@ -1938,6 +1960,7 @@ The project exposes a developer CLI for common operations:
 - `guard uninstall <code_repo_path>`: remove the guard from a repo
 - `share wizard`: launch interactive deployment wizard (auto-installs CLIs, authenticates, exports, deploys to GitHub Pages or Cloudflare Pages)
 - `share export --output <path> [options]`: export mailbox to a static HTML bundle (see Static Mailbox Export section for full options)
+- `share update <bundle_path> [options]`: refresh an existing bundle using recorded (or overridden) export settings
 - `share preview <bundle_path> [--port N] [--open-browser]`: serve a static bundle locally for inspection
 - `share verify <bundle_path> [--public-key <key>]`: verify bundle integrity (SRI hashes and Ed25519 signature)
 - `share decrypt <encrypted_path> [--identity <file> | --passphrase]`: decrypt an age-encrypted bundle
@@ -1969,6 +1992,9 @@ uv run python -m mcp_agent_mail.cli share preview ./bundle --port 9000 --open-br
 
 # Verify bundle integrity
 uv run python -m mcp_agent_mail.cli share verify ./bundle
+
+# Refresh an existing bundle in place with recorded settings
+uv run python -m mcp_agent_mail.cli share update ./bundle
 
 # Change server port
 uv run python -m mcp_agent_mail.cli config set-port 9000

@@ -1311,14 +1311,49 @@ def _load_bundle_export_config(bundle_dir: Path) -> StoredExportConfig:
 
 
 def _copy_bundle_contents(source: Path, destination: Path) -> None:
+    """Synchronise *destination* with *source* by mirroring files and pruning stale artefacts."""
+
+    source = source.resolve()
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+
+    desired_files: set[Path] = set()
+    desired_dirs: set[Path] = {destination}
+
     for root, _, files in os.walk(source):
         root_path = Path(root)
-        relative = root_path.relative_to(source)
-        dest_dir = destination / relative
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        relative_root = root_path.relative_to(source)
+        dest_root = destination / relative_root
+        desired_dirs.add(dest_root)
+        for filename in files:
+            rel_file = relative_root / filename
+            desired_files.add(destination / rel_file)
+            parent = (destination / rel_file).parent
+            while parent != destination:
+                desired_dirs.add(parent)
+                parent = parent.parent
+
+    # Remove files that are no longer present in the source bundle.
+    existing_files = {path for path in destination.rglob("*") if path.is_file()}
+    for stale_file in existing_files - desired_files:
+        # Unlink without following symlinks (we never export symlinks, but be defensive).
+        stale_file.unlink(missing_ok=True)
+
+    # Remove directories that are no longer needed (deepest first).
+    existing_dirs = {path for path in destination.rglob("*") if path.is_dir()}
+    for stale_dir in sorted(existing_dirs - desired_dirs, key=lambda p: len(p.parts), reverse=True):
+        with suppress(OSError):
+            stale_dir.rmdir()
+
+    # Copy fresh files from source (overwrite in place to handle updated content).
+    for root, _, files in os.walk(source):
+        root_path = Path(root)
+        relative_root = root_path.relative_to(source)
+        dest_root = destination / relative_root
+        dest_root.mkdir(parents=True, exist_ok=True)
         for filename in files:
             src_file = root_path / filename
-            dest_file = dest_dir / filename
+            dest_file = dest_root / filename
             shutil.copy2(src_file, dest_file)
 
 
