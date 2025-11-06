@@ -787,22 +787,23 @@ function viewerController() {
       // First, get all messages with their basic info
       const stmt = state.db.prepare(`
         SELECT
-          m.id,
-          m.subject,
-          m.created_ts,
-          m.importance,
-        m.thread_id,
-        m.project_id,
-        CASE WHEN m.thread_id IS NULL OR m.thread_id = '' THEN printf('msg:%d', m.id) ELSE m.thread_id END AS thread_key,
-        LENGTH(COALESCE(m.body_md, '')) AS body_length,
-        substr(COALESCE(m.body_md, ''), 1, 280) AS snippet,
-        COALESCE(a.name, 'Unknown') AS sender,
-        COALESCE(p.slug, 'unknown') AS project_slug,
-        COALESCE(p.human_key, 'Unknown Project') AS project_name
-      FROM messages m
+          mv.id,
+          mv.subject,
+          mv.created_ts,
+          mv.importance,
+          mv.thread_id,
+          m.project_id,
+          CASE WHEN mv.thread_id IS NULL OR mv.thread_id = '' THEN printf('msg:%d', mv.id) ELSE mv.thread_id END AS thread_key,
+          mv.body_length,
+          mv.latest_snippet,
+          mv.recipients,
+          mv.sender_name AS sender,
+          COALESCE(p.slug, 'unknown') AS project_slug,
+          COALESCE(p.human_key, 'Unknown Project') AS project_name
+        FROM message_overview_mv mv
+        JOIN messages m ON m.id = mv.id
         LEFT JOIN projects p ON p.id = m.project_id
-        LEFT JOIN agents a ON a.id = m.sender_id
-        ORDER BY datetime(m.created_ts) DESC, m.id DESC
+        ORDER BY datetime(mv.created_ts) DESC, mv.id DESC
       `);
 
       try {
@@ -821,14 +822,14 @@ function viewerController() {
       return results.map((msg) => {
         const importance = (msg.importance || '').toLowerCase();
         const bodyLength = Number(msg.body_length) || 0;
-        const excerpt = msg.snippet || '';
+        const excerpt = msg.latest_snippet || msg.snippet || '';
         const isAdministrative = this.isAdministrativeMessage(msg);
 
         return {
           ...msg,
           importance,
           body_length: bodyLength,
-          recipients: recipientsMap.get(msg.id) || 'Unknown',
+          recipients: msg.recipients || recipientsMap.get(msg.id) || 'Unknown',
           excerpt,
           created_relative: this.formatTimestamp(msg.created_ts),
           created_full: this.formatTimestampFull(msg.created_ts),

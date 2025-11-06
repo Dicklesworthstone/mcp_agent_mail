@@ -1161,6 +1161,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             m.id,
                             m.subject,
                             m.body_md,
+                            LENGTH(COALESCE(m.body_md, '')) AS body_length,
                             m.created_ts,
                             m.importance,
                             m.thread_id,
@@ -1192,11 +1193,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                     for r in rows.fetchall():
                         body = r[2] or ""
+                        raw_body_length = r[3]
+                        body_length = int(raw_body_length) if raw_body_length is not None else len(body)
                         excerpt = body[:150].replace('#', '').replace('*', '').replace('`', '').strip()
-                        if len(body) > 150:
+                        if body_length > 150:
                             excerpt += "..."
 
-                        created_ts = r[3]
+                        created_ts = r[4]
                         if isinstance(created_ts, str):
                             created_dt = datetime.fromisoformat(created_ts.replace('Z', '+00:00'))
                         else:
@@ -1229,18 +1232,19 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             {
                                 "id": r[0],
                                 "subject": r[1] or "(No subject)",
-                                "body_md": r[2] or "",
+                                "body_md": body,
+                                "body_length": body_length,
                                 "excerpt": excerpt,
-                                "created_ts": str(r[3]),
+                                "created_ts": str(r[4]),
                                 "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
                                 "created_relative": created_relative,
-                                "importance": r[4] or "normal",
-                                "thread_id": r[5],
-                                "sender": r[6],
-                                "project_slug": r[7],
-                                "project_name": r[8],
+                                "importance": r[5] or "normal",
+                                "thread_id": r[6],
+                                "sender": r[7],
+                                "project_slug": r[8],
+                                "project_name": r[9],
                                 "recipients": ", ".join(
-                                    part.strip() for part in (r[9] or "").split(",") if part.strip()
+                                    part.strip() for part in (r[10] or "").split(",") if part.strip()
                                 ),
                                 "read": False,
                             }
