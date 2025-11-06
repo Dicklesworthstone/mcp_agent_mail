@@ -1187,6 +1187,10 @@ function viewerController() {
 
       this.uniqueImportance = importanceEntries.map(([value, count]) => ({ value, count }));
       this.importanceCounts = Object.fromEntries(importanceEntries);
+
+      if (this.filters.importance && !this.importanceCounts[this.filters.importance]) {
+        this.filters.importance = '';
+      }
     },
 
     isAdministrativeMessage(message) {
@@ -1420,6 +1424,21 @@ function viewerController() {
         }
       } catch {
         return timestamp;
+      }
+    },
+
+    formatImportanceLabel(value) {
+      const normalized = (value || '').toLowerCase();
+      switch (normalized) {
+        case 'urgent':
+          return 'Urgent';
+        case 'high':
+          return 'High';
+        case 'low':
+          return 'Low';
+        case 'normal':
+        default:
+          return 'Normal';
       }
     },
 
