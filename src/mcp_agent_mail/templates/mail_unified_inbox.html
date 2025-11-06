@@ -260,7 +260,7 @@
           <button @click="sortOpen = !sortOpen"
                   class="px-2 py-1 text-xs bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 rounded border border-slate-200 dark:border-slate-700 transition-colors flex items-center gap-1">
             <i data-lucide="arrow-down-up" class="w-3 h-3"></i>
-            <span class="hidden sm:inline" x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : 'Sender'"></span>
+            <span class="hidden sm:inline" x-text="sortBy === 'newest' ? 'Newest' : sortBy === 'oldest' ? 'Oldest' : sortBy === 'longest' ? 'Longest' : 'Sender'"></span>
           </button>
 
           <div x-show="sortOpen"
@@ -286,6 +286,12 @@
                     class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
               <i data-lucide="user" class="w-4 h-4"></i>
               By Sender
+            </button>
+            <button @click="sortBy = 'longest'; filterMessages(); sortOpen = false"
+                    :class="sortBy === 'longest' ? 'bg-primary-50 dark:bg-primary-900/20 text-primary-700 dark:text-primary-300' : 'text-slate-700 dark:text-slate-300'"
+                    class="w-full px-3 py-2 text-left text-sm hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors flex items-center gap-2">
+              <i data-lucide="file-text" class="w-4 h-4"></i>
+              Longest First
             </button>
           </div>
         </div>
@@ -895,6 +901,24 @@ function unifiedInboxManager() {
             const parsedA = Date.parse(a.created_ts || '') || 0;
             const parsedB = Date.parse(b.created_ts || '') || 0;
             return parsedA - parsedB;
+          });
+          break;
+        }
+        case 'longest': {
+          const toLength = (msg) => {
+            const direct = Number(msg.body_length ?? Number.NaN);
+            if (Number.isFinite(direct)) {
+              return direct;
+            }
+            if (typeof msg.body_md === 'string') {
+              return msg.body_md.length;
+            }
+            return 0;
+          };
+          filtered.sort((a, b) => {
+            const lengthA = toLength(a);
+            const lengthB = toLength(b);
+            return lengthB - lengthA;
           });
           break;
         }
