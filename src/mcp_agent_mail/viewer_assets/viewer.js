@@ -666,6 +666,8 @@ function viewerController() {
     uniqueProjects: [],
     uniqueSenders: [],
     uniqueRecipients: [],
+    uniqueImportance: [],
+    importanceCounts: {},
     threadSearch: '',
 
     // Bulk Actions
@@ -1148,6 +1150,7 @@ function viewerController() {
       const projects = new Set();
       const senders = new Set();
       const recipients = new Set();
+      const importanceMap = new Map();
 
       messages.forEach(msg => {
         if (msg.project_name) projects.add(msg.project_name);
@@ -1159,11 +1162,31 @@ function viewerController() {
             if (trimmed) recipients.add(trimmed);
           });
         }
+
+        const importance = (msg.importance || 'normal').toLowerCase();
+        importanceMap.set(importance, (importanceMap.get(importance) || 0) + 1);
       });
 
       this.uniqueProjects = Array.from(projects).sort();
       this.uniqueSenders = Array.from(senders).sort();
       this.uniqueRecipients = Array.from(recipients).sort();
+
+      const order = new Map([
+        ['urgent', 0],
+        ['high', 1],
+        ['normal', 2],
+        ['low', 3],
+      ]);
+
+      const importanceEntries = Array.from(importanceMap.entries()).sort((a, b) => {
+        const rankA = order.has(a[0]) ? order.get(a[0]) : 99;
+        const rankB = order.has(b[0]) ? order.get(b[0]) : 99;
+        if (rankA !== rankB) return rankA - rankB;
+        return a[0].localeCompare(b[0]);
+      });
+
+      this.uniqueImportance = importanceEntries.map(([value, count]) => ({ value, count }));
+      this.importanceCounts = Object.fromEntries(importanceEntries);
     },
 
     isAdministrativeMessage(message) {
