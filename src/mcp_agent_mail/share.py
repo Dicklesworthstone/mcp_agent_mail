@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib import abc, resources
 from pathlib import Path
-from typing import Any, Optional, Sequence, cast
+from typing import Any, Mapping, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from sqlalchemy.engine import make_url
@@ -167,6 +167,21 @@ GENERIC_HOSTING_NOTES: list[str] = [
     "If cross-origin isolation is unavailable, the viewer will show a warning banner with platform-specific instructions and fall back to streaming mode.",
     "Verify isolation: open browser DevTools console and check that `window.crossOriginIsolated === true`.",
 ]
+
+
+@dataclass(slots=True, frozen=True)
+class SnapshotContext:
+    snapshot_path: Path
+    scope: ProjectScopeResult
+    scrub_summary: ScrubSummary
+    fts_enabled: bool
+
+
+@dataclass(slots=True, frozen=True)
+class BundleArtifacts:
+    attachments_manifest: dict[str, Any]
+    chunk_manifest: Optional[dict[str, Any]]
+    viewer_data: Optional[dict[str, Any]]
 
 
 def _find_repo_root(start: Path) -> Optional[Path]:
@@ -362,7 +377,14 @@ def export_viewer_data(
     }
 
 
-def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path, *, public_out: Optional[Path] = None) -> dict[str, str]:
+def sign_manifest(
+    manifest_path: Path,
+    signing_key_path: Path,
+    output_path: Path,
+    *,
+    public_out: Optional[Path] = None,
+    overwrite: bool = False,
+) -> dict[str, str]:
     try:
         from nacl.signing import SigningKey  # type: ignore
     except ImportError as exc:  # pragma: no cover - optional dependency
@@ -414,7 +436,10 @@ def sign_manifest(manifest_path: Path, signing_key_path: Path, output_path: Path
 
     sig_path = output_path / "manifest.sig.json"
     try:
-        _write_json_file(sig_path, payload)
+        if overwrite and sig_path.exists():
+            sig_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        else:
+            _write_json_file(sig_path, payload)
     except ShareExportError:
         raise  # Re-raise ShareExportError as-is
     except Exception as exc:
@@ -1118,6 +1143,30 @@ def summarize_snapshot(
     }
 
 
+def create_snapshot_context(
+    *,
+    source_database: Path,
+    snapshot_path: Path,
+    project_filters: Sequence[str],
+    scrub_preset: str,
+) -> SnapshotContext:
+    """Materialize and prepare a snapshot for export."""
+
+    create_sqlite_snapshot(source_database, snapshot_path)
+    scope = apply_project_scope(snapshot_path, project_filters)
+    scrub_summary = scrub_snapshot(snapshot_path, preset=scrub_preset)
+    fts_enabled = build_search_indexes(snapshot_path)
+    build_materialized_views(snapshot_path)
+    create_performance_indexes(snapshot_path)
+    finalize_snapshot_for_export(snapshot_path)
+    return SnapshotContext(
+        snapshot_path=snapshot_path,
+        scope=scope,
+        scrub_summary=scrub_summary,
+        fts_enabled=fts_enabled,
+    )
+
+
 def bundle_attachments(
     snapshot_path: Path,
     output_dir: Path,
@@ -1335,9 +1384,64 @@ def maybe_chunk_database(
         "chunk_count": index,
         "pattern": "chunks/{index:05d}.bin",
         "original_bytes": size,
+        "threshold_bytes": threshold_bytes,
     }
     _write_json_file(output_dir / "mailbox.sqlite3.config.json", config)
     return config
+
+
+def build_bundle_assets(
+    snapshot_path: Path,
+    output_dir: Path,
+    *,
+    storage_root: Path,
+    inline_threshold: int,
+    detach_threshold: int,
+    chunk_threshold: int,
+    chunk_size: int,
+    scope: ProjectScopeResult,
+    project_filters: Sequence[str],
+    scrub_summary: ScrubSummary,
+    hosting_hints: Sequence[HostingHint],
+    fts_enabled: bool,
+    export_config: Mapping[str, Any],
+    exporter_version: str = "prototype",
+) -> BundleArtifacts:
+    """Bundle attachments, viewer assets, and scaffolding for the export."""
+
+    attachments_manifest = bundle_attachments(
+        snapshot_path,
+        output_dir,
+        storage_root=storage_root,
+        inline_threshold=inline_threshold,
+        detach_threshold=detach_threshold,
+    )
+    chunk_manifest = maybe_chunk_database(
+        snapshot_path,
+        output_dir,
+        threshold_bytes=chunk_threshold,
+        chunk_bytes=chunk_size,
+    )
+    copy_viewer_assets(output_dir)
+    viewer_data = export_viewer_data(snapshot_path, output_dir, fts_enabled=fts_enabled)
+    write_bundle_scaffolding(
+        output_dir,
+        snapshot=snapshot_path,
+        scope=scope,
+        project_filters=project_filters,
+        scrub_summary=scrub_summary,
+        attachments_manifest=attachments_manifest,
+        chunk_manifest=chunk_manifest,
+        hosting_hints=hosting_hints,
+        viewer_data=viewer_data,
+        exporter_version=exporter_version,
+        export_config=export_config,
+    )
+    return BundleArtifacts(
+        attachments_manifest=attachments_manifest,
+        chunk_manifest=chunk_manifest,
+        viewer_data=viewer_data,
+    )
 
 
 def copy_viewer_assets(output_dir: Path) -> None:
@@ -1609,6 +1713,7 @@ def write_bundle_scaffolding(
     chunk_manifest: Optional[dict[str, Any]],
     hosting_hints: Sequence[HostingHint],
     viewer_data: Optional[dict[str, Any]],
+    export_config: Mapping[str, Any],
     exporter_version: str = "prototype",
 ) -> None:
     """Create manifest and helper docs around the freshly minted snapshot."""
@@ -1665,6 +1770,10 @@ def write_bundle_scaffolding(
         manifest["viewer"] = viewer_meta
     elif viewer_sri:
         manifest["viewer"] = {"sri": viewer_sri}
+    export_config_payload = dict(export_config)
+    export_config_payload.setdefault("projects", list(project_filters))
+    export_config_payload.setdefault("scrub_preset", scrub_summary.preset)
+    manifest["export_config"] = {k: v for k, v in export_config_payload.items() if v is not None}
     _write_json_file(output_dir / "manifest.json", manifest)
 
     readme_content = (

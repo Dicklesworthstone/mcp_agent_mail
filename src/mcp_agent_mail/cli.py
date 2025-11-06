@@ -16,6 +16,7 @@ import time
 import warnings
 import webbrowser
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,25 +42,16 @@ from .share import (
     INLINE_ATTACHMENT_THRESHOLD,
     SCRUB_PRESETS,
     ShareExportError,
-    apply_project_scope,
-    build_materialized_views,
-    build_search_indexes,
-    bundle_attachments,
+    build_bundle_assets,
     copy_viewer_assets,
-    create_performance_indexes,
-    create_sqlite_snapshot,
+    create_snapshot_context,
     detect_hosting_hints,
     encrypt_bundle,
-    export_viewer_data,
-    finalize_snapshot_for_export,
-    maybe_chunk_database,
     package_directory_as_zip,
     prepare_output_directory,
     resolve_sqlite_database_path,
-    scrub_snapshot,
     sign_manifest,
     summarize_snapshot,
-    write_bundle_scaffolding,
 )
 from .utils import slugify
 
@@ -310,14 +302,6 @@ def share_export(
     snapshot_path = output_path / "mailbox.sqlite3"
     console.print(f"[cyan]Creating snapshot:[/] {snapshot_path}")
 
-    try:
-        create_sqlite_snapshot(database_path, snapshot_path)
-    except ShareExportError as exc:
-        console.print(f"[red]Snapshot failed:[/] {exc}")
-        if temp_dir is not None:
-            temp_dir.cleanup()
-        raise typer.Exit(code=1) from exc
-
     if detach_threshold <= inline_threshold:
         console.print(
             "[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]"
@@ -337,33 +321,25 @@ def share_export(
 
     console.print("[cyan]Applying project filters and scrubbing data...[/]")
     try:
-        scope = apply_project_scope(snapshot_path, projects)
+        snapshot_ctx = create_snapshot_context(
+            source_database=database_path,
+            snapshot_path=snapshot_path,
+            project_filters=projects,
+            scrub_preset=scrub_preset,
+        )
     except ShareExportError as exc:
-        console.print(f"[red]Project filtering failed:[/] {exc}")
+        console.print(f"[red]Snapshot preparation failed:[/] {exc}")
         if temp_dir is not None:
             temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
-    try:
-        scrub_summary = scrub_snapshot(snapshot_path, preset=scrub_preset)
-    except ShareExportError as exc:
-        console.print(f"[red]Snapshot scrubbing failed:[/] {exc}")
-        if temp_dir is not None:
-            temp_dir.cleanup()
-        raise typer.Exit(code=1) from exc
-
-    fts_enabled = build_search_indexes(snapshot_path)
+    scope = snapshot_ctx.scope
+    scrub_summary = snapshot_ctx.scrub_summary
+    fts_enabled = snapshot_ctx.fts_enabled
     if not fts_enabled:
         console.print("[yellow]FTS5 not available; viewer will fall back to LIKE search.[/]")
-
-    console.print("[cyan]Building materialized views for httpvfs performance...[/]")
-    build_materialized_views(snapshot_path)
-
-    console.print("[cyan]Adding SQLite indexes for viewer performance...[/]")
-    create_performance_indexes(snapshot_path)
-
-    console.print("[cyan]Finalizing snapshot (SQL hygiene optimizations)...[/]")
-    finalize_snapshot_for_export(snapshot_path)
+    else:
+        console.print("[green]✓ Built FTS5 index for snapshot search.[/]")
 
     settings = get_settings()
     storage_root = Path(settings.storage.root).expanduser()
@@ -422,52 +398,45 @@ def share_export(
             temp_dir = None
         return
 
+    export_config: dict[str, Any] = {
+        "inline_threshold": inline_threshold,
+        "detach_threshold": detach_threshold,
+        "chunk_threshold": chunk_threshold,
+        "chunk_size": chunk_size,
+        "scrub_preset": scrub_preset,
+        "projects": list(projects),
+    }
+
+    console.print("[cyan]Packaging attachments, viewer assets, and manifest...[/]")
     try:
-        attachments_manifest = bundle_attachments(
-            snapshot_path,
+        bundle_artifacts = build_bundle_assets(
+            snapshot_ctx.snapshot_path,
             output_path,
             storage_root=storage_root,
             inline_threshold=inline_threshold,
             detach_threshold=detach_threshold,
+            chunk_threshold=chunk_threshold,
+            chunk_size=chunk_size,
+            scope=scope,
+            project_filters=projects,
+            scrub_summary=scrub_summary,
+            hosting_hints=hosting_hints,
+            fts_enabled=fts_enabled,
+            export_config=export_config,
         )
     except ShareExportError as exc:
-        console.print(f"[red]Attachment packaging failed:[/] {exc}")
+        console.print(f"[red]Failed to build bundle assets:[/] {exc}")
         if temp_dir is not None:
             temp_dir.cleanup()
         raise typer.Exit(code=1) from exc
 
-    chunk_manifest = maybe_chunk_database(
-        snapshot_path,
-        output_path,
-        threshold_bytes=chunk_threshold,
-        chunk_bytes=chunk_size,
-    )
+    attachments_manifest = bundle_artifacts.attachments_manifest
+    chunk_manifest = bundle_artifacts.chunk_manifest
     if chunk_manifest:
         console.print(
             f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size']//1024} KiB.[/]"
         )
 
-    copy_viewer_assets(output_path)
-    viewer_data = export_viewer_data(snapshot_path, output_path, fts_enabled=fts_enabled)
-
-    console.print("[cyan]Writing manifest and helper docs...[/]")
-    try:
-        write_bundle_scaffolding(
-            output_path,
-            snapshot=snapshot_path,
-            scope=scope,
-            project_filters=projects,
-            scrub_summary=scrub_summary,
-            attachments_manifest=attachments_manifest,
-            chunk_manifest=chunk_manifest,
-            hosting_hints=hosting_hints,
-            viewer_data=viewer_data,
-        )
-    except ShareExportError as exc:
-        console.print(f"[red]Failed to scaffold bundle:[/] {exc}")
-        if temp_dir is not None:
-            temp_dir.cleanup()
-        raise typer.Exit(code=1) from exc
 
     if signing_key is not None:
         try:
@@ -719,6 +688,281 @@ def _start_preview_server(bundle_path: Path, host: str, port: int) -> ThreadingH
     server = ThreadingHTTPServer((host, port), PreviewRequestHandler)
     server.daemon_threads = True
     return server
+
+
+@share_app.command("update")
+def share_update(
+    bundle: Annotated[str, typer.Argument(help="Path to the existing bundle directory (e.g., your GitHub Pages repo).")],
+    projects: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            "-p",
+            help="Override project scope for this update (slugs or human keys). May be provided multiple times.",
+        ),
+    ] = None,
+    inline_threshold_override: Annotated[
+        Optional[int],
+        typer.Option("--inline-threshold", help="Override inline attachment threshold (bytes).", min=0),
+    ] = None,
+    detach_threshold_override: Annotated[
+        Optional[int],
+        typer.Option("--detach-threshold", help="Override detach attachment threshold (bytes).", min=0),
+    ] = None,
+    chunk_threshold_override: Annotated[
+        Optional[int],
+        typer.Option("--chunk-threshold", help="Override chunking threshold (bytes).", min=0),
+    ] = None,
+    chunk_size_override: Annotated[
+        Optional[int],
+        typer.Option("--chunk-size", help="Override chunk size when chunking is enabled.", min=1024),
+    ] = None,
+    scrub_preset_override: Annotated[
+        Optional[str],
+        typer.Option(
+            "--scrub-preset",
+            help="Override scrub preset (standard, strict, ...).",
+            case_sensitive=False,
+        ),
+    ] = None,
+    zip_bundle: Annotated[
+        bool,
+        typer.Option("--zip/--no-zip", help="Package the updated bundle into a ZIP archive.", show_default=True),
+    ] = False,
+    signing_key: Annotated[Optional[Path], typer.Option("--signing-key", help="Path to Ed25519 signing key (32-byte seed).")]=None,
+    signing_public_out: Annotated[Optional[Path], typer.Option("--signing-public-out", help="Write public key to this file after signing.")]=None,
+    age_recipients: Annotated[
+        Optional[list[str]],
+        typer.Option(
+            "--age-recipient",
+            help="Encrypt the ZIP archive with age using the provided recipient(s). May be passed multiple times.",
+        ),
+    ] = None,
+) -> None:
+    """Refresh an existing static mailbox bundle using the previous export settings."""
+
+    age_recipient_list = list(age_recipients or ())
+    bundle_path = _resolve_path(bundle)
+    if not bundle_path.exists() or not bundle_path.is_dir():
+        console.print(f"[red]Bundle path {bundle_path} does not exist or is not a directory.[/]")
+        raise typer.Exit(code=1)
+
+    manifest_path = bundle_path / "manifest.json"
+    if not manifest_path.exists():
+        console.print(f"[red]manifest.json not found inside {bundle_path}. Are you sure this is a bundle directory?[/]")
+        raise typer.Exit(code=1)
+
+    try:
+        stored_config = _load_bundle_export_config(bundle_path)
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to load existing bundle configuration:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    project_filters = list(projects) if projects else list(stored_config.projects)
+    scrub_preset = (scrub_preset_override or stored_config.scrub_preset or "standard").strip().lower()
+    if scrub_preset not in SCRUB_PRESETS:
+        console.print(
+            "[red]Invalid scrub preset override:[/] "
+            f"{scrub_preset}. Choose one of: {', '.join(SCRUB_PRESETS)}."
+        )
+        raise typer.Exit(code=1)
+
+    inline_threshold = inline_threshold_override if inline_threshold_override is not None else stored_config.inline_threshold
+    detach_threshold = detach_threshold_override if detach_threshold_override is not None else stored_config.detach_threshold
+    chunk_threshold = chunk_threshold_override if chunk_threshold_override is not None else stored_config.chunk_threshold
+    chunk_size = chunk_size_override if chunk_size_override is not None else stored_config.chunk_size
+
+    if inline_threshold < 0:
+        console.print("[red]Inline threshold must be non-negative.[/]")
+        raise typer.Exit(code=1)
+    if detach_threshold < 0:
+        console.print("[red]Detach threshold must be non-negative.[/]")
+        raise typer.Exit(code=1)
+    if chunk_threshold < 0:
+        console.print("[red]Chunk threshold must be non-negative.[/]")
+        raise typer.Exit(code=1)
+    if chunk_size < 1024:
+        console.print("[red]Chunk size must be at least 1024 bytes.[/]")
+        raise typer.Exit(code=1)
+
+    if detach_threshold <= inline_threshold:
+        console.print(
+            "[yellow]Adjusting detach threshold to exceed inline threshold to avoid conflicts.[/]"
+        )
+        detach_threshold = inline_threshold + max(1024, inline_threshold // 2 or 1)
+
+    existing_signature = (bundle_path / "manifest.sig.json").exists()
+
+    console.rule("[bold]Static Mailbox Update[/bold]")
+
+    try:
+        database_path = resolve_sqlite_database_path()
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to resolve SQLite database: {exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[cyan]Using database:[/] {database_path}")
+
+    hosting_hints = detect_hosting_hints(bundle_path)
+    if hosting_hints:
+        table = Table(title="Detected Hosting Targets")
+        table.add_column("Host")
+        table.add_column("Signals")
+        for hint in hosting_hints:
+            table.add_row(hint.title, "\n".join(hint.signals))
+        console.print(table)
+    else:
+        console.print("[dim]No hosting targets detected automatically; consult HOW_TO_DEPLOY.md for guidance.[/]")
+
+    attachments_manifest: dict[str, Any] = {}
+    chunk_manifest: Optional[dict[str, Any]] = None
+    scope = None
+    scrub_summary = None
+    fts_enabled = False
+
+    with tempfile.TemporaryDirectory(prefix="mailbox-share-update-") as temp_dir_name:
+        temp_path = Path(temp_dir_name)
+        snapshot_path = temp_path / "mailbox.sqlite3"
+        console.print(f"[cyan]Creating snapshot:[/] {snapshot_path}")
+        try:
+            snapshot_ctx = create_snapshot_context(
+                source_database=database_path,
+                snapshot_path=snapshot_path,
+                project_filters=project_filters,
+                scrub_preset=scrub_preset,
+            )
+        except ShareExportError as exc:
+            console.print(f"[red]Snapshot preparation failed:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        scope = snapshot_ctx.scope
+        scrub_summary = snapshot_ctx.scrub_summary
+        fts_enabled = snapshot_ctx.fts_enabled
+        if not fts_enabled:
+            console.print("[yellow]FTS5 not available; viewer will fall back to LIKE search.[/]")
+        else:
+            console.print("[green]✓ Built FTS5 index for snapshot search.[/]")
+
+        settings = get_settings()
+        storage_root = Path(settings.storage.root).expanduser()
+
+        export_config = {
+            "inline_threshold": inline_threshold,
+            "detach_threshold": detach_threshold,
+            "chunk_threshold": chunk_threshold,
+            "chunk_size": chunk_size,
+            "scrub_preset": scrub_preset,
+            "projects": project_filters,
+        }
+
+        console.print("[cyan]Packaging attachments, viewer assets, and manifest...[/]")
+        try:
+            bundle_artifacts = build_bundle_assets(
+                snapshot_ctx.snapshot_path,
+                temp_path,
+                storage_root=storage_root,
+                inline_threshold=inline_threshold,
+                detach_threshold=detach_threshold,
+                chunk_threshold=chunk_threshold,
+                chunk_size=chunk_size,
+                scope=scope,
+                project_filters=project_filters,
+                scrub_summary=scrub_summary,
+                hosting_hints=hosting_hints,
+                fts_enabled=fts_enabled,
+                export_config=export_config,
+            )
+        except ShareExportError as exc:
+            console.print(f"[red]Failed to build bundle assets:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        attachments_manifest = bundle_artifacts.attachments_manifest
+        chunk_manifest = bundle_artifacts.chunk_manifest
+        if chunk_manifest:
+            console.print(
+                f"[cyan]Chunked database into {chunk_manifest['chunk_count']} files of ~{chunk_manifest['chunk_size']//1024} KiB.[/]"
+            )
+
+        console.print(f"[cyan]Synchronizing updated bundle into:[/] {bundle_path}")
+        _copy_bundle_contents(temp_path, bundle_path)
+
+    assert scope is not None and scrub_summary is not None
+
+    if signing_key is not None:
+        try:
+            public_out_path = _resolve_path(signing_public_out) if signing_public_out else None
+            signature_info = sign_manifest(
+                bundle_path / "manifest.json",
+                signing_key,
+                bundle_path,
+                public_out=public_out_path,
+                overwrite=True,
+            )
+            console.print(
+                f"[green]✓ Signed manifest (Ed25519, public key {signature_info['public_key']})[/]"
+            )
+        except ShareExportError as exc:
+            console.print(f"[red]Manifest signing failed:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+    elif existing_signature:
+        console.print(
+            "[yellow]Existing manifest signature may no longer match. Re-run with --signing-key to refresh it.[/]"
+        )
+
+    archive_path: Optional[Path] = None
+    if zip_bundle:
+        archive_path = bundle_path.parent / f"{bundle_path.name}.zip"
+        console.print(f"[cyan]Packaging archive:[/] {archive_path}")
+        if archive_path.exists():
+            console.print(
+                f"[red]Archive already exists at {archive_path}. Remove it or specify --no-zip to skip packaging.[/]"
+            )
+            raise typer.Exit(code=1)
+        try:
+            package_directory_as_zip(bundle_path, archive_path)
+        except ShareExportError as exc:
+            console.print(f"[red]Failed to create ZIP archive:[/] {exc}")
+            raise typer.Exit(code=1) from exc
+
+    if age_recipient_list:
+        if not archive_path:
+            console.print("[yellow]Skipped age encryption because --zip was not enabled.[/]")
+        else:
+            console.print("[cyan]Encrypting archive with age...[/]")
+            try:
+                encrypted_path = encrypt_bundle(archive_path, age_recipient_list)
+                if encrypted_path:
+                    console.print(f"[green]✓ Encrypted archive written to {encrypted_path}[/]")
+            except ShareExportError as exc:
+                console.print(f"[red]age encryption failed:[/] {exc}")
+                raise typer.Exit(code=1) from exc
+
+    console.print("[green]✓ Updated SQLite snapshot for sharing.[/]")
+    console.print(
+        f"[green]✓ Applied '{scrub_summary.preset}' scrub (pseudonymized {scrub_summary.agents_pseudonymized}/{scrub_summary.agents_total} agents, "
+        f"{scrub_summary.secrets_replaced} secret tokens redacted, {scrub_summary.bodies_redacted} bodies replaced).[/]"
+    )
+    included_projects = ", ".join(record.slug for record in scope.projects)
+    console.print(f"[green]✓ Project scope includes: {included_projects or 'none'}[/]")
+    att_stats = attachments_manifest.get("stats", {})
+    console.print(
+        "[green]✓ Packaged attachments: "
+        f"{att_stats.get('inline', 0)} inline, "
+        f"{att_stats.get('copied', 0)} copied, "
+        f"{att_stats.get('externalized', 0)} external, "
+        f"{att_stats.get('missing', 0)} missing "
+        f"(inline ≤ {inline_threshold} B, external ≥ {detach_threshold} B).[/]"
+    )
+    if fts_enabled:
+        console.print("[green]✓ Built FTS5 index for full-text viewer search.[/]")
+    else:
+        console.print("[yellow]Search fallback active (FTS5 unavailable in current sqlite build).[/]")
+    if chunk_manifest:
+        console.print("[green]✓ Chunk manifest refreshed (mailbox.sqlite3.config.json updated).[/]")
+        console.print("[dim]Existing chunk files beyond the new chunk count remain on disk; remove them manually if needed.[/]")
+
+    if zip_bundle and archive_path:
+        console.print(f"[green]✓ Bundle archive available at {archive_path}[/]")
 
 
 @share_app.command("preview")
@@ -989,6 +1233,93 @@ def _resolve_path(raw_path: str | Path) -> Path:
     path = Path(raw_path).expanduser()
     path = (Path.cwd() / path).resolve() if not path.is_absolute() else path.resolve()
     return path
+
+
+@dataclass(slots=True)
+class StoredExportConfig:
+    projects: list[str]
+    inline_threshold: int
+    detach_threshold: int
+    chunk_threshold: int
+    chunk_size: int
+    scrub_preset: str
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_bundle_export_config(bundle_dir: Path) -> StoredExportConfig:
+    manifest_path = bundle_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise ShareExportError(f"manifest.json not found in {bundle_dir}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ShareExportError(f"Failed to parse manifest.json: {exc}") from exc
+
+    export_config = manifest.get("export_config", {}) or {}
+    attachments_section = manifest.get("attachments", {}) or {}
+    attachments_config = attachments_section.get("config", {}) or {}
+    project_scope = manifest.get("project_scope", {}) or {}
+    scrub_section = manifest.get("scrub", {}) or {}
+    database_section = manifest.get("database", {}) or {}
+
+    raw_projects = export_config.get("projects", project_scope.get("requested", []))
+    projects = [str(p) for p in raw_projects if isinstance(p, str)]
+
+    scrub_preset = str(export_config.get("scrub_preset") or scrub_section.get("preset") or "standard")
+
+    inline_threshold = _coerce_int(
+        export_config.get("inline_threshold") or attachments_config.get("inline_threshold"),
+        INLINE_ATTACHMENT_THRESHOLD,
+    )
+    detach_threshold = _coerce_int(
+        export_config.get("detach_threshold") or attachments_config.get("detach_threshold"),
+        DETACH_ATTACHMENT_THRESHOLD,
+    )
+    chunk_threshold = _coerce_int(export_config.get("chunk_threshold"), DEFAULT_CHUNK_THRESHOLD)
+
+    chunk_manifest = database_section.get("chunk_manifest") or {}
+    chunk_size = _coerce_int(
+        export_config.get("chunk_size") or chunk_manifest.get("chunk_size"),
+        DEFAULT_CHUNK_SIZE,
+    )
+
+    chunk_config: dict[str, Any] = {}
+    chunk_config_path = bundle_dir / "mailbox.sqlite3.config.json"
+    if chunk_config_path.exists():
+        try:
+            chunk_config = json.loads(chunk_config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            chunk_config = {}
+    if chunk_config:
+        chunk_size = _coerce_int(chunk_config.get("chunk_size"), chunk_size)
+        chunk_threshold = _coerce_int(chunk_config.get("threshold_bytes"), chunk_threshold)
+
+    return StoredExportConfig(
+        projects=projects,
+        inline_threshold=inline_threshold,
+        detach_threshold=detach_threshold,
+        chunk_threshold=chunk_threshold,
+        chunk_size=chunk_size,
+        scrub_preset=scrub_preset,
+    )
+
+
+def _copy_bundle_contents(source: Path, destination: Path) -> None:
+    for root, _, files in os.walk(source):
+        root_path = Path(root)
+        relative = root_path.relative_to(source)
+        dest_dir = destination / relative
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for filename in files:
+            src_file = root_path / filename
+            dest_file = dest_dir / filename
+            shutil.copy2(src_file, dest_file)
 
 
 @app.command("clear-and-reset-everything")
