@@ -528,7 +528,7 @@ Once messages exist, visit `/mail`, click your project, then open an agent inbox
 
 ## Static Mailbox Export (Share & Distribute Archives)
 
-The `share` command group provides a complete pipeline for exporting mailbox archives into self-contained static HTML bundles. These bundles can be distributed to stakeholders, auditors, or team members who need read-only access to message history without running the full MCP Agent Mail server.
+The `share` command group exports a project’s mailbox into a portable, read‑only bundle that anyone can review in a browser. It’s designed for auditors, stakeholders, or teammates who need to browse threads, search history, or prove delivery timelines without spinning up the full MCP Agent Mail stack.
 
 ### Why export to static bundles?
 
@@ -546,13 +546,12 @@ The `share` command group provides a complete pipeline for exporting mailbox arc
 
 Each bundle contains:
 
-- **Static HTML viewer**: A single-page application with three-pane interface (projects, threads, messages) that runs entirely in the browser. No server required after the initial file serving.
-- **SQLite database snapshot**: A read-only copy of the messages, agents, and metadata, loaded via SQL.js (WebAssembly).
-- **Full-text search**: FTS5 search index embedded in the database allows fast subject/body searches entirely client-side.
-- **Attachments**: Images and files, either bundled directly (for small files) or marked as external references (for large files).
-- **Integrity metadata**: SHA-256 hashes for all assets (vendor libraries, database, attachments) stored in `manifest.json` for verification.
-- **Optional signature**: Ed25519 cryptographic signature over the manifest to prove authenticity and detect tampering.
-- **Security hardening**: Content Security Policy headers and DOMPurify sanitization protect against XSS attacks in message bodies.
+- **Self-contained**: Everything ships in a single directory (HTML, CSS/JS, SQLite snapshot, attachments). Drop it on a static host or open it locally.
+- **Rich reader UI**: Gmail-style inbox with project filters, search, and full-thread rendering—each message is shown with its metadata and Markdown body, just like in the live web UI.
+- **Fast search & filters**: FTS-backed search and precomputed per-message summaries keep scrolling and filtering responsive even with large archives.
+- **Verifiable integrity**: SHA-256 hashes for every asset plus optional Ed25519 signing make authenticity and tampering checks straightforward.
+- **Chunk-friendly archives**: Large databases can be chunked for httpvfs streaming; a companion `chunks.sha256` file lists digests for each chunk so clients can trust streamed blobs without recomputing hashes.
+- **One-click hosting**: The interactive wizard can publish straight to GitHub Pages or Cloudflare Pages, or you can serve the bundle locally with the CLI preview command.
 
 ### Quick Start: Interactive Deployment Wizard
 
@@ -805,7 +804,8 @@ The export process:
 4. Generates `manifest.json` with SHA-256 hashes for all assets
 5. Optionally signs the manifest with Ed25519 (produces `manifest.sig.json`)
 6. Packages everything into a ZIP archive (optional, enabled by default)
-7. Optionally encrypts the ZIP with age (produces `bundle.zip.age`)
+7. If chunking is enabled, writes the segmented database plus a `chunks.sha256` manifest so streamed pages can be verified cheaply
+8. Optionally encrypts the ZIP with age (produces `bundle.zip.age`)
 
 **2. Preview locally**
 

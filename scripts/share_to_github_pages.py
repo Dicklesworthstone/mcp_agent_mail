@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1173,6 +1174,11 @@ def main() -> None:
         if signing_pub:
             console.print(f"[green]✓ Signing public key: {signing_pub}[/]")
 
+        console.print(
+            "\n[cyan]To refresh this bundle later, run:[/]\n  uv run python -m mcp_agent_mail.cli share update "
+            f"{shlex.quote(str(output_path))}"
+        )
+
         save_config({
             "project_indices": selected_indices,
             "project_count": len(selected_projects),
@@ -1213,6 +1219,18 @@ def main() -> None:
             if signing_pub:
                 console.print(f"\n[cyan]Signing public key saved to:[/] {signing_pub}")
                 console.print("[dim]Share this with viewers to verify bundle authenticity[/]")
+
+            console.print(
+                "\n[cyan]To refresh this deployment later, run:[/]\n"
+                f"  uv run python -m mcp_agent_mail.cli share update {shlex.quote(str(bundle_path))}\n"
+                f"  wrangler pages deploy {shlex.quote(str(bundle_path))} --project-name {deployment.get('project_name', 'mailbox-viewer')} --branch main"
+            )
+
+            console.print(
+                "\n[cyan]To publish fresh mailbox data later, run:[/]\n"
+                f"  uv run python -m mcp_agent_mail.cli share update {shlex.quote(str(bundle_path))}\n"
+                "  git add . && git commit -m \"Refresh mailbox\" && git push"
+            )
 
             save_config({
                 "project_indices": selected_indices,
