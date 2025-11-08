@@ -174,6 +174,10 @@ Pitfalls to avoid
 
 ```
 
+## Executive Orchestration Tool
+
+For autonomous company operations we ship an Executive Orchestration Tool that generates structured executive briefs, integrates with the beads task ledger, and dispatches them through MCP Agent Mail. See [`docs/EXECUTIVE_ORCHESTRATION_TOOL.md`](docs/EXECUTIVE_ORCHESTRATION_TOOL.md) for setup, dry-run/live commands, scheduling pointers, and roadmap ideas.
+
 ## Core ideas (at a glance)
 
 - HTTP-only FastMCP server (Streamable HTTP). No SSE, no STDIO.
