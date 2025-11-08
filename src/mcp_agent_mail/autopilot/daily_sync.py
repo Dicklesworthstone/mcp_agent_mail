@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import NoResultFound
 
 from ..config import get_settings
@@ -113,7 +114,10 @@ async def _prepare_briefs(
     agent_map = await get_agent_map(project.id, agent_names)
     missing = [name for name in agent_names if name not in agent_map]
     if missing:
-        raise RuntimeError(f"Agents not registered for project {project_key}: {', '.join(missing)}")
+        project_identifier = project.human_key or project.slug or str(project.id)
+        raise RuntimeError(
+            f"Agents not registered for project {project_identifier}: {', '.join(missing)}"
+        )
 
     serialised = []
     for record in tasks:
@@ -186,6 +190,30 @@ async def _ensure_autopilot_agent(project: Project) -> Agent:
 _load_local_env()
 
 
+def _normalized_async_database_url(url: str) -> str:
+    """Return URL updated to use an async driver when possible."""
+
+    try:
+        parsed = make_url(url)
+    except Exception:
+        return url
+
+    driver = parsed.drivername
+    if driver.startswith("sqlite"):
+        if "+aiosqlite" in driver:
+            return url
+        return str(parsed.set(drivername="sqlite+aiosqlite"))
+    if driver.startswith("postgresql"):
+        if "+asyncpg" in driver:
+            return url
+        return str(parsed.set(drivername="postgresql+asyncpg"))
+    if driver.startswith("mysql"):
+        if "+aiomysql" in driver:
+            return url
+        return str(parsed.set(drivername="mysql+aiomysql"))
+    return url
+
+
 async def _send_messages(
     *,
     briefs: Iterable[AgentBrief],
@@ -242,8 +270,12 @@ async def run_daily_sync(
     """Execute daily sync orchestration."""
 
     db_url = os.environ.get("DATABASE_URL")
-    if not db_url or not db_url.startswith("sqlite+"):
+    if not db_url:
         os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///messages.db"
+    else:
+        normalized_url = _normalized_async_database_url(db_url)
+        if normalized_url != db_url:
+            os.environ["DATABASE_URL"] = normalized_url
 
     await ensure_schema(get_settings())
     resolved_run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
