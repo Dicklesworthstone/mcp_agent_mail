@@ -114,3 +114,52 @@ class ProjectSiblingSuggestion(SQLModel, table=True):
     evaluated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     confirmed_ts: Optional[datetime] = Field(default=None)
     dismissed_ts: Optional[datetime] = Field(default=None)
+
+
+class Task(SQLModel, table=True):
+    """High-level work item tracked for autonomous coordination."""
+
+    __tablename__ = "tasks"
+    __table_args__ = (UniqueConstraint("project_id", "external_id", name="uq_task_external"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    external_id: Optional[str] = Field(default=None, max_length=128)
+    title: str = Field(max_length=512)
+    description: str = Field(default="", max_length=8192)
+    status: str = Field(default="open", max_length=32)
+    priority: str = Field(default="normal", max_length=16)
+    bead_value: int = Field(default=0)
+    due_ts: Optional[datetime] = None
+    owner_agent_id: Optional[int] = Field(default=None, foreign_key="agents.id")
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TaskAssignment(SQLModel, table=True):
+    """History of agent-task interactions and commitments."""
+
+    __tablename__ = "task_assignments"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    task_id: int = Field(foreign_key="tasks.id", index=True)
+    agent_id: int = Field(foreign_key="agents.id", index=True)
+    status: str = Field(default="proposed", max_length=32)
+    bead_stake: int = Field(default=0)
+    notes: str = Field(default="", max_length=4096)
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BeadTransaction(SQLModel, table=True):
+    """Ledger of incentive adjustments for agents."""
+
+    __tablename__ = "beads_transactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    agent_id: int = Field(foreign_key="agents.id", index=True)
+    task_id: Optional[int] = Field(default=None, foreign_key="tasks.id", index=True)
+    delta: int = Field()
+    reason: str = Field(default="", max_length=512)
+    run_id: Optional[str] = Field(default=None, max_length=64)
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
