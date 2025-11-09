@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -119,7 +120,14 @@ class AsyncFileLock:
         return None
 
     def _cleanup_if_stale(self) -> bool:
-        """Remove lock and metadata when the previous holder is gone and the lock is stale."""
+        """Remove lock and metadata when the lock is stale.
+
+        A lock is considered stale if EITHER:
+        1. The owning process no longer exists, OR
+        2. The lock age exceeds the stale timeout
+
+        This ensures locks are cleaned up promptly when either condition is met.
+        """
         if not self._path.exists():
             return False
         now = time.time()
@@ -141,14 +149,26 @@ class AsyncFileLock:
         else:
             with contextlib.suppress(Exception):
                 age = now - self._path.stat().st_mtime
-        if owner_alive:
+
+        # Lock is stale if EITHER the owner is dead OR the age exceeds timeout
+        # Special case: if stale_timeout is 0, only check owner liveness (ignore age)
+        is_stale = False
+        if not owner_alive:
+            # Owner process is dead - lock is stale regardless of age
+            is_stale = True
+        elif self._stale_timeout > 0 and isinstance(age, (int, float)) and age >= self._stale_timeout:
+            # Lock is too old - stale regardless of owner status
+            # (only if stale_timeout > 0, otherwise age check is disabled)
+            is_stale = True
+
+        if not is_stale:
             return False
-        if isinstance(age, (int, float)) and age < self._stale_timeout:
-            return False
+
+        # Clean up stale lock
         with contextlib.suppress(Exception):
-            self._path.unlink()
+            self._path.unlink(missing_ok=True)
         with contextlib.suppress(Exception):
-            self._metadata_path.unlink()
+            self._metadata_path.unlink(missing_ok=True)
         return True
 
     def _write_metadata(self) -> None:
@@ -161,13 +181,25 @@ class AsyncFileLock:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         if self._held:
+            # Release the file lock first
             with contextlib.suppress(Exception):
                 await _to_thread(self._lock.release)
+
+            # Small delay on Windows to ensure file handles are released
+            if sys.platform == 'win32':
+                await asyncio.sleep(0.01)
+
+            # Delete metadata file
             with contextlib.suppress(Exception):
-                await _to_thread(self._metadata_path.unlink)
+                await _to_thread(self._metadata_path.unlink, missing_ok=True)
+
+            # Delete lock file
             with contextlib.suppress(Exception):
-                await _to_thread(self._path.unlink)
+                await _to_thread(self._path.unlink, missing_ok=True)
+
             self._held = False
+
+        # Clean up process-level locks
         if self._loop_key is not None:
             _PROCESS_LOCK_OWNERS.pop(self._loop_key, None)
         if self._process_lock_held and self._process_lock:
@@ -185,17 +217,46 @@ class AsyncFileLock:
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
+        """Check if a process with the given PID is alive (cross-platform)."""
         if pid <= 0:
             return False
+
+        # Try psutil first if available (most reliable cross-platform method)
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
+            import psutil
+            return psutil.pid_exists(pid)
+        except ImportError:
+            pass
+
+        # Platform-specific fallbacks
+        if sys.platform == 'win32':
+            # Windows: Use ctypes to call OpenProcess
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                SYNCHRONIZE = 0x00100000
+                # Try to open the process with minimal permissions
+                handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            except Exception:
+                # If ctypes fails, assume process doesn't exist
+                return False
+        else:
+            # Unix/Linux/macOS: Use os.kill(pid, 0)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                # Process exists but we don't have permission to signal it
+                return True
+            except OSError:
+                return False
             return True
-        except OSError:
-            return False
-        return True
 
 
 @asynccontextmanager
@@ -273,7 +334,17 @@ def collect_lock_status(settings: Settings) -> dict[str, Any]:
             stale_threshold = AsyncFileLock(lock_path)._stale_timeout
             info["stale_timeout_seconds"] = stale_threshold
             age_val = info.get("age_seconds")
-            is_stale = bool(metadata) and not info["owner_alive"] and isinstance(age_val, (int, float)) and age_val >= stale_threshold
+            # Lock is stale if EITHER the owner is dead OR the age exceeds timeout
+            # Special case: if stale_timeout is 0, only check owner liveness (ignore age)
+            is_stale = False
+            if bool(metadata):
+                if not info["owner_alive"]:
+                    # Owner process is dead - lock is stale
+                    is_stale = True
+                elif stale_threshold > 0 and isinstance(age_val, (int, float)) and age_val >= stale_threshold:
+                    # Lock is too old - stale
+                    # (only if stale_timeout > 0, otherwise age check is disabled)
+                    is_stale = True
             info["stale_suspected"] = is_stale
 
             summary["total"] += 1
