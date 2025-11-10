@@ -2518,6 +2518,142 @@ def guard_status(
     table.add_row("pre-push", "present" if pre_push.exists() else "missing")
     console.print(table)
 
+@guard_app.command("check")
+def guard_check(
+    stdin_nul: bool = typer.Option(False, "--stdin-nul", help="Read NUL-delimited paths from STDIN"),
+    advisory: bool = typer.Option(False, "--advisory", help="Advisory mode: print conflicts but exit 0"),
+    repo: Annotated[Path, typer.Option("--repo", help="Path to git repo (defaults to detected root)")] = Path(),
+) -> None:
+    """
+    Check paths (from STDIN when --stdin-nul) against active exclusive file_reservations.
+
+    Unifies guard semantics across hooks and CLI:
+    - Normalizes paths to repo-root relative, honoring core.ignorecase
+    - Uses Git wildmatch semantics via pathspec when available, with fnmatch fallback
+    - Prints conflicts and returns non-zero unless --advisory is set
+    """
+    settings = get_settings()
+    if not settings.worktrees_enabled:
+        raise typer.Exit(code=0)
+    agent_name = os.environ.get("AGENT_NAME")
+    if not agent_name:
+        console.print("[red]AGENT_NAME environment variable is required.[/]")
+        raise typer.Exit(code=1)
+
+    def _git(cwd: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+
+    repo_root = repo
+    if not str(repo_root):
+        guess = _git(Path.cwd(), "rev-parse", "--show-toplevel")
+        repo_root = Path(guess) if guess else Path.cwd()
+    repo_root = repo_root.expanduser().resolve()
+
+    # Map repo path to project archive
+    try:
+        from mcp_agent_mail.app import _compute_project_slug as _compute_slug  # type: ignore
+    except Exception:
+        console.print("[red]Internal error: cannot import slug helper.[/]")
+        raise typer.Exit(code=1) from None
+    slug_value = _compute_slug(str(repo_root))
+    archive = asyncio.run(ensure_archive(settings, slug_value))
+
+    # Read NUL-delimited paths from STDIN
+    paths: list[str] = []
+    if stdin_nul:
+        data = sys.stdin.buffer.read()
+        if data:
+            items = [p for p in data.decode("utf-8", "ignore").split("\x00") if p]
+            # De-duplicate while preserving order
+            seen = set()
+            for p in items:
+                if p not in seen:
+                    seen.add(p)
+                    paths.append(p)
+    if not paths:
+        raise typer.Exit(code=0)
+
+    # Matching semantics
+    ignorecase = False
+    ic = _git(repo_root, "config", "--get", "core.ignorecase")
+    if ic and ic.strip().lower() == "true":
+        ignorecase = True
+    try:
+        from pathspec import PathSpec as _PS  # type: ignore
+    except Exception:
+        _PS = None  # type: ignore
+    import fnmatch as _fn
+
+    def _normalize(p: str) -> str:
+        s = p.replace("\\", "/").lstrip("/")
+        return s.lower() if ignorecase else s
+
+    def _compile(pattern: str):
+        patt = pattern.lower() if ignorecase else pattern
+        if _PS is not None:
+            try:
+                return _PS.from_lines("gitwildmatch", [patt])
+            except Exception:
+                return None
+        return None
+
+    def _match(spec, a: str, b: str) -> bool:
+        aa = _normalize(a)
+        bb = _normalize(b)
+        if spec is not None:
+            try:
+                return bool(spec.match_file(aa))
+            except Exception:
+                pass
+        return _fn.fnmatchcase(aa, bb) or _fn.fnmatchcase(bb, aa) or (aa == bb)
+
+    fr_dir = archive.root / "file_reservations"
+    if not fr_dir.exists():
+        raise typer.Exit(code=0)
+    now = datetime.now(timezone.utc)
+    conflicts: list[tuple[str, str, str]] = []
+
+    for candidate in sorted(fr_dir.glob("*.json")):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("agent") == agent_name:
+            continue
+        if not data.get("exclusive", True):
+            continue
+        expires = data.get("expires_ts")
+        if expires:
+            try:
+                if datetime.fromisoformat(expires) < now:
+                    continue
+            except Exception:
+                pass
+        pattern = (data.get("path_pattern") or "").strip()
+        if not pattern:
+            continue
+        spec = _compile(pattern)
+        for path_value in paths:
+            if _match(spec, path_value, pattern):
+                conflicts.append((path_value, data.get("agent", ""), pattern))
+
+    if conflicts:
+        console.print("[red]Exclusive file_reservation conflicts detected:[/]")
+        for path_value, agent, pattern in conflicts:
+            console.print(f"  - {path_value} matches file_reservation '{pattern}' held by [bold]{agent}[/]")
+        if advisory:
+            console.print("[yellow]Advisory mode: not blocking (set AGENT_MAIL_GUARD_MODE=block to enforce).[/]")
+            raise typer.Exit(code=0)
+        else:
+            console.print("[yellow]Resolve conflicts or release file_reservations before proceeding.[/]")
+            console.print("[dim]Hints: set AGENT_MAIL_GUARD_MODE=warn for advisory, or AGENT_MAIL_BYPASS=1 to bypass in emergencies.[/]")
+            raise typer.Exit(code=1)
+    raise typer.Exit(code=0)
+
 @projects_app.command("adopt")
 def projects_adopt(
     source: Annotated[str, typer.Argument(..., help="Old project slug or human key")],
