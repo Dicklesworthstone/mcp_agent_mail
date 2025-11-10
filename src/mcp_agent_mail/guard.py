@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 from pathlib import Path
 
 from .config import Settings
@@ -36,6 +37,14 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "",
         f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
         f"STORAGE_ROOT = Path(\"{storage_root}\")",
+        "",
+        "# Global gate: if not explicitly enabled, this hook is a no-op.",
+        "if (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or \"0\").strip().lower() not in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
+        "    sys.exit(0)",
+        "",
+        "# Advisory/blocking mode: default to 'block' unless explicitly set to 'warn'.",
+        "MODE = (os.environ.get(\"AGENT_MAIL_GUARD_MODE\",\"block\") or \"block\").strip().lower()",
+        "ADVISORY = MODE in {\"warn\",\"advisory\",\"adv\"}",
         "AGENT_NAME = os.environ.get(\"AGENT_NAME\")",
         "if not AGENT_NAME:",
         "    sys.stderr.write(\"[pre-commit] AGENT_NAME environment variable is required.\\n\")",
@@ -87,8 +96,12 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "    sys.stderr.write(\"[pre-commit] Exclusive file_reservation conflicts detected:\\n\")",
         "    for path_value, agent_name, pattern in conflicts:",
         "        sys.stderr.write(f\"  - {path_value} matches file_reservation '{pattern}' held by {agent_name}\\n\")",
-        "    sys.stderr.write(\"Resolve conflicts or release file_reservations before committing.\\n\")",
-        "    sys.exit(1)",
+        "    if ADVISORY:",
+        "        sys.stderr.write(\"[pre-commit] Advisory mode: not blocking commit (set AGENT_MAIL_GUARD_MODE=block to enforce).\\n\")",
+        "        sys.exit(0)",
+        "    else:",
+        "        sys.stderr.write(\"Resolve conflicts or release file_reservations before committing.\\n\")",
+        "        sys.exit(1)",
         "",
         "sys.exit(0)",
     ]
@@ -99,9 +112,41 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
     """Install the pre-commit guard for the given project into the repo."""
 
     archive = await ensure_archive(settings, project_slug)
-    hooks_dir = repo_path / ".git" / "hooks"
-    if not hooks_dir.is_dir():
-        raise ValueError(f"No git hooks directory at {hooks_dir}")
+
+    def _git(cwd: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+
+    def _resolve_hooks_dir(repo: Path) -> Path:
+        # Prefer core.hooksPath if configured
+        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
+        if hooks_path:
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")):
+                resolved = Path(hooks_path)
+            else:
+                # Resolve relative to repo root
+                root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
+                resolved = Path(root) / hooks_path
+            return resolved
+        # Fall back to git-dir/hooks
+        git_dir = _git(repo, "rev-parse", "--git-dir")
+        if git_dir:
+            g = Path(git_dir)
+            if not g.is_absolute():
+                g = repo / g
+            return g / "hooks"
+        # Last resort: traditional path
+        return repo / ".git" / "hooks"
+
+    hooks_dir = _resolve_hooks_dir(repo_path)
+    if not hooks_dir.parent.exists() and hooks_dir.name != "hooks":
+        # Ensure parent for custom hooksPath exists
+        await asyncio.to_thread(hooks_dir.parent.mkdir, parents=True, exist_ok=True)
+    if not hooks_dir.exists():
+        await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
 
     hook_path = hooks_dir / "pre-commit"
     script = render_precommit_script(archive)
