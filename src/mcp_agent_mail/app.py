@@ -5513,8 +5513,15 @@ def build_mcp_server() -> FastMCP:
 
     # --- Build slots (coarse concurrency control) --------------------------------------------
 
+    def _safe_component(value: str) -> str:
+        # Keep it simple and dependency-free: replace common problematic filesystem chars
+        safe = value.strip()
+        for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+            safe = safe.replace(ch, "_")
+        return safe or "unknown"
+
     def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
-        safe = slot.strip().replace("/", "_").replace("\\", "_")
+        safe = _safe_component(slot)
         return archive.root / "build_slots" / safe
 
     def _compute_branch(path: str) -> Optional[str]:
@@ -5559,6 +5566,9 @@ def build_mcp_server() -> FastMCP:
         """
         Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
         """
+        if not settings.worktrees_enabled:
+            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
+            return {"granted": None, "conflicts": [], "disabled": True}
         project = await _get_project_by_identifier(project_key)
         archive = await ensure_archive(settings, project.slug)
         now = datetime.now(timezone.utc)
@@ -5567,7 +5577,7 @@ def build_mcp_server() -> FastMCP:
         active = _read_active_slots(slot_path, now)
 
         branch = _compute_branch(project.human_key)
-        holder_id = f"{agent_name}__{branch or 'unknown'}"
+        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         lease_path = slot_path / f"{holder_id}.json"
 
         conflicts: list[dict[str, Any]] = []
@@ -5603,12 +5613,15 @@ def build_mcp_server() -> FastMCP:
         """
         Extend expiry for an existing build slot lease. No-op if missing.
         """
+        if not settings.worktrees_enabled:
+            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
+            return {"renewed": False, "expires_ts": None, "disabled": True}
         project = await _get_project_by_identifier(project_key)
         archive = await ensure_archive(settings, project.slug)
         now = datetime.now(timezone.utc)
         slot_path = _slot_dir(archive, slot)
         branch = _compute_branch(project.human_key)
-        holder_id = f"{agent_name}__{branch or 'unknown'}"
+        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         lease_path = slot_path / f"{holder_id}.json"
         try:
             current = json.loads(lease_path.read_text(encoding="utf-8"))
@@ -5631,12 +5644,15 @@ def build_mcp_server() -> FastMCP:
         """
         Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
         """
+        if not settings.worktrees_enabled:
+            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
+            return {"released": False, "released_at": _iso(datetime.now(timezone.utc)), "disabled": True}
         project = await _get_project_by_identifier(project_key)
         archive = await ensure_archive(settings, project.slug)
         now = datetime.now(timezone.utc)
         slot_path = _slot_dir(archive, slot)
         branch = _compute_branch(project.human_key)
-        holder_id = f"{agent_name}__{branch or 'unknown'}"
+        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         lease_path = slot_path / f"{holder_id}.json"
         released = False
         try:
