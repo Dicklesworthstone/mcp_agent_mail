@@ -5730,16 +5730,24 @@ def build_mcp_server() -> FastMCP:
         - If both are absent, error
         """
         await ensure_schema()
-        key = (product_key or name or "").strip()
-        if not key:
+        key_raw = (product_key or name or "").strip()
+        if not key_raw:
             raise ToolExecutionError("INVALID_ARGUMENT", "Provide product_key or name.")
         async with get_session() as session:
-            prod = await _get_product_by_key(session, key)
+            prod = await _get_product_by_key(session, key_raw)
             if prod is None:
-                # Create with product_uid if key looks like a uid; else generate a uid and set name
+                # Create with strict uid pattern; otherwise generate uid and normalize name
                 import uuid as _uuid
-                uid = key if len(key) >= 8 else _uuid.uuid4().hex[:20]
-                prod = Product(product_uid=uid, name=(name or key))
+                import re as _re
+                uid_pattern = _re.compile(r"^[A-Fa-f0-9]{8,64}$")
+                if product_key and uid_pattern.fullmatch(product_key.strip()):
+                    uid = product_key.strip().lower()
+                else:
+                    uid = _uuid.uuid4().hex[:20]
+                display_name = (name or key_raw).strip()
+                # Collapse internal whitespace and cap length
+                display_name = " ".join(display_name.split())[:255] or uid
+                prod = Product(product_uid=uid, name=display_name)
                 session.add(prod)
                 await session.commit()
                 await session.refresh(prod)
@@ -5788,6 +5796,27 @@ def build_mcp_server() -> FastMCP:
         """
         Inspect product and list linked projects.
         """
+        # Safe runner that works even if an event loop is already running
+        def _run_coro_sync(coro):
+            try:
+                asyncio.get_running_loop()
+                # Run in a separate thread to avoid nested loop issues
+            except RuntimeError:
+                return asyncio.run(coro)
+            import threading  # type: ignore
+            import queue  # type: ignore
+            q: "queue.Queue[tuple[bool, Any]]" = queue.Queue()
+            def _runner():
+                try:
+                    q.put((True, asyncio.run(coro)))
+                except Exception as e:
+                    q.put((False, e))
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start()
+            ok, val = q.get()
+            if ok:
+                return val
+            raise val
         async def _load() -> dict[str, Any]:
             await ensure_schema()
             async with get_session() as session:
@@ -5811,7 +5840,7 @@ def build_mcp_server() -> FastMCP:
                     "projects": projects,
                 }
         # Run async in a synchronous resource
-        return asyncio.get_event_loop().run_until_complete(_load())
+        return _run_coro_sync(_load())
 
     @mcp.tool(name="search_messages_product")
     @_instrument_tool("search_messages_product", cluster=CLUSTER_PRODUCT, capabilities={"search"})
@@ -5870,6 +5899,141 @@ def build_mcp_server() -> FastMCP:
             return ToolResult(structured_content={"result": items})
         except Exception:
             return items
+
+    @mcp.tool(name="fetch_inbox_product")
+    @_instrument_tool("fetch_inbox_product", cluster=CLUSTER_PRODUCT, capabilities={"messaging", "read"})
+    async def fetch_inbox_product(
+        ctx: Context,
+        product_key: str,
+        agent_name: str,
+        limit: int = 20,
+        urgent_only: bool = False,
+        include_bodies: bool = False,
+        since_ts: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Retrieve recent messages for an agent across all projects linked to a product (non-mutating).
+        """
+        await ensure_schema()
+        # Collect linked projects
+        async with get_session() as session:
+            prod = await _get_product_by_key(session, product_key.strip())
+            if prod is None:
+                raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+            proj_rows = await session.execute(
+                select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
+                    ProductProjectLink.product_id == cast(Any, prod.id)
+                )
+            )
+            projects: list[Project] = list(proj_rows.scalars().all())
+        # For each project, if agent exists, list inbox items
+        messages: list[dict[str, Any]] = []
+        for project in projects:
+            try:
+                ag = await _get_agent(project, agent_name)
+            except Exception:
+                continue
+            proj_items = await _list_inbox(project, ag, limit, urgent_only, include_bodies, since_ts)
+            for item in proj_items:
+                item["project_id"] = item.get("project_id") or project.id
+                messages.append(item)
+        # Sort by created_ts desc and trim to limit
+        def _dt_key(it: dict[str, Any]) -> float:
+            ts = _parse_iso(str(it.get("created_ts") or ""))
+            return ts.timestamp() if ts else 0.0
+        messages.sort(key=_dt_key, reverse=True)
+        return messages[: max(0, int(limit))]
+
+    @mcp.tool(name="summarize_thread_product")
+    @_instrument_tool("summarize_thread_product", cluster=CLUSTER_PRODUCT, capabilities={"summarization", "search"})
+    async def summarize_thread_product(
+        ctx: Context,
+        product_key: str,
+        thread_id: str,
+        include_examples: bool = False,
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+        per_thread_limit: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """
+        Summarize a thread (by id or thread key) across all projects linked to a product.
+        """
+        await ensure_schema()
+        sender_alias = aliased(Agent)
+        try:
+            seed_id = int(thread_id)
+        except ValueError:
+            seed_id = None
+        criteria = [Message.thread_id == thread_id]
+        if seed_id is not None:
+            criteria.append(Message.id == seed_id)
+
+        async with get_session() as session:
+            prod = await _get_product_by_key(session, product_key.strip())
+            if prod is None:
+                raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+            proj_ids_rows = await session.execute(
+                select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
+            )
+            proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
+            if not proj_ids:
+                return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
+            stmt = (
+                select(Message, sender_alias.name)
+                .join(sender_alias, Message.sender_id == sender_alias.id)
+                .where(cast(Any, Message.project_id).in_(proj_ids), or_(*criteria))
+                .order_by(asc(Message.created_ts))
+            )
+            if per_thread_limit:
+                stmt = stmt.limit(per_thread_limit)
+            rows = (await session.execute(stmt)).all()
+        summary = _summarize_messages(rows)
+
+        # Optional LLM refinement (same as project-level)
+        if llm_mode and get_settings().llm.enabled:
+            try:
+                excerpts: list[str] = []
+                for message, sender_name in rows[:15]:
+                    excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
+                if excerpts:
+                    system = (
+                        "You are a senior engineer. Produce a concise JSON summary with keys: "
+                        "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
+                        "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
+                    )
+                    user = "\n\n".join(excerpts)
+                    llm_resp = await complete_system_user(system, user, model=llm_model)
+                    parsed = _parse_json_safely(llm_resp.content)
+                    if parsed:
+                        for key in (
+                            "participants",
+                            "key_points",
+                            "action_items",
+                            "mentions",
+                            "code_references",
+                            "total_messages",
+                            "open_actions",
+                            "done_actions",
+                        ):
+                            value = parsed.get(key)
+                            if value:
+                                summary[key] = value
+            except Exception as e:
+                await ctx.debug(f"summarize_thread_product.llm_skipped: {e}")
+
+        examples: list[dict[str, Any]] = []
+        if include_examples:
+            for message, sender_name in rows[:3]:
+                examples.append(
+                    {
+                        "id": message.id,
+                        "subject": message.subject,
+                        "from": sender_name,
+                        "created_ts": _iso(message.created_ts),
+                    }
+                )
+        await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
+        return {"thread_id": thread_id, "summary": summary, "examples": examples}
     @mcp.resource("resource://identity/{project}", mime_type="application/json")
     def identity_resource(project: str) -> dict[str, Any]:
         """

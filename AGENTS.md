@@ -138,6 +138,23 @@ Macros vs granular tools
   - Combine with `mcp-agent-mail amctl env --path . --agent $AGENT_NAME` to get `CACHE_KEY` and `ARTIFACT_DIR`.
   - Use `mcp-agent-mail am-run <slot> -- <cmd...>` to run with prepped env; flags include `--ttl-seconds`, `--shared/--exclusive`, and `--block-on-conflicts`. Future versions will auto-acquire/renew/release.
 
+### Product Bus
+
+- Create or ensure a product:
+  - `mcp-agent-mail products ensure MyProduct --name "My Product"`
+- Link a repo/worktree into the product (use slug or path):
+  - `mcp-agent-mail products link MyProduct .`
+- View product status and linked projects:
+  - `mcp-agent-mail products status MyProduct`
+- Search messages across all linked projects:
+  - `mcp-agent-mail products search MyProduct "bd-123 OR \"release plan\"" --limit 50`
+
+Server tools (for orchestrators)
+- `ensure_product(product_key|name)`
+- `products_link(product_key, project_key)`
+- `resource://product/{key}`
+- `search_messages_product(product_key, query, limit=20)`
+
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
 - "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.

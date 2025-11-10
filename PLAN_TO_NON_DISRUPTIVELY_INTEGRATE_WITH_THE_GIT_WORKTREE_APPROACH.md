@@ -1326,6 +1326,8 @@ File reservation best practices:
 - [x] Implement `projects adopt` CLI (dry‑run/apply) and write `aliases.json`.
 - [x] Implement Product Bus: `ensure_product`, `products_link`, and product‑wide resources.
   - DONE: Added models (`Product`, `ProductProjectLink`), tools (`ensure_product`, `products_link`), product resource (`resource://product/{key}`), and product-wide search (`search_messages_product`). Tests included.
+- [x] Add product‑wide inbox fetch and summarization helpers.
+  - DONE: Server tools `fetch_inbox_product`, `summarize_thread_product` aggregate across linked projects with optional LLM refinement. CLI commands added: `products inbox`, `products summarize-thread`.
 - [x] Ship `am-run` and `amctl env` with build slots + per‑agent caches.
   - DONE: `am-run` now auto‑acquires/renews/releases advisory build slots (warn mode prints conflicts), and exports `CACHE_KEY`/`ARTIFACT_DIR` via `amctl env`.
 - [x] Update docs (`AGENTS.md`, `README.md`) with worktree guides and edge cases.

@@ -27,7 +27,7 @@ import typer
 import uvicorn
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, bindparam, desc, func, select, text
 from sqlalchemy.engine import make_url
 
 from .app import build_mcp_server
@@ -35,7 +35,7 @@ from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
-from .models import Agent, FileReservation, Message, MessageRecipient, Project
+from .models import Agent, FileReservation, Message, MessageRecipient, Product, ProductProjectLink, Project
 from .share import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_THRESHOLD,
@@ -84,6 +84,8 @@ projects_app = typer.Typer(help="Project maintenance utilities")
 app.add_typer(projects_app, name="projects")
 amctl_app = typer.Typer(help="Build and environment helpers")
 app.add_typer(amctl_app, name="amctl")
+products_app = typer.Typer(help="Product Bus: manage products and links")
+app.add_typer(products_app, name="products")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -116,6 +118,418 @@ def _iso(dt: Optional[datetime]) -> str:
     if dt is None:
         return ""
     return dt.astimezone(timezone.utc).isoformat()
+
+
+@products_app.command("ensure")
+def products_ensure(
+    product_key: Annotated[Optional[str], typer.Argument(None, help="Product uid or name")],
+    name: Annotated[Optional[str], typer.Option("--name", "-n", help="Product display name")] = None,
+) -> None:
+    """
+    Ensure a product exists (creates if missing) and print its identifiers.
+    """
+    key = (product_key or name or "").strip()
+    if not key:
+        raise typer.BadParameter("Provide a product_key or --name.")
+    # Prefer server tool to ensure consistent uid policy
+    settings = get_settings()
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
+    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    resp_data: dict[str, Any] = {}
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            headers = {}
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
+            req = {
+                "jsonrpc": "2.0",
+                "id": "cli-products-ensure",
+                "method": "tools/call",
+                "params": {
+                    "name": "ensure_product",
+                    "arguments": {
+                        "product_key": product_key or "",
+                        "name": name or "",
+                    },
+                },
+            }
+            resp = client.post(server_url, json=req, headers=headers)
+            data = resp.json()
+            result = (data or {}).get("result") or {}
+            if result:
+                resp_data = result
+    except Exception:
+        resp_data = {}
+    if not resp_data:
+        # Fallback to local DB with the same strict uid policy
+        async def _ensure_local() -> dict[str, Any]:
+            await ensure_schema()
+            async with get_session() as session:
+                existing = await session.execute(
+                    select(Product).where((Product.product_uid == key) | (Product.name == key))
+                )
+                prod = existing.scalars().first()
+                if prod:
+                    return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": prod.created_at}
+                import re as _re
+                import uuid as _uuid
+                uid_pattern = _re.compile(r"^[A-Fa-f0-9]{8,64}$")
+                if product_key and uid_pattern.fullmatch(product_key.strip()):
+                    uid = product_key.strip().lower()
+                else:
+                    uid = _uuid.uuid4().hex[:20]
+                display_name = (name or key).strip()
+                display_name = " ".join(display_name.split())[:255] or uid
+                prod = Product(product_uid=uid, name=display_name)
+                session.add(prod)
+                await session.commit()
+                await session.refresh(prod)
+                return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": prod.created_at}
+        resp_data = asyncio.run(_ensure_local())
+    table = Table(title="Product", show_lines=False)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("id", str(resp_data.get("id", "")))
+    table.add_row("product_uid", str(resp_data.get("product_uid", "")))
+    table.add_row("name", str(resp_data.get("name", "")))
+    _created = resp_data.get("created_at", "")
+    try:
+        if hasattr(_created, "isoformat"):
+            _created = _created.isoformat()
+    except Exception:
+        pass
+    table.add_row("created_at", str(_created))
+    console.print(table)
+
+
+@products_app.command("link")
+def products_link(
+    product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
+    project: Annotated[str, typer.Argument(..., help="Project slug or path")],
+) -> None:
+    """
+    Link a project into a product (idempotent).
+    """
+    async def _link() -> dict:
+        await ensure_schema()
+        prod = await _get_product_record(product_key.strip())
+        proj = await _get_project_record(project)
+        async with get_session() as session:
+            existing = await session.execute(
+                select(ProductProjectLink).where(
+                    ProductProjectLink.product_id == prod.id, ProductProjectLink.project_id == proj.id
+                )
+            )
+            link = existing.scalars().first()
+            if link is None:
+                link = ProductProjectLink(product_id=int(prod.id), project_id=int(proj.id))
+                session.add(link)
+                await session.commit()
+                await session.refresh(link)
+        return {"product_uid": prod.product_uid, "product_name": prod.name, "project_slug": proj.slug}
+    res = asyncio.run(_link())
+    console.print(f"[green]Linked[/] project '{res['project_slug']}' into product '{res['product_name']}' ({res['product_uid']}).")
+
+
+@products_app.command("status")
+def products_status(
+    product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
+) -> None:
+    """
+    Show product metadata and linked projects.
+    """
+    async def _status() -> tuple[Product, list[Project]]:
+        await ensure_schema()
+        async with get_session() as session:
+            stmt_prod = select(Product).where((Product.product_uid == product_key) | (Product.name == product_key))
+            prod = (await session.execute(stmt_prod)).scalars().first()
+            if prod is None:
+                raise typer.BadParameter(f"Product '{product_key}' not found.")
+            rows = await session.execute(
+                select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
+                    ProductProjectLink.product_id == prod.id
+                )
+            )
+            projects = list(rows.scalars().all())
+            return prod, projects
+    prod, projects = asyncio.run(_status())
+    table = Table(title=f"Product: {prod.name}", show_lines=False)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("id", str(prod.id))
+    table.add_row("product_uid", prod.product_uid)
+    table.add_row("name", prod.name)
+    table.add_row("created_at", _iso(prod.created_at))
+    console.print(table)
+    pt = Table(title="Linked Projects", show_lines=False)
+    pt.add_column("id")
+    pt.add_column("slug")
+    pt.add_column("human_key")
+    for p in projects:
+        pt.add_row(str(p.id), p.slug, p.human_key)
+    console.print(pt)
+
+
+@products_app.command("search")
+def products_search(
+    product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
+    query: Annotated[str, typer.Argument(..., help="FTS query")],
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Max results",)] = 20,
+) -> None:
+    """
+    Full-text search over messages for all projects linked to a product.
+    """
+    async def _run() -> list[dict]:
+        await ensure_schema()
+        async with get_session() as session:
+            stmt_prod = select(Product).where((Product.product_uid == product_key) | (Product.name == product_key))
+            prod = (await session.execute(stmt_prod)).scalars().first()
+            if prod is None:
+                raise typer.BadParameter(f"Product '{product_key}' not found.")
+            rows = await session.execute(
+                select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == prod.id)
+            )
+            proj_ids = [int(r[0]) for r in rows.fetchall()]
+            if not proj_ids:
+                return []
+            result = await session.execute(
+                text(
+                    """
+                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                           m.thread_id, a.name AS sender_name, m.project_id
+                    FROM fts_messages
+                    JOIN messages m ON fts_messages.rowid = m.id
+                    JOIN agents a ON m.sender_id = a.id
+                    WHERE m.project_id IN (:proj_ids) AND fts_messages MATCH :query
+                    ORDER BY bm25(fts_messages) ASC
+                    LIMIT :limit
+                    """
+                ).bindparams(bindparam("proj_ids", expanding=True)),
+                {"proj_ids": proj_ids, "query": query, "limit": limit},
+            )
+            return [dict(row) for row in result.mappings().all()]
+    rows = asyncio.run(_run())
+    if not rows:
+        console.print("[yellow]No results.[/]")
+        return
+    t = Table(title=f"Product search: '{query}'", show_lines=False)
+    t.add_column("project_id")
+    t.add_column("id")
+    t.add_column("subject")
+    t.add_column("from")
+    t.add_column("created_ts")
+    for r in rows:
+        t.add_row(str(r["project_id"]), str(r["id"]), r["subject"], r["sender_name"], r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]))
+    console.print(t)
+
+
+@products_app.command("inbox")
+def products_inbox(
+    product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
+    agent: Annotated[str, typer.Argument(..., help="Agent name")],
+    limit: Annotated[int, typer.Option("--limit", "-l", help="Max messages",)] = 20,
+    urgent_only: Annotated[bool, typer.Option("--urgent-only/--all", help="Only high/urgent")] = False,
+    include_bodies: Annotated[bool, typer.Option("--include-bodies/--no-bodies", help="Include body_md")] = False,
+    since_ts: Annotated[Optional[str], typer.Option("--since-ts", help="ISO-8601 timestamp filter")] = None,
+) -> None:
+    """
+    Fetch recent inbox messages for an agent across all projects in a product.
+    Prefers server tool; falls back to local DB when server is not reachable.
+    """
+    settings = get_settings()
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
+    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    # Try server first
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            headers = {}
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
+            req = {
+                "jsonrpc": "2.0",
+                "id": "cli-products-inbox",
+                "method": "tools/call",
+                "params": {
+                    "name": "fetch_inbox_product",
+                    "arguments": {
+                        "product_key": product_key,
+                        "agent_name": agent,
+                        "limit": int(limit),
+                        "urgent_only": bool(urgent_only),
+                        "include_bodies": bool(include_bodies),
+                        "since_ts": since_ts or "",
+                    },
+                },
+            }
+            resp = client.post(server_url, json=req, headers=headers)
+            data = resp.json()
+            result = (data or {}).get("result")
+            rows = result if isinstance(result, list) else []
+    except Exception:
+        rows = []
+    if not rows:
+        # Fallback: local DB
+        async def _fallback() -> list[dict]:
+            await ensure_schema()
+            async with get_session() as session:
+                prod = (await session.execute(select(Product).where((Product.product_uid == product_key) | (Product.name == product_key)))).scalars().first()
+                if prod is None:
+                    return []
+                proj_rows = await session.execute(
+                    select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
+                        ProductProjectLink.product_id == prod.id
+                    )
+                )
+                projects = list(proj_rows.scalars().all())
+                items: list[dict] = []
+                for proj in projects:
+                    agent_row = (await session.execute(select(Agent).where(Agent.project_id == proj.id, Agent.name == agent))).scalars().first()
+                    if not agent_row:
+                        continue
+                    from sqlalchemy.orm import aliased as _aliased  # local to avoid top-level churn
+                    sender_alias = _aliased(Agent)
+                    stmt = (
+                        select(Message, MessageRecipient.kind, sender_alias.name)
+                        .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                        .join(sender_alias, Message.sender_id == sender_alias.id)
+                        .where(Message.project_id == proj.id, MessageRecipient.agent_id == agent_row.id)
+                        .order_by(desc(Message.created_ts))
+                        .limit(limit)
+                    )
+                    if urgent_only:
+                        stmt = stmt.where(Message.importance.in_(["high", "urgent"]))
+                    if since_ts:
+                        try:
+                            s = since_ts.strip()
+                            s = s[:-1] + "+00:00" if s.endswith("Z") else s
+                            from datetime import datetime as _dt
+                            since_dt = _dt.fromisoformat(s)
+                            stmt = stmt.where(Message.created_ts > since_dt)
+                        except Exception:
+                            pass
+                    res = await session.execute(stmt)
+                    for msg, kind, sender_name in res.all():
+                        payload = {
+                            "id": msg.id,
+                            "project_id": proj.id,
+                            "subject": msg.subject,
+                            "importance": msg.importance,
+                            "ack_required": msg.ack_required,
+                            "created_ts": msg.created_ts,
+                            "from": sender_name,
+                            "kind": kind,
+                        }
+                        if include_bodies:
+                            payload["body_md"] = msg.body_md
+                        items.append(payload)
+                # Sort desc by created_ts
+                items.sort(key=lambda r: r.get("created_ts") or 0, reverse=True)
+                return items[: max(0, int(limit))]
+        rows = asyncio.run(_fallback())
+    if not rows:
+        console.print("[yellow]No messages found.[/]")
+        return
+    t = Table(title=f"Inbox for {agent} in product '{product_key}'", show_lines=False)
+    t.add_column("project_id")
+    t.add_column("id")
+    t.add_column("subject")
+    t.add_column("from")
+    t.add_column("importance")
+    t.add_column("created_ts")
+    for r in rows:
+        created = r.get("created_ts")
+        if hasattr(created, "isoformat"):
+            created = created.isoformat()
+        t.add_row(str(r.get("project_id", "")), str(r.get("id", "")), str(r.get("subject", "")), str(r.get("from", "")), str(r.get("importance", "")), str(created or ""))
+    console.print(t)
+
+
+@products_app.command("summarize-thread")
+def products_summarize_thread(
+    product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
+    thread_id: Annotated[str, typer.Argument(..., help="Thread id or key")],
+    per_thread_limit: Annotated[int, typer.Option("--per-thread-limit", "-n", help="Max messages per thread",)] = 50,
+    no_llm: Annotated[bool, typer.Option("--no-llm", help="Disable LLM refinement")] = False,
+) -> None:
+    """
+    Summarize a thread across all projects in a product. Prefers server tool; minimal fallback if server is unavailable.
+    """
+    settings = get_settings()
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
+    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    # Try server
+    try:
+        with httpx.Client(timeout=8.0) as client:
+            headers = {}
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
+            req = {
+                "jsonrpc": "2.0",
+                "id": "cli-products-summarize-thread",
+                "method": "tools/call",
+                "params": {
+                    "name": "summarize_thread_product",
+                    "arguments": {
+                        "product_key": product_key,
+                        "thread_id": thread_id,
+                        "include_examples": True,
+                        "llm_mode": (not no_llm),
+                        "per_thread_limit": int(per_thread_limit),
+                    },
+                },
+            }
+            resp = client.post(server_url, json=req, headers=headers)
+            data = resp.json()
+            result = (data or {}).get("result") or {}
+    except Exception:
+        result = {}
+    if not result:
+        console.print("[yellow]Server unavailable; summarization requires server tool. Try again when server is running.[/]")
+        raise typer.Exit(code=2)
+    # Pretty print
+    summary = result.get("summary") or {}
+    examples = result.get("examples") or []
+    table = Table(title=f"Thread summary: {thread_id}", show_lines=False)
+    table.add_column("Key")
+    table.add_column("Value")
+    table.add_row("participants", ", ".join(summary.get("participants", [])))
+    table.add_row("total_messages", str(summary.get("total_messages", "")))
+    table.add_row("open_actions", str(summary.get("open_actions", "")))
+    table.add_row("done_actions", str(summary.get("done_actions", "")))
+    console.print(table)
+    if summary.get("key_points"):
+        kp = Table(title="Key Points", show_lines=False)
+        kp.add_column("point")
+        for p in summary["key_points"]:
+            kp.add_row(str(p))
+        console.print(kp)
+    if summary.get("action_items"):
+        act = Table(title="Action Items", show_lines=False)
+        act.add_column("item")
+        for a in summary["action_items"]:
+            act.add_row(str(a))
+        console.print(act)
+    if examples:
+        ex = Table(title="Examples", show_lines=False)
+        ex.add_column("id")
+        ex.add_column("subject")
+        ex.add_column("from")
+        ex.add_column("created_ts")
+        for e in examples:
+            ex.add_row(str(e.get("id", "")), str(e.get("subject", "")), str(e.get("from", "")), str(e.get("created_ts", "")))
+        console.print(ex)
+
+
+async def _get_product_record(key: str) -> Product:
+    """Fetch Product by uid or name."""
+    await ensure_schema()
+    async with get_session() as session:
+        stmt = select(Product).where((Product.product_uid == key) | (Product.name == key))
+        result = await session.execute(stmt)
+        prod = result.scalars().first()
+        if not prod:
+            raise ValueError(f"Product '{key}' not found")
+        return prod
 
 
 @app.command("serve-http")
@@ -1680,7 +2094,7 @@ def am_run(
     settings = get_settings()
     guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
     worktrees_enabled = bool(settings.worktrees_enabled)
-    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path.lstrip('/')}"
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
     bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
 
     def _safe_component(value: str) -> str:
