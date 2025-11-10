@@ -14,17 +14,25 @@
 
 ## Design summary (high-signal)
 
-- **Add a project identity canonicalizer (opt-in)** that maps each agent's `human_key` (its working directory) to a shared, stable, privacy-safe identity when the working copy is a Git worktree of the same repository.
-  - New server setting/flag: `PROJECT_IDENTITY_MODE = dir|git-toplevel|git-common-dir` (default: `dir`).
-  - **`dir` mode (default)**: Uses the existing `slugify()` function for **100% backward compatibility**. Zero changes to existing behavior; existing projects continue to work with identical slugs.
-  - **`git-toplevel` and `git-common-dir` modes**: The server computes a privacy-safe project `slug` (human-readable basename + short hash) from a shared canonical path while keeping the original `human_key` unchanged for audit.
-  - Privacy-safe slugs never contain absolute paths; they use `basename + sha1(canonical_path)[:10]` for stability and privacy (git-* modes only).
-- **Make guard installation work with worktrees** by resolving the real hooks directory via `git config core.hooksPath` or `git rev-parse --git-dir` (supports both monorepos and linked worktrees where `.git` is a file).
-  - Add optional `pre-push` guard to catch conflicts before cross-worktree pushes.
-  - Include emergency bypass: `AGENT_MAIL_BYPASS=1` (logged).
-- **Repo-root relative path matching** for file reservations to ensure cross-worktree consistency.
-- **Containerized builds (optional)**: Provide a standard pattern to run isolated builds per worktree using Docker/BuildKit, emitting logs and artifacts to the shared Agent Mail archive, avoiding cross-worktree conflicts.
-- **Zero disruption**: All new behavior is gated behind a setting/flag and optional parameters on macros; current users see no change by default. The default `dir` mode uses the existing `slugify()` function, ensuring 100% backward compatibility with identical slugs for existing projects.
+**Identity (portable, privacy‑safe, zero‑config across clones)**
+- Add a durable `project_uid` and treat slug as a view. Precedence (first hit wins):
+  repo marker (`.agent-mail-project-id`) → git‑remote (normalized `origin` URL) → `git-common-dir` → `git-toplevel` → `dir`. Slugs remain privacy‑safe; never embed absolute paths.
+
+**Same‑repo and multi‑repo coordination**
+- Same‑repo auto‑unification: clones/worktrees with the same normalized remote are one project bus by default.
+- Product Bus (optional): introduce `product_uid` to group multiple repos (frontend/backend/infra) with product‑wide inbox/search and shared threads (`bd-###`, etc.).
+
+**Hooks & guards (composable, cross‑platform)**
+- Install a chain‑runner that respects `core.hooksPath` and existing frameworks; ship POSIX + Windows variants. Add a correct pre‑push guard (reads STDIN tuples) and keep `AGENT_MAIL_BYPASS=1`.
+
+**Reservations: Git semantics**
+- Switch reservation matching to Git pathspec wildmatch (honor `core.ignorecase`), against repo‑root relative paths.
+
+**Build interference**
+- Provide build slots + a thin `am-run` wrapper for long‑running tasks (watchers/devservers) with per‑agent cache namespaces. Containers remain optional recipes layered on top.
+
+**Zero disruption**
+- All of the above are opt‑in (defaults preserve current behavior); existing projects/slugs keep working unchanged.
 
 ---
 
@@ -53,7 +61,7 @@ Everything below deepens these, with code and exact behaviors.
 
 ---
 
-## 1) Identity: from “slug” to “stable Project UID”
+## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
 ### Why:
 
@@ -67,7 +75,7 @@ Everything below deepens these, with code and exact behaviors.
      - File name: `.agent-mail-project-id` (committed).
      - Content: a single line UUIDv4 (or ULID).
   2. Else, if a private marker exists: `.git/agent-mail/project-id` (uncommitted).
-  3. Else: generate a UUIDv4, write both (a) committed marker (ask or default off via env) and (b) private marker. Default to private marker only to stay non‑disruptive; expose a CLI to “commit the ID” later.
+  3. Else: generate a UUIDv4, write private marker under `.git/agent-mail/project-id`. Expose a CLI to “promote” it to the committed marker later.
 - Compute slug exactly as in the existing plan (privacy‑safe in `git-*` modes). Record `(project_uid, slug)`.
 
 ### Minimal additive schema (optional but recommended)
@@ -80,8 +88,9 @@ Everything below deepens these, with code and exact behaviors.
 ### Canonicalization order (robust & private)
 
 1. If marker present: `project_uid = read_marker()`.
-2. Else if `PROJECT_IDENTITY_MODE in {git-toplevel, git-common-dir}`: compute slug as defined (basename + short hash of canonical git path) and also generate `project_uid` (persist markers) so other machines match.
-3. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
+2. Else if git‑remote is enabled and a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
+3. Else if `PROJECT_IDENTITY_MODE in {git-common-dir, git-toplevel}`: compute privacy‑safe slug from canonical Git paths and generate `project_uid`.
+4. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
 
 ### Drop‑in function (replacement for canonicalizer)
 
@@ -202,7 +211,7 @@ Behavioral wins:
 
 - Back‑compat: default remains `dir`; slugs identical.
 - Opt‑in `git-*` still gives privacy‑safe slugs.
-- Cross‑machine stability: `project_uid` binds them all.
+- Cross‑clone/machine stability: `project_uid` binds them all; git‑remote mode makes unrelated clones of the same repo “just work”.
 - Admin can later “commit the ID” once they want portable identity in VCS.
 
 ---
@@ -490,11 +499,13 @@ Handle:
 
 ### Drop‑in lists to implement next
 
-1. Implement `ProjectIdentity` function above and thread `project_uid` through `ensure_project`, macros, and guard CLI responses.
-2. Chain‑runner hook + guard scripts exactly as provided; switch installer to compose rather than replace.
-3. Add `pathspec` dependency and switch reservation matching to Git wildmatch semantics.
-4. Implement `projects adopt` command.
-5. Add `resource://identity` and surface identity panel in the UI.
+1. Implement `ProjectIdentity` (marker→git‑remote→gitdir→dir) and thread `project_uid` through `ensure_project`, macros, and guard CLI responses.
+2. Chain‑runner hook (+ Windows shims) and guards; switch installer to compose rather than replace.
+3. Add `pathspec` dependency; move matching to Git wildmatch; honor `core.ignorecase`.
+4. Implement `projects adopt` command (dry‑run + apply).
+5. Add `resource://identity` panel + `mail status` command with routing diagnostics.
+6. Ship `am-run` and `amctl env` for build isolation; wire build slots enforcement into the runner.
+7. Add Product Bus: `ensure_product`, `products.link`, product‑wide thread/search resources.
 
 ---
 
@@ -735,175 +746,12 @@ Net effect:
 
 ## Proposed changes (non-disruptive and additive)
 
-### 1) Project identity canonicalizer
+### 1) Project identity and precedence (supersedes earlier slug‑only canonicalizer)
 
-- **Problem**: Each worktree has a different absolute path, so today each worktree becomes a distinct project (different `slug`).
-- **Solution**: Introduce an optional canonicalization step that derives the `slug` from a shared Git identity while keeping `human_key` as the actual working directory.
-
-Configuration (server-side, startup flag/env):
-
-- `PROJECT_IDENTITY_MODE`:
-  - `dir` (default): current behavior; slug is based on `human_key`.
-  - `git-toplevel`: slug is based on `git rev-parse --show-toplevel` from `human_key`.
-  - `git-common-dir`: slug is based on `git rev-parse --git-common-dir` from `human_key`.
-- Optional: `PROJECT_IDENTITY_FALLBACK=dir` to define a fallback if Git queries fail.
-
-Behavioral contract:
-
-- `human_key` remains the agent's actual working directory (for audit and ergonomics).
-- `slug` computation depends on identity mode:
-  - **`dir` mode**: Uses the existing `slugify()` function for **100% backward compatibility**. No changes to existing project slugs.
-  - **`git-toplevel` and `git-common-dir` modes**: Uses **privacy-safe** format: `basename + "-" + sha1(canonical_path)[:10]`. Slugs never embed absolute paths; they combine a human-readable name with a short hash for stability.
-- All linked worktrees of the same repo share the same `slug` (when using git-* modes).
-- Existing APIs remain unchanged; `ensure_project` and macros continue to accept `human_key` or `slug` as today.
-- Add optional override parameter to `macro_start_session` and `ensure_project` (e.g., `identity_mode?: str`) to support per-call testing and gradual rollout, but prefer the server-side setting for consistency.
-- **Return structured identity metadata**: `{ slug, identity_mode_used, canonical_path, human_key }` from `ensure_project` and macros so clients can show users exactly what happened.
-
-Canonicalization algorithm:
-
-- Resolve `human_key` to an absolute, normalized, realpath using `os.path.realpath()` + `os.path.normcase()` to handle symlinks and case-insensitive filesystems.
-- Normalize trailing slashes.
-- If `PROJECT_IDENTITY_MODE == dir`:
-  - Use **existing `slugify(human_key)` function** for 100% backward compatibility.
-  - No changes to slug format; existing projects continue to work.
-  - Example: `/data/projects/mcp_agent_mail` → `data-projects-mcp-agent-mail`
-- If `git-toplevel`:
-  - Run `git rev-parse --show-toplevel` in `human_key`; if success:
-    - `slug_source = realpath(normcase(show_toplevel))`
-    - `base = os.path.basename(slug_source) or "repo"`
-    - `slug = f"{base}-{sha1(slug_source)[:10]}"` (privacy-safe format)
-  - If Git command fails, fall back to configured fallback mode.
-  - Example: `/data/projects/mcp_agent_mail` → `mcp_agent_mail-a1b2c3d4e5`
-- If `git-common-dir`:
-  - Run `git rev-parse --git-common-dir` in `human_key`; if success:
-    - `slug_source = realpath(normcase(git_common_dir))`
-    - `base = "repo"`
-    - `slug = f"{base}-{sha1(slug_source)[:10]}"` (privacy-safe format)
-  - If Git command fails, fall back to `dir` mode (hard fallback).
-  - Example: `/data/projects/mcp_agent_mail/.git` → `repo-f9e8d7c6b5`
-- Log canonicalization decision with rich-styled output explaining which mode was used and why, including fallback path when git commands fail.
-
-Edge cases and special Git configurations:
-
-- **Non-git directories**: Falls back to `dir` mode (logged).
-- **Bare repositories**: `git-toplevel` will fail; `git-common-dir` will succeed and point to the bare repo location.
-- **Submodules**: Each submodule is treated as a separate project by default in phase 1. Superproject unification is not supported initially.
-- **Nested repos**: Each repo gets its own identity based on where the git command is run.
-- **Detached worktrees**: Behavior follows standard worktree semantics; `git-common-dir` will unify them.
-- **Cross-machine**: Slugs are per-machine by default (different absolute paths → different hashes). Cross-machine unification via a repo-side marker/ID is out of scope for phase 1 (optional enhancement later).
-
-Back-compat:
-
-- Default remains `dir`; **zero changes to existing behavior**.
-- **`dir` mode uses the existing `slugify()` function**, ensuring existing projects continue to work with identical slugs.
-- Existing projects will be found and reused without any migration or duplicate creation.
-- No data changes, no migrations, no disruption to current users.
-- If users opt in to `git-toplevel` or `git-common-dir` modes later, previously created per-worktree projects (using old `dir` mode slugs) may remain in the DB (not deleted). That is acceptable and auditable; we can optionally add a discoverable "aliases" mapping later (out of scope for this first phase).
-
-Reference implementation:
-
-```python
-from __future__ import annotations
-
-import hashlib
-import os
-import re
-import subprocess
-from dataclasses import dataclass
-from typing import Literal, Optional
-
-IdentityMode = Literal["dir", "git-toplevel", "git-common-dir"]
-
-@dataclass(frozen=True)
-class ProjectIdentity:
-    slug: str
-    identity_mode_used: IdentityMode
-    canonical_path: str
-    human_key: str
-
-def _short_sha1(text: str, length: int = 10) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:length]
-
-def _norm_real(path: str) -> str:
-    """Normalize symlinks and case; keep stable separators."""
-    real = os.path.realpath(path)
-    return os.path.normcase(real)
-
-def _git(workdir: str, *args: str) -> Optional[str]:
-    """Run git command, return stdout or None on failure."""
-    try:
-        cp = subprocess.run(
-            ["git", "-C", workdir, *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return cp.stdout.strip()
-    except Exception:
-        return None
-
-# Existing slugify function for backward compatibility
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-def slugify(value: str) -> str:
-    """Normalize a human-readable value into a slug (EXISTING function)."""
-    normalized = value.strip().lower()
-    slug = _SLUG_RE.sub("-", normalized).strip("-")
-    return slug or "project"
-
-def canonicalize_project_identity(
-    human_key: str,
-    mode: IdentityMode,
-    fallback: IdentityMode = "dir",
-) -> ProjectIdentity:
-    """
-    Compute project identity.
-
-    - dir mode: Uses existing slugify() for 100% backward compatibility
-    - git-* modes: Use privacy-safe slugging (basename + hash)
-    """
-    human_key_real = _norm_real(human_key)
-
-    def mk_privacy_safe_slug(base_name: str, source_path: str) -> str:
-        """Privacy-safe slug: basename + short hash (git-* modes only)."""
-        return f"{base_name}-{_short_sha1(source_path)}"
-
-    used_mode: IdentityMode = mode
-    if mode == "git-toplevel":
-        top = _git(human_key_real, "rev-parse", "--show-toplevel")
-        if top:
-            top_real = _norm_real(top)
-            base = os.path.basename(top_real) or "repo"
-            return ProjectIdentity(
-                slug=mk_privacy_safe_slug(base, top_real),
-                identity_mode_used="git-toplevel",
-                canonical_path=top_real,
-                human_key=human_key_real,
-            )
-        used_mode = fallback
-
-    if used_mode == "git-common-dir":
-        common = _git(human_key_real, "rev-parse", "--git-common-dir")
-        if common:
-            common_real = _norm_real(common)
-            base = "repo"
-            return ProjectIdentity(
-                slug=mk_privacy_safe_slug(base, common_real),
-                identity_mode_used="git-common-dir",
-                canonical_path=common_real,
-                human_key=human_key_real,
-            )
-        used_mode = "dir"  # hard fallback
-
-    # dir mode: use EXISTING slugify() for backward compatibility
-    # This ensures existing projects continue to work without any changes
-    return ProjectIdentity(
-        slug=slugify(human_key_real),
-        identity_mode_used="dir",
-        canonical_path=human_key_real,
-        human_key=human_key_real,
-    )
-```
+- Identity is `project_uid` (UUID). Slug is a presentation key.
+- Precedence: marker → git‑remote → `git-common-dir` → `git-toplevel` → `dir`.
+- Git‑remote normalizes SSH/HTTPS/file URLs to `host/owner/repo` and hashes it for privacy; supports `PROJECT_IDENTITY_REMOTE` and `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE`.
+- First successful resolution also writes a private marker under `.git/agent-mail/project-id` for cross‑machine stability. A CLI can “promote” to a committed marker later.
 
 ### 2) Worktree-aware pre-commit guard installation
 
@@ -991,7 +839,7 @@ Path normalization:
 - When the guard checks staged files:
   - Get repo-root relative paths via `git diff --cached --name-only`.
   - Normalize separators and case.
-  - Match using `fnmatch` against stored patterns (also normalized).
+  - Match using Git wildmatch pathspec (via `pathspec`/`GitWildMatchPattern`), honoring `core.ignorecase`. Renames check both old and new names.
 
 ### 4) Containerized builds to avoid cross-worktree conflict (optional)
 
@@ -1059,17 +907,23 @@ Optional server assistance:
 ## API/behavior changes (additive)
 
 - Server settings (env/flag):
-  - `PROJECT_IDENTITY_MODE = dir|git-toplevel|git-common-dir` (default `dir`).
-  - `PROJECT_IDENTITY_FALLBACK = dir` (default `dir`).
-  - `INSTALL_PREPUSH_GUARD = true|false` (default `false`).
+  - `PROJECT_IDENTITY_MODE = dir|git-remote|git-common-dir|git-toplevel` (default `dir`)
+  - `PROJECT_IDENTITY_FALLBACK = dir`
+  - `PROJECT_IDENTITY_REMOTE = origin`
+  - `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE =` (optional)
+  - `INSTALL_PREPUSH_GUARD = true|false` (default `false`)
+  - `PROJECT_PRODUCT_UID =` (optional)
 - Tool/macro enhancements (non-breaking):
-  - `ensure_project(human_key: str, identity_mode?: str)` → returns `{ slug, identity_mode_used, canonical_path, human_key, ... }`
-  - `macro_start_session(human_key: str, program: str, model: str, ..., identity_mode?: str)` → returns identity metadata
+  - `ensure_project(human_key: str, identity_mode?: str)` → returns `{ project_uid, slug, normalized_remote?, identity_mode_used, canonical_path, human_key, ... }`
+  - `macro_start_session(...)` → returns the same, plus `product_uid?`
+  - `ensure_product(product_uid?: str, name?: str)` and `products.link(project_uid, product_uid)`
   - Guard install: `install_guard(project_key: str, repo_path: str, install_prepush?: bool)` → prints resolved hook paths
 - Transparency resource (read-only):
-  - `resource://identity?project=<abs-path>` → returns canonicalization result and mode for inspection.
+  - `resource://identity?project=<abs-path>` → returns identity result + evidence (marker/remote/gitdir/dir)
+  - `resource://product/{product_uid}/thread/{id}` and `/search` (product‑wide reads)
 - Guard utilities:
-  - `guard status` subcommand: prints current agent, repo root, resolved hooks path, sample reservation matches, and how to bypass (for emergencies).
+  - `guard status` subcommand: prints current agent, repo root, hooks path, `project_uid`, `normalized_remote`, sample reservation matches, and bypass hints.
+  - `mail status` subcommand: prints routing diagnostics (why DMs did/didn’t deliver and one‑line fixes).
 
 No DB migrations required for phase 1:
 
@@ -1098,7 +952,7 @@ No DB migrations required for phase 1:
 ## Rollout plan
 
 1. Ship server setting and canonicalizer:
-   - Implement `_canonicalize_project_identity(human_key, mode, fallback)` with privacy-safe slugging for git-* modes only.
+   - Implement marker→git‑remote→gitdir→dir identity with durable `project_uid`; privacy‑safe slugs.
    - Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
    - Return structured identity metadata from `ensure_project`/`macro_start_session`.
    - Log canonicalization decisions with rich-styled output.
@@ -1111,7 +965,7 @@ No DB migrations required for phase 1:
    - Add `AGENT_MAIL_BYPASS=1` emergency bypass.
    - Rich-styled error messages with actionable guidance.
 3. File reservation enhancements:
-   - Normalize to repo-root relative storage and matching.
+   - Normalize to repo-root relative storage and Git pathspec matching.
    - Add branch/worktree context to metadata.
    - Server-side validation warning for overly broad patterns.
 4. Documentation:
@@ -1120,16 +974,18 @@ No DB migrations required for phase 1:
    - Document edge cases (submodules, bare repos, nested repos, etc.).
    - Change all "uv/pip" references to "uv only" to match repo policy.
 5. Optional utilities:
-   - Add CLI helper `amctl slug` for manual inspection.
-   - Add `guard status` subcommand.
-   - Add `resource://identity?project=<path>` for transparency.
+   - Add `amctl env` and `am-run` (build slots + per‑agent caches).
+   - Add `guard status` and `mail status`.
+   - Add `resource://identity?project=<path>` and product resources for transparency.
 6. E2E tests:
-   - Simulate two linked worktrees against the same repo.
+   - Simulate two clones and two worktrees of the same repo.
    - Verify shared project slug, shared messaging, and guard conflict detection.
    - Test on case-insensitive FS (macOS/Windows).
    - Test WSL2 path normalization.
    - Test rename/move detection in guards.
    - Test bypass mechanism.
+   - Test pre‑push new branch, multiple refspecs, forced updates.
+   - Test product bus thread/search across two repos.
 7. Gradual adoption:
    - Start with a single team; monitor for confusion or edge cases.
    - Expand once stable.
@@ -1144,8 +1000,8 @@ No DB migrations required for phase 1:
     - Verify identical slugs for existing projects (no duplicates created).
     - Test that existing project data is found and reused.
   - Canonicalizer:
-    - Non-git dir, git repo (no worktrees), linked worktree.
-    - Both `git-toplevel` and `git-common-dir` modes.
+    - Non-git dir, git repo (no worktrees), linked worktree, two separate clones with same remote.
+    - `git-remote`, `git-toplevel`, and `git-common-dir` modes.
     - Fallback behavior when git commands fail.
     - Verify privacy-safe slugging (basename + hash) only applies to git-* modes.
     - Submodules (treated as separate projects).
@@ -1158,16 +1014,20 @@ No DB migrations required for phase 1:
     - Relative vs absolute `core.hooksPath`.
     - Per-worktree gitdir resolution.
   - Path matching:
-    - Repo-root relative normalization.
+    - Repo-root relative normalization with Git wildmatch and `core.ignorecase`.
     - Rename/move detection.
     - Case-insensitive matching on appropriate filesystems.
 - Integration tests:
-  - Two agents in two linked worktrees; both call `macro_start_session` with `identity_mode=git-common-dir`. Verify:
+  - Two agents in two clones; both call `macro_start_session` with `identity_mode=git-remote`. Verify:
     - Same project `slug` returned.
     - Identity metadata includes correct `identity_mode_used` and `canonical_path`.
     - File reservations made by one agent block the other in a different worktree.
     - Messages appear in a single thread.
     - Bypass mechanism works (`AGENT_MAIL_BYPASS=1`).
+  - Product bus:
+    - Two repos linked under one `product_uid`; verify shared thread view and product-wide search.
+  - Pre‑push correctness:
+    - New branch, multiple refspecs, forced update ranges.
   - Build isolation smoke test (optional):
     - Run containerized builds in two worktrees concurrently.
     - Verify artifact/log separation and absence of cache conflicts.
@@ -1188,6 +1048,10 @@ No DB migrations required for phase 1:
   - **Mitigation**: Use `os.path.realpath()` + `os.path.normcase()` consistently. Test on Windows, macOS (case-insensitive), Linux, and WSL2.
 - **Risk**: Submodule confusion (users expect unified project across submodule boundaries).
   - **Mitigation**: Document clearly that submodules are separate projects in phase 1. Consider superproject unification as future enhancement.
+- **Risk**: Remote mismatches across clones (e.g., `origin` vs `upstream`, different hosts/mirrors).
+  - **Mitigation**: Allow `PROJECT_IDENTITY_REMOTE` and `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE`; write a private marker on first resolve; provide `projects adopt` and `mail status` with one‑line fixes.
+- **Risk**: Default branch detection variance across hosts.
+  - **Mitigation**: Prefer `refs/remotes/<remote>/HEAD` when present; otherwise fall back to `"main"`.
 
 ---
 
@@ -1210,7 +1074,7 @@ export AGENT_NAME="AliceDev"
 export AGENT_MAIL_PROJECT_IDENTITY_MODE="git-common-dir"
 ```
 
-Guard install per worktree (unchanged usage, improved resolution under the hood):
+Guard install per worktree (composable, cross‑platform):
 
 ```bash
 # Install pre-commit guard only
@@ -1220,10 +1084,11 @@ mcp-agent-mail guard install <project-slug-or-human-key> .
 mcp-agent-mail guard install <project-slug-or-human-key> . --prepush
 ```
 
-Check guard status:
+Check guard status / routing:
 
 ```bash
 mcp-agent-mail guard status .
+mcp-agent-mail mail status .
 ```
 
 Emergency bypass (use sparingly):
@@ -1260,9 +1125,9 @@ File reservation best practices:
   - Rename/move operations are detected and checked correctly.
   - `AGENT_MAIL_BYPASS=1` allows emergency bypass (logged).
   - Rich-styled error messages show exact conflicts with holder info and actionable resolution steps.
-- With `PROJECT_IDENTITY_SOURCES` including `"remote"`:
+- With **git‑remote identity enabled** (or marker present):
   - Agents in different clones on different machines of the same `github.com/owner/repo` communicate without any UI linking on first start; they see one inbox/thread set.
-  - With no markers committed and default sources including `remote`, clones unify via `remote_uid`.
+  - With no markers committed and remote enabled, clones unify via remote; a private marker is written for stability.
 - Build slots (if enabled):
   - Starting a devserver in one clone while another is building triggers slot contention with a clear message; switching to a different slot avoids collisions.
 - Product groups (if enabled):
@@ -1295,21 +1160,24 @@ File reservation best practices:
 
 ## Implementation checklist
 
-- [ ] Add canonicalizer with privacy-safe slugging (basename + short hash) for git-* modes only.
+- [ ] Add canonicalizer with durable `project_uid` and precedence marker → git‑remote → gitdir → dir; privacy‑safe slugs.
 - [ ] Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
 - [ ] Return structured identity metadata from `ensure_project` and `macro_start_session`.
 - [ ] Add rich-styled logging for canonicalization decisions.
 - [ ] Wire `identity_mode` optional arg into `ensure_project` and macros.
 - [ ] Update guard installer to honor `core.hooksPath` and per-worktree `git-dir`.
 - [ ] Add optional `pre-push` guard installation.
-- [ ] Implement repo-root relative path matching with normalization.
+- [ ] Implement repo-root relative Git pathspec matching with normalization and `core.ignorecase`.
 - [ ] Add rename/move detection in guard path collection.
 - [ ] Add `AGENT_MAIL_BYPASS=1` emergency bypass mechanism.
 - [ ] Implement rich-styled, actionable error messages in guards.
 - [ ] Add branch/worktree context to reservation metadata.
 - [ ] Add server-side validation warning for overly broad reservation patterns.
 - [ ] Implement `guard status` subcommand.
-- [ ] Add `resource://identity?project=<path>` transparency resource.
+- [ ] Add `mail status` subcommand and `resource://identity?project=<path>` transparency resource.
+- [ ] Implement `projects adopt` CLI (dry‑run/apply) and write `aliases.json`.
+- [ ] Implement Product Bus: `ensure_product`, `products.link`, and product‑wide resources.
+- [ ] Ship `am-run` and `amctl env` with build slots + per‑agent caches.
 - [ ] Update docs (`AGENTS.md`, `README.md`) with worktree guides and edge cases.
 - [ ] Change all "uv/pip" references to "uv only".
 - [ ] Add unit tests for canonicalizer (all edge cases).
@@ -1319,4 +1187,4 @@ File reservation best practices:
 - [ ] Test WSL2 path normalization.
 - [ ] Test rename/move detection.
 - [ ] Test bypass mechanism.
-- [ ] Optional: publish build isolation recipes and CLI helper for slugs.
+- [ ] Optional: publish container recipes; CI template that runs `am-run`.
