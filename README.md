@@ -1534,6 +1534,28 @@ Group multiple repositories (e.g., frontend, backend, infra) under a single prod
 - Product‑wide thread summarization:
   - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --per-thread-limit 100 --no-llm`
 
+## Containers
+
+- Build and run locally:
+  ```bash
+  docker build -t mcp-agent-mail .
+  docker run --rm -p 8765:8765 \
+    -e HTTP_HOST=0.0.0.0 \
+    -e STORAGE_ROOT=/data/mailbox \
+    -v agent_mail_data:/data \
+    mcp-agent-mail
+  ```
+- Or with Compose:
+  ```bash
+  docker compose up --build
+  ```
+- Notes:
+  - Runs as an unprivileged user (`appuser`, uid 10001).
+  - Includes a HEALTHCHECK against `/health/liveness`.
+  - The server reads config from `.env` via python-decouple. You can mount it read-only into the container at `/app/.env`.
+  - Default bind host is `0.0.0.0` in the container; port `8765` is exposed.
+  - Persistent archive lives under `/data/mailbox` (mapped to the `agent_mail_data` volume by default).
+
 Notes
 - A unique `product_uid` is stored for each product; you can reference a product by uid or name.
 - Server tools also exist for orchestration: `ensure_product`, `products_link`, `search_messages_product`, and `resource://product/{key}`.

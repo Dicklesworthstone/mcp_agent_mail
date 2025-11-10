@@ -1355,4 +1355,5 @@ File reservation best practices:
   - DONE: AGENT_MAIL_BYPASS=1 exits 0 despite conflicts.
 - [x] Optional: CI template that runs `am-run`.
   - DONE: GitHub Actions workflow added (Ubuntu, macOS): runs lint, type-check, tests, and a smoke `am-run` on Ubuntu.
-- [ ] Optional: publish container recipes.
+- [x] Optional: publish container recipes.
+  - DONE: Added `Dockerfile` (Python 3.14 + uv + git) and `compose.yaml` (port 8765, volume for storage, optional `.env` mount). README includes usage instructions.
