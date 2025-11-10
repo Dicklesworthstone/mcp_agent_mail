@@ -1506,6 +1506,23 @@ sequenceDiagram
     - `exclusive=true` reports conflicts if another active exclusive holder exists
     - Intended for long-running tasks (dev servers, watchers); pair with `am-run` and `amctl env`
 
+## Product Bus
+
+Group multiple repositories (e.g., frontend, backend, infra) under a single product for product‑wide inbox/search and shared threads.
+
+- Ensure a product:
+  - `mcp-agent-mail products ensure MyProduct --name "My Product"`
+- Link a project (slug or path) into the product:
+  - `mcp-agent-mail products link MyProduct .`
+- Inspect product and linked projects:
+  - `mcp-agent-mail products status MyProduct`
+- Product‑wide message search (FTS):
+  - `mcp-agent-mail products search MyProduct "urgent AND deploy" --limit 50`
+
+Notes
+- A unique `product_uid` is stored for each product; you can reference a product by uid or name.
+- Server tools also exist for orchestration: `ensure_product`, `products_link`, `search_messages_product`, and `resource://product/{key}`.
+
 
 Exclusive file reservations are advisory but visible and auditable:
 
