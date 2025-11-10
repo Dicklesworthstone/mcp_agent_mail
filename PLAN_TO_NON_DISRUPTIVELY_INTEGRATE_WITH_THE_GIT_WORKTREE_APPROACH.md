@@ -125,6 +125,11 @@ Implementation progress:
     - Agent Mail guard is installed as `hooks.d/pre-commit/50-agent-mail.py` and `hooks.d/pre-push/50-agent-mail.py`.
     - Pre-push chain-runner reads STDIN once and forwards it to child hooks, matching Git’s tuple semantics.
     - Uninstall removes only our `50-agent-mail.py` plugins; chain-runner and user hooks remain intact. Legacy single-file Agent Mail hooks are still removed if detected by sentinel.
+  - 2025-11-10: Unified guard checker via CLI:
+    - Added `mcp-agent-mail guard check` command that reads NUL-delimited paths (`--stdin-nul`) and checks conflicts using Git wildmatch semantics (via `pathspec`), honoring `core.ignorecase`.
+    - Hook plugins now delegate to the CLI via `uv run python -m mcp_agent_mail.cli guard check --stdin-nul --repo <root>` so server/CLI/hook semantics cannot drift. Fallback to `python -m mcp_agent_mail.cli ...` when `uv` is unavailable.
+    - Advisory mode (`AGENT_MAIL_GUARD_MODE=warn` or `--advisory`) prints conflicts but does not block.
+    - Windows: `.cmd` and `.ps1` shims for chain-runner are installed to mirror POSIX behavior.
   - 2025-11-10: Project maintenance CLI:
     - Added `mcp-agent-mail projects adopt <from> <to> --dry-run` that validates same repo (`git-common-dir`) and prints a consolidation plan. (Apply phase to be implemented in a later step.)
   - 2025-11-10: Guard status and adopt apply:
