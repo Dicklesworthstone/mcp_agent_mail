@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 
 from .config import Settings
-from .storage import ProjectArchive, archive_write_lock, ensure_archive
+from .storage import ProjectArchive, ensure_archive
 
 __all__ = [
     "install_guard",
@@ -17,6 +17,86 @@ __all__ = [
     "render_prepush_script",
     "uninstall_guard",
 ]
+
+
+def _render_chain_runner_script(hook_name: str) -> str:
+    """
+    Render a Python chain-runner for the given Git hook name.
+
+    Behavior:
+    - Runs executables in hooks.d/<hook_name>/* in lexical order.
+    - For pre-push, reads STDIN once and forwards it to each child hook.
+    - If a <hook_name>.orig exists and is executable, it is invoked last.
+    - Exits non-zero on the first non-zero child exit code.
+    """
+    lines: list[str] = [
+        "#!/usr/bin/env python3",
+        f"# mcp-agent-mail chain-runner ({hook_name})",
+        "import os",
+        "import sys",
+        "import stat",
+        "import subprocess",
+        "from pathlib import Path",
+        "",
+        "HOOK_DIR = Path(__file__).parent",
+        f"RUN_DIR = HOOK_DIR / 'hooks.d' / '{hook_name}'",
+        f"ORIG = HOOK_DIR / '{hook_name}.orig'",
+        "",
+        "def _is_exec(p: Path) -> bool:",
+        "    try:",
+        "        st = p.stat()",
+        "        return bool(st.st_mode & stat.S_IXUSR)",
+        "    except Exception:",
+        "        return False",
+        "",
+        "def _list_execs() -> list[Path]:",
+        "    if not RUN_DIR.exists() or not RUN_DIR.is_dir():",
+        "        return []",
+        "    items = sorted([p for p in RUN_DIR.iterdir() if p.is_file()], key=lambda p: p.name)",
+        "    # On POSIX, honor exec bit; on Windows, include all files (we'll dispatch .py via python).",
+        "    if os.name == 'posix':",
+        "        try:",
+        "            items = [p for p in items if _is_exec(p)]",
+        "        except Exception:",
+        "            pass",
+        "    return items",
+        "",
+        "def _run_child(path: Path, *, stdin_bytes: bytes | None = None) -> int:",
+        "    # On Windows, prefer 'python' for .py plugins to avoid PATHEXT reliance.",
+        "    if os.name != 'posix' and path.suffix.lower() == '.py':",
+        "        return subprocess.run(['python', str(path)], input=stdin_bytes, check=False).returncode",
+        "    return subprocess.run([str(path)], input=stdin_bytes, check=False).returncode",
+        "",
+    ]
+    if hook_name == "pre-push":
+        lines += [
+            "# Read STDIN once (Git passes ref tuples); forward to children",
+            "stdin_bytes = sys.stdin.buffer.read()",
+            "for exe in _list_execs():",
+            "    rc = _run_child(exe, stdin_bytes=stdin_bytes)",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "",
+            "if ORIG.exists():",
+            "    rc = _run_child(ORIG, stdin_bytes=stdin_bytes)",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "sys.exit(0)",
+        ]
+    else:
+        lines += [
+            "for exe in _list_execs():",
+            "    rc = _run_child(exe)",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "",
+            "if ORIG.exists():",
+            "    rc = _run_child(ORIG)",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "sys.exit(0)",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def render_precommit_script(archive: ProjectArchive) -> str:
@@ -29,13 +109,22 @@ def render_precommit_script(archive: ProjectArchive) -> str:
     storage_root = str(archive.root.resolve())
     lines = [
         "#!/usr/bin/env python3",
+        "# mcp-agent-mail guard hook (pre-commit)",
         "import json",
         "import os",
         "import sys",
         "import subprocess",
         "from pathlib import Path",
-        "from fnmatch import fnmatch",
+        "import fnmatch as _fn",
         "from datetime import datetime, timezone",
+        "",
+        "# Optional Git pathspec support (preferred when available)",
+        "try:",
+        "    from pathspec import PathSpec as _PS  # type: ignore[import-not-found]",
+        "    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GWM  # type: ignore[import-not-found]",
+        "except Exception:",
+        "    _PS = None  # type: ignore[assignment]",
+        "    _GWM = None  # type: ignore[assignment]",
         "",
         f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
         f"STORAGE_ROOT = Path(\"{storage_root}\")",
@@ -56,11 +145,6 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "if not AGENT_NAME:",
         "    sys.stderr.write(\"[pre-commit] AGENT_NAME environment variable is required.\\n\")",
         "    sys.exit(1)",
-        "",
-        "if not FILE_RESERVATIONS_DIR.exists():",
-        "    sys.exit(0)",
-        "",
-        "now = datetime.now(timezone.utc)",
         "",
         "# Collect staged paths (name-only) and expand renames/moves (old+new)",
         "paths = []",
@@ -95,46 +179,33 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "if not paths:",
         "    sys.exit(0)",
         "",
-        "def load_file_reservations():",
-        "    for candidate in FILE_RESERVATIONS_DIR.glob(\"*.json\"):",
-        "        try:",
-        "            data = json.loads(candidate.read_text())",
-        "        except Exception:",
-        "            continue",
-        "        yield data",
-        "",
-        "conflicts = []",
-        "for file_reservation in load_file_reservations():",
-        "    if file_reservation.get(\"agent\") == AGENT_NAME:",
-        "        continue",
-        "    expires = file_reservation.get(\"expires_ts\")",
-        "    if expires:",
-        "        try:",
-        "            expires_dt = datetime.fromisoformat(expires)",
-        "            if expires_dt < now:",
-        "                continue",
-        "        except Exception:",
-        "            pass",
-        "    pattern = file_reservation.get(\"path_pattern\")",
-        "    if not pattern:",
-        "        continue",
-        "    for path_value in paths:",
-        "        if fnmatch(path_value, pattern) or fnmatch(pattern, path_value):",
-        "            conflicts.append((path_value, file_reservation.get(\"agent\"), pattern))",
-        "",
-        "if conflicts:",
-        "    sys.stderr.write(\"[pre-commit] Exclusive file_reservation conflicts detected:\\n\")",
-        "    for path_value, agent_name, pattern in conflicts:",
-        "        sys.stderr.write(f\"  - {path_value} matches file_reservation '{pattern}' held by {agent_name}\\n\")",
+        "# Call unified CLI guard checker via uv",
+        "root = None",
+        "try:",
+        "    cp = subprocess.run([\"git\",\"rev-parse\",\"--show-toplevel\"], check=True, capture_output=True, text=True)",
+        "    root = (cp.stdout.strip() or None)",
+        "except Exception:",
+        "    root = None",
+        "if not root:",
+        "    root = os.getcwd()",
+        "payload = (\"\\x00\".join(paths) + \"\\x00\").encode(\"utf-8\",\"ignore\")",
+        "try:",
+        "    proc = subprocess.run([\"uv\",\"run\",\"python\",\"-m\",\"mcp_agent_mail.cli\",\"guard\",\"check\",\"--stdin-nul\",\"--repo\", root],",
+        "                           input=payload, check=False)",
+        "    rc = proc.returncode",
+        "    if rc != 0:",
+        "        if ADVISORY:",
+        "            sys.stderr.write(\"[pre-commit] Advisory mode: conflicts reported by guard check; not blocking.\\n\")",
+        "            sys.exit(0)",
+        "        sys.exit(rc)",
+        "    sys.exit(0)",
+        "except Exception:",
+        "    # Fail open to avoid false blocks if CLI unavailable",
         "    if ADVISORY:",
-        "        sys.stderr.write(\"[pre-commit] Advisory mode: not blocking commit (set AGENT_MAIL_GUARD_MODE=block to enforce).\\n\")",
+        "        sys.stderr.write(\"[pre-commit] guard check unavailable; advisory mode proceeding.\\n\")",
         "        sys.exit(0)",
-        "    else:",
-        "        sys.stderr.write(\"Resolve conflicts or release file_reservations before committing.\\n\")",
-        "        sys.stderr.write(\"Hints: set AGENT_MAIL_GUARD_MODE=warn to trial advisory mode; set AGENT_MAIL_BYPASS=1 to bypass in emergencies.\\n\")",
-        "        sys.exit(1)",
-        "",
-        "sys.exit(0)",
+        "    sys.stderr.write(\"[pre-commit] guard check unavailable; proceeding to avoid false block.\\n\")",
+        "    sys.exit(0)",
     ]
     return "\n".join(lines) + "\n"
 
@@ -147,12 +218,22 @@ def render_prepush_script(archive: ProjectArchive) -> str:
     file_reservations_dir = str((archive.root / "file_reservations").resolve())
     lines = [
         "#!/usr/bin/env python3",
+        "# mcp-agent-mail guard hook (pre-push)",
         "import json",
         "import os",
         "import sys",
         "import subprocess",
         "from pathlib import Path",
+        "import fnmatch as _fn",
         "from datetime import datetime, timezone",
+        "",
+        "# Optional Git pathspec support (preferred when available)",
+        "try:",
+        "    from pathspec import PathSpec as _PS  # type: ignore[import-not-found]",
+        "    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GWM  # type: ignore[import-not-found]",
+        "except Exception:",
+        "    _PS = None  # type: ignore[assignment]",
+        "    _GWM = None  # type: ignore[assignment]",
         "",
         f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
         "",
@@ -202,7 +283,7 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "        except Exception:",
         "            pass",
         "",
-        "# changed already initialized above",
+        "# changed already initialized above; add per-commit changed paths",
         "for c in commits:",
         "    try:",
         "        cp = subprocess.run([\"git\",\"diff-tree\",\"-r\",\"--no-commit-id\",\"--name-only\",\"--no-ext-diff\",\"--diff-filter=ACMRDTU\",\"-z\",c],",
@@ -213,59 +294,38 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "    except Exception:",
         "        continue",
         "",
-        "def load_file_reservations():",
-        "    for candidate in FILE_RESERVATIONS_DIR.glob(\"*.json\"):",
-        "        try:",
-        "            data = json.loads(candidate.read_text())",
-        "        except Exception:",
-        "            continue",
-        "        yield data",
-        "",
-        "now = datetime.now(timezone.utc)",
-        "conflicts = []",
-        "for file_reservation in load_file_reservations():",
-        "    if file_reservation.get(\"agent\") == AGENT_NAME:",
-        "        continue",
-        "    if not file_reservation.get(\"exclusive\", True):",
-        "        continue",
-        "    expires = file_reservation.get(\"expires_ts\")",
-        "    if expires:",
-        "        try:",
-        "            expires_dt = datetime.fromisoformat(expires)",
-        "            if expires_dt < now:",
-        "                continue",
-        "        except Exception:",
-        "            pass",
-        "    pattern = (file_reservation.get(\"path_pattern\") or \"\").strip()",
-        "    if not pattern:",
-        "        continue",
-        "    for path_value in changed:",
-        "        # simple fnmatch-style compare; hook remains dependency-free",
-        "        import fnmatch as _fn",
-        "        a = path_value.replace(\"\\\\\",\"/\").lstrip(\"/\")",
-        "        b = pattern.replace(\"\\\\\",\"/\").lstrip(\"/\")",
-        "        if _fn.fnmatchcase(a,b) or _fn.fnmatchcase(b,a) or (a==b):",
-        "            conflicts.append((path_value, file_reservation.get(\"agent\"), pattern))",
-        "",
-        "if conflicts:",
-        "    sys.stderr.write(\"[pre-push] Exclusive file_reservation conflicts detected:\\n\")",
-        "    for path_value, agent_name, pattern in conflicts:",
-        "        sys.stderr.write(f\"  - {path_value} matches file_reservation '{pattern}' held by {agent_name}\\n\")",
+        "# Call unified CLI guard checker via uv",
+        "root = None",
+        "try:",
+        "    cp = subprocess.run([\"git\",\"rev-parse\",\"--show-toplevel\"], check=True, capture_output=True, text=True)",
+        "    root = (cp.stdout.strip() or None)",
+        "except Exception:",
+        "    root = None",
+        "if not root:",
+        "    root = os.getcwd()",
+        "payload = (\"\\x00\".join(changed) + \"\\x00\").encode(\"utf-8\",\"ignore\")",
+        "try:",
+        "    proc = subprocess.run([\"uv\",\"run\",\"python\",\"-m\",\"mcp_agent_mail.cli\",\"guard\",\"check\",\"--stdin-nul\",\"--repo\", root],",
+        "                           input=payload, check=False)",
+        "    rc = proc.returncode",
+        "    if rc != 0:",
+        "        if ADVISORY:",
+        "            sys.stderr.write(\"[pre-push] Advisory mode: conflicts reported by guard check; not blocking.\\n\")",
+        "            sys.exit(0)",
+        "        sys.exit(rc)",
+        "    sys.exit(0)",
+        "except Exception:",
         "    if ADVISORY:",
-        "        sys.stderr.write(\"[pre-push] Advisory mode: not blocking push (set AGENT_MAIL_GUARD_MODE=block to enforce).\\n\")",
+        "        sys.stderr.write(\"[pre-push] guard check unavailable; advisory mode proceeding.\\n\")",
         "        sys.exit(0)",
-        "    else:",
-        "        sys.stderr.write(\"Resolve conflicts or release file_reservations before pushing.\\n\")",
-        "        sys.stderr.write(\"Hints: set AGENT_MAIL_GUARD_MODE=warn to trial advisory mode; set AGENT_MAIL_BYPASS=1 to bypass in emergencies.\\n\")",
-        "        sys.exit(1)",
-        "",
-        "sys.exit(0)",
+        "    sys.stderr.write(\"[pre-push] guard check unavailable; proceeding to avoid false block.\\n\")",
+        "    sys.exit(0)",
     ]
     return "\n".join(lines) + "\n"
 
 
 async def install_guard(settings: Settings, project_slug: str, repo_path: Path) -> Path:
-    """Install the pre-commit guard for the given project into the repo."""
+    """Install the pre-commit chain-runner and Agent Mail guard plugin."""
 
     archive = await ensure_archive(settings, project_slug)
 
@@ -298,24 +358,60 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
         return repo / ".git" / "hooks"
 
     hooks_dir = _resolve_hooks_dir(repo_path)
-    if not hooks_dir.parent.exists() and hooks_dir.name != "hooks":
-        # Ensure parent for custom hooksPath exists
-        await asyncio.to_thread(hooks_dir.parent.mkdir, parents=True, exist_ok=True)
     if not hooks_dir.exists():
         await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
 
-    hook_path = hooks_dir / "pre-commit"
-    script = render_precommit_script(archive)
+    # Ensure hooks.d/pre-commit exists
+    run_dir = hooks_dir / "hooks.d" / "pre-commit"
+    await asyncio.to_thread(run_dir.mkdir, parents=True, exist_ok=True)
 
-    async with archive_write_lock(archive):
-        await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
-        await asyncio.to_thread(hook_path.write_text, script, "utf-8")
-        await asyncio.to_thread(os.chmod, hook_path, 0o755)
-    return hook_path
+    chain_path = hooks_dir / "pre-commit"
+    # Preserve existing non-chain hook as .orig
+    if chain_path.exists():
+        try:
+            content = (await asyncio.to_thread(chain_path.read_text, "utf-8")).strip()
+        except Exception:
+            content = ""
+        if "mcp-agent-mail chain-runner (pre-commit)" not in content:
+            orig = hooks_dir / "pre-commit.orig"
+            if not orig.exists():
+                await asyncio.to_thread(chain_path.replace, orig)
+    # Write/overwrite chain-runner
+    chain_script = _render_chain_runner_script("pre-commit")
+    await asyncio.to_thread(chain_path.write_text, chain_script, "utf-8")
+    await asyncio.to_thread(os.chmod, chain_path, 0o755)
+
+    # Windows shims (.cmd / .ps1) to invoke the Python chain-runner
+    cmd_path = hooks_dir / "pre-commit.cmd"
+    if not cmd_path.exists():
+        cmd_body = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            "set \"DIR=%~dp0\"\r\n"
+            "python \"%DIR%pre-commit\" %*\r\n"
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+        await asyncio.to_thread(cmd_path.write_text, cmd_body, "utf-8")
+    ps1_path = hooks_dir / "pre-commit.ps1"
+    if not ps1_path.exists():
+        ps1_body = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "$hook = Join-Path $PSScriptRoot 'pre-commit'\n"
+            "python $hook @args\n"
+            "exit $LASTEXITCODE\n"
+        )
+        await asyncio.to_thread(ps1_path.write_text, ps1_body, "utf-8")
+
+    # Write our guard plugin
+    plugin_path = run_dir / "50-agent-mail.py"
+    plugin_script = render_precommit_script(archive)
+    await asyncio.to_thread(plugin_path.write_text, plugin_script, "utf-8")
+    await asyncio.to_thread(os.chmod, plugin_path, 0o755)
+    return chain_path
 
 
 async def install_prepush_guard(settings: Settings, project_slug: str, repo_path: Path) -> Path:
-    """Install the pre-push guard for the given project into the repo."""
+    """Install the pre-push chain-runner and Agent Mail guard plugin."""
     archive = await ensure_archive(settings, project_slug)
 
     def _git(cwd: Path, *args: str) -> str | None:
@@ -344,19 +440,104 @@ async def install_prepush_guard(settings: Settings, project_slug: str, repo_path
 
     hooks_dir = _resolve_hooks_dir(repo_path)
     await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
-    hook_path = hooks_dir / "pre-push"
-    script = render_prepush_script(archive)
-    async with archive_write_lock(archive):
-        await asyncio.to_thread(hook_path.write_text, script, "utf-8")
-        await asyncio.to_thread(os.chmod, hook_path, 0o755)
-    return hook_path
+    # Ensure hooks.d/pre-push exists
+    run_dir = hooks_dir / "hooks.d" / "pre-push"
+    await asyncio.to_thread(run_dir.mkdir, parents=True, exist_ok=True)
+
+    chain_path = hooks_dir / "pre-push"
+    if chain_path.exists():
+        try:
+            content = (await asyncio.to_thread(chain_path.read_text, "utf-8")).strip()
+        except Exception:
+            content = ""
+        if "mcp-agent-mail chain-runner (pre-push)" not in content:
+            orig = hooks_dir / "pre-push.orig"
+            if not orig.exists():
+                await asyncio.to_thread(chain_path.replace, orig)
+    chain_script = _render_chain_runner_script("pre-push")
+    await asyncio.to_thread(chain_path.write_text, chain_script, "utf-8")
+    await asyncio.to_thread(os.chmod, chain_path, 0o755)
+
+    # Windows shims (.cmd / .ps1) to invoke the Python chain-runner
+    cmd_path = hooks_dir / "pre-push.cmd"
+    if not cmd_path.exists():
+        cmd_body = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            "set \"DIR=%~dp0\"\r\n"
+            "python \"%DIR%pre-push\" %*\r\n"
+            "exit /b %ERRORLEVEL%\r\n"
+        )
+        await asyncio.to_thread(cmd_path.write_text, cmd_body, "utf-8")
+    ps1_path = hooks_dir / "pre-push.ps1"
+    if not ps1_path.exists():
+        ps1_body = (
+            "$ErrorActionPreference = 'Stop'\n"
+            "$hook = Join-Path $PSScriptRoot 'pre-push'\n"
+            "python $hook @args\n"
+            "exit $LASTEXITCODE\n"
+        )
+        await asyncio.to_thread(ps1_path.write_text, ps1_body, "utf-8")
+
+    plugin_path = run_dir / "50-agent-mail.py"
+    plugin_script = render_prepush_script(archive)
+    await asyncio.to_thread(plugin_path.write_text, plugin_script, "utf-8")
+    await asyncio.to_thread(os.chmod, plugin_path, 0o755)
+    return chain_path
 
 
 async def uninstall_guard(repo_path: Path) -> bool:
-    """Remove the pre-commit guard from repo, returning True if removed."""
+    """Remove Agent Mail guard plugin(s) from repo, returning True if any were removed.
 
-    hook_path = repo_path / ".git" / "hooks" / "pre-commit"
-    if hook_path.exists():
-        await asyncio.to_thread(hook_path.unlink)
-        return True
-    return False
+    - Removes hooks.d/<hook>/50-agent-mail.py if present.
+    - Legacy fallback: removes top-level pre-commit/pre-push only if they are old-style
+      Agent Mail hooks (sentinel present) and not chain-runners.
+    """
+
+    def _git(cwd: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+
+    def _resolve_hooks_dir(repo: Path) -> Path:
+        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
+        if hooks_path:
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
+                return Path(hooks_path)
+            root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
+            return Path(root) / hooks_path
+        git_dir = _git(repo, "rev-parse", "--git-dir")
+        if git_dir:
+            g = Path(git_dir)
+            if not g.is_absolute():
+                g = repo / g
+            return g / "hooks"
+        return repo / ".git" / "hooks"
+
+    hooks_dir = _resolve_hooks_dir(repo_path)
+    removed = False
+    # Remove our hooks.d plugins if present
+    for sub in ("pre-commit", "pre-push"):
+        plugin = hooks_dir / "hooks.d" / sub / "50-agent-mail.py"
+        if plugin.exists():
+            await asyncio.to_thread(plugin.unlink)
+            removed = True
+    # Legacy top-level single-file uninstall (pre-chain-runner installs)
+    pre_commit = hooks_dir / "pre-commit"
+    pre_push = hooks_dir / "pre-push"
+    SENTINELS = ("mcp-agent-mail guard hook", "AGENT_NAME environment variable is required.")
+    for hook_path in (pre_commit, pre_push):
+        if hook_path.exists():
+            try:
+                content = (await asyncio.to_thread(hook_path.read_text, "utf-8")).strip()
+            except Exception:
+                content = ""
+            # Keep chain-runner files
+            if "mcp-agent-mail chain-runner" in content:
+                continue
+            if any(s in content for s in SENTINELS):
+                await asyncio.to_thread(hook_path.unlink)
+                removed = True
+    return removed

@@ -1473,6 +1473,11 @@ sequenceDiagram
     - `mcp-agent-mail guard install <project_key> <repo_path> --prepush`
   - Pre-commit honors `WORKTREES_ENABLED` and `AGENT_MAIL_GUARD_MODE` (`warn` advisory).
   - Pre-push enumerates to-be-pushed commits (`rev-list`) and uses `diff-tree` with `--no-ext-diff`.
+  - Composition-safe install (chain-runner):
+    - A Python chain-runner is written to `.git/hooks/pre-commit` and `.git/hooks/pre-push`.
+    - It executes `hooks.d/<hook>/*` in lexical order, then `<hook>.orig` if present (existing hooks are preserved, not overwritten).
+    - Agent Mail installs its guard as `hooks.d/pre-commit/50-agent-mail.py` and `hooks.d/pre-push/50-agent-mail.py`.
+    - Windows shims (`pre-commit.cmd/.ps1`, `pre-push.cmd/.ps1`) are written to invoke the Python chain-runner.
 
 ## Git-based project identity (opt-in)
 
