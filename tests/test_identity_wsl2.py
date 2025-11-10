@@ -11,7 +11,8 @@ def _is_wsl2() -> bool:
     try:
         if os.environ.get("WSL_INTEROP"):
             return True
-        with open("/proc/version", "r", encoding="utf-8", errors="ignore") as fh:
+        from pathlib import Path as _Path
+        with _Path("/proc/version").open("r", encoding="utf-8", errors="ignore") as fh:
             data = fh.read().lower()
         return "microsoft" in data
     except Exception:
