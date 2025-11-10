@@ -22,6 +22,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, Optional, cast
 
+import httpx
 import typer
 import uvicorn
 from rich.console import Console
@@ -1649,6 +1650,9 @@ def am_run(
     cmd: Annotated[list[str], typer.Argument(help="Command to run", nargs=-1)],
     project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
+    ttl_seconds: Annotated[int, typer.Option("--ttl-seconds", help="Lease TTL seconds (default 3600)")] = 3600,
+    shared: Annotated[bool, typer.Option("--shared/--exclusive", help="Shared (non-exclusive) lease",)] = False,
+    block_on_conflicts: Annotated[bool, typer.Option("--block-on-conflicts/--no-block-on-conflicts", help="Exit 1 if exclusive conflicts are present")] = False,
 ) -> None:
     """
     Build wrapper that prepares environment variables and manages a build slot:
@@ -1676,6 +1680,8 @@ def am_run(
     settings = get_settings()
     guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
     worktrees_enabled = bool(settings.worktrees_enabled)
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path.lstrip('/')}"
+    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
 
     def _safe_component(value: str) -> str:
         s = value.strip()
@@ -1722,67 +1728,175 @@ def am_run(
     lease_path: Optional[Path] = None
     renew_stop = threading.Event()
     renew_thread: Optional[threading.Thread] = None
-    ttl_seconds = 3600
     try:
         if worktrees_enabled:
-            slot_dir = asyncio.run(_ensure_slot_paths())
-            active = _read_active(slot_dir)
-            conflicts = [
-                e for e in active
-                if e.get("exclusive", True) and not (e.get("agent") == agent_name and e.get("branch") == branch)
-            ]
-            if conflicts and guard_mode == "warn":
-                console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
-                for c in conflicts:
-                    console.print(
-                        f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
-                        f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
-                    )
-            lease_path = _lease_path(slot_dir)
-            payload = {
-                "slot": slot,
-                "agent": agent_name,
-                "branch": branch,
-                "exclusive": True,
-                "acquired_ts": datetime.now(timezone.utc).isoformat(),
-                "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
-            }
-            with suppress(Exception):
-                lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            def _renewer() -> None:
-                interval = max(60, ttl_seconds // 2)
-                while not renew_stop.wait(interval):
-                    try:
-                        now = datetime.now(timezone.utc)
-                        new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
+            # Prefer server tools (authority); fallback to local FS leases
+            use_server = True
+            try:
+                with httpx.Client(timeout=5.0) as client:
+                    headers = {}
+                    if bearer:
+                        headers["Authorization"] = f"Bearer {bearer}"
+                    req = {
+                        "jsonrpc": "2.0",
+                        "id": "am-run-ensure",
+                        "method": "tools/call",
+                        "params": {"name": "ensure_project", "arguments": {"human_key": str(p)}},
+                    }
+                    client.post(server_url, json=req, headers=headers)
+            except Exception:
+                use_server = False
+
+            if use_server:
+                conflicts: list[dict[str, Any]] = []
+                try:
+                    with httpx.Client(timeout=5.0) as client:
+                        headers = {}
+                        if bearer:
+                            headers["Authorization"] = f"Bearer {bearer}"
+                        req = {
+                            "jsonrpc": "2.0",
+                            "id": "am-run-acquire",
+                            "method": "tools/call",
+                            "params": {
+                                "name": "acquire_build_slot",
+                                "arguments": {
+                                    "project_key": str(p),
+                                    "agent_name": agent_name,
+                                    "slot": slot,
+                                    "ttl_seconds": int(ttl_seconds),
+                                    "exclusive": (not shared),
+                                },
+                            },
+                        }
+                        resp = client.post(server_url, json=req, headers=headers)
+                        data = resp.json()
+                        result = (data or {}).get("result") or {}
+                        conflicts = list(result.get("conflicts") or [])
+                except Exception:
+                    use_server = False
+
+                if conflicts and guard_mode == "warn":
+                    console.print("[yellow]Build slot conflicts (server advisory, proceeding):[/]")
+                    for c in conflicts:
+                        console.print(
+                            f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
+                            f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
+                        )
+                if conflicts and (not shared) and block_on_conflicts:
+                    console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
+                    raise typer.Exit(code=1)
+
+                def _renewer_srv() -> None:
+                    interval = max(60, ttl_seconds // 2)
+                    while not renew_stop.wait(interval):
                         try:
-                            current = json.loads(lease_path.read_text(encoding="utf-8")) if lease_path else {}
+                            with httpx.Client(timeout=5.0) as client:
+                                headers = {}
+                                if bearer:
+                                    headers["Authorization"] = f"Bearer {bearer}"
+                                req = {
+                                    "jsonrpc": "2.0",
+                                    "id": "am-run-renew",
+                                    "method": "tools/call",
+                                    "params": {
+                                        "name": "renew_build_slot",
+                                        "arguments": {
+                                            "project_key": str(p),
+                                            "agent_name": agent_name,
+                                            "slot": slot,
+                                            "extend_seconds": max(60, ttl_seconds // 2),
+                                        },
+                                    },
+                                }
+                                client.post(server_url, json=req, headers=headers)
                         except Exception:
-                            current = {}
-                        current.update({"expires_ts": new_exp.isoformat()})
-                        if lease_path:
-                            lease_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
-                    except Exception:
-                        continue
-            renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
-            renew_thread.start()
+                            continue
+
+                renew_thread = threading.Thread(target=_renewer_srv, name="am-run-renew", daemon=True)
+                renew_thread.start()
+
+            if not use_server:
+                slot_dir = asyncio.run(_ensure_slot_paths())
+                active = _read_active(slot_dir)
+                conflicts = [
+                    e for e in active
+                    if e.get("exclusive", True) and not shared and not (e.get("agent") == agent_name and e.get("branch") == branch)
+                ]
+                if conflicts and guard_mode == "warn":
+                    console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
+                    for c in conflicts:
+                        console.print(
+                            f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
+                            f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
+                        )
+                if conflicts and (not shared) and block_on_conflicts:
+                    console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
+                    raise typer.Exit(code=1)
+                lease_path = _lease_path(slot_dir)
+                payload = {
+                    "slot": slot,
+                    "agent": agent_name,
+                    "branch": branch,
+                    "exclusive": (not shared),
+                    "acquired_ts": datetime.now(timezone.utc).isoformat(),
+                    "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
+                }
+                with suppress(Exception):
+                    lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+                def _renewer() -> None:
+                    interval = max(60, ttl_seconds // 2)
+                    while not renew_stop.wait(interval):
+                        try:
+                            now = datetime.now(timezone.utc)
+                            new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
+                            try:
+                                current = json.loads(lease_path.read_text(encoding="utf-8")) if lease_path else {}
+                            except Exception:
+                                current = {}
+                            current.update({"expires_ts": new_exp.isoformat()})
+                            if lease_path:
+                                lease_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+                        except Exception:
+                            continue
+                renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
+                renew_thread.start()
         console.print(f"[cyan]$ {' '.join(cmd)}[/]  [dim](slot={slot})[/]")
         rc = subprocess.run(list(cmd), env=env, check=False).returncode
     except FileNotFoundError:
         rc = 127
     finally:
-        if worktrees_enabled and lease_path:
+        if worktrees_enabled:
+            # Attempt server release; fallback to local lease release
             try:
-                now = datetime.now(timezone.utc)
-                try:
-                    data = json.loads(lease_path.read_text(encoding="utf-8"))
-                except Exception:
-                    data = {}
-                data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
-                with suppress(Exception):
-                    lease_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                with httpx.Client(timeout=5.0) as client:
+                    headers = {}
+                    if bearer:
+                        headers["Authorization"] = f"Bearer {bearer}"
+                    req = {
+                        "jsonrpc": "2.0",
+                        "id": "am-run-release",
+                        "method": "tools/call",
+                        "params": {
+                            "name": "release_build_slot",
+                            "arguments": {"project_key": str(p), "agent_name": agent_name, "slot": slot},
+                        },
+                    }
+                    client.post(server_url, json=req, headers=headers)
             except Exception:
-                pass
+                if lease_path:
+                    try:
+                        now = datetime.now(timezone.utc)
+                        try:
+                            data = json.loads(lease_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            data = {}
+                        data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
+                        with suppress(Exception):
+                            lease_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
             finally:
                 renew_stop.set()
                 if renew_thread and renew_thread.is_alive():

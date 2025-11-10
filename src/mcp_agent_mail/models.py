@@ -18,6 +18,28 @@ class Project(SQLModel, table=True):
     human_key: str = Field(max_length=255, index=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class Product(SQLModel, table=True):
+    """Logical grouping across multiple repositories for product-wide inbox/search and threads."""
+
+    __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("product_uid", name="uq_product_uid"), UniqueConstraint("name", name="uq_product_name"))
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    product_uid: str = Field(index=True, max_length=64)
+    name: str = Field(index=True, max_length=255)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class ProductProjectLink(SQLModel, table=True):
+    """Associates a Project with a Product (many-to-many via link table)."""
+
+    __tablename__ = "product_project_links"
+    __table_args__ = (UniqueConstraint("product_id", "project_id", name="uq_product_project"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    product_id: int = Field(foreign_key="products.id", index=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
 
 class Agent(SQLModel, table=True):
     __tablename__ = "agents"

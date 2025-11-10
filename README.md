@@ -1491,6 +1491,10 @@ sequenceDiagram
   - Example: `mcp-agent-mail am-run frontend-build -- npm run dev`
 
 - Build slots (advisory, per-project coarse locking):
+  - Flags:
+    - `--ttl-seconds`: lease duration (default 3600)
+    - `--shared/--exclusive`: non-exclusive or exclusive lease (default exclusive)
+    - `--block-on-conflicts`: exit non-zero if exclusive conflicts are detected before starting
   - Acquire:
     - Tool: `acquire_build_slot(project_key, agent_name, slot, ttl_seconds=3600, exclusive=true)`
   - Renew:
