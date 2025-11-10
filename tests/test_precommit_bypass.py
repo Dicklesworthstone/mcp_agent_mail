@@ -45,7 +45,7 @@ def test_precommit_bypass_allows_commit(tmp_path: Path) -> None:
     )
     # Run hook with bypass
     hook = repo / "pre-commit-test.py"
-    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")
+    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"

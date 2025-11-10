@@ -160,6 +160,10 @@ Macros vs granular tools
   - `mcp-agent-mail products status MyProduct`
 - Search messages across all linked projects:
   - `mcp-agent-mail products search MyProduct "bd-123 OR \"release plan\"" --limit 50`
+- Product-wide inbox for an agent:
+  - `mcp-agent-mail products inbox MyProduct YourAgent --limit 50 --urgent-only --include-bodies`
+- Product-wide thread summarization:
+  - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --per-thread-limit 100 --no-llm`
 
 Server tools (for orchestrators)
 - `ensure_product(product_key|name)`

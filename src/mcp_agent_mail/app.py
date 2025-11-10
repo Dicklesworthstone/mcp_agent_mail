@@ -387,7 +387,7 @@ def _split_slug_and_query(raw_value: str) -> tuple[str, dict[str, str]]:
     slug, _, query_string = raw_value.partition("?")
     if not query_string:
         return slug, {}
-    params = cast(dict[str, str], dict(parse_qsl(query_string, keep_blank_values=True)))
+    params = dict(parse_qsl(query_string, keep_blank_values=True))
     return slug, params
 
 
@@ -1824,7 +1824,7 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
     if PathSpec and GitWildMatchPattern:
-        spec = PathSpec.from_lines(GitWildMatchPattern, [existing.path_pattern])
+        spec = PathSpec.from_lines("gitwildmatch", [existing.path_pattern])
         return spec.match_file(_normalize(candidate_path))
     # Fallback to conservative fnmatch if pathspec not available
     pat = existing.path_pattern
@@ -1838,8 +1838,8 @@ def _patterns_overlap(a: str, b: str) -> bool:
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
     if PathSpec and GitWildMatchPattern:
-        a_spec = PathSpec.from_lines(GitWildMatchPattern, [a])
-        b_spec = PathSpec.from_lines(GitWildMatchPattern, [b])
+        a_spec = PathSpec.from_lines("gitwildmatch", [a])
+        b_spec = PathSpec.from_lines("gitwildmatch", [b])
         # Heuristic: check direct cross-matches on normalized patterns
         return a_spec.match_file(_normalize(b)) or b_spec.match_file(_normalize(a))
     # Fallback approximate

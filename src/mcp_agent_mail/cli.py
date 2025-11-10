@@ -399,7 +399,8 @@ def products_inbox(
                         .limit(limit)
                     )
                     if urgent_only:
-                        stmt = stmt.where(Message.importance.in_(["high", "urgent"]))
+                        from typing import Any as _Any
+                        stmt = stmt.where(cast(_Any, Message.importance).in_(["high", "urgent"]))
                     if since_ts:
                         try:
                             s = since_ts.strip()
@@ -2063,7 +2064,7 @@ def amctl_env(
 @app.command(name="am-run")
 def am_run(
     slot: Annotated[str, typer.Argument(help="Build slot name (e.g., frontend-build)")],
-    cmd: Annotated[list[str], typer.Argument(help="Command to run", nargs=-1)],
+    cmd: Annotated[list[str], typer.Argument(help="Command to run")],
     project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
     ttl_seconds: Annotated[int, typer.Option("--ttl-seconds", help="Lease TTL seconds (default 3600)")] = 3600,
@@ -2510,7 +2511,9 @@ def projects_adopt(
         return await _get_project_record(slug_or_key)
 
     try:
-        src, dst = asyncio.run(asyncio.gather(_load(source), _load(target)))
+        async def _both() -> tuple[Project, Project]:
+            return await asyncio.gather(_load(source), _load(target))  # type: ignore[return-value]
+        src, dst = asyncio.run(_both())
     except Exception as exc:
         raise typer.BadParameter(str(exc)) from exc
 

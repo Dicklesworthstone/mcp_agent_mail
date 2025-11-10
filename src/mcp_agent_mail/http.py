@@ -830,7 +830,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
                 return response
 
-        fastapi_app.add_middleware(RequestLoggingMiddleware)
+        fastapi_app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
 
     # Unified JWT/RBAC and robust rate limiter middleware
     if (
@@ -838,10 +838,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         or getattr(settings.http, "jwt_enabled", False)
         or getattr(settings.http, "rbac_enabled", True)
     ):
-        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
+        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)  # type: ignore[arg-type]
     # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
     if settings.http.bearer_token:
-        fastapi_app.add_middleware(
+        from typing import Any as _Any, cast as _cast  # local type-only import
+        app_any = _cast(_Any, fastapi_app)
+        app_any.add_middleware(
             BearerAuthMiddleware,
             token=settings.http.bearer_token,
             allow_localhost=bool(getattr(settings.http, "allow_localhost_unauthenticated", False)),
@@ -849,7 +851,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # Optional CORS
     if settings.cors.enabled:
-        fastapi_app.add_middleware(
+        from typing import Any as _Any, cast as _cast  # local type-only import
+        app_any2 = _cast(_Any, fastapi_app)
+        app_any2.add_middleware(
             CORSMiddleware,
             allow_origins=settings.cors.origins or ["*"],
             allow_credentials=settings.cors.allow_credentials,

@@ -6,8 +6,10 @@ from mcp_agent_mail.db import ensure_schema, reset_database_state
 
 
 async def _call(tool_name: str, args: dict[str, Any]) -> Any:
-    server = build_mcp_server()
-    tool = next(t for t in server.tools if t.name == tool_name)
+    # Access FastMCP internals in a tolerant way for testing
+    from fastmcp.tools.tool import FunctionTool  # type: ignore
+    mcp = build_mcp_server()
+    tool = next(t for t in getattr(mcp, "_tools", []) if isinstance(t, FunctionTool) and t.name == tool_name)  # type: ignore[attr-defined]
     return await tool.run(args)
 
 
@@ -25,9 +27,9 @@ def test_ensure_product_and_link_project(tmp_path) -> None:
     link = asyncio.run(_call("products_link", {"product_key": prod["product_uid"], "project_key": slug}))
     assert link["linked"] is True
     # Product resource lists the project
-    server = build_mcp_server()
-    resource = next(r for r in server.resources if r.name == "resource://product/{key}")
-    res = resource.func(prod["product_uid"])  # type: ignore
+    mcp = build_mcp_server()
+    resource = next(r for r in getattr(mcp, "_resources", []) if r.name == "resource://product/{key}")  # type: ignore[attr-defined]
+    res = resource.func(prod["product_uid"])  # type: ignore[attr-defined]
     assert any(p["slug"] == slug for p in res["projects"])
 
 
