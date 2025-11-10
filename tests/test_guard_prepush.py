@@ -54,11 +54,10 @@ def test_prepush_blocks_on_conflict_with_real_range(tmp_path: Path) -> None:
     hook.write_text(render_prepush_script(_DummyArchive(archive_root)), encoding="utf-8")
     # Determine local ref and sha; remote has no refs yet
     local_ref = "refs/heads/main"
-    try:
+    from contextlib import suppress
+    with suppress(Exception):
         # Ensure branch named main even if default differs
         _git(repo, "branch", "-M", "main")
-    except Exception:
-        pass
     local_sha = _git(repo, "rev-parse", "HEAD")
     remote_ref = "refs/heads/main"
     remote_sha = "0" * 40

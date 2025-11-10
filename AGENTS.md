@@ -102,7 +102,7 @@ Macros vs granular tools
 ### Worktree recipes (opt-in, non-disruptive)
 
 - Enable gated features:
-  - Set `WORKTREES_ENABLED=1` in `.env` (do not commit secrets; config is loaded via `python-decouple`).
+  - Set `WORKTREES_ENABLED=1` or `GIT_IDENTITY_ENABLED=1` in `.env` (do not commit secrets; config is loaded via `python-decouple`).
   - For trial posture, set `AGENT_MAIL_GUARD_MODE=warn` to surface conflicts without blocking.
 - Inspect identity for a worktree:
   - CLI: `mcp-agent-mail mail status .`
@@ -114,6 +114,18 @@ Macros vs granular tools
 - Reserve before you edit:
   - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)`
   - Patterns use Git pathspec semantics and respect repository `core.ignorecase`.
+
+### Git-based identity: precedence and migration
+
+- Precedence (when gate is on):
+  1) Committed marker `.agent-mail-project-id`
+  2) Discovery YAML `.agent-mail.yaml` with `project_uid:`
+  3) Private marker `.git/agent-mail/project-id`
+  4) Remote fingerprint: normalized `origin` + default branch
+  5) `git-common-dir` or path hash
+- Migration helpers (CLI):
+  - Write committed marker: `mcp-agent-mail projects mark-identity . --commit`
+  - Scaffold discovery YAML: `mcp-agent-mail projects discovery-init . --product <product_uid>`
 
 ### Guard usage quickstart
 

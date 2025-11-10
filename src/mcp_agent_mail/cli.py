@@ -141,16 +141,18 @@ def products_ensure(
             headers = {}
             if bearer:
                 headers["Authorization"] = f"Bearer {bearer}"
+            arguments: dict[str, Any] = {}
+            if product_key:
+                arguments["product_key"] = product_key
+            if name:
+                arguments["name"] = name
             req = {
                 "jsonrpc": "2.0",
                 "id": "cli-products-ensure",
                 "method": "tools/call",
                 "params": {
                     "name": "ensure_product",
-                    "arguments": {
-                        "product_key": product_key or "",
-                        "name": name or "",
-                    },
+                    "arguments": arguments,
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
@@ -300,7 +302,7 @@ def products_search(
                     FROM fts_messages
                     JOIN messages m ON fts_messages.rowid = m.id
                     JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id IN (:proj_ids) AND fts_messages MATCH :query
+                    WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
                     ORDER BY bm25(fts_messages) ASC
                     LIMIT :limit
                     """
@@ -2318,6 +2320,59 @@ def am_run(
     if rc != 0:
         raise typer.Exit(code=rc)
 
+@projects_app.command("mark-identity")
+def projects_mark_identity(
+    project_path: Annotated[Path, typer.Argument(..., help="Path to repo/worktree ('.' for current)")],
+    commit: Annotated[bool, typer.Option("--commit/--no-commit", help="Write committed marker .agent-mail-project-id")] = True,
+) -> None:
+    """
+    Write the current project_uid into a marker file (.agent-mail-project-id).
+    """
+    p = project_path.expanduser().resolve()
+    from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident  # type: ignore
+    ident = _resolve_ident(str(p))
+    uid = ident.get("project_uid") or ""
+    if not uid:
+        raise typer.BadParameter("Unable to resolve project_uid for this path.")
+    # Determine repo root
+    try:
+        from git import Repo as _Repo
+        repo = _Repo(str(p), search_parent_directories=True)
+        root = Path(repo.working_tree_dir or str(p))
+    except Exception:
+        root = p
+    marker_path = root / ".agent-mail-project-id"
+    marker_path.write_text(uid + "\n", encoding="utf-8")
+    console.print(f"[green]Wrote[/] {marker_path} with project_uid={uid}")
+    if commit:
+        try:
+            subprocess.run(["git", "-C", str(root), "add", str(marker_path)], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-m", "chore: add .agent-mail-project-id"], check=True)
+            console.print("[green]Committed marker file.[/]")
+        except Exception:
+            console.print("[yellow]Unable to commit marker automatically. Please commit manually.[/]")
+
+
+@projects_app.command("discovery-init")
+def projects_discovery_init(
+    project_path: Annotated[Path, typer.Argument(..., help="Path to repo/worktree ('.' for current)")],
+    product: Annotated[Optional[str], typer.Option("--product", "-P", help="Optional product_uid")] = None,
+) -> None:
+    """
+    Scaffold a discovery YAML file (.agent-mail.yaml) with project_uid (and optional product_uid).
+    """
+    p = project_path.expanduser().resolve()
+    from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident  # type: ignore
+    ident = _resolve_ident(str(p))
+    uid = ident.get("project_uid") or ""
+    if not uid:
+        raise typer.BadParameter("Unable to resolve project_uid for this path.")
+    ypath = p / ".agent-mail.yaml"
+    lines = ["# Agent Mail discovery file", f"project_uid: {uid}"]
+    if product:
+        lines.append(f"product_uid: {product}")
+    ypath.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    console.print(f"[green]Wrote[/] {ypath}")
 @mail_app.command("status")
 def mail_status(
     project_path: Annotated[

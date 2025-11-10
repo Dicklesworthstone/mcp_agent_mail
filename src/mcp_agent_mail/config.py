@@ -275,7 +275,11 @@ def get_settings() -> Settings:
 
     return Settings(
         environment=environment,
-        worktrees_enabled=_bool(_decouple_config("WORKTREES_ENABLED", default="false"), default=False),
+        # Gate: allow either legacy WORKTREES_ENABLED or new GIT_IDENTITY_ENABLED to enable features
+        worktrees_enabled=(
+            _bool(_decouple_config("WORKTREES_ENABLED", default="false"), default=False)
+            or _bool(_decouple_config("GIT_IDENTITY_ENABLED", default="false"), default=False)
+        ),
         project_identity_mode=_decouple_config("PROJECT_IDENTITY_MODE", default="dir").strip().lower(),
         project_identity_remote=_decouple_config("PROJECT_IDENTITY_REMOTE", default="origin").strip(),
         http=http_settings,

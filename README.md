@@ -1474,13 +1474,24 @@ sequenceDiagram
   - Pre-commit honors `WORKTREES_ENABLED` and `AGENT_MAIL_GUARD_MODE` (`warn` advisory).
   - Pre-push enumerates to-be-pushed commits (`rev-list`) and uses `diff-tree` with `--no-ext-diff`.
 
-## Identity and worktree mode (opt-in)
+## Git-based project identity (opt-in)
 
-- Gate: `WORKTREES_ENABLED=1` enables worktree-friendly features. Default off.
+- Gate: `WORKTREES_ENABLED=1` or `GIT_IDENTITY_ENABLED=1` enables git-based identity features. Default off.
 - Identity modes (default `dir`): `dir`, `git-remote`, `git-toplevel`, `git-common-dir`.
 - Inspect identity for a path:
   - Resource (MCP): `resource://identity/{/abs/path}`
   - CLI (diagnostics): `mcp-agent-mail mail status /abs/path`
+
+- Precedence (when gate is on):
+  1) Committed marker `.agent-mail-project-id` (recommended)
+  2) Discovery YAML `.agent-mail.yaml` with `project_uid:`
+  3) Private marker under Git common dir `.git/agent-mail/project-id`
+  4) Remote fingerprint: normalized `origin` URL + default branch
+  5) `git-common-dir` hash; else dir hash
+
+- Migration helpers:
+  - Write committed marker: `mcp-agent-mail projects mark-identity . --commit`
+  - Scaffold discovery file: `mcp-agent-mail projects discovery-init . --product <product_uid>`
 
 ## Build slots and helpers (opt-in)
 
