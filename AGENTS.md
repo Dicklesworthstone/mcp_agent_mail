@@ -136,7 +136,7 @@ Macros vs granular tools
   - `release_build_slot(project_key, agent_name, "frontend-build")`
 - Tips:
   - Combine with `mcp-agent-mail amctl env --path . --agent $AGENT_NAME` to get `CACHE_KEY` and `ARTIFACT_DIR`.
-  - Use `mcp-agent-mail am-run <slot> -- <cmd...>` to run with prepped env; future versions will auto-acquire/renew/release.
+  - Use `mcp-agent-mail am-run <slot> -- <cmd...>` to run with prepped env; flags include `--ttl-seconds`, `--shared/--exclusive`, and `--block-on-conflicts`. Future versions will auto-acquire/renew/release.
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.

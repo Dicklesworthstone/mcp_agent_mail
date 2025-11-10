@@ -32,7 +32,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[assignment]
     GitWildMatchPattern = None  # type: ignore[assignment]
-from sqlalchemy import asc, desc, func, or_, select, text, update
+from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
@@ -49,6 +49,8 @@ from .models import (
     MessageRecipient,
     Project,
     ProjectSiblingSuggestion,
+    Product,
+    ProductProjectLink,
 )
 from .storage import (
     ProjectArchive,
@@ -80,6 +82,7 @@ CLUSTER_SEARCH = "search"
 CLUSTER_FILE_RESERVATIONS = "file_reservations"
 CLUSTER_MACROS = "workflow_macros"
 CLUSTER_BUILD_SLOTS = "build_slots"
+CLUSTER_PRODUCT = "product_bus"
 
 
 class ToolExecutionError(Exception):
@@ -5705,6 +5708,168 @@ def build_mcp_server() -> FastMCP:
             },
         }
 
+    # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
+
+    async def _get_product_by_key(session, key: str) -> Optional[Product]:
+        # Key may match product_uid or name (case-sensitive by default)
+        stmt = select(Product).where((Product.product_uid == key) | (Product.name == key))
+        res = await session.execute(stmt)
+        return res.scalars().first()
+
+    @mcp.tool(name="ensure_product")
+    @_instrument_tool("ensure_product", cluster=CLUSTER_PRODUCT, capabilities={"product"})
+    async def ensure_product_tool(
+        ctx: Context,
+        product_key: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Ensure a Product exists. If not, create one.
+
+        - product_key may be a product_uid or a name
+        - If both are absent, error
+        """
+        await ensure_schema()
+        key = (product_key or name or "").strip()
+        if not key:
+            raise ToolExecutionError("INVALID_ARGUMENT", "Provide product_key or name.")
+        async with get_session() as session:
+            prod = await _get_product_by_key(session, key)
+            if prod is None:
+                # Create with product_uid if key looks like a uid; else generate a uid and set name
+                import uuid as _uuid
+                uid = key if len(key) >= 8 else _uuid.uuid4().hex[:20]
+                prod = Product(product_uid=uid, name=(name or key))
+                session.add(prod)
+                await session.commit()
+                await session.refresh(prod)
+        return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
+
+    @mcp.tool(name="products_link")
+    @_instrument_tool("products_link", cluster=CLUSTER_PRODUCT, capabilities={"product"}, project_arg="project_key")
+    async def products_link_tool(
+        ctx: Context,
+        product_key: str,
+        project_key: str,
+    ) -> dict[str, Any]:
+        """
+        Link a project into a product (idempotent).
+        """
+        await ensure_schema()
+        async with get_session() as session:
+            prod = await _get_product_by_key(session, product_key.strip())
+            if prod is None:
+                raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+            # Resolve project
+            project = await _get_project_by_identifier(project_key)
+            if project.id is None:
+                raise ToolExecutionError("NOT_FOUND", f"Project '{project_key}' not found.", recoverable=True)
+            # Link if missing
+            existing = await session.execute(
+                select(ProductProjectLink).where(
+                    ProductProjectLink.product_id == cast(Any, prod.id),
+                    ProductProjectLink.project_id == cast(Any, project.id),
+                )
+            )
+            link = existing.scalars().first()
+            if link is None:
+                link = ProductProjectLink(product_id=int(prod.id), project_id=int(project.id))
+                session.add(link)
+                await session.commit()
+                await session.refresh(link)
+            return {
+                "product": {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name},
+                "project": {"id": project.id, "slug": project.slug, "human_key": project.human_key},
+                "linked": True,
+            }
+
+    @mcp.resource("resource://product/{key}", mime_type="application/json")
+    def product_resource(key: str) -> dict[str, Any]:
+        """
+        Inspect product and list linked projects.
+        """
+        async def _load() -> dict[str, Any]:
+            await ensure_schema()
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, key.strip())
+                if prod is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Product '{key}' not found.", recoverable=True)
+                proj_rows = await session.execute(
+                    select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
+                        ProductProjectLink.product_id == cast(Any, prod.id)
+                    )
+                )
+                projects = [
+                    {"id": p.id, "slug": p.slug, "human_key": p.human_key, "created_at": _iso(p.created_at)}
+                    for p in proj_rows.scalars().all()
+                ]
+                return {
+                    "id": prod.id,
+                    "product_uid": prod.product_uid,
+                    "name": prod.name,
+                    "created_at": _iso(prod.created_at),
+                    "projects": projects,
+                }
+        # Run async in a synchronous resource
+        return asyncio.get_event_loop().run_until_complete(_load())
+
+    @mcp.tool(name="search_messages_product")
+    @_instrument_tool("search_messages_product", cluster=CLUSTER_PRODUCT, capabilities={"search"})
+    async def search_messages_product(
+        ctx: Context,
+        product_key: str,
+        query: str,
+        limit: int = 20,
+    ) -> Any:
+        """
+        Full-text search across all projects linked to a product.
+        """
+        await ensure_schema()
+        async with get_session() as session:
+            prod = await _get_product_by_key(session, product_key.strip())
+            if prod is None:
+                raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+            proj_ids_rows = await session.execute(
+                select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
+            )
+            proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
+            if not proj_ids:
+                return []
+            # FTS search limited to projects in proj_ids
+            result = await session.execute(
+                text(
+                    """
+                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                           m.thread_id, a.name AS sender_name, m.project_id
+                    FROM fts_messages
+                    JOIN messages m ON fts_messages.rowid = m.id
+                    JOIN agents a ON m.sender_id = a.id
+                    WHERE m.project_id IN (:proj_ids) AND fts_messages MATCH :query
+                    ORDER BY bm25(fts_messages) ASC
+                    LIMIT :limit
+                    """
+                ).bindparams(bindparam("proj_ids", expanding=True)),
+                {"proj_ids": proj_ids, "query": query, "limit": limit},
+            )
+            rows = result.mappings().all()
+        items = [
+            {
+                "id": row["id"],
+                "subject": row["subject"],
+                "importance": row["importance"],
+                "ack_required": row["ack_required"],
+                "created_ts": _iso(row["created_ts"]),
+                "thread_id": row["thread_id"],
+                "from": row["sender_name"],
+                "project_id": row["project_id"],
+            }
+            for row in rows
+        ]
+        try:
+            from fastmcp.tools.tool import ToolResult  # type: ignore
+            return ToolResult(structured_content={"result": items})
+        except Exception:
+            return items
     @mcp.resource("resource://identity/{project}", mime_type="application/json")
     def identity_resource(project: str) -> dict[str, Any]:
         """
