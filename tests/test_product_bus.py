@@ -1,9 +1,7 @@
 import asyncio
-import json
 from typing import Any
 
 from mcp_agent_mail.app import build_mcp_server  # type: ignore
-from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import ensure_schema, reset_database_state
 
 

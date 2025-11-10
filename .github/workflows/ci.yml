@@ -2,65 +2,60 @@ name: CI
 
 on:
   push:
-    branches: ["main", "develop", "release/**", "feature/**"]
+    branches: [ main ]
   pull_request:
-    branches: ["main", "develop"]
+    branches: [ main ]
 
 jobs:
-  ruff:
-    name: Ruff Lint
-    runs-on: ubuntu-latest
+  build-and-test:
+    name: Lint, Type Check, Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Python
+
+      - name: Set up Python 3.14
         uses: actions/setup-python@v5
         with:
           python-version: '3.14'
+          allow-prereleases: true
+
       - name: Install uv
-        run: curl -Ls https://astral.sh/uv/install.sh | sh
-      - name: Add uv to PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-      - name: Cache uv
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/uv
-            .venv
-          key: ci-ruff-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            ci-ruff-${{ runner.os }}-
+        shell: bash
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          uv --version
+
       - name: Sync dependencies
-        run: uv sync --dev
-      - name: Run Ruff
-        run: uv run ruff check --output-format=github
+        shell: bash
+        run: |
+          uv sync --dev
 
-  ty:
-    name: Ty Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.14'
-      - name: Install uv
-        run: curl -Ls https://astral.sh/uv/install.sh | sh
-      - name: Add uv to PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-      - name: Cache uv
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/uv
-            .venv
-          key: ci-ty-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'uv.lock') }}
-          restore-keys: |
-            ci-ty-${{ runner.os }}-
-      - name: Sync dependencies
-        run: uv sync --dev
-      - name: Run Ty
-        run: uvx ty check
+      - name: Lint (ruff)
+        shell: bash
+        run: |
+          uv run ruff check
 
+      - name: Type check
+        shell: bash
+        run: |
+          uvx ty check
 
+      - name: Run tests
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          uv run -m pytest -q
+
+      - name: Smoke test am-run (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          uv run python -m mcp_agent_mail.cli am-run ci-slot -- echo "ok"

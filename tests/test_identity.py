@@ -1,7 +1,6 @@
-import os
 from pathlib import Path
 
-from mcp_agent_mail.app import _resolve_project_identity, _compute_project_slug  # type: ignore
+from mcp_agent_mail.app import _compute_project_slug, _resolve_project_identity  # type: ignore
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.utils import slugify
 

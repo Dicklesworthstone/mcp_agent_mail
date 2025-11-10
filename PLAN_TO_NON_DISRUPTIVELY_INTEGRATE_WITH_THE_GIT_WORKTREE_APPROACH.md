@@ -149,12 +149,16 @@ Implementation progress:
   - Backfill existing rows with generated UUIDs.
   - Look up by `project_uid` first, then by slug.
 
-### Canonicalization order (robust & private; applied only when `WORKTREES_ENABLED=1`)
+### Canonicalization order (robust & private; applied only when `WORKTREES_ENABLED`/`GIT_IDENTITY_ENABLED` is on)
 
-1. If marker present: `project_uid = read_marker()`.
-2. Else if `PROJECT_IDENTITY_MODE=git-remote` (or remote source is enabled) **and** a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
-3. Else if `PROJECT_IDENTITY_MODE in {git-common-dir, git-toplevel}`: compute privacy‑safe slug from canonical Git paths and generate `project_uid`.
-4. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
+1. If committed marker present: `project_uid = read_marker()`.
+2. Else if discovery YAML `.agent-mail.yaml` contains `project_uid:`: use it.
+3. Else if `PROJECT_IDENTITY_MODE=git-remote` (or remote source is enabled) **and** a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
+4. Else if `PROJECT_IDENTITY_MODE in {git-common-dir, git-toplevel}`: compute privacy‑safe slug from canonical Git paths and generate `project_uid`.
+5. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
+- ### Migration tools
+  - `mcp-agent-mail projects mark-identity [--no-commit]` writes `.agent-mail-project-id` with the current `project_uid` and optionally commits it.
+  - `mcp-agent-mail projects discovery-init [--product <uid>]` scaffolds `.agent-mail.yaml` with `project_uid:` (and optional `product_uid:`) for discovery/overrides.
 
 ### Drop‑in function (replacement for canonicalizer; now supports `git-remote`)
 
@@ -1348,4 +1352,6 @@ File reservation best practices:
   - DONE: staged rename collected (old+new) triggers conflicts on new path.
 - [x] Test bypass mechanism.
   - DONE: AGENT_MAIL_BYPASS=1 exits 0 despite conflicts.
-- [ ] Optional: publish container recipes; CI template that runs `am-run`.
+- [x] Optional: CI template that runs `am-run`.
+  - DONE: GitHub Actions workflow added (Ubuntu, macOS): runs lint, type-check, tests, and a smoke `am-run` on Ubuntu.
+- [ ] Optional: publish container recipes.

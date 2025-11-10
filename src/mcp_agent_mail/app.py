@@ -800,26 +800,71 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             return None
         u = url.strip()
         try:
-            if u.startswith("git@"):
-                host = u.split("@", 1)[1].split(":", 1)[0]
-                path = u.split(":", 1)[1]
+            host = ""
+            path = ""
+            # SCP-like: git@host:owner/repo.git
+            if "@" in u and ":" in u and not u.startswith(("http://", "https://", "ssh://", "git://")):
+                at_pos = u.find("@")
+                colon_pos = u.find(":", at_pos + 1)
+                if colon_pos != -1:
+                    host = u[at_pos + 1 : colon_pos]
+                    path = u[colon_pos + 1 :]
             else:
                 from urllib.parse import urlparse as _urlparse
-                p = _urlparse(u)
-                host = p.hostname or ""
-                path = (p.path or "")
+                pr = _urlparse(u)
+                host = (pr.hostname or "").lower()
+                # Some ssh URLs include port; ignore
+                path = (pr.path or "")
+            host = host.lower()
+            if not host:
+                return None
+            path = path.lstrip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            # collapse duplicate slashes
+            while "//" in path:
+                path = path.replace("//", "/")
+            parts = [seg for seg in path.split("/") if seg]
+            if len(parts) < 2:
+                return None
+            # Keep first two segments (owner/repo) and normalize to lowercase
+            owner, repo_name = parts[0].lower(), parts[1].lower()
+            return f"{host}/{owner}/{repo_name}"
         except Exception:
             return None
-        if not host:
-            return None
-        path = path.lstrip("/")
-        if path.endswith(".git"):
-            path = path[:-4]
-        parts = [seg for seg in path.split("/") if seg]
-        if len(parts) < 2:
-            return None
-        owner, repo_name = parts[0], parts[1]
-        return f"{host}/{owner}/{repo_name}"
+
+    # Discovery YAML: optional override
+    def _read_discovery_yaml(base_dir: str) -> dict[str, Any]:
+        try:
+            ypath = Path(base_dir) / ".agent-mail.yaml"
+            if not ypath.exists():
+                return {}
+            # Prefer PyYAML when available for robust parsing; fallback to minimal parser
+            try:
+                import yaml as _yaml  # type: ignore
+                loaded = _yaml.safe_load(ypath.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    # Keep only known keys to avoid surprises
+                    allowed = {"project_uid", "product_uid"}
+                    return {k: str(v) for k, v in loaded.items() if k in allowed and isinstance(v, (str, int))}
+                return {}
+            except Exception:
+                data = {}
+                for line in ypath.read_text(encoding="utf-8").splitlines():
+                    s = line.strip()
+                    if not s or s.startswith("#") or ":" not in s:
+                        continue
+                    key, value = s.split(":", 1)
+                    k = key.strip()
+                    if k not in {"project_uid", "product_uid"}:
+                        continue
+                    # strip inline comments
+                    v = value.split("#", 1)[0].strip().strip("'\"")
+                    if v:
+                        data[k] = v
+                return data
+        except Exception:
+            return {}
 
     try:
         repo = Repo(target_path, search_parent_directories=True)
@@ -868,15 +913,22 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     else:
         canonical_path = target_path
 
-    # Compute project_uid via precedence: committed marker -> private marker -> remote fingerprint -> git-common-dir hash -> dir hash
+    # Compute project_uid via precedence:
+    # committed marker -> discovery yaml -> private marker -> remote fingerprint -> git-common-dir hash -> dir hash
     marker_committed: Optional[Path] = Path(repo_root or "") / ".agent-mail-project-id" if repo_root else None
     marker_private: Optional[Path] = Path(git_common_dir or "") / "agent-mail" / "project-id" if git_common_dir else None
+    discovery: dict[str, Any] = _read_discovery_yaml(repo_root or target_path)
     project_uid: Optional[str] = None
     try:
         if marker_committed and marker_committed.exists():
             project_uid = (marker_committed.read_text(encoding="utf-8").strip() or None)
     except Exception:
         project_uid = None
+    if not project_uid:
+        # Discovery yaml override
+        uid = str(discovery.get("project_uid", "")).strip() if discovery else ""
+        if uid:
+            project_uid = uid
     if not project_uid:
         try:
             if marker_private and marker_private.exists():
@@ -934,6 +986,7 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
         "core_ignorecase": core_ignorecase,
         "normalized_remote": normalized_remote,
         "project_uid": project_uid,
+        "discovery": discovery or None,
     }
     # Rich-styled identity decision logging (optional)
     try:
@@ -5873,7 +5926,7 @@ def build_mcp_server() -> FastMCP:
                     FROM fts_messages
                     JOIN messages m ON fts_messages.rowid = m.id
                     JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id IN (:proj_ids) AND fts_messages MATCH :query
+                    WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
                     ORDER BY bm25(fts_messages) ASC
                     LIMIT :limit
                     """
