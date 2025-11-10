@@ -119,6 +119,12 @@ Implementation progress:
     - Pre-push hook now:
       - Honors `AGENT_MAIL_BYPASS=1` and `AGENT_MAIL_GUARD_MODE=warn`.
       - Uses `rev-list` + `diff-tree` and `--no-ext-diff` for correct ranges and NUL-safety.
+  - 2025-11-10: Chain-runner hooks implemented (composition-safe):
+    - Installer writes a Python chain-runner at `.git/hooks/pre-commit` and `.git/hooks/pre-push` that executes `hooks.d/<hook>/*` in lexical order and then `<hook>.orig` if present.
+    - Existing single-file hooks are preserved as `<hook>.orig` on first install; no overwrites.
+    - Agent Mail guard is installed as `hooks.d/pre-commit/50-agent-mail.py` and `hooks.d/pre-push/50-agent-mail.py`.
+    - Pre-push chain-runner reads STDIN once and forwards it to child hooks, matching Git’s tuple semantics.
+    - Uninstall removes only our `50-agent-mail.py` plugins; chain-runner and user hooks remain intact. Legacy single-file Agent Mail hooks are still removed if detected by sentinel.
   - 2025-11-10: Project maintenance CLI:
     - Added `mcp-agent-mail projects adopt <from> <to> --dry-run` that validates same repo (`git-common-dir`) and prints a consolidation plan. (Apply phase to be implemented in a later step.)
   - 2025-11-10: Guard status and adopt apply:

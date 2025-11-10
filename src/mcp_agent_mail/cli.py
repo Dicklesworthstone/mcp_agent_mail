@@ -1969,11 +1969,32 @@ def guard_uninstall(
 
     repo_path = repo.expanduser().resolve()
     removed = asyncio.run(uninstall_guard_script(repo_path))
-    hook_path = repo_path / ".git" / "hooks" / "pre-commit"
-    if removed:
-        console.print(f"[green]Removed guard at {hook_path}.")
+    # Resolve hooks directory for accurate messaging
+    def _git(cwd: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+    hooks_path = _git(repo_path, "config", "--get", "core.hooksPath")
+    if hooks_path:
+        if hooks_path.startswith("/") or (((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")))):
+            hooks_dir = Path(hooks_path)
+        else:
+            root = _git(repo_path, "rev-parse", "--show-toplevel") or str(repo_path)
+            hooks_dir = Path(root) / hooks_path
     else:
-        console.print(f"[yellow]No guard found at {hook_path}.")
+        git_dir = _git(repo_path, "rev-parse", "--git-dir") or ".git"
+        g = Path(git_dir)
+        if not g.is_absolute():
+            g = repo_path / g
+        hooks_dir = g / "hooks"
+    pre_commit = hooks_dir / "pre-commit"
+    pre_push = hooks_dir / "pre-push"
+    if removed:
+        console.print(f"[green]Removed guard scripts at {pre_commit} and (if present) {pre_push}.")
+    else:
+        console.print(f"[yellow]No guard scripts found at {hooks_dir}.")
 
 
 @file_reservations_app.command("list")
@@ -2504,8 +2525,7 @@ def projects_adopt(
     dry_run: Annotated[bool, typer.Option("--dry-run/--apply", help="Show plan without applying changes.")] = True,
 ) -> None:
     """
-    Plan consolidation of legacy per-worktree projects into a canonical project.
-    NOTE: Apply is not yet implemented; this command currently prints a dry-run only.
+    Plan and optionally apply consolidation of legacy per-worktree projects into a canonical project.
     """
     async def _load(slug_or_key: str) -> Project:
         return await _get_project_record(slug_or_key)
