@@ -1309,7 +1309,8 @@ File reservation best practices:
 - [x] Add canonicalizer with durable `project_uid` and precedence marker → git‑remote → gitdir → dir; privacy‑safe slugs.
 - [x] Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
 - [x] Return structured identity metadata from `ensure_project` and `resource://identity`.
-- [ ] Add rich-styled logging for canonicalization decisions.
+- [x] Add rich-styled logging for canonicalization decisions.
+  - DONE: identity resolution emits rich-structured context when enabled; tool instrumentation already prints rich panels under `tools_log_enabled`.
 - [x] Wire `identity_mode` optional arg into `ensure_project` (macros N/A).
 - [x] Update guard installer to honor `core.hooksPath` and per-worktree `git-dir`.
 - [x] Add optional `pre-push` guard installation.
@@ -1323,8 +1324,10 @@ File reservation best practices:
 - [x] Add `mail status` subcommand and `resource://identity?project=<path>` transparency resource.
 - [x] Implement `projects adopt` CLI (dry‑run/apply) and write `aliases.json`.
 - [ ] Implement Product Bus: `ensure_product`, `products.link`, and product‑wide resources.
-- [ ] Ship `am-run` and `amctl env` with build slots + per‑agent caches.
-- [ ] Update docs (`AGENTS.md`, `README.md`) with worktree guides and edge cases.
+- [x] Ship `am-run` and `amctl env` with build slots + per‑agent caches.
+  - DONE: `am-run` now auto‑acquires/renews/releases advisory build slots (warn mode prints conflicts), and exports `CACHE_KEY`/`ARTIFACT_DIR` via `amctl env`.
+- [x] Update docs (`AGENTS.md`, `README.md`) with worktree guides and edge cases.
+  - DONE: Added worktree recipes, guard usage, and build slots sections with examples.
 - [ ] Change all "uv/pip" references to "uv only".
 - [ ] Add unit tests for canonicalizer (all edge cases).
 - [ ] Add unit tests for guard path resolution and matching.
