@@ -9,6 +9,7 @@
   - No mandatory migrations that break existing data or workflows.
   - No behavior changes unless explicitly enabled via a startup flag or explicit parameter.
   - No forced editor/tooling changes for users who don't use worktrees.
+  - All worktree‑friendly behavior is **opt‑in** behind a single gate; default stays today’s `dir` identity and existing hooks. Nothing changes unless explicitly enabled.
 
 ---
 
@@ -34,6 +35,9 @@
 **Zero disruption**
 - All of the above are opt‑in (defaults preserve current behavior); existing projects/slugs keep working unchanged.
 
+**Feature flag (single gate)**
+- `WORKTREES_ENABLED=1` (env/flag) must be set for any of the worktree‑friendly features in this plan to activate. When unset/false, the system behaves exactly as it does today.
+
 ---
 
 ## Executive TL;DR (what to change first)
@@ -56,10 +60,17 @@
    - Use `-z` everywhere to be path‑safe.
 5. **Add a tiny “adoption/merge” command** to consolidate legacy per‑worktree projects into the canonical one by `project_uid`. No breaking migration; opt‑in admin action.
 6. **Return identity + repo facts everywhere** (`git root`, `worktree name`, `branch`, `core.ignorecase`, `sparse-checkout`) so UIs and guards can explain decisions and match Git semantics precisely.
+7. **Keep onboarding safe and reversible**: gate all new behavior behind `WORKTREES_ENABLED=1`; start guards in `warn` mode (`AGENT_MAIL_GUARD_MODE=warn`) during trials, then flip to `block`.
 
 Everything below deepens these, with code and exact behaviors.
 
 ---
+
+## 0) Opt‑in switch & safe defaults (tiny but important)
+
+- Global gate: `WORKTREES_ENABLED = 0|1` (default **0**). If `0`, identity stays `dir`, existing slugs are unchanged, and no new hooks/guards/paths are installed.
+- Recommended trial posture when enabling: set `AGENT_MAIL_GUARD_MODE=warn` for a sprint, then switch to `block`.
+- Per‑feature toggles remain available (e.g., `INSTALL_PREPUSH_GUARD`, `PROJECT_IDENTITY_MODE`), but are ignored unless `WORKTREES_ENABLED=1`.
 
 ## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
@@ -85,7 +96,7 @@ Everything below deepens these, with code and exact behaviors.
   - Backfill existing rows with generated UUIDs.
   - Look up by `project_uid` first, then by slug.
 
-### Canonicalization order (robust & private)
+### Canonicalization order (robust & private; applied only when `WORKTREES_ENABLED=1`)
 
 1. If marker present: `project_uid = read_marker()`.
 2. Else if git‑remote is enabled and a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
@@ -250,11 +261,12 @@ if [ -x "$HOOK_DIR/$HOOK_NAME.orig" ]; then
 fi
 ```
 
-#### Guard script (POSIX) placed at `hooks.d/pre-commit/50-agent-mail.sh`
+#### Guard script (POSIX) placed at `hooks.d/pre-commit/50-agent-mail.sh` (honors advisory mode)
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+MODE="${AGENT_MAIL_GUARD_MODE:-block}"
 if [ "${AGENT_MAIL_BYPASS:-0}" = "1" ]; then
   echo "[agent-mail] bypass enabled via AGENT_MAIL_BYPASS=1"
   exit 0
@@ -266,7 +278,12 @@ while IFS= read -r -d '' f; do
   MAPLIST+=("$f")
 done < <(git diff --cached -z --name-only --diff-filter=ACMRDTU)
 if [ "${#MAPLIST[@]}" -gt 0 ]; then
-  printf "%s\0" "${MAPLIST[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul
+  if [ "$MODE" = "warn" ]; then
+    printf "%s\0" "${MAPLIST[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul --advisory
+    exit 0
+  else
+    printf "%s\0" "${MAPLIST[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul
+  fi
 fi
 ```
 
@@ -333,7 +350,7 @@ def matches_any(spec: PathSpec, ignore_case: bool, repo_rel_path: str) -> bool:
 
 Guard side: compute repo‑relative paths via Git plumbing (`git diff -z`, `git ls-files --full-name -z`). For renames, check both old and new names.
 
-Optional guardrails: warn (not block) on ultra‑broad patterns like `**/*`.
+Optional guardrails: warn (not block) on ultra‑broad patterns like `**/*`. In `warn` mode the guard never blocks, it only prints actionable hints.
 
 ---
 
@@ -467,6 +484,9 @@ Handle:
 - Hook composition: existing Husky hook continues to run (assert order and non‑duplication).
 - NUL‑byte safety: filenames with spaces/newlines/UTF‑8; use `-z` end‑to‑end.
 - WSL path formats: guard check succeeds with repo‑relative paths from Git plumbing.
+ - Port allocator: `assign` returns unique ports within range; `release` frees; sweeper reaps expired leases.
+ - Guard advisory mode: with `AGENT_MAIL_GUARD_MODE=warn`, commits never block but emit conflicts.
+ - Remote override marker: `.agent-mail-remote` takes precedence when present and `WORKTREES_ENABLED=1`.
 
 ---
 
@@ -477,6 +497,34 @@ Handle:
   - `git rev-parse --path-format=absolute --show-toplevel`
   - `git rev-parse --git-common-dir`
 - Treat zero‑length patterns or patterns containing `..` as invalid and reject early.
+ - Honor the global gate: if `WORKTREES_ENABLED=0`, skip worktree‑specific logic entirely and behave as today.
+
+---
+
+## 13) Small pragmatic add‑ons (opt‑in, minimal)
+
+### A) Lightweight port allocator (prevents dev‑server clashes without containers)
+- CLI only; no daemon. Requires `WORKTREES_ENABLED=1`.
+- Commands:
+  - `am-ports assign <service> [--range 3000-3999]` → prints a free port and writes a small lease file under `projects/<slug>/ports/<service>/<agent>__<branch>.json` with TTL (default 4h).
+  - `am-ports release <service>` → removes the lease.
+  - `am-ports list` → shows current leases.
+- `am-run` auto‑renews the lease while the process is alive. Leases are reaped by the sweeper when TTL expires.
+
+### B) Remote override marker (helps mirrors/renamed remotes)
+- Optional repo‑root file `.agent-mail-remote` containing a single normalized value like `github.com/owner/repo`.
+- When `WORKTREES_ENABLED=1` and `PROJECT_IDENTITY_MODE=git-remote`, this marker wins over `remote.origin.url` normalization.
+
+### C) Guard advisory mode (gentle onboarding)
+- `AGENT_MAIL_GUARD_MODE=warn` prints conflicts but does not block; pairs well with pilots.
+- CI can still enforce blocking (see snippet below) while local dev runs in `warn`.
+
+### D) Minimal CI/PR check (optional)
+Add a tiny GitHub Action step to catch bypassed local hooks:
+```yaml
+- uses: actions/checkout@v4
+- run: uv run python -m mcp_agent_mail.cli guard check --range ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} --ci
+```
 
 ---
 
@@ -907,23 +955,27 @@ Optional server assistance:
 ## API/behavior changes (additive)
 
 - Server settings (env/flag):
+  - `WORKTREES_ENABLED = true|false` (default `false`; gate for all features in this plan)
   - `PROJECT_IDENTITY_MODE = dir|git-remote|git-common-dir|git-toplevel` (default `dir`)
   - `PROJECT_IDENTITY_FALLBACK = dir`
   - `PROJECT_IDENTITY_REMOTE = origin`
   - `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE =` (optional)
   - `INSTALL_PREPUSH_GUARD = true|false` (default `false`)
   - `PROJECT_PRODUCT_UID =` (optional)
+  - `AGENT_MAIL_GUARD_MODE = block|warn` (default `block`)
 - Tool/macro enhancements (non-breaking):
   - `ensure_project(human_key: str, identity_mode?: str)` → returns `{ project_uid, slug, normalized_remote?, identity_mode_used, canonical_path, human_key, ... }`
   - `macro_start_session(...)` → returns the same, plus `product_uid?`
   - `ensure_product(product_uid?: str, name?: str)` and `products.link(project_uid, product_uid)`
   - Guard install: `install_guard(project_key: str, repo_path: str, install_prepush?: bool)` → prints resolved hook paths
+  - Ports: `am-ports assign|release|list` (no daemon; file‑based leases with TTL)
 - Transparency resource (read-only):
   - `resource://identity?project=<abs-path>` → returns identity result + evidence (marker/remote/gitdir/dir)
   - `resource://product/{product_uid}/thread/{id}` and `/search` (product‑wide reads)
 - Guard utilities:
   - `guard status` subcommand: prints current agent, repo root, hooks path, `project_uid`, `normalized_remote`, sample reservation matches, and bypass hints.
   - `mail status` subcommand: prints routing diagnostics (why DMs did/didn’t deliver and one‑line fixes).
+  - `guard check --range A..B` for CI/PR diffs; `--advisory` to emit warnings only.
 
 No DB migrations required for phase 1:
 
@@ -951,6 +1003,7 @@ No DB migrations required for phase 1:
 
 ## Rollout plan
 
+0. Enablement is explicit: roll pilots by setting `WORKTREES_ENABLED=1` in a single repo/team; start with `AGENT_MAIL_GUARD_MODE=warn`, then flip to `block`.
 1. Ship server setting and canonicalizer:
    - Implement marker→git‑remote→gitdir→dir identity with durable `project_uid`; privacy‑safe slugs.
    - Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
@@ -1052,6 +1105,8 @@ No DB migrations required for phase 1:
   - **Mitigation**: Allow `PROJECT_IDENTITY_REMOTE` and `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE`; write a private marker on first resolve; provide `projects adopt` and `mail status` with one‑line fixes.
 - **Risk**: Default branch detection variance across hosts.
   - **Mitigation**: Prefer `refs/remotes/<remote>/HEAD` when present; otherwise fall back to `"main"`.
+ - **Risk**: Port allocator “lost lease” if a process crashes.
+   - **Mitigation**: File‑based TTL + periodic sweeper; `am-run` renews while alive; manual `release` is a no‑op if already reaped.
 
 ---
 
@@ -1138,6 +1193,9 @@ File reservation best practices:
   - `pre-push` guard can be installed and works correctly.
   - `guard status` command provides clear diagnostic info.
   - Containerized builds from multiple worktrees run concurrently without interfering caches or artifacts.
+  - With `WORKTREES_ENABLED=0`, behavior is indistinguishable from today across identity, hooks, reservations, and messaging.
+  - With `WORKTREES_ENABLED=1` and `AGENT_MAIL_GUARD_MODE=warn`, the system surfaces conflicts without blocking; switching to `block` enforces the same checks.
+  - Port allocator prevents common dev‑server port collisions in pilots (no daemon; leases have TTL and are reaped).
 - Edge cases handled:
   - Submodules treated as separate projects (documented).
   - Bare repos work with appropriate identity mode.
