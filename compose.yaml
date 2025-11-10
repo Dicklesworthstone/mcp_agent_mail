@@ -1,0 +1,16 @@
+services:
+  agent-mail:
+    build: .
+    environment:
+      HTTP_HOST: "0.0.0.0"
+      STORAGE_ROOT: "/data/mailbox"
+      LOG_RICH_ENABLED: "true"
+    ports:
+      - "8765:8765"
+    volumes:
+      - agent_mail_data:/data
+      # Optional: mount a local .env file (read-only) for config
+      - ./.env:/app/.env:ro
+volumes:
+  agent_mail_data:
+

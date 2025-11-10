@@ -827,8 +827,12 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             parts = [seg for seg in path.split("/") if seg]
             if len(parts) < 2:
                 return None
-            # Keep first two segments (owner/repo) and normalize to lowercase
-            owner, repo_name = parts[0].lower(), parts[1].lower()
+            # Keep the last two segments (owner/repo) and normalize to lowercase
+            # This supports nested group paths (e.g., GitLab subgroups)
+            if len(parts) >= 2:
+                owner, repo_name = parts[-2].lower(), parts[-1].lower()
+            else:
+                return None
             return f"{host}/{owner}/{repo_name}"
         except Exception:
             return None
