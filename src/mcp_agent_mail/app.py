@@ -4959,6 +4959,10 @@ def build_mcp_server() -> FastMCP:
             extra = f" ({summary})" if summary else ""
             await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
         project_id = project.id
+        # Lightweight validation: warn on ultra-broad patterns
+        broad = [p for p in paths if p.strip() in {"*", "**/*", "**", "/**/*"}]
+        if broad:
+            await ctx.info(f"[warn] Reservation pattern(s) extremely broad: {', '.join(broad)} — consider narrowing to repo-root relative paths (e.g., 'app/api/*.py').")
         async with get_session() as session:
             existing_rows = await session.execute(
                 select(FileReservation, Agent.name)

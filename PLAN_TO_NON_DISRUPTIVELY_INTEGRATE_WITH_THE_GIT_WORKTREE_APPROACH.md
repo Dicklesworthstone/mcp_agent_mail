@@ -108,8 +108,17 @@ Implementation progress:
   - 2025-11-10: Guards and installer updates:
     - Added optional `--prepush` flag to `mcp-agent-mail guard install` to install a Python-based pre-push guard that enumerates to-be-pushed commits with `rev-list` and inspects changed paths via `diff-tree`. Honors `WORKTREES_ENABLED` and `AGENT_MAIL_GUARD_MODE=warn`.
     - Hook installer now resolves `core.hooksPath` and `git-dir/hooks` correctly for both `pre-commit` and `pre-push`.
+    - Pre-commit hook now:
+      - Honors `AGENT_MAIL_BYPASS=1` for emergency bypass.
+      - Expands renames/moves via `git diff --cached --name-status -M -z` and checks both old and new names.
+    - Pre-push hook now:
+      - Honors `AGENT_MAIL_BYPASS=1` and `AGENT_MAIL_GUARD_MODE=warn`.
+      - Uses `rev-list` + `diff-tree` and `--no-ext-diff` for correct ranges and NUL-safety.
   - 2025-11-10: Project maintenance CLI:
     - Added `mcp-agent-mail projects adopt <from> <to> --dry-run` that validates same repo (`git-common-dir`) and prints a consolidation plan. (Apply phase to be implemented in a later step.)
+  - 2025-11-10: Guard status and adopt apply:
+    - `mcp-agent-mail guard status <repo>` prints gate/mode, resolved hooks directory (honors `core.hooksPath`), and presence of `pre-commit`/`pre-push`.
+    - `mcp-agent-mail projects adopt <from> <to> --apply` moves Git artifacts within the archive into the target project (preserving history), re-keys DB rows (`agents`, `messages`, `file_reservations`), and records `aliases.json`. Safeguards: requires same repo; aborts on agent-name conflicts to preserve uniqueness.
 
 ## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
