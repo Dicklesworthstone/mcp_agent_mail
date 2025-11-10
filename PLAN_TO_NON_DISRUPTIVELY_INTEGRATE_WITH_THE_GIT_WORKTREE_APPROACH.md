@@ -28,6 +28,695 @@
 
 ---
 
+## Executive TL;DR (what to change first)
+
+1. **Adopt a repo‑scoped, portable, privacy‑safe Project ID** (file marker) and make slug a view, not an identity.
+   - Add a stable `project_uid` derived from a committed marker (e.g., `.agent-mail-project-id`) or, if you can’t change the repo, from a non‑committed `.git/agent-mail/project-id`.
+   - Slugs can continue to differ (e.g., machine‑local privacy), but all slugs map to one `project_uid`.
+   - This solves cross‑worktree and cross‑machine unification without leaking absolute paths.
+2. **Make hooks composable and cross‑platform** instead of overwriting.
+   - Install a chain‑runner hook that executes `hooks.d/<hook>/*` and falls back to an existing hook body.
+   - Ship both POSIX `.sh` and Windows `.cmd/.ps1` variants.
+   - Respect `core.hooksPath` and detect Husky/lefthook/pre‑commit frameworks.
+3. **Use Git’s pathspec semantics for reservations and matching.**
+   - Store patterns as Git wildmatch (not ad‑hoc globs).
+   - Compile and match via a Git‑compatible engine (e.g., `pathspec` with `GitWildMatchPattern`).
+   - Honor `core.ignorecase` and treat repo‑root relativity exactly like Git does.
+4. **Harden pre‑push logic** to correctly diff the to‑be‑pushed range.
+   - Parse pre‑push STDIN tuples; for new branches use empty remote SHA as `--not` boundary.
+   - Handle force‑pushes, tags, and multiple refspecs.
+   - Use `-z` everywhere to be path‑safe.
+5. **Add a tiny “adoption/merge” command** to consolidate legacy per‑worktree projects into the canonical one by `project_uid`. No breaking migration; opt‑in admin action.
+6. **Return identity + repo facts everywhere** (`git root`, `worktree name`, `branch`, `core.ignorecase`, `sparse-checkout`) so UIs and guards can explain decisions and match Git semantics precisely.
+
+Everything below deepens these, with code and exact behaviors.
+
+---
+
+## 1) Identity: from “slug” to “stable Project UID”
+
+### Why:
+
+- Current `git-…` modes unify worktrees on one machine but not across machines; hashing paths is guessable and not portable.
+- Treat slug as a presentation key (disk folder) and add a durable `project_uid` (UUID) as the true identity.
+
+### Mechanism (opt‑in, no disruption):
+
+- On first `ensure_project` in a repo:
+  1. If a committed marker exists at repo root (recommended): read it.
+     - File name: `.agent-mail-project-id` (committed).
+     - Content: a single line UUIDv4 (or ULID).
+  2. Else, if a private marker exists: `.git/agent-mail/project-id` (uncommitted).
+  3. Else: generate a UUIDv4, write both (a) committed marker (ask or default off via env) and (b) private marker. Default to private marker only to stay non‑disruptive; expose a CLI to “commit the ID” later.
+- Compute slug exactly as in the existing plan (privacy‑safe in `git-*` modes). Record `(project_uid, slug)`.
+
+### Minimal additive schema (optional but recommended)
+
+- You can avoid a DB migration by keeping `projects.id` as the primary key and storing `project_uid` only in Git metadata. Adding a unique `project_uid` column will make “adopt/merge” trivial:
+  - `ALTER TABLE projects ADD COLUMN project_uid TEXT UNIQUE;`
+  - Backfill existing rows with generated UUIDs.
+  - Look up by `project_uid` first, then by slug.
+
+### Canonicalization order (robust & private)
+
+1. If marker present: `project_uid = read_marker()`.
+2. Else if `PROJECT_IDENTITY_MODE in {git-toplevel, git-common-dir}`: compute slug as defined (basename + short hash of canonical git path) and also generate `project_uid` (persist markers) so other machines match.
+3. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
+
+### Drop‑in function (replacement for canonicalizer)
+
+```python
+from __future__ import annotations
+import hashlib, os, re, subprocess, uuid
+from dataclasses import dataclass
+from typing import Literal, Optional, Tuple
+
+IdentityMode = Literal["dir", "git-toplevel", "git-common-dir"]
+
+@dataclass(frozen=True)
+class ProjectIdentity:
+    project_uid: str
+    slug: str
+    identity_mode_used: IdentityMode
+    canonical_path: str
+    human_key: str
+    repo_root: Optional[str]
+    git_common_dir: Optional[str]
+    branch: Optional[str]
+    worktree_name: Optional[str]
+    core_ignorecase: Optional[bool]
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+def slugify(value: str) -> str:
+    s = _SLUG_RE.sub("-", value.strip().lower()).strip("-")
+    return s or "project"
+
+def _short_sha1(text: str, n: int = 10) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:n]
+
+def _norm_real(p: str) -> str:
+    return os.path.normcase(os.path.realpath(p))
+
+def _git(workdir: str, *args: str) -> Optional[str]:
+    try:
+        cp = subprocess.run(["git", "-C", workdir, *args], check=True, capture_output=True, text=True)
+        return cp.stdout.strip()
+    except Exception:
+        return None
+
+def _read_file(p: str) -> Optional[str]:
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+def _write_file(p: str, content: str) -> None:
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content + "\n")
+
+def _repo_facts(human_key_real: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[bool]]:
+    root = _git(human_key_real, "rev-parse", "--show-toplevel")
+    common = _git(human_key_real, "rev-parse", "--git-common-dir")
+    branch = _git(human_key_real, "rev-parse", "--abbrev-ref", "HEAD")
+    wt = _git(human_key_real, "worktree", "list", "--porcelain")
+    worktree_name = None
+    if wt and root:
+        for block in wt.split("\n\n"):
+            lines = [l.strip() for l in block.splitlines() if l.strip()]
+            if lines and lines[0].startswith("worktree "):
+                path = lines[0].split(" ", 1)[1]
+                if _norm_real(path) == _norm_real(root):
+                    worktree_name = os.path.basename(path) or None
+                    break
+    ignorecase = _git(human_key_real, "config", "--get", "core.ignorecase")
+    return (root, common, branch, worktree_name, (ignorecase == "true"))
+
+def canonicalize_project_identity(
+    human_key: str,
+    mode: IdentityMode,
+    fallback: IdentityMode = "dir",
+    allow_commit_marker: bool = False,
+) -> ProjectIdentity:
+    human_key_real = _norm_real(human_key)
+    repo_root, git_common_dir, branch, worktree_name, core_ignorecase = _repo_facts(human_key_real)
+
+    project_uid = None
+    marker_committed = os.path.join(repo_root or "", ".agent-mail-project-id") if repo_root else None
+    marker_private = os.path.join(git_common_dir or "", "agent-mail", "project-id") if git_common_dir else None
+
+    for p in (marker_committed, marker_private):
+        if p:
+            project_uid = _read_file(p)
+            if project_uid:
+                break
+
+    if not project_uid:
+        project_uid = str(uuid.uuid4())
+        if marker_private:
+            _write_file(marker_private, project_uid)
+        if allow_commit_marker and marker_committed:
+            _write_file(marker_committed, project_uid)
+
+    if mode == "git-toplevel" and repo_root:
+        canonical_path = _norm_real(repo_root)
+        base = os.path.basename(canonical_path) or "repo"
+        slug = f"{base}-{_short_sha1(canonical_path)}"
+        return ProjectIdentity(project_uid, slug, "git-toplevel", canonical_path, human_key_real,
+                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+
+    if mode == "git-common-dir" and git_common_dir:
+        canonical_path = _norm_real(git_common_dir)
+        base = "repo"
+        slug = f"{base}-{_short_sha1(canonical_path)}"
+        return ProjectIdentity(project_uid, slug, "git-common-dir", canonical_path, human_key_real,
+                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+
+    slug = slugify(human_key_real)
+    return ProjectIdentity(project_uid, slug, "dir", human_key_real, human_key_real,
+                           repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+```
+
+Behavioral wins:
+
+- Back‑compat: default remains `dir`; slugs identical.
+- Opt‑in `git-*` still gives privacy‑safe slugs.
+- Cross‑machine stability: `project_uid` binds them all.
+- Admin can later “commit the ID” once they want portable identity in VCS.
+
+---
+
+## 2) Hook installation: composable, idempotent, cross‑platform
+
+### Why:
+
+Overwriting `pre-commit` or `pre-push` breaks existing setups (Husky, pre-commit, lefthook). Worktrees + `core.hooksPath` complicate paths. Windows shells differ.
+
+### Approach:
+
+- Resolve hooks path exactly as previously proposed.
+- Install a chain‑runner `pre-commit` / `pre-push` once, which executes `hooks.d/pre-commit/*` (or `/pre-push/*`) in lexical order, then (if present) an original hook saved as `pre-commit.orig` (first install only).
+- Drop the Agent Mail guard as `hooks.d/pre-commit/50-agent-mail.sh` (+ `.cmd` on Windows).
+- Idempotency: re‑runs do nothing if sentinel lines are present.
+
+#### Chain‑runner (POSIX `pre-commit`)
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+HOOK_NAME="pre-commit"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="$HOOK_DIR/hooks.d/$HOOK_NAME"
+
+if [ -d "$RUN_DIR" ]; then
+  while IFS= read -r -d '' f; do
+    [ -x "$f" ] || continue
+    "$f"
+  done < <(find "$RUN_DIR" -maxdepth 1 -type f -perm -111 -print0 | sort -z)
+fi
+
+if [ -x "$HOOK_DIR/$HOOK_NAME.orig" ]; then
+  "$HOOK_DIR/$HOOK_NAME.orig"
+fi
+```
+
+#### Guard script (POSIX) placed at `hooks.d/pre-commit/50-agent-mail.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${AGENT_MAIL_BYPASS:-0}" = "1" ]; then
+  echo "[agent-mail] bypass enabled via AGENT_MAIL_BYPASS=1"
+  exit 0
+fi
+ROOT="$(git rev-parse --show-toplevel)"
+if [ -z "$ROOT" ]; then exit 0; fi
+MAPLIST=()
+while IFS= read -r -d '' f; do
+  MAPLIST+=("$f")
+done < <(git diff --cached -z --name-only --diff-filter=ACMRDTU)
+if [ "${#MAPLIST[@]}" -gt 0 ]; then
+  printf "%s\0" "${MAPLIST[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul
+fi
+```
+
+#### Pre‑push “range correct” collector (POSIX) for `hooks.d/pre-push/50-agent-mail.sh`
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${AGENT_MAIL_BYPASS:-0}" = "1" ]; then
+  echo "[agent-mail] bypass enabled via AGENT_MAIL_BYPASS=1"
+  exit 0
+fi
+REMOTE=""
+read -r REMOTE REMOTE_URL || true
+declare -a ALL
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+  [ -n "${LOCAL_SHA:-}" ] || continue
+  if [ "${REMOTE_SHA:-}" = "0000000000000000000000000000000000000000" ] || [ -z "${REMOTE_SHA:-}" ]; then
+    RANGE="${LOCAL_SHA}"
+  else
+    RANGE="${REMOTE_SHA}..${LOCAL_SHA}"
+  fi
+  while IFS= read -r -d '' f; do ALL+=("$f"); done < <(git diff -z --name-only "$RANGE" --diff-filter=ACMRDTU)
+done
+if [ "${#ALL[@]}" -gt 0 ]; then
+  printf "%s\0" "${ALL[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul
+fi
+```
+
+(Ship Windows `.cmd`/`.ps1` wrappers that shell out to the same Python CLI.)
+
+---
+
+## 3) Reservations: Git pathspec semantics, not ad‑hoc globs
+
+### Why:
+
+Developers expect matching to behave exactly like `git add`, `git diff`, `git ls-files`. OS case sensitivity should follow the repo’s `core.ignorecase`, not the host OS.
+
+### Changes:
+
+- Persist patterns verbatim + a compiled “normalized” form (for fast match).
+- Treat all patterns as GitWildMatch with `**` semantics, path separators `/`, repo‑root relative unless pattern starts with `:(top)`.
+- Honor `core.ignorecase`.
+- Support pathspec magic: `:(icase)`, `:(literal)`, `:(glob)`, `:(top)`.
+
+#### Matching engine (Python), using `pathspec`:
+
+```python
+from pathspec import PathSpec
+from pathspec.patterns.gitwildmatch import GitWildMatchPattern
+
+def compile_git_pathspec(patterns: list[str], ignore_case: bool) -> tuple[PathSpec, bool]:
+    if ignore_case:
+        patterns = [p.lower() for p in patterns]
+    return PathSpec.from_lines(GitWildMatchPattern, patterns), ignore_case
+
+def matches_any(spec: PathSpec, ignore_case: bool, repo_rel_path: str) -> bool:
+    p = repo_rel_path.replace("\\", "/")
+    if ignore_case:
+        p = p.lower()
+    return spec.match_file(p)
+```
+
+Guard side: compute repo‑relative paths via Git plumbing (`git diff -z`, `git ls-files --full-name -z`). For renames, check both old and new names.
+
+Optional guardrails: warn (not block) on ultra‑broad patterns like `**/*`.
+
+---
+
+## 4) “Adopt/Merge” legacy projects into canonical one (safe, explicit)
+
+Command: `uv run python -m mcp_agent_mail.cli projects adopt --from <old-slug> --to <project_uid or new-slug> [--dry-run]`
+
+Behavior:
+
+- Validates both projects refer to the same repo (by marker or by heuristic: same `git-common-dir` hash).
+- Moves Git artifacts under `projects/<old-slug>/…` into `projects/<new-slug>/…` (preserving history).
+- Re‑keys DB rows from `old_project_id` → `new_project_id`.
+- Writes `aliases.json` under `projects/<new-slug>/` with `"former_slugs": [...]`.
+- Idempotent; dry‑run prints a plan. Adoption is optional.
+
+---
+
+## 5) Guard UX: precise, explainable, Git‑native
+
+- Surface holder, reason, expiry, branch, worktree.
+- Include matching patterns and exact staged file(s).
+- Respect `AGENT_NAME`; show corrective action.
+- Respect `--no-verify` and `AGENT_MAIL_BYPASS=1` with a clear warning.
+
+Sample:
+
+```
+✖ Commit blocked by active exclusive reservation
+
+Holder: BlueLake  (branch: feature/auth, worktree: frontend-wt)
+Reason: bd-123  •  Expires: 2025-11-10T18:14:09Z
+
+Matched pattern(s):
+  - frontend/**          (reservation #4182)
+  - frontend/src/auth/*  (reservation #4191)
+
+Your staged changes:
+  - frontend/src/auth/login.tsx
+  - frontend/src/auth/Guard.tsx
+
+Resolve: wait for expiry, request release, or coordinate in thread [bd-123].
+Emergency: set AGENT_MAIL_BYPASS=1 or run 'git commit --no-verify'
+```
+
+---
+
+## 6) Pre‑push correctness: tricky cases handled
+
+Handle:
+
+- New branches/tags (remote SHA = zeros → use local root only).
+- Force‑push: diff against the old remote tip (pre‑push provides it).
+- Multiple refspecs in one push: accumulate all changed files.
+- Tags: evaluate too. Always use `-z` and dedupe paths.
+
+---
+
+## 7) Extra robustness for real‑world repos
+
+- Sparse‑checkout: Use Git plumbing; repo‑relative names only.
+- LFS: Path-only matching, no special handling required.
+- Case‑insensitive filesystems: drive matcher from `core.ignorecase`.
+- WSL2: Avoid mixing `C:\` and `/mnt/c`; rely on Git for repo‑relative paths.
+- Symlinks: Match the link path, not the target.
+- Submodules: Keep phase‑1 behavior (separate projects).
+- Network filesystems: Prefer Git facts over `realpath` quirks.
+
+---
+
+## 8) Containerized builds: reliable pattern
+
+- Canonical archive structure:
+  - `projects/<slug>/builds/<iso>__<agent>__<branch>.log`
+  - `projects/<slug>/artifacts/<agent>/<branch>/<iso>/…`
+- Helper: `amctl env` prints `SLUG, PROJECT_UID, BRANCH, AGENT, CACHE_KEY, ARTIFACT_DIR`.
+- Cache keys: `am-cache-${PROJECT_UID}-${AGENT_NAME}-${BRANCH}` (use `PROJECT_UID`, not slug).
+- Mount per‑agent cache subpaths (npm/pnpm, uv, cargo, etc.). Optionally emit a Mail message with a link to the log on success/failure.
+
+---
+
+## 9) Surfaces & APIs (additive, low risk)
+
+- Tools: keep existing signatures; add `project_uid` in responses.
+- New resource: `resource://identity?project=<abs-path>` returns:
+
+```json
+{
+  "project_uid": "uuid",
+  "slug": "repo-a1b2c3d4e5",
+  "identity_mode_used": "git-common-dir",
+  "repo_root": "/abs/repo",
+  "git_common_dir": "/abs/repo/.git",
+  "branch": "feature/x",
+  "worktree_name": "repo-wt-x",
+  "core_ignorecase": true
+}
+```
+
+- Guard CLI:
+  - `guard check --stdin-nul` (non‑interactive checker; exit code is the decision)
+  - `guard status` prints hooks path, chained entries, repo facts, sample match.
+
+---
+
+## 10) Observability & ergonomics
+
+- Structured guard events (JSON on stderr) when blocking: include `project_uid`, `reservation_ids`, `patterns`, `paths`, `agent`, `branch`.
+- Web UI identity panel: show `Project UID`, slug(s), repo facts, worktree badges, and `core.ignorecase`.
+- Doctor command: `amctl doctor` checks hooks path, chain‑runner presence, `AGENT_NAME`, repo facts, pathspec probe, next actions.
+
+---
+
+## 11) Documentation deltas (short and clear)
+
+- “Worktrees: Recommended configuration” recipe:
+  - Per‑worktree `.envrc` setting `AGENT_NAME`
+  - Enabling `PROJECT_IDENTITY_MODE=git-common-dir` on server
+  - (Optional) `amctl project-id --commit` to create `.agent-mail-project-id` for cross‑machine stability
+  - Installing guards once; verifying with `guard status`
+- Explain why Git wildmatch is used and how to write good patterns; include a table mapping shell globs → Git pathspec.
+
+---
+
+## 12) Test plan upgrades
+
+- Cross‑machine slug divergence but shared `project_uid`: both write to same project by UID while slugs differ.
+- Pre‑push new branch (remote zeros).
+- Force‑push updating history.
+- Rename detection: check both old/new names.
+- `core.ignorecase=true` repo on case‑insensitive FS: `Auth.tsx` vs `auth.tsx` reservations.
+- Hook composition: existing Husky hook continues to run (assert order and non‑duplication).
+- NUL‑byte safety: filenames with spaces/newlines/UTF‑8; use `-z` end‑to‑end.
+- WSL path formats: guard check succeeds with repo‑relative paths from Git plumbing.
+
+---
+
+## Small but sharp correctness fixes
+
+- Read pre‑push STDIN tuples (above) rather than diffing remote tracking branches (which may be stale).
+- For privacy‑safe slugs, prefer Git’s absolute plumbing where available:
+  - `git rev-parse --path-format=absolute --show-toplevel`
+  - `git rev-parse --git-common-dir`
+- Treat zero‑length patterns or patterns containing `..` as invalid and reject early.
+
+---
+
+## What this buys you
+
+- No default breakage; everything stays opt‑in.
+- Agents in multiple worktrees share one project across machines, not just locally.
+- Hooks don’t fight with existing tooling.
+- Guards are Git‑native, explainable, and safe on every platform.
+- Clean adoption path and reversible story for legacy slugs.
+
+---
+
+## Optional (speculative, flagged)
+
+- (Speculative) Add a `project_uid` → network namespace mapping for multi‑repo products (frontend/backend).
+- (Speculative) CI gate: GitHub Action/CI step that runs `guard check` on the merge diff to protect `main` against bypassed local hooks.
+
+---
+
+### Drop‑in lists to implement next
+
+1. Implement `ProjectIdentity` function above and thread `project_uid` through `ensure_project`, macros, and guard CLI responses.
+2. Chain‑runner hook + guard scripts exactly as provided; switch installer to compose rather than replace.
+3. Add `pathspec` dependency and switch reservation matching to Git wildmatch semantics.
+4. Implement `projects adopt` command.
+5. Add `resource://identity` and surface identity panel in the UI.
+
+---
+
+## Requirements
+
+- **Multi‑clone / multi‑machine unification**: agents across separate clones of the same GitHub repo should automatically share one project bus.
+- **Build isolation**: watchers, caches, and dev servers must not interfere across agents; file reservations alone are insufficient.
+- **Multi‑repo workflows**: first‑class support for products spanning multiple repos.
+- **Identity fix**: avoid “project = absolute path” to eliminate the core impedance mismatch.
+
+---
+
+## A. Identity model: portable and zero‑config across clones
+
+Keep the opt‑in canonicalizer, but add two identity sources and a precedence rule so separate clones of the same GH repo unify automatically, even across machines.
+
+Identity precedence (first hit wins):
+
+1. Committed marker: `.agent-mail-project-id` at repo root → `project_uid`.
+2. Remote fingerprint (NEW): normalized `origin` URL + default branch → `remote_uid`.
+   - Example canonical form: `github.com/owner/repo@main`
+   - Hash to privacy‑safe `remote_uid = sha1(canonical)[:20]`.
+3. Git common dir (existing `git-common-dir` mode).
+4. Dir hash (existing `dir` mode; strict back‑compat).
+
+Behavior:
+
+- If (1) exists, use it and you’re done.
+- Else if (2) exists, auto‑unify all clones with the same `remote_uid` into one project bus on first contact. Later, admins can “promote” this to (1) with a single command if they want a committed ID.
+- Else fall back to current modes.
+
+Complete helper (drop‑in ready):
+
+```python
+import hashlib, os, re, subprocess, uuid
+from dataclasses import dataclass
+from urllib.parse import urlparse
+
+def _git(C, *args):
+    try:
+        out = subprocess.run(["git","-C",C,*args],check=True,capture_output=True,text=True).stdout.strip()
+        return out or None
+    except Exception:
+        return None
+
+def _norm_remote(url: str) -> str|None:
+    # ssh: git@github.com:org/repo.git ; https: https://github.com/org/repo.git ; ssh://git@...
+    if not url: return None
+    url = url.strip()
+    if url.startswith("git@"):
+        host_path = url.split(":",1)
+        if len(host_path)!=2: return None
+        host = host_path[0].split("@",1)[1]
+        path = host_path[1]
+    else:
+        p = urlparse(url)
+        host = p.hostname
+        path = (p.path or "").lstrip("/")
+    if not host or not path: return None
+    if path.endswith(".git"): path = path[:-4]
+    parts = [x for x in path.split("/") if x]
+    if len(parts)<2: return None
+    owner, repo = parts[0], parts[1]
+    return f"{host}/{owner}/{repo}"
+
+def resolve_identity(human_path: str, allow_commit_marker=False):
+    C = os.path.realpath(human_path)
+    root = _git(C, "rev-parse", "--show-toplevel")
+    gdir = _git(C, "rev-parse", "--git-common-dir")
+    # 1) committed marker
+    uid = None
+    if root:
+        marker = os.path.join(root, ".agent-mail-project-id")
+        if os.path.exists(marker):
+            uid = open(marker,"r",encoding="utf-8").read().strip() or None
+    # 2) remote fingerprint
+    remote_uid = None
+    if not uid:
+        url = _git(C,"config","--get","remote.origin.url")
+        norm = _norm_remote(url or "")
+        if norm:
+            head = _git(C,"symbolic-ref","refs/remotes/origin/HEAD")
+            if head and head.startswith("refs/remotes/origin/"):
+                default_branch = head.rsplit("/",1)[-1]
+            else:
+                default_branch = "main"
+            canonical = f"{norm}@{default_branch}"
+            remote_uid = hashlib.sha1(canonical.encode()).hexdigest()[:20]
+            uid = uid or remote_uid
+    # 3) fallback: git-common-dir / dir
+    if not uid and gdir:
+        uid = hashlib.sha1(os.path.realpath(gdir).encode()).hexdigest()[:20]
+    if not uid:
+        uid = hashlib.sha1(os.path.realpath(C).encode()).hexdigest()[:20]
+    # promote to committed marker if requested
+    if allow_commit_marker and root:
+        with open(os.path.join(root,".agent-mail-project-id"),"w",encoding="utf-8") as f:
+            f.write(uid+"\n")
+    return {"project_uid": uid, "remote_uid": remote_uid, "repo_root": root, "git_common_dir": gdir}
+```
+
+Server knobs:
+
+- `PROJECT_IDENTITY_SOURCES=marker,remote,git-common-dir,dir` (default keeps `remote` enabled)
+- `PROJECT_IDENTITY_REMOTE_REQUIRED=false` (set true in enterprises that rely on GH/GitLab canonicalization)
+
+Outcome: different clones of the same GH repo become one mailbox automatically, no UI linking required, no worktree requirement.
+
+---
+
+## B. Multi‑repo “product bus” with first‑class threads
+
+Elevate project (repo) into a product group:
+
+- Product UID: `product_uid` groups many `project_uid`s. Source it from:
+  1. A committed file `product.toml` with a stable `product_uid`, or
+  2. A heuristically built group: same GH owner + repo name prefixes + UI discovery.
+- Unified thread resolution: if a `thread_id` looks like a task key (`bd-###`, `TKT-###`), show one thread merged across all projects in the group (server read‑only view that stitches by `thread_id`).
+- Group‑level addressing: `to: ["@frontend", "@backend"]` maps to agent lists in member projects (policy‑checked).
+- Group default auto‑handshake: within `product_uid`, new contacts are auto‑approved (TTL‑limited, configurable).
+
+Additive tables (tiny):
+
+- `product_groups(product_uid TEXT PK, name TEXT)`
+- `product_members(product_uid, project_uid, UNIQUE(product_uid, project_uid))`
+
+Resources:
+
+- `resource://product/{product_uid}/thread/{id}`
+- `resource://product/{product_uid}/search?q=...`
+
+---
+
+## C. Build interference: beyond file reservations
+
+Reservations alone won’t tame devservers, watchers, and caches. Add execution‑domain controls for heavy writers.
+
+1. Build Slots (coarse concurrency control)
+   - `acquire_build_slot(project_uid, slot="frontend-build", ttl=3600, exclusive=true|false)`
+   - Defaults: `frontend-build`, `backend-build`, `db-migrate`, `e2e`.
+   - Guards read slot state but don’t block commits; slots are enforced by runners/macros.
+   - Heartbeat/renew; stale slots auto‑reaped.
+2. Guarded runners (wrap long‑running tools)
+   - `am-run <slot> -- <cmd...>` acquires slot, prepares per‑agent cache volumes, streams logs to `projects/<slug>/builds/...`.
+   - Works on Windows/macOS/Linux (Python wrapper + file lock + DB row).
+3. Per‑agent caches and outputs
+   - Cache root keyed by `project_uid/agent_name/branch` (not slug).
+   - Default mappings for npm, uv, cargo, gradle; wrapper sets env so agents never collide.
+4. Opt‑in write fences for hot paths
+   - Lightweight FS watcher that logs and warns (not blocks) if a process writes inside another agent’s active reservation.
+
+---
+
+## D. Zero‑friction onboarding for clones
+
+- Auto‑adopt wizard: when server first sees two projects with the same `remote_uid`, propose one‑click adopt/merge into a canonical `project_uid` (manual CLI remains).
+- Implicit auto‑link: messaging between agents with equal `remote_uid` is allowed immediately under default `auto` policy (same repo), no contact request UX.
+
+---
+
+## E. Path semantics: match Git exactly
+
+Keep repo‑root path semantics but switch reservations to Git wildmatch and honor `core.ignorecase` (via `pathspec`). Ensure rename and sparse‑checkout behave predictably.
+
+---
+
+## F. Hooks: compose, don’t replace
+
+Keep the chain‑runner; ship Windows `.cmd/.ps1` variants so Husky/pre‑commit users aren’t broken. Treat pre‑push ranges correctly (read STDIN tuples; new branches; force‑pushes).
+
+---
+
+## G. Routing policy: “same‑repo easy, cross‑repo explicit”
+
+- Same `project_uid` or same `remote_uid` → delivery always allowed (subject to per‑agent policy), no handshake.
+- Same `product_uid` but different projects → auto‑approve with TTL and log the implicit link.
+- Different products → current handshake flow.
+
+---
+
+## H. UX/Observability tweaks that reduce confusion
+
+- “Why aren’t they talking?” banner with explicit reason and next action.
+- Identity debugger `resource://identity/evidence?project=<path>` returning all sources considered (marker, remote, gitdir, dir) and which one won.
+- Product view: single inbox listing per `product_uid`, even if messages live in many repo archives.
+
+---
+
+## I. Minimal schema changes (optional but clean)
+
+- Add `project_uid` and `remote_uid` columns to `projects` (unique).
+- Add `product_groups` and `product_members` (see above).
+- If you defer migration, keep `project_uid` in Git metadata and a small cache table; behaviors still work.
+
+---
+
+## K. Short docs additions
+
+1. How identity is resolved (marker → remote → gitdir → dir), with a one‑liner to promote to a committed ID.
+2. Same‑repo zero‑config: “If the remotes match, you’re already in one mailbox.”
+3. Product groups: how to opt in (commit `product.toml` or accept UI suggestion).
+4. Build slots & `am-run`: examples for devserver, tests, migrations.
+5. Windows hooks: what’s installed and why it won’t break Husky/pre‑commit.
+
+---
+
+## L. What to trim or de‑emphasize from the original plan
+
+- You don’t need users to pick between `git-toplevel` and `git-common-dir` to solve multi‑clone/multi‑machine; remote fingerprint handles this cleanly. Keep git‑dir modes as advanced options, not the primary story.
+- Don’t require containers in the core plan; keep them as optional stronger‑isolation on top of build slots (which cover most pain with less friction).
+
+---
+
+Net effect:
+
+- Same GitHub repo feels like one project across clones, machines, and worktrees—zero configuration.
+- Multi‑repo products have a first‑class address book and shared threads, so cross‑repo feels designed, not bolted on.
+- Builds/watchers have a dedicated coordination primitive (slots) that makes interference rare even for large teams.
+- All of this remains opt‑in and back‑compatible with the current `dir` default.
+
+---
+
 ## Why Git worktrees for agents
 
 - Separate worktrees isolate branch state, indexes, and build outputs while sharing the same underlying repository object database.
@@ -571,6 +1260,15 @@ File reservation best practices:
   - Rename/move operations are detected and checked correctly.
   - `AGENT_MAIL_BYPASS=1` allows emergency bypass (logged).
   - Rich-styled error messages show exact conflicts with holder info and actionable resolution steps.
+- With `PROJECT_IDENTITY_SOURCES` including `"remote"`:
+  - Agents in different clones on different machines of the same `github.com/owner/repo` communicate without any UI linking on first start; they see one inbox/thread set.
+  - With no markers committed and default sources including `remote`, clones unify via `remote_uid`.
+- Build slots (if enabled):
+  - Starting a devserver in one clone while another is building triggers slot contention with a clear message; switching to a different slot avoids collisions.
+- Product groups (if enabled):
+  - A product spanning `frontend` and `backend` repos shows a single thread for a shared `thread_id` (e.g., `bd-123`) across both; replies from either side continue the same conversation.
+- Hooks (Windows and composition):
+  - Windows users with Husky/pre-commit retain their existing hooks; the Agent Mail guard runs in addition to existing hooks via the chain-runner.
 - Optional features:
   - `pre-push` guard can be installed and works correctly.
   - `guard status` command provides clear diagnostic info.
