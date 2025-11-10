@@ -1676,6 +1676,54 @@ def mail_status(
     console.print(table)
 
 
+@guard_app.command("status")
+def guard_status(
+    repo: Annotated[Path, typer.Argument(..., help="Path to git repo")],
+) -> None:
+    """
+    Print guard status: gate/mode, resolved hooks directory, and presence of hooks.
+    """
+    settings = get_settings()
+    p = repo.expanduser().resolve()
+    gate = settings.worktrees_enabled
+    mode = (settings.project_identity_mode or "dir").strip().lower()
+    guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
+
+    def _git(cwd: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+
+    hooks_path = _git(p, "config", "--get", "core.hooksPath")
+    if hooks_path:
+        if hooks_path.startswith("/") or ((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/"))):
+            hooks_dir = Path(hooks_path)
+        else:
+            root = _git(p, "rev-parse", "--show-toplevel") or str(p)
+            hooks_dir = Path(root) / hooks_path
+    else:
+        git_dir = _git(p, "rev-parse", "--git-dir") or ".git"
+        g = Path(git_dir)
+        if not g.is_absolute():
+            g = p / g
+        hooks_dir = g / "hooks"
+
+    pre_commit = hooks_dir / "pre-commit"
+    pre_push = hooks_dir / "pre-push"
+
+    table = Table(title="Guard status", show_lines=False)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("WORKTREES_ENABLED", "true" if gate else "false")
+    table.add_row("AGENT_MAIL_GUARD_MODE", guard_mode)
+    table.add_row("PROJECT_IDENTITY_MODE", mode or "dir")
+    table.add_row("hooks_dir", str(hooks_dir))
+    table.add_row("pre-commit", "present" if pre_commit.exists() else "missing")
+    table.add_row("pre-push", "present" if pre_push.exists() else "missing")
+    console.print(table)
+
 @projects_app.command("adopt")
 def projects_adopt(
     source: Annotated[str, typer.Argument(..., help="Old project slug or human key")],
@@ -1732,8 +1780,69 @@ def projects_adopt(
     for line in plan:
         console.print(f"- {line}")
 
-    if not dry_run:
-        console.print("[red]Apply not yet implemented. Aborting.[/]")
+    if dry_run:
+        return
+    # Apply phase
+    async def _apply() -> None:
+        if src.id is None or dst.id is None:
+            raise typer.BadParameter("Projects must be persisted (id not null).")
+        # Detect agent name conflicts
+        await ensure_schema()
+        async with get_session() as session:
+            src_agents = [row[0] for row in (await session.execute(select(Agent.name).where(Agent.project_id == src.id))).all()]
+            dst_agents = [row[0] for row in (await session.execute(select(Agent.name).where(Agent.project_id == dst.id))).all()]
+            dup = sorted(set(src_agents).intersection(set(dst_agents)))
+            if dup:
+                raise typer.BadParameter(f"Agent name conflicts in target project: {', '.join(dup)}")
+        # Move Git artifacts
+        settings = get_settings()
+        # local import to minimize top-level churn and keep ordering stable
+        from .storage import AsyncFileLock as _AsyncFileLock, ensure_archive as _ensure_archive  # type: ignore
+        src_archive = asyncio.run(_ensure_archive(settings, src.slug))
+        dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
+        moved_relpaths: list[str] = []
+        for path in sorted(src_archive.root.rglob("*"), key=str):
+            if not path.is_file():
+                continue
+            if path.name.endswith(".lock") or path.name.endswith(".lock.owner.json"):
+                continue
+            rel_from_root = path.relative_to(src_archive.root)
+            dest_path = dst_archive.root / rel_from_root
+            await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
+            if dest_path.exists():
+                continue
+            await asyncio.to_thread(path.replace, dest_path)
+            moved_relpaths.append(dest_path.relative_to(dst_archive.repo_root).as_posix())
+        from .storage import _commit as _archive_commit  # type: ignore
+        async with _AsyncFileLock(dst_archive.lock_path):
+            await _archive_commit(dst_archive.repo, settings, f"adopt: move {src.slug} into {dst.slug}", moved_relpaths)
+        # Re-key database rows (agents, messages, file_reservations)
+        async with get_session() as session:
+            from sqlalchemy import update as _update  # local import to avoid top-of-file churn
+            await session.execute(_update(Agent).where(Agent.project_id == src.id).values(project_id=dst.id))
+            await session.execute(_update(Message).where(Message.project_id == src.id).values(project_id=dst.id))
+            await session.execute(_update(FileReservation).where(FileReservation.project_id == src.id).values(project_id=dst.id))
+            await session.commit()
+        # Write aliases.json under target
+        aliases_path = dst_archive.root / "aliases.json"
+        try:
+            existing = {}
+            if aliases_path.exists():
+                existing = json.loads(aliases_path.read_text(encoding="utf-8"))
+            former = set(existing.get("former_slugs", []))
+            former.add(src.slug)
+            existing["former_slugs"] = sorted(former)
+            await asyncio.to_thread(aliases_path.write_text, json.dumps(existing, indent=2), "utf-8")
+            rel_alias = aliases_path.relative_to(dst_archive.repo_root).as_posix()
+            await _archive_commit(dst_archive.repo, settings, f"adopt: record alias for {src.slug}", [rel_alias])
+        except Exception as exc:
+            console.print(f"[yellow]Warning: failed to write aliases.json: {exc}[/]")
+
+    try:
+        asyncio.run(_apply())
+        console.print("[green]Adoption apply completed.[/]")
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @file_reservations_app.command("active")
