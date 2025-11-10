@@ -38,6 +38,7 @@
 **Feature flag (single gate)**
 - `WORKTREES_ENABLED=1` (env/flag) must be set for any of the worktree‑friendly features in this plan to activate. When unset/false, the system behaves exactly as it does today.
   - Guard installer and identity resolver must no‑op unless `WORKTREES_ENABLED=1` (see code/CLI notes below).
+  - Hook scripts themselves also check the gate and exit early when disabled.
 
 ---
 
@@ -102,7 +103,7 @@ Everything below deepens these, with code and exact behaviors.
 ### Canonicalization order (robust & private; applied only when `WORKTREES_ENABLED=1`)
 
 1. If marker present: `project_uid = read_marker()`.
-2. Else if `PROJECT_IDENTITY_MODE=git-remote` (or remote source is enabled) and a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
+2. Else if `PROJECT_IDENTITY_MODE=git-remote` (or remote source is enabled) **and** a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
 3. Else if `PROJECT_IDENTITY_MODE in {git-common-dir, git-toplevel}`: compute privacy‑safe slug from canonical Git paths and generate `project_uid`.
 4. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
 
@@ -302,6 +303,7 @@ fi
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${WORKTREES_ENABLED:-0}" != "1" ]; then exit 0; fi
 MODE="${AGENT_MAIL_GUARD_MODE:-block}"
 if [ "${AGENT_MAIL_BYPASS:-0}" = "1" ]; then
   echo "[agent-mail] bypass enabled via AGENT_MAIL_BYPASS=1"
@@ -328,21 +330,21 @@ fi
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${WORKTREES_ENABLED:-0}" != "1" ]; then exit 0; fi
 if [ "${AGENT_MAIL_BYPASS:-0}" = "1" ]; then
   echo "[agent-mail] bypass enabled via AGENT_MAIL_BYPASS=1"
   exit 0
 fi
-REMOTE=""
 read -r REMOTE REMOTE_URL || true
-declare -a ALL
+declare -a ALL COMMITS
 while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
   [ -n "${LOCAL_SHA:-}" ] || continue
-  if [ "${REMOTE_SHA:-}" = "0000000000000000000000000000000000000000" ] || [ -z "${REMOTE_SHA:-}" ]; then
-    RANGE="${LOCAL_SHA}"
-  else
-    RANGE="${REMOTE_SHA}..${LOCAL_SHA}"
-  fi
-  while IFS= read -r -d '' f; do ALL+=("$f"); done < <(git diff -z --name-only "$RANGE" --diff-filter=ACMRDTU)
+  # enumerate commits that will be pushed for this ref
+  while IFS= read -r c; do COMMITS+=("$c"); done < <(git rev-list --topo-order "${LOCAL_SHA}" --not --remotes="${REMOTE}")
+done
+for c in "${COMMITS[@]}"; do
+  # collect changed paths per commit; disable external diffs; NUL-safe
+  while IFS= read -r -d '' f; do ALL+=("$f"); done < <(git diff-tree -r --no-commit-id --name-only --no-ext-diff --diff-filter=ACMRDTU -z "$c")
 done
 if [ "${#ALL[@]}" -gt 0 ]; then
   printf "%s\0" "${ALL[@]}" | uv run python -m mcp_agent_mail.cli guard check --stdin-nul
@@ -476,12 +478,13 @@ Handle:
 {
   "project_uid": "uuid",
   "slug": "repo-a1b2c3d4e5",
-  "identity_mode_used": "git-common-dir",
+  "identity_mode_used": "git-remote",
   "repo_root": "/abs/repo",
   "git_common_dir": "/abs/repo/.git",
   "branch": "feature/x",
   "worktree_name": "repo-wt-x",
-  "core_ignorecase": true
+  "core_ignorecase": true,
+  "normalized_remote": "github.com/owner/repo"
 }
 ```
 
@@ -589,7 +592,7 @@ Add a tiny GitHub Action step to catch bypassed local hooks:
 4. Implement `projects adopt` command (dry‑run + apply).
 5. Add `resource://identity` panel + `mail status` command with routing diagnostics.
 6. Ship `am-run` and `amctl env` for build isolation; wire build slots enforcement into the runner.
-7. Add Product Bus: `ensure_product`, `products.link`, product‑wide thread/search resources.
+7. (Phase 2) Add Product Bus: `ensure_product`, `products.link`, product‑wide thread/search resources.
 
 ---
 
@@ -700,7 +703,7 @@ Outcome: different clones of the same GH repo become one mailbox automatically, 
 
 ---
 
-## B. Multi‑repo “product bus” with first‑class threads
+## B. (Phase 2, optional) Multi‑repo “product bus” with first‑class threads
 
 Elevate project (repo) into a product group:
 
@@ -716,7 +719,7 @@ Additive tables (tiny):
 - `product_groups(product_uid TEXT PK, name TEXT)`
 - `product_members(product_uid, project_uid, UNIQUE(product_uid, project_uid))`
 
-Resources:
+Resources (Phase 2):
 
 - `resource://product/{product_uid}/thread/{id}`
 - `resource://product/{product_uid}/search?q=...`
@@ -997,17 +1000,17 @@ Optional server assistance:
   - `PROJECT_IDENTITY_REMOTE = origin`
   - `PROJECT_IDENTITY_REMOTE_URL_OVERRIDE =` (optional)
   - `INSTALL_PREPUSH_GUARD = true|false` (default `false`)
-  - `PROJECT_PRODUCT_UID =` (optional)
+  - `PROJECT_PRODUCT_UID =` (Phase 2, optional)
   - `AGENT_MAIL_GUARD_MODE = block|warn` (default `block`)
 - Tool/macro enhancements (non-breaking):
   - `ensure_project(human_key: str, identity_mode?: str)` → returns `{ project_uid, slug, normalized_remote?, identity_mode_used, canonical_path, human_key, ... }`
   - `macro_start_session(...)` → returns the same, plus `product_uid?`
-  - `ensure_product(product_uid?: str, name?: str)` and `products.link(project_uid, product_uid)`
+  - `ensure_product(product_uid?: str, name?: str)` and `products.link(project_uid, product_uid)` (Phase 2)
   - Guard install: `install_guard(project_key: str, repo_path: str, install_prepush?: bool)` → prints resolved hook paths
   - Ports: `am-ports assign|release|list` (no daemon; file‑based leases with TTL)
 - Transparency resource (read-only):
   - `resource://identity?project=<abs-path>` → returns identity result + evidence (marker/remote/gitdir/dir)
-  - `resource://product/{product_uid}/thread/{id}` and `/search` (product‑wide reads)
+  - `resource://product/{product_uid}/thread/{id}` and `/search` (product‑wide reads) (Phase 2)
 - Guard utilities:
   - `guard status` subcommand: prints current agent, repo root, hooks path, `project_uid`, `normalized_remote`, sample reservation matches, and bypass hints.
   - `mail status` subcommand: prints routing diagnostics (why DMs did/didn’t deliver and one‑line fixes).
@@ -1221,7 +1224,7 @@ File reservation best practices:
   - With no markers committed and remote enabled, clones unify via remote; a private marker is written for stability.
 - Build slots (if enabled):
   - Starting a devserver in one clone while another is building triggers slot contention with a clear message; switching to a different slot avoids collisions.
-- Product groups (if enabled):
+- Product groups (Phase 2, optional):
   - A product spanning `frontend` and `backend` repos shows a single thread for a shared `thread_id` (e.g., `bd-123`) across both; replies from either side continue the same conversation.
 - Hooks (Windows and composition):
   - Windows users with Husky/pre-commit retain their existing hooks; the Agent Mail guard runs in addition to existing hooks via the chain-runner.
