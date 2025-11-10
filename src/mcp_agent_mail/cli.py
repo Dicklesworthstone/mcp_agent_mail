@@ -53,6 +53,7 @@ from .share import (
     sign_manifest,
     summarize_snapshot,
 )
+from .storage import ensure_archive
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
@@ -1650,8 +1651,10 @@ def am_run(
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
 ) -> None:
     """
-    Minimal build wrapper that prepares environment variables and runs a command.
-    (Stub: future versions will acquire/release build slots with enforcement.)
+    Build wrapper that prepares environment variables and manages a build slot:
+    - Acquires the slot (advisory), prints conflicts in warn mode.
+    - Renews lease in the background while the child runs.
+    - Releases the slot on exit.
     """
     p = project_path.expanduser().resolve()
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
@@ -1659,7 +1662,54 @@ def am_run(
     ident = _resolve_ident(str(p))
     slug = ident["slug"]
     project_uid = ident["project_uid"]
-    branch = ident.get("branch") or "unknown"
+    branch = ident.get("branch") or ""
+    if not branch:
+        try:
+            from git import Repo as _Repo
+            repo = _Repo(str(p), search_parent_directories=True)
+            try:
+                branch = repo.active_branch.name
+            except Exception:
+                branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+        except Exception:
+            branch = "unknown"
+    settings = get_settings()
+    guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
+    worktrees_enabled = bool(settings.worktrees_enabled)
+
+    def _safe_component(value: str) -> str:
+        s = value.strip()
+        for ch in ("/", "\\\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+            s = s.replace(ch, "_")
+        return s or "unknown"
+
+    async def _ensure_slot_paths() -> Path:
+        archive = await ensure_archive(settings, slug)
+        slot_dir = archive.root / "build_slots" / _safe_component(slot)
+        slot_dir.mkdir(parents=True, exist_ok=True)
+        return slot_dir
+
+    def _read_active(slot_dir: Path) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        results: list[dict[str, Any]] = []
+        for f in slot_dir.glob("*.json"):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                exp = data.get("expires_ts")
+                if exp:
+                    try:
+                        if datetime.fromisoformat(exp) <= now:
+                            continue
+                    except Exception:
+                        pass
+                results.append(data)
+            except Exception:
+                continue
+        return results
+
+    def _lease_path(slot_dir: Path) -> Path:
+        holder = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+        return slot_dir / f"{holder}.json"
     env = os.environ.copy()
     env.update({
         "AM_SLOT": slot,
@@ -1669,11 +1719,74 @@ def am_run(
         "AGENT": agent_name,
         "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
     })
-    console.print(f"[cyan]$ {' '.join(cmd)}[/]  [dim](slot={slot})[/]")
+    lease_path: Optional[Path] = None
+    renew_stop = threading.Event()
+    renew_thread: Optional[threading.Thread] = None
+    ttl_seconds = 3600
     try:
+        if worktrees_enabled:
+            slot_dir = asyncio.run(_ensure_slot_paths())
+            active = _read_active(slot_dir)
+            conflicts = [
+                e for e in active
+                if e.get("exclusive", True) and not (e.get("agent") == agent_name and e.get("branch") == branch)
+            ]
+            if conflicts and guard_mode == "warn":
+                console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
+                for c in conflicts:
+                    console.print(
+                        f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
+                        f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
+                    )
+            lease_path = _lease_path(slot_dir)
+            payload = {
+                "slot": slot,
+                "agent": agent_name,
+                "branch": branch,
+                "exclusive": True,
+                "acquired_ts": datetime.now(timezone.utc).isoformat(),
+                "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
+            }
+            with suppress(Exception):
+                lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            def _renewer() -> None:
+                interval = max(60, ttl_seconds // 2)
+                while not renew_stop.wait(interval):
+                    try:
+                        now = datetime.now(timezone.utc)
+                        new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
+                        try:
+                            current = json.loads(lease_path.read_text(encoding="utf-8")) if lease_path else {}
+                        except Exception:
+                            current = {}
+                        current.update({"expires_ts": new_exp.isoformat()})
+                        if lease_path:
+                            lease_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+                    except Exception:
+                        continue
+            renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
+            renew_thread.start()
+        console.print(f"[cyan]$ {' '.join(cmd)}[/]  [dim](slot={slot})[/]")
         rc = subprocess.run(list(cmd), env=env, check=False).returncode
     except FileNotFoundError:
         rc = 127
+    finally:
+        if worktrees_enabled and lease_path:
+            try:
+                now = datetime.now(timezone.utc)
+                try:
+                    data = json.loads(lease_path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+                data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
+                with suppress(Exception):
+                    lease_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            finally:
+                renew_stop.set()
+                if renew_thread and renew_thread.is_alive():
+                    renew_thread.join(timeout=1.0)
     if rc != 0:
         raise typer.Exit(code=rc)
 
