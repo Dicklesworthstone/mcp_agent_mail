@@ -1512,6 +1512,9 @@ def guard_install(
     """Install the advisory pre-commit guard into the given repository."""
 
     settings = get_settings()
+    if not settings.worktrees_enabled:
+        console.print("[yellow]Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.[/]")
+        return
     repo_path = repo.expanduser().resolve()
 
     async def _run() -> tuple[Project, Path]:

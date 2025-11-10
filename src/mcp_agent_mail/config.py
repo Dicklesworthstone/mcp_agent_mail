@@ -103,6 +103,11 @@ class Settings:
     """Top-level application settings."""
 
     environment: str
+    # Global gate for worktree-friendly behavior (opt-in; default False)
+    worktrees_enabled: bool
+    # Identity preferences (phase 1: read-only; behavior remains 'dir' unless features enabled)
+    project_identity_mode: str  # "dir" | "git-remote" | "git-common-dir" | "git-toplevel"
+    project_identity_remote: str  # e.g., "origin"
     http: HttpSettings
     database: DatabaseSettings
     storage: StorageSettings
@@ -270,6 +275,9 @@ def get_settings() -> Settings:
 
     return Settings(
         environment=environment,
+        worktrees_enabled=_bool(_decouple_config("WORKTREES_ENABLED", default="false"), default=False),
+        project_identity_mode=_decouple_config("PROJECT_IDENTITY_MODE", default="dir").strip().lower(),
+        project_identity_remote=_decouple_config("PROJECT_IDENTITY_REMOTE", default="origin").strip(),
         http=http_settings,
         database=database_settings,
         storage=storage_settings,

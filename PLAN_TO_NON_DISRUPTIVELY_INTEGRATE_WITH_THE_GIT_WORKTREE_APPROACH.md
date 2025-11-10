@@ -76,6 +76,31 @@ Everything below deepens these, with code and exact behaviors.
 - Per‑feature toggles remain available (e.g., `INSTALL_PREPUSH_GUARD`, `PROJECT_IDENTITY_MODE`), but are ignored unless `WORKTREES_ENABLED=1`.
  - CLI behavior: `mcp-agent-mail guard install` and `am-ports` subcommands must detect the gate and print a short “disabled (WORKTREES_ENABLED=0)” message instead of mutating state.
 
+Implementation progress:
+- 2025-11-10: Introduced `WORKTREES_ENABLED` (default false) into application config:
+  - Added `worktrees_enabled: bool` to `Settings` in `src/mcp_agent_mail/config.py`, read via python‑decouple with default `"false"`.
+  - No changes to `.env` were made; if absent or set to false, the system continues with existing behavior unchanged.
+  - Guard installer gating:
+    - `mcp_agent_mail.cli guard install` now no‑ops with a clear message when `WORKTREES_ENABLED=0`.
+    - MCP tool `install_precommit_guard` returns without installing and emits an info message when gated off.
+    - Generated pre‑commit hook script checks `WORKTREES_ENABLED` at runtime and exits early when disabled.
+  - Identity wiring (no behavior change yet): `_ensure_project` now computes slugs via a `_compute_project_slug` helper that preserves existing `dir` behavior unless the gate is enabled (and even then, remains `dir` until additional identity modes are implemented).
+  - Guard advisory mode: pre‑commit script honors `AGENT_MAIL_GUARD_MODE=warn` to print conflicts but not block; default remains `block`.
+ - 2025-11-10: Implemented identity modes behind the gate in `src/mcp_agent_mail/app.py`:
+   - `PROJECT_IDENTITY_MODE=git-remote|git-toplevel|git-common-dir|dir` supported (default `dir`).
+   - `git-remote`: normalize `remote.<name>.url` (default `origin`) to `host/owner/repo`; slug = `repo-<sha1(normalized)[:10]>`.
+   - `git-toplevel`: slug = `basename-<sha1(realpath)[:10]>`.  `git-common-dir`: slug = `repo-<sha1(realpath)[:10]>`.
+   - On any failure, falls back to `dir` (strict back‑compat). Behavior is unchanged unless `WORKTREES_ENABLED=1`.
+  - Added identity inspection resource:
+    - `resource://identity/{project}` returns `{ slug, identity_mode_used, canonical_path, human_key, repo_root, git_common_dir, branch, worktree_name, core_ignorecase, normalized_remote }`.
+    - `project` can be an absolute path; query parsing is robust to transports that embed params in the path segment.
+  - ensure_project extended:
+    - Accepts optional `identity_mode` arg (for inspection/testing).
+    - Returns identity metadata alongside `{id, slug, human_key, created_at}`.
+  - Guard installer now respects Git configuration for hook placement:
+    - Honors `core.hooksPath` (absolute or repo-relative) and falls back to `rev-parse --git-dir`/hooks.
+    - Creates directories as needed and remains gated by `WORKTREES_ENABLED`.
+
 ## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
 ### Why:

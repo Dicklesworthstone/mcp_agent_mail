@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import functools
+import hashlib
 import inspect
 import json
 import logging
@@ -21,6 +22,12 @@ from typing import Any, Optional, cast
 from urllib.parse import parse_qsl
 
 from fastmcp import Context, FastMCP
+try:
+    from pathspec import PathSpec  # type: ignore[import-not-found]
+    from pathspec.patterns.gitwildmatch import GitWildMatchPattern  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - optional dependency fallback
+    PathSpec = None  # type: ignore[assignment]
+    GitWildMatchPattern = None  # type: ignore[assignment]
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from sqlalchemy import asc, desc, func, or_, select, text, update
@@ -646,9 +653,114 @@ def _message_frontmatter(
         "attachments": attachments,
     }
 
+def _compute_project_slug(human_key: str) -> str:
+    """
+    Compute the project slug with strict backward compatibility by default.
+    When worktree-friendly behavior is enabled, we still default to 'dir' mode
+    until additional identity modes are implemented.
+    """
+    settings = get_settings()
+    # Gate: preserve existing behavior unless explicitly enabled
+    if not settings.worktrees_enabled:
+        return slugify(human_key)
+    # Helpers for identity modes (privacy-safe)
+    def _short_sha1(text: str, n: int = 10) -> str:
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()[:n]
+
+    def _norm_remote(url: str | None) -> str | None:
+        if not url:
+            return None
+        url = url.strip()
+        try:
+            if url.startswith("git@"):
+                host = url.split("@", 1)[1].split(":", 1)[0]
+                path = url.split(":", 1)[1]
+            else:
+                from urllib.parse import urlparse as _urlparse
+
+                p = _urlparse(url)
+                host = p.hostname or ""
+                path = (p.path or "")
+        except Exception:
+            return None
+        if not host:
+            return None
+        path = path.lstrip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = [seg for seg in path.split("/") if seg]
+        if len(parts) < 2:
+            return None
+        owner, repo = parts[0], parts[1]
+        return f"{host}/{owner}/{repo}"
+
+    mode = (settings.project_identity_mode or "dir").strip().lower()
+    # Mode: git-remote
+    if mode == "git-remote":
+        try:
+            # Attempt to use GitPython for robustness across worktrees
+            repo = Repo(human_key, search_parent_directories=True)
+            remote_name = settings.project_identity_remote or "origin"
+            remote_url: str | None = None
+            # Prefer 'git remote get-url' to support multiple urls/rewrite rules
+            try:
+                remote_url = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                # Fallback: use config if available
+                try:
+                    remote = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if remote and remote.urls:
+                        remote_url = next(iter(remote.urls), None)
+                except Exception:
+                    remote_url = None
+            normalized = _norm_remote(remote_url)
+            if normalized:
+                base = normalized.rsplit("/", 1)[-1] or "repo"
+                canonical = normalized  # privacy-safe canonical string
+                return f"{base}-{_short_sha1(canonical)}"
+        except (InvalidGitRepositoryError, NoSuchPathError, Exception):
+            # Non-git directory or error; fall through to fallback
+            pass
+        # Fallback to dir behavior if we cannot resolve a normalized remote
+        return slugify(human_key)
+
+    # Mode: git-toplevel
+    if mode == "git-toplevel":
+        try:
+            repo = Repo(human_key, search_parent_directories=True)
+            top = repo.git.rev_parse("--show-toplevel").strip()
+            if top:
+                from pathlib import Path as _P
+
+                top_real = str(_P(top).resolve())
+                base = _P(top_real).name or "repo"
+                return f"{base}-{_short_sha1(top_real)}"
+        except (InvalidGitRepositoryError, NoSuchPathError, Exception):
+            return slugify(human_key)
+        return slugify(human_key)
+
+    # Mode: git-common-dir
+    if mode == "git-common-dir":
+        try:
+            repo = Repo(human_key, search_parent_directories=True)
+            gdir = repo.git.rev_parse("--git-common-dir").strip()
+            if gdir:
+                from pathlib import Path as _P
+
+                gdir_real = str(_P(gdir).resolve())
+                base = "repo"
+                return f"{base}-{_short_sha1(gdir_real)}"
+        except (InvalidGitRepositoryError, NoSuchPathError, Exception):
+            return slugify(human_key)
+        return slugify(human_key)
+
+    # Default and 'dir' mode: strict back-compat
+    return slugify(human_key)
+
+
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
-    slug = slugify(human_key)
+    slug = _compute_project_slug(human_key)
     async with get_session() as session:
         result = await session.execute(select(Project).where(Project.slug == slug))
         project = result.scalars().first()
@@ -659,6 +771,8 @@ async def _ensure_project(human_key: str) -> Project:
         await session.commit()
         await session.refresh(project)
         return project
+
+    # -- Identity inspection resource is registered inside build_mcp_server below
 
 
 async def _get_project_by_identifier(identifier: str) -> Project:
@@ -1451,35 +1565,32 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
         return False
     if not existing.exclusive and not candidate_exclusive:
         return False
-    normalized_existing = existing.path_pattern
-    # Treat simple directory patterns like "src/*" as inclusive of files under that directory
-    # when comparing against concrete file paths like "src/app.py".
-    def _expand_dir_star(p: str) -> str:
-        if p.endswith("/*"):
-            return p[:-1] + "*"  # "src/*" -> "src/**"-like breadth for fnmatchcase approximation
-        return p
-    a = _expand_dir_star(candidate_path)
-    b = _expand_dir_star(normalized_existing)
-    return (
-        fnmatch.fnmatchcase(a, b)
-        or fnmatch.fnmatchcase(b, a)
-        or a == b
-    )
+    # Git wildmatch semantics; treat inputs as repo-root relative forward-slash paths
+    def _normalize(p: str) -> str:
+        return p.replace("\\", "/").lstrip("/")
+    if PathSpec and GitWildMatchPattern:
+        spec = PathSpec.from_lines(GitWildMatchPattern, [existing.path_pattern])
+        return spec.match_file(_normalize(candidate_path))
+    # Fallback to conservative fnmatch if pathspec not available
+    pat = existing.path_pattern
+    a = _normalize(candidate_path)
+    b = _normalize(pat)
+    return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a) or (a == b)
 
 
 def _patterns_overlap(a: str, b: str) -> bool:
-    # Normalize simple relative prefixes for matching
-    def _norm(s: str) -> str:
-        while s.startswith("./"):
-            s = s[2:]
-        return s
-    a1 = _norm(a)
-    b1 = _norm(b)
-    return (
-        fnmatch.fnmatchcase(a1, b1)
-        or fnmatch.fnmatchcase(b1, a1)
-        or a1 == b1
-    )
+    # Overlap if any file could be matched by both patterns (approximate by cross-matching)
+    def _normalize(p: str) -> str:
+        return p.replace("\\", "/").lstrip("/")
+    if PathSpec and GitWildMatchPattern:
+        a_spec = PathSpec.from_lines(GitWildMatchPattern, [a])
+        b_spec = PathSpec.from_lines(GitWildMatchPattern, [b])
+        # Heuristic: check direct cross-matches on normalized patterns
+        return a_spec.match_file(_normalize(b)) or b_spec.match_file(_normalize(a))
+    # Fallback approximate
+    a1 = _normalize(a)
+    b1 = _normalize(b)
+    return fnmatch.fnmatchcase(a1, b1) or fnmatch.fnmatchcase(b1, a1) or (a1 == b1)
 
 
 def _file_reservations_patterns_overlap(paths_a: Sequence[str], paths_b: Sequence[str]) -> bool:
@@ -2128,7 +2239,7 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="ensure_project")
     @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "storage"}, complexity="low", project_arg="human_key")
-    async def ensure_project(ctx: Context, human_key: str) -> dict[str, Any]:
+    async def ensure_project(ctx: Context, human_key: str, identity_mode: Optional[str] = None) -> dict[str, Any]:
         """
         Idempotently create or ensure a project exists for the given human key.
 
@@ -2200,7 +2311,106 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
         await ensure_archive(settings, project.slug)
-        return _project_to_dict(project)
+        # Compose identity metadata similar to resource://identity
+        settings_local = get_settings()
+        mode_config = (identity_mode or settings_local.project_identity_mode or "dir").strip().lower()
+        mode_used = "dir" if not settings_local.worktrees_enabled else mode_config
+        target_path = str(Path(human_key).expanduser().resolve())
+
+        repo_root: Optional[str] = None
+        git_common_dir: Optional[str] = None
+        branch: Optional[str] = None
+        worktree_name: Optional[str] = None
+        core_ignorecase: Optional[bool] = None
+        normalized_remote: Optional[str] = None
+        canonical_path: str = target_path
+
+        def _norm_remote(url: Optional[str]) -> Optional[str]:
+            if not url:
+                return None
+            u = url.strip()
+            try:
+                if u.startswith("git@"):
+                    host = u.split("@", 1)[1].split(":", 1)[0]
+                    path = u.split(":", 1)[1]
+                else:
+                    from urllib.parse import urlparse as _urlparse
+                    p = _urlparse(u)
+                    host = p.hostname or ""
+                    path = (p.path or "")
+            except Exception:
+                return None
+            if not host:
+                return None
+            path = path.lstrip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            parts = [seg for seg in path.split("/") if seg]
+            if len(parts) < 2:
+                return None
+            owner, repo = parts[0], parts[1]
+            return f"{host}/{owner}/{repo}"
+
+        try:
+            repo = Repo(target_path, search_parent_directories=True)
+            repo_root = str(Path(repo.working_tree_dir or "").resolve())
+            try:
+                git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
+            except Exception:
+                git_common_dir = None
+            try:
+                branch = repo.active_branch.name
+            except Exception:
+                try:
+                    branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                except Exception:
+                    branch = None
+            try:
+                worktree_name = Path(repo.working_tree_dir or "").name or None
+            except Exception:
+                worktree_name = None
+            try:
+                core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
+                core_ignorecase = str(core_ic).strip().lower() == "true"
+            except Exception:
+                core_ignorecase = None
+            # normalized remote
+            remote_name = settings_local.project_identity_remote or "origin"
+            remote_url: Optional[str] = None
+            try:
+                remote_url = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                try:
+                    r = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if r and r.urls:
+                        remote_url = next(iter(r.urls), None)
+                except Exception:
+                    remote_url = None
+            normalized_remote = _norm_remote(remote_url)
+        except (InvalidGitRepositoryError, NoSuchPathError, Exception):
+            pass
+
+        if mode_used == "git-remote" and normalized_remote:
+            canonical_path = normalized_remote
+        elif mode_used == "git-toplevel" and repo_root:
+            canonical_path = repo_root
+        elif mode_used == "git-common-dir" and git_common_dir:
+            canonical_path = str(Path(git_common_dir).resolve())
+        else:
+            canonical_path = target_path
+
+        payload = _project_to_dict(project)
+        payload.update({
+            "identity_mode_used": mode_used,
+            "canonical_path": canonical_path,
+            "repo_root": repo_root,
+            "git_common_dir": git_common_dir,
+            "branch": branch,
+            "worktree_name": worktree_name,
+            "core_ignorecase": core_ignorecase,
+            "normalized_remote": normalized_remote,
+        })
+        return payload
 
     @mcp.tool(name="register_agent")
     @_instrument_tool("register_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name", project_arg="project_key")
@@ -4612,6 +4822,9 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         code_repo_path: str,
     ) -> dict[str, Any]:
+        if not settings.worktrees_enabled:
+            await ctx.info("Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.")
+            return {"hook": ""}
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -5209,6 +5422,114 @@ def build_mcp_server() -> FastMCP:
             },
         }
 
+    @mcp.resource("resource://identity/{project}", mime_type="application/json")
+    def identity_resource(project: str) -> dict[str, Any]:
+        """
+        Inspect identity resolution for a given project path. Returns the slug actually used,
+        the identity mode in effect, canonical path for the selected mode, and git repo facts.
+        """
+        raw_path, _ = _split_slug_and_query(project)
+        target_path = str(Path(raw_path).expanduser().resolve())
+
+        settings_local = get_settings()
+        mode_config = (settings_local.project_identity_mode or "dir").strip().lower()
+        mode_used = "dir" if not settings_local.worktrees_enabled else mode_config
+
+        repo_root: Optional[str] = None
+        git_common_dir: Optional[str] = None
+        branch: Optional[str] = None
+        worktree_name: Optional[str] = None
+        core_ignorecase: Optional[bool] = None
+        normalized_remote: Optional[str] = None
+        canonical_path: str = target_path
+
+        def _norm_remote(url: Optional[str]) -> Optional[str]:
+            if not url:
+                return None
+            u = url.strip()
+            try:
+                if u.startswith("git@"):
+                    host = u.split("@", 1)[1].split(":", 1)[0]
+                    path = u.split(":", 1)[1]
+                else:
+                    from urllib.parse import urlparse as _urlparse
+                    p = _urlparse(u)
+                    host = p.hostname or ""
+                    path = (p.path or "")
+            except Exception:
+                return None
+            if not host:
+                return None
+            path = path.lstrip("/")
+            if path.endswith(".git"):
+                path = path[:-4]
+            parts = [seg for seg in path.split("/") if seg]
+            if len(parts) < 2:
+                return None
+            owner, repo_name = parts[0], parts[1]
+            return f"{host}/{owner}/{repo_name}"
+
+        try:
+            repo = Repo(target_path, search_parent_directories=True)
+            repo_root = str(Path(repo.working_tree_dir or "").resolve())
+            try:
+                git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
+            except Exception:
+                git_common_dir = None
+            try:
+                branch = repo.active_branch.name
+            except Exception:
+                try:
+                    branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                except Exception:
+                    branch = None
+            try:
+                worktree_name = Path(repo.working_tree_dir or "").name or None
+            except Exception:
+                worktree_name = None
+            try:
+                core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
+                core_ignorecase = str(core_ic).strip().lower() == "true"
+            except Exception:
+                core_ignorecase = None
+            remote_name = settings_local.project_identity_remote or "origin"
+            remote_url: Optional[str] = None
+            try:
+                remote_url = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                try:
+                    r = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if r and r.urls:
+                        remote_url = next(iter(r.urls), None)
+                except Exception:
+                    remote_url = None
+            normalized_remote = _norm_remote(remote_url)
+        except (InvalidGitRepositoryError, NoSuchPathError, Exception):
+            repo = None
+
+        if mode_used == "git-remote" and normalized_remote:
+            canonical_path = normalized_remote
+        elif mode_used == "git-toplevel" and repo_root:
+            canonical_path = repo_root
+        elif mode_used == "git-common-dir" and git_common_dir:
+            canonical_path = str(Path(git_common_dir).resolve())
+        else:
+            canonical_path = target_path
+
+        slug_value = _compute_project_slug(target_path)
+        return {
+            "project_uid": None,
+            "slug": slug_value,
+            "identity_mode_used": mode_used,
+            "canonical_path": canonical_path,
+            "human_key": target_path,
+            "repo_root": repo_root,
+            "git_common_dir": git_common_dir,
+            "branch": branch,
+            "worktree_name": worktree_name,
+            "core_ignorecase": core_ignorecase,
+            "normalized_remote": normalized_remote,
+        }
     @mcp.resource("resource://tooling/directory", mime_type="application/json")
     def tooling_directory_resource() -> dict[str, Any]:
         """
