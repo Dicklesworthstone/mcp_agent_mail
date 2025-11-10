@@ -1,4 +1,5 @@
 """Application factory for the MCP Agent Mail server."""
+# ruff: noqa: I001
 
 from __future__ import annotations
 
@@ -22,14 +23,14 @@ from typing import Any, Optional, cast
 from urllib.parse import parse_qsl
 
 from fastmcp import Context, FastMCP
+from git import Repo
+from git.exc import InvalidGitRepositoryError, NoSuchPathError
 try:
     from pathspec import PathSpec  # type: ignore[import-not-found]
     from pathspec.patterns.gitwildmatch import GitWildMatchPattern  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[assignment]
     GitWildMatchPattern = None  # type: ignore[assignment]
-from git import Repo
-from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from sqlalchemy import asc, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
@@ -39,7 +40,15 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
-from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, Project, ProjectSiblingSuggestion
+from .models import (
+    Agent,
+    AgentLink,
+    FileReservation,
+    Message,
+    MessageRecipient,
+    Project,
+    ProjectSiblingSuggestion,
+)
 from .storage import (
     ProjectArchive,
     archive_write_lock,

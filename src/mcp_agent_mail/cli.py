@@ -76,6 +76,10 @@ app.add_typer(file_reservations_app, name="file_reservations")
 app.add_typer(acks_app, name="acks")
 app.add_typer(share_app, name="share")
 app.add_typer(config_app, name="config")
+mail_app = typer.Typer(help="Mail diagnostics and routing status")
+app.add_typer(mail_app, name="mail")
+projects_app = typer.Typer(help="Project maintenance utilities")
+app.add_typer(projects_app, name="projects")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -1508,6 +1512,7 @@ def list_projects(
 def guard_install(
     project: str,
     repo: Annotated[Path, typer.Argument(..., help="Path to git repo")],
+    prepush: Annotated[bool, typer.Option("--prepush/--no-prepush", help="Also install a pre-push guard.",)] = False,
 ) -> None:
     """Install the advisory pre-commit guard into the given repository."""
 
@@ -1520,6 +1525,12 @@ def guard_install(
     async def _run() -> tuple[Project, Path]:
         project_record = await _get_project_record(project)
         hook_path = await install_guard_script(settings, project_record.slug, repo_path)
+        if prepush:
+            try:
+                from .guard import install_prepush_guard as _install_prepush
+                await _install_prepush(settings, project_record.slug, repo_path)
+            except Exception as exc:
+                console.print(f"[yellow]Warning: failed to install pre-push guard: {exc}[/]")
         return project_record, hook_path
 
     try:
@@ -1588,6 +1599,141 @@ def file_reservations_list(
             _iso(file_reservation.released_ts) if file_reservation.released_ts else "",
         )
     console.print(table)
+
+
+@mail_app.command("status")
+def mail_status(
+    project_path: Annotated[
+        Path,
+        typer.Argument(..., help="Absolute path to a repo/worktree directory (use '.' for current)."),
+    ],
+) -> None:
+    """
+    Print routing diagnostics: gate state, configured identity mode, normalized remote (if any),
+    and the slug that would be used for this path.
+    """
+    settings = get_settings()
+    p = project_path.expanduser().resolve()
+    gate = settings.worktrees_enabled
+    mode = (settings.project_identity_mode or "dir").strip().lower()
+    remote_name = (settings.project_identity_remote or "origin").strip()
+
+    def _norm_remote(url: Optional[str]) -> Optional[str]:
+        if not url:
+            return None
+        u = url.strip()
+        try:
+            if u.startswith("git@"):
+                host = u.split("@", 1)[1].split(":", 1)[0]
+                path = u.split(":", 1)[1]
+            else:
+                from urllib.parse import urlparse as _urlparse
+                pr = _urlparse(u)
+                host = pr.hostname or ""
+                path = (pr.path or "")
+        except Exception:
+            return None
+        if not host:
+            return None
+        path = path.lstrip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = [seg for seg in path.split("/") if seg]
+        if len(parts) < 2:
+            return None
+        owner, repo = parts[0], parts[1]
+        return f"{host}/{owner}/{repo}"
+
+    normalized_remote: Optional[str] = None
+    try:
+        from git import Repo as _Repo  # local import to avoid CLI startup cost
+        repo = _Repo(str(p), search_parent_directories=True)
+        try:
+            url = repo.git.remote("get-url", remote_name).strip() or None
+        except Exception:
+            try:
+                r = next((r for r in repo.remotes if r.name == remote_name), None)
+                url = next(iter(r.urls), None) if r and r.urls else None
+            except Exception:
+                url = None
+        normalized_remote = _norm_remote(url)
+    except Exception:
+        normalized_remote = None
+
+    # Compute a candidate slug using the same logic as the server helper (summarized)
+    from mcp_agent_mail.app import _compute_project_slug as _compute_slug  # type: ignore
+    slug_value = _compute_slug(str(p))
+
+    table = Table(title="Mail routing status", show_lines=False)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("WORKTREES_ENABLED", "true" if gate else "false")
+    table.add_row("PROJECT_IDENTITY_MODE", mode or "dir")
+    table.add_row("PROJECT_IDENTITY_REMOTE", remote_name)
+    table.add_row("normalized_remote", normalized_remote or "")
+    table.add_row("slug", slug_value)
+    table.add_row("path", str(p))
+    console.print(table)
+
+
+@projects_app.command("adopt")
+def projects_adopt(
+    source: Annotated[str, typer.Argument(..., help="Old project slug or human key")],
+    target: Annotated[str, typer.Argument(..., help="New project slug or project_uid (future)")],
+    dry_run: Annotated[bool, typer.Option("--dry-run/--apply", help="Show plan without applying changes.")] = True,
+) -> None:
+    """
+    Plan consolidation of legacy per-worktree projects into a canonical project.
+    NOTE: Apply is not yet implemented; this command currently prints a dry-run only.
+    """
+    async def _load(slug_or_key: str) -> Project:
+        return await _get_project_record(slug_or_key)
+
+    try:
+        src, dst = asyncio.run(asyncio.gather(_load(source), _load(target)))
+    except Exception as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if src.id == dst.id:
+        console.print("[yellow]Source and target refer to the same project; nothing to do.[/]")
+        return
+
+    plan: list[str] = []
+    plan.append(f"Source: id={src.id} slug={src.slug} key={src.human_key}")
+    plan.append(f"Target: id={dst.id} slug={dst.slug} key={dst.human_key}")
+
+    # Heuristic: same repo if git-common-dir hashes match
+    def _git(path: Path, *args: str) -> str | None:
+        try:
+            cp = subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True)
+            return cp.stdout.strip()
+        except Exception:
+            return None
+
+    src_gdir = _git(Path(src.human_key), "rev-parse", "--git-common-dir")
+    dst_gdir = _git(Path(dst.human_key), "rev-parse", "--git-common-dir")
+    same_repo = bool(src_gdir and dst_gdir and Path(src_gdir).resolve() == Path(dst_gdir).resolve())
+    plan.append(f"Same repo (git-common-dir): {'yes' if same_repo else 'no'}")
+
+    if not same_repo:
+        console.print("[red]Refusing to adopt: projects do not appear to belong to the same repository.[/]")
+        return
+
+    # Describe filesystem moves (archive layout)
+    settings = get_settings()
+    from .storage import ensure_archive as _ensure_archive
+    src_archive = asyncio.run(_ensure_archive(settings, src.slug))
+    dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
+    plan.append(f"Move Git artifacts: {src_archive.root} -> {dst_archive.root}")
+    plan.append("Re-key DB rows: source project_id -> target project_id (messages, agents, file_reservations, etc.)")
+    plan.append("Write aliases.json under target 'projects/<slug>/' with former_slugs")
+
+    console.print("[bold]Projects adopt plan (dry-run)[/bold]")
+    for line in plan:
+        console.print(f"- {line}")
+
+    if not dry_run:
+        console.print("[red]Apply not yet implemented. Aborting.[/]")
 
 
 @file_reservations_app.command("active")
