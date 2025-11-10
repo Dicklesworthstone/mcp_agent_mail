@@ -51,7 +51,7 @@ def test_prepush_blocks_on_conflict_with_real_range(tmp_path: Path) -> None:
     )
     # Render pre-push hook and run it providing pre-push stdin tuple
     hook = repo / "pre-push-test.py"
-    hook.write_text(render_prepush_script(_DummyArchive(archive_root)), encoding="utf-8")
+    hook.write_text(render_prepush_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
     # Determine local ref and sha; remote has no refs yet
     local_ref = "refs/heads/main"
     from contextlib import suppress
@@ -97,7 +97,7 @@ def test_prepush_warns_on_conflict_in_warn_mode(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     hook = repo / "pre-push-test.py"
-    hook.write_text(render_prepush_script(_DummyArchive(archive_root)), encoding="utf-8")
+    hook.write_text(render_prepush_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
     _git(repo, "branch", "-M", "main")
     local_ref = "refs/heads/main"
     local_sha = _git(repo, "rev-parse", "HEAD")

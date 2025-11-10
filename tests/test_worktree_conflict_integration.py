@@ -51,7 +51,7 @@ def test_cross_worktree_conflict_blocks_commit(tmp_path: Path) -> None:
     (wt / "src" / "shared.txt").write_text("v2\n", encoding="utf-8")
     _git(wt, "add", "src/shared.txt")
     hook = wt / "pre-commit-test.py"
-    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")
+    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"

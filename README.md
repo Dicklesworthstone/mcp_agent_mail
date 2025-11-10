@@ -1529,6 +1529,10 @@ Group multiple repositories (e.g., frontend, backend, infra) under a single prod
   - `mcp-agent-mail products status MyProduct`
 - Product‑wide message search (FTS):
   - `mcp-agent-mail products search MyProduct "urgent AND deploy" --limit 50`
+- Product‑wide inbox:
+  - `mcp-agent-mail products inbox MyProduct Alice --limit 50 --urgent-only --include-bodies --since-ts "2025-11-01T00:00:00Z"`
+- Product‑wide thread summarization:
+  - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --per-thread-limit 100 --no-llm`
 
 Notes
 - A unique `product_uid` is stored for each product; you can reference a product by uid or name.
