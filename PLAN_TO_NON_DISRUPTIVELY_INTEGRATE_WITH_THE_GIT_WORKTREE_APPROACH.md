@@ -100,6 +100,11 @@ Implementation progress:
   - Guard installer now respects Git configuration for hook placement:
     - Honors `core.hooksPath` (absolute or repo-relative) and falls back to `rev-parse --git-dir`/hooks.
     - Creates directories as needed and remains gated by `WORKTREES_ENABLED`.
+ - 2025-11-10: Identity canonicalizer with durable `project_uid`:
+   - Implemented `_resolve_project_identity(human_key)` that computes slug, mode, canonical path, normalized remote, and `project_uid` via precedence:
+     - committed marker `.agent-mail-project-id` → private marker `.git/agent-mail/project-id` → remote fingerprint (`host/owner/repo@default_branch`) → `git-common-dir` hash → directory hash.
+   - When `WORKTREES_ENABLED=1` and no marker exists, writes a private marker under `.git/agent-mail/project-id` (non-destructive).
+   - `ensure_project` and `resource://identity/{project}` now return `project_uid` in the payload.
  - 2025-11-10: Pathspec matcher (server-side) implemented:
    - Switched server matching in `_file_reservations_conflict` to Git wildmatch semantics (via `pathspec`), with safe fnmatch fallback if the optional dependency is unavailable.
    - Added `_patterns_overlap` heuristic using pathspec for better overlap detection.
@@ -1301,22 +1306,22 @@ File reservation best practices:
 
 ## Implementation checklist
 
-- [ ] Add canonicalizer with durable `project_uid` and precedence marker → git‑remote → gitdir → dir; privacy‑safe slugs.
-- [ ] Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
-- [ ] Return structured identity metadata from `ensure_project` and `macro_start_session`.
+- [x] Add canonicalizer with durable `project_uid` and precedence marker → git‑remote → gitdir → dir; privacy‑safe slugs.
+- [x] Ensure `dir` mode uses existing `slugify()` function for 100% backward compatibility.
+- [x] Return structured identity metadata from `ensure_project` and `resource://identity`.
 - [ ] Add rich-styled logging for canonicalization decisions.
-- [ ] Wire `identity_mode` optional arg into `ensure_project` and macros.
-- [ ] Update guard installer to honor `core.hooksPath` and per-worktree `git-dir`.
-- [ ] Add optional `pre-push` guard installation.
-- [ ] Implement repo-root relative Git pathspec matching with normalization and `core.ignorecase`.
-- [ ] Add rename/move detection in guard path collection.
-- [ ] Add `AGENT_MAIL_BYPASS=1` emergency bypass mechanism.
+- [x] Wire `identity_mode` optional arg into `ensure_project` (macros N/A).
+- [x] Update guard installer to honor `core.hooksPath` and per-worktree `git-dir`.
+- [x] Add optional `pre-push` guard installation.
+- [x] Implement repo-root relative Git pathspec matching with normalization (fallback if missing dependency).
+- [x] Add rename/move detection in guard path collection.
+- [x] Add `AGENT_MAIL_BYPASS=1` emergency bypass mechanism.
 - [ ] Implement rich-styled, actionable error messages in guards.
-- [ ] Add branch/worktree context to reservation metadata.
-- [ ] Add server-side validation warning for overly broad reservation patterns.
-- [ ] Implement `guard status` subcommand.
-- [ ] Add `mail status` subcommand and `resource://identity?project=<path>` transparency resource.
-- [ ] Implement `projects adopt` CLI (dry‑run/apply) and write `aliases.json`.
+- [x] Add branch/worktree context to reservation metadata.
+- [x] Add server-side validation warning for overly broad reservation patterns.
+- [x] Implement `guard status` subcommand.
+- [x] Add `mail status` subcommand and `resource://identity?project=<path>` transparency resource.
+- [x] Implement `projects adopt` CLI (dry‑run/apply) and write `aliases.json`.
 - [ ] Implement Product Bus: `ensure_product`, `products.link`, and product‑wide resources.
 - [ ] Ship `am-run` and `amctl env` with build slots + per‑agent caches.
 - [ ] Update docs (`AGENTS.md`, `README.md`) with worktree guides and edge cases.

@@ -80,6 +80,8 @@ mail_app = typer.Typer(help="Mail diagnostics and routing status")
 app.add_typer(mail_app, name="mail")
 projects_app = typer.Typer(help="Project maintenance utilities")
 app.add_typer(projects_app, name="projects")
+amctl_app = typer.Typer(help="Build and environment helpers")
+app.add_typer(amctl_app, name="amctl")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -1600,6 +1602,80 @@ def file_reservations_list(
         )
     console.print(table)
 
+@amctl_app.command("env")
+def amctl_env(
+    project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
+    agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
+) -> None:
+    """
+    Print environment variables useful for build wrappers (slots, caches, artifacts).
+    """
+    p = project_path.expanduser().resolve()
+    agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
+    # Reuse server helper for identity
+    from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident  # type: ignore
+    ident = _resolve_ident(str(p))
+    slug = ident["slug"]
+    project_uid = ident["project_uid"]
+    # Determine branch
+    branch = ident.get("branch") or ""
+    if not branch:
+        try:
+            from git import Repo as _Repo
+            repo = _Repo(str(p), search_parent_directories=True)
+            try:
+                branch = repo.active_branch.name
+            except Exception:
+                branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+        except Exception:
+            branch = "unknown"
+    # Compute cache key and artifact dir
+    settings = get_settings()
+    cache_key = f"am-cache-{project_uid}-{agent_name}-{branch}"
+    artifact_dir = Path(settings.storage.root).expanduser().resolve() / "projects" / slug / "artifacts" / agent_name / branch
+    # Print as KEY=VALUE lines
+    console.print(f"SLUG={slug}")
+    console.print(f"PROJECT_UID={project_uid}")
+    console.print(f"BRANCH={branch}")
+    console.print(f"AGENT={agent_name}")
+    console.print(f"CACHE_KEY={cache_key}")
+    console.print(f"ARTIFACT_DIR={artifact_dir}")
+
+
+@app.command(name="am-run")
+def am_run(
+    slot: Annotated[str, typer.Argument(help="Build slot name (e.g., frontend-build)")],
+    cmd: Annotated[list[str], typer.Argument(help="Command to run", nargs=-1)],
+    project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
+    agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
+) -> None:
+    """
+    Minimal build wrapper that prepares environment variables and runs a command.
+    (Stub: future versions will acquire/release build slots with enforcement.)
+    """
+    p = project_path.expanduser().resolve()
+    agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
+    from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident  # type: ignore
+    ident = _resolve_ident(str(p))
+    slug = ident["slug"]
+    project_uid = ident["project_uid"]
+    branch = ident.get("branch") or "unknown"
+    env = os.environ.copy()
+    env.update({
+        "AM_SLOT": slot,
+        "SLUG": slug,
+        "PROJECT_UID": project_uid or "",
+        "BRANCH": branch,
+        "AGENT": agent_name,
+        "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
+    })
+    console.print(f"[cyan]$ {' '.join(cmd)}[/]  [dim](slot={slot})[/]")
+    try:
+        rc = subprocess.run(list(cmd), env=env, check=False).returncode
+    except FileNotFoundError:
+        rc = 127
+    if rc != 0:
+        raise typer.Exit(code=rc)
 
 @mail_app.command("status")
 def mail_status(

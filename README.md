@@ -1466,6 +1466,30 @@ sequenceDiagram
 <!-- View URIs consolidated in API Quick Reference → Resources -->
 
 ## File Reservations and the optional pre-commit guard
+- Guard status and pre-push
+  - Print guard status:
+    - `mcp-agent-mail guard status /path/to/repo`
+  - Install both guards (pre-commit + pre-push):
+    - `mcp-agent-mail guard install <project_key> <repo_path> --prepush`
+  - Pre-commit honors `WORKTREES_ENABLED` and `AGENT_MAIL_GUARD_MODE` (`warn` advisory).
+  - Pre-push enumerates to-be-pushed commits (`rev-list`) and uses `diff-tree` with `--no-ext-diff`.
+
+## Identity and worktree mode (opt-in)
+
+- Gate: `WORKTREES_ENABLED=1` enables worktree-friendly features. Default off.
+- Identity modes (default `dir`): `dir`, `git-remote`, `git-toplevel`, `git-common-dir`.
+- Inspect identity for a path:
+  - Resource (MCP): `resource://identity/{/abs/path}`
+  - CLI (diagnostics): `mcp-agent-mail mail status /abs/path`
+
+## Build helpers (stubs)
+
+- `amctl env` prints helpful environment keys:
+  - `SLUG`, `PROJECT_UID`, `BRANCH`, `AGENT`, `CACHE_KEY`, `ARTIFACT_DIR`
+  - Example: `mcp-agent-mail amctl env --path . --agent AliceDev`
+- `am-run` wraps a command with those keys set:
+  - Example: `mcp-agent-mail am-run frontend-build -- npm run dev`
+
 
 Exclusive file reservations are advisory but visible and auditable:
 
