@@ -1335,7 +1335,7 @@ File reservation best practices:
 - [x] Change all "uv/pip" references to "uv only".
   - DONE: Owned docs (`README.md`, `AGENTS.md`, plan) contain uv‑only guidance; any remaining `pip` mentions are in third‑party docs retained verbatim.
 - [x] Add unit tests for canonicalizer (all edge cases).
-  - PARTIAL DONE: added tests for dir-mode fallback and git-common-dir mode; more edge cases (marker precedence, remote fingerprint) to add later.
+  - DONE: added tests for dir-mode fallback, git-common-dir, committed/private marker precedence, and remote fingerprint fallback.
 - [x] Add unit tests for guard path resolution and matching.
   - DONE: pre-commit rename detection; pre-push range collection conflicts with real tuple input.
 - [x] Add integration tests for worktrees (shared project, cross-worktree conflicts).
