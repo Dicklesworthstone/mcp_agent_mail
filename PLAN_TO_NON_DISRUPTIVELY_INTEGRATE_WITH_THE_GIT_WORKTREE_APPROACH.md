@@ -100,6 +100,16 @@ Implementation progress:
   - Guard installer now respects Git configuration for hook placement:
     - Honors `core.hooksPath` (absolute or repo-relative) and falls back to `rev-parse --git-dir`/hooks.
     - Creates directories as needed and remains gated by `WORKTREES_ENABLED`.
+ - 2025-11-10: Pathspec matcher (server-side) implemented:
+   - Switched server matching in `_file_reservations_conflict` to Git wildmatch semantics (via `pathspec`), with safe fnmatch fallback if the optional dependency is unavailable.
+   - Added `_patterns_overlap` heuristic using pathspec for better overlap detection.
+ - 2025-11-10: Mail diagnostics CLI:
+   - `mcp-agent-mail mail status <path>` prints gate state, identity mode, normalized remote, and the slug that would be used for the path (non-destructive, read-only).
+  - 2025-11-10: Guards and installer updates:
+    - Added optional `--prepush` flag to `mcp-agent-mail guard install` to install a Python-based pre-push guard that enumerates to-be-pushed commits with `rev-list` and inspects changed paths via `diff-tree`. Honors `WORKTREES_ENABLED` and `AGENT_MAIL_GUARD_MODE=warn`.
+    - Hook installer now resolves `core.hooksPath` and `git-dir/hooks` correctly for both `pre-commit` and `pre-push`.
+  - 2025-11-10: Project maintenance CLI:
+    - Added `mcp-agent-mail projects adopt <from> <to> --dry-run` that validates same repo (`git-common-dir`) and prints a consolidation plan. (Apply phase to be implemented in a later step.)
 
 ## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
