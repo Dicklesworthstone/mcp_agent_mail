@@ -1482,13 +1482,25 @@ sequenceDiagram
   - Resource (MCP): `resource://identity/{/abs/path}`
   - CLI (diagnostics): `mcp-agent-mail mail status /abs/path`
 
-## Build helpers (stubs)
+## Build slots and helpers (opt-in)
 
 - `amctl env` prints helpful environment keys:
   - `SLUG`, `PROJECT_UID`, `BRANCH`, `AGENT`, `CACHE_KEY`, `ARTIFACT_DIR`
   - Example: `mcp-agent-mail amctl env --path . --agent AliceDev`
 - `am-run` wraps a command with those keys set:
   - Example: `mcp-agent-mail am-run frontend-build -- npm run dev`
+
+- Build slots (advisory, per-project coarse locking):
+  - Acquire:
+    - Tool: `acquire_build_slot(project_key, agent_name, slot, ttl_seconds=3600, exclusive=true)`
+  - Renew:
+    - Tool: `renew_build_slot(project_key, agent_name, slot, extend_seconds=1800)`
+  - Release (non-destructive; marks released):
+    - Tool: `release_build_slot(project_key, agent_name, slot)`
+  - Notes:
+    - Slots are recorded under the project archive `build_slots/<slot>/<agent>__<branch>.json`
+    - `exclusive=true` reports conflicts if another active exclusive holder exists
+    - Intended for long-running tasks (dev servers, watchers); pair with `am-run` and `amctl env`
 
 
 Exclusive file reservations are advisory but visible and auditable:

@@ -99,6 +99,45 @@ Macros vs granular tools
 - Prefer macros when you want speed or are on a smaller model: `macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`.
 - Use granular tools when you need control: `register_agent`, `file_reservation_paths`, `send_message`, `fetch_inbox`, `acknowledge_message`.
 
+### Worktree recipes (opt-in, non-disruptive)
+
+- Enable gated features:
+  - Set `WORKTREES_ENABLED=1` in `.env` (do not commit secrets; config is loaded via `python-decouple`).
+  - For trial posture, set `AGENT_MAIL_GUARD_MODE=warn` to surface conflicts without blocking.
+- Inspect identity for a worktree:
+  - CLI: `mcp-agent-mail mail status .`
+  - Resource: `resource://identity/{/abs/path}`
+- Install guards (chain-runner friendly; honors `core.hooksPath` and Husky):
+  - `mcp-agent-mail guard status .`
+  - `mcp-agent-mail guard install <project_key> . --prepush`
+  - Guards exit early when `WORKTREES_ENABLED=0` or `AGENT_MAIL_BYPASS=1`.
+- Reserve before you edit:
+  - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true)`
+  - Patterns use Git pathspec semantics and respect repository `core.ignorecase`.
+
+### Guard usage quickstart
+
+- Set your identity for local commits:
+  - Export `AGENT_NAME="YourAgentName"` in the shell that performs commits.
+- Pre-commit:
+  - Scans staged changes (`git diff --cached --name-status -M -z`) and blocks conflicts with others’ active exclusive reservations.
+- Pre-push:
+  - Enumerates to-be-pushed commits (`git rev-list`) and diffs trees (`git diff-tree --no-ext-diff -z`) to catch conflicts not staged locally.
+- Advisory mode:
+  - With `AGENT_MAIL_GUARD_MODE=warn`, conflicts are printed with rich context and push/commit proceeds.
+
+### Build slots for long-running tasks
+
+- Acquire a slot (advisory):
+  - `acquire_build_slot(project_key, agent_name, "frontend-build", ttl_seconds=3600, exclusive=true)`
+- Keep it fresh during the run:
+  - `renew_build_slot(project_key, agent_name, "frontend-build", extend_seconds=1800)`
+- Release when done (non-destructive; marks released):
+  - `release_build_slot(project_key, agent_name, "frontend-build")`
+- Tips:
+  - Combine with `mcp-agent-mail amctl env --path . --agent $AGENT_NAME` to get `CACHE_KEY` and `ARTIFACT_DIR`.
+  - Use `mcp-agent-mail am-run <slot> -- <cmd...>` to run with prepped env; future versions will auto-acquire/renew/release.
+
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
 - "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
