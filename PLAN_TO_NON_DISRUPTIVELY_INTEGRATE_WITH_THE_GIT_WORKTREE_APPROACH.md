@@ -20,8 +20,8 @@
   repo marker (`.agent-mail-project-id`) → git‑remote (normalized `origin` URL) → `git-common-dir` → `git-toplevel` → `dir`. Slugs remain privacy‑safe; never embed absolute paths.
 
 **Same‑repo and multi‑repo coordination**
-- Same‑repo auto‑unification: clones/worktrees with the same normalized remote are one project bus by default.
-- Product Bus (optional): introduce `product_uid` to group multiple repos (frontend/backend/infra) with product‑wide inbox/search and shared threads (`bd-###`, etc.).
+- Same‑repo auto‑unification (when opted in): clones/worktrees with the same normalized remote are one project bus.
+- Product Bus (**Phase 2, optional**): introduce `product_uid` to group multiple repos (frontend/backend/infra) with product‑wide inbox/search and shared threads (`bd-###`, etc.).
 
 **Hooks & guards (composable, cross‑platform)**
 - Install a chain‑runner that respects `core.hooksPath` and existing frameworks; ship POSIX + Windows variants. Add a correct pre‑push guard (reads STDIN tuples) and keep `AGENT_MAIL_BYPASS=1`.
@@ -37,6 +37,7 @@
 
 **Feature flag (single gate)**
 - `WORKTREES_ENABLED=1` (env/flag) must be set for any of the worktree‑friendly features in this plan to activate. When unset/false, the system behaves exactly as it does today.
+  - Guard installer and identity resolver must no‑op unless `WORKTREES_ENABLED=1` (see code/CLI notes below).
 
 ---
 
@@ -61,6 +62,7 @@
 5. **Add a tiny “adoption/merge” command** to consolidate legacy per‑worktree projects into the canonical one by `project_uid`. No breaking migration; opt‑in admin action.
 6. **Return identity + repo facts everywhere** (`git root`, `worktree name`, `branch`, `core.ignorecase`, `sparse-checkout`) so UIs and guards can explain decisions and match Git semantics precisely.
 7. **Keep onboarding safe and reversible**: gate all new behavior behind `WORKTREES_ENABLED=1`; start guards in `warn` mode (`AGENT_MAIL_GUARD_MODE=warn`) during trials, then flip to `block`.
+   - Guard installer refuses to install when the gate is off (explicit `--force` overrides for power users).
 
 Everything below deepens these, with code and exact behaviors.
 
@@ -71,6 +73,7 @@ Everything below deepens these, with code and exact behaviors.
 - Global gate: `WORKTREES_ENABLED = 0|1` (default **0**). If `0`, identity stays `dir`, existing slugs are unchanged, and no new hooks/guards/paths are installed.
 - Recommended trial posture when enabling: set `AGENT_MAIL_GUARD_MODE=warn` for a sprint, then switch to `block`.
 - Per‑feature toggles remain available (e.g., `INSTALL_PREPUSH_GUARD`, `PROJECT_IDENTITY_MODE`), but are ignored unless `WORKTREES_ENABLED=1`.
+ - CLI behavior: `mcp-agent-mail guard install` and `am-ports` subcommands must detect the gate and print a short “disabled (WORKTREES_ENABLED=0)” message instead of mutating state.
 
 ## 1) Identity: from “slug” to “stable Project UID” (marker → remote → gitdir → dir)
 
@@ -99,19 +102,20 @@ Everything below deepens these, with code and exact behaviors.
 ### Canonicalization order (robust & private; applied only when `WORKTREES_ENABLED=1`)
 
 1. If marker present: `project_uid = read_marker()`.
-2. Else if git‑remote is enabled and a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
+2. Else if `PROJECT_IDENTITY_MODE=git-remote` (or remote source is enabled) and a normalized remote URL can be derived (default remote: `origin` or `PROJECT_IDENTITY_REMOTE`): unify by remote; generate `project_uid` and persist the private marker for stability across machines.
 3. Else if `PROJECT_IDENTITY_MODE in {git-common-dir, git-toplevel}`: compute privacy‑safe slug from canonical Git paths and generate `project_uid`.
 4. Else: `dir` mode for slug (back‑compat), but still generate `project_uid` so you can adopt later.
 
-### Drop‑in function (replacement for canonicalizer)
+### Drop‑in function (replacement for canonicalizer; now supports `git-remote`)
 
 ```python
 from __future__ import annotations
 import hashlib, os, re, subprocess, uuid
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple
+from urllib.parse import urlparse
 
-IdentityMode = Literal["dir", "git-toplevel", "git-common-dir"]
+IdentityMode = Literal["dir", "git-remote", "git-toplevel", "git-common-dir"]
 
 @dataclass(frozen=True)
 class ProjectIdentity:
@@ -125,6 +129,7 @@ class ProjectIdentity:
     branch: Optional[str]
     worktree_name: Optional[str]
     core_ignorecase: Optional[bool]
+    normalized_remote: Optional[str]
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 def slugify(value: str) -> str:
@@ -173,6 +178,29 @@ def _repo_facts(human_key_real: str) -> Tuple[Optional[str], Optional[str], Opti
     ignorecase = _git(human_key_real, "config", "--get", "core.ignorecase")
     return (root, common, branch, worktree_name, (ignorecase == "true"))
 
+def _norm_remote(url: Optional[str]) -> Optional[str]:
+    if not url: return None
+    url = url.strip()
+    if url.startswith("git@"):
+        try:
+            host = url.split("@",1)[1].split(":",1)[0]
+            path = url.split(":",1)[1]
+        except Exception:
+            return None
+    else:
+        try:
+            p = urlparse(url)
+            host, path = p.hostname, (p.path or "")
+        except Exception:
+            return None
+    if not host: return None
+    path = path.lstrip("/")
+    if path.endswith(".git"): path = path[:-4]
+    parts = [x for x in path.split("/") if x]
+    if len(parts) < 2: return None
+    owner, repo = parts[0], parts[1]
+    return f"{host}/{owner}/{repo}"
+
 def canonicalize_project_identity(
     human_key: str,
     mode: IdentityMode,
@@ -181,6 +209,7 @@ def canonicalize_project_identity(
 ) -> ProjectIdentity:
     human_key_real = _norm_real(human_key)
     repo_root, git_common_dir, branch, worktree_name, core_ignorecase = _repo_facts(human_key_real)
+    normalized_remote = _norm_remote(_git(human_key_real, "config", "--get", "remote.%s.url" % os.environ.get("PROJECT_IDENTITY_REMOTE","origin")))
 
     project_uid = None
     marker_committed = os.path.join(repo_root or "", ".agent-mail-project-id") if repo_root else None
@@ -199,23 +228,30 @@ def canonicalize_project_identity(
         if allow_commit_marker and marker_committed:
             _write_file(marker_committed, project_uid)
 
+    if mode == "git-remote" and normalized_remote:
+        canonical_path = normalized_remote  # privacy-safe, no local paths
+        base = (normalized_remote.rsplit("/",1)[-1]) or "repo"
+        slug = f"{base}-{_short_sha1(canonical_path)}"
+        return ProjectIdentity(project_uid, slug, "git-remote", canonical_path, human_key_real,
+                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase, normalized_remote)
+
     if mode == "git-toplevel" and repo_root:
         canonical_path = _norm_real(repo_root)
         base = os.path.basename(canonical_path) or "repo"
         slug = f"{base}-{_short_sha1(canonical_path)}"
         return ProjectIdentity(project_uid, slug, "git-toplevel", canonical_path, human_key_real,
-                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase, normalized_remote)
 
     if mode == "git-common-dir" and git_common_dir:
         canonical_path = _norm_real(git_common_dir)
         base = "repo"
         slug = f"{base}-{_short_sha1(canonical_path)}"
         return ProjectIdentity(project_uid, slug, "git-common-dir", canonical_path, human_key_real,
-                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+                               repo_root, git_common_dir, branch, worktree_name, core_ignorecase, normalized_remote)
 
     slug = slugify(human_key_real)
     return ProjectIdentity(project_uid, slug, "dir", human_key_real, human_key_real,
-                           repo_root, git_common_dir, branch, worktree_name, core_ignorecase)
+                           repo_root, git_common_dir, branch, worktree_name, core_ignorecase, normalized_remote)
 ```
 
 Behavioral wins:
