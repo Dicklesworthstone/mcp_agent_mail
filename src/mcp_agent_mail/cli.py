@@ -2522,7 +2522,7 @@ def guard_status(
 def guard_check(
     stdin_nul: bool = typer.Option(False, "--stdin-nul", help="Read NUL-delimited paths from STDIN"),
     advisory: bool = typer.Option(False, "--advisory", help="Advisory mode: print conflicts but exit 0"),
-    repo: Annotated[Path, typer.Option("--repo", help="Path to git repo (defaults to detected root)")] = Path(),
+    repo: Annotated[Optional[Path], typer.Option("--repo", help="Path to git repo (defaults to detected root)")] = None,
 ) -> None:
     """
     Check paths (from STDIN when --stdin-nul) against active exclusive file_reservations.
@@ -2547,11 +2547,11 @@ def guard_check(
         except Exception:
             return None
 
-    repo_root = repo
-    if not str(repo_root):
+    if repo is not None:
+        repo_root = repo.expanduser().resolve()
+    else:
         guess = _git(Path.cwd(), "rev-parse", "--show-toplevel")
-        repo_root = Path(guess) if guess else Path.cwd()
-    repo_root = repo_root.expanduser().resolve()
+        repo_root = Path(guess).expanduser().resolve() if guess else Path.cwd().expanduser().resolve()
 
     # Map repo path to project archive
     try:
