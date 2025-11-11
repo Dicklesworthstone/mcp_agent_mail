@@ -65,7 +65,7 @@ def test_prepush_blocks_on_conflict_with_real_range(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run(
         [sys.executable, str(hook), "origin"],
         cwd=str(repo),
@@ -105,7 +105,7 @@ def test_prepush_warns_on_conflict_in_warn_mode(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "warn"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run(
         [sys.executable, str(hook), "origin"],
         cwd=str(repo),

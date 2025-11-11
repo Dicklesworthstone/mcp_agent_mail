@@ -53,7 +53,7 @@ def test_precommit_blocks_on_rename_conflict(tmp_path: Path, monkeypatch) -> Non
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(repo), env=env).returncode
     assert rc == 1
 
@@ -86,7 +86,7 @@ def test_precommit_warns_on_rename_conflict_in_warn_mode(tmp_path: Path, monkeyp
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "warn"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(repo), env=env).returncode
     assert rc == 0
 

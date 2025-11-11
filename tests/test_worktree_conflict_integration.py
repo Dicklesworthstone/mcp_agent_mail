@@ -55,7 +55,7 @@ def test_cross_worktree_conflict_blocks_commit(tmp_path: Path) -> None:
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(wt), env=env).returncode
     assert rc == 1
 
