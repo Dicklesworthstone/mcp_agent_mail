@@ -921,6 +921,13 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     # committed marker -> discovery yaml -> private marker -> remote fingerprint -> git-common-dir hash -> dir hash
     marker_committed: Optional[Path] = Path(repo_root or "") / ".agent-mail-project-id" if repo_root else None
     marker_private: Optional[Path] = Path(git_common_dir or "") / "agent-mail" / "project-id" if git_common_dir else None
+    # Normalize marker_private to absolute if git_common_dir is relative (common for non-linked worktrees)
+    if marker_private is not None and not marker_private.is_absolute():
+        try:
+            base = Path(repo_root or target_path)
+            marker_private = (base / marker_private).resolve()
+        except Exception:
+            pass
     discovery: dict[str, Any] = _read_discovery_yaml(repo_root or target_path)
     project_uid: Optional[str] = None
     try:

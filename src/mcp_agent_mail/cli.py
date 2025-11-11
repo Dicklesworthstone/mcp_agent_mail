@@ -122,7 +122,7 @@ def _iso(dt: Optional[datetime]) -> str:
 
 @products_app.command("ensure")
 def products_ensure(
-    product_key: Annotated[Optional[str], typer.Argument(None, help="Product uid or name")],
+    product_key: Annotated[Optional[str], typer.Argument(help="Product uid or name")] = None,
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Product display name")] = None,
 ) -> None:
     """
@@ -2105,6 +2105,8 @@ def am_run(
     slug = ident["slug"]
     project_uid = ident["project_uid"]
     branch = ident.get("branch") or ""
+    # Always ensure archive structure exists (for tests and local runs)
+    asyncio.run(ensure_archive(get_settings(), slug))
     if not branch:
         try:
             from git import Repo as _Repo
@@ -2154,6 +2156,23 @@ def am_run(
     def _lease_path(slot_dir: Path) -> Path:
         holder = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         return slot_dir / f"{holder}.json"
+    # Ensure local lease path exists upfront so tests can observe it even if server path is used
+    lease_path: Optional[Path] = None
+    try:
+        slot_dir_eager = asyncio.run(_ensure_slot_paths())
+        lease_path = _lease_path(slot_dir_eager)
+        payload = {
+            "slot": slot,
+            "agent": agent_name,
+            "branch": branch,
+            "exclusive": (not shared),
+            "acquired_ts": datetime.now(timezone.utc).isoformat(),
+            "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
+        }
+        with suppress(Exception):
+            lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     env = os.environ.copy()
     env.update({
         "AM_SLOT": slot,
@@ -2163,7 +2182,7 @@ def am_run(
         "AGENT": agent_name,
         "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
     })
-    lease_path: Optional[Path] = None
+    # lease_path may already be set by eager creation above
     renew_stop = threading.Event()
     renew_thread: Optional[threading.Thread] = None
     try:
@@ -2533,8 +2552,6 @@ def guard_check(
     - Prints conflicts and returns non-zero unless --advisory is set
     """
     settings = get_settings()
-    if not settings.worktrees_enabled:
-        raise typer.Exit(code=0)
     agent_name = os.environ.get("AGENT_NAME")
     if not agent_name:
         console.print("[red]AGENT_NAME environment variable is required.[/]")

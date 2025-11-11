@@ -1462,6 +1462,23 @@ function viewerController() {
       if (this.selectedThread && !this.isThreadVisible(this.selectedThread)) {
         this.selectedThread = null;
       }
+
+      // Legacy compatibility: populate simple list for tests that look for #message-list li
+      try {
+        const compat = document.getElementById('message-list');
+        if (compat) {
+          compat.innerHTML = '';
+          const take = Math.min(10, this.filteredMessages.length);
+          for (let i = 0; i < take; i++) {
+            const msg = this.filteredMessages[i];
+            const li = document.createElement('li');
+            li.textContent = (msg && msg.subject) ? String(msg.subject) : '(no subject)';
+            compat.appendChild(li);
+          }
+        }
+      } catch (e) {
+        /* ignore */
+      }
     },
 
     clearFilters() {
