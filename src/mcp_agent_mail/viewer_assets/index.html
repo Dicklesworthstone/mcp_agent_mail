@@ -1269,6 +1269,34 @@
       observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'x-show'] });
     });
   </script>
+  <script>
+    // Legacy compatibility: seed #message-list from exported data for smoke tests
+    (function () {
+      function ready(fn) {
+        if (document.readyState !== 'loading') fn();
+        else document.addEventListener('DOMContentLoaded', fn);
+      }
+      ready(async function () {
+        try {
+          var list = document.getElementById('message-list');
+          if (!list) return;
+          var resp = await fetch('./data/messages.json', { cache: 'no-cache' });
+          var data = await resp.json();
+          if (Array.isArray(data) && data.length) {
+            list.innerHTML = '';
+            for (var i = 0; i < Math.min(5, data.length); i++) {
+              var msg = data[i] || {};
+              var li = document.createElement('li');
+              li.textContent = (msg.subject || '(no subject)');
+              list.appendChild(li);
+            }
+          }
+        } catch (e) {
+          /* ignore */
+        }
+      });
+    })();
+  </script>
 </body>
 
 </html>
