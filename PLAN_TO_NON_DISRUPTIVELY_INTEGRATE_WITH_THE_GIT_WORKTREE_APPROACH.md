@@ -1227,7 +1227,7 @@ git rev-parse --show-prefix      # get current subdir (for path normalization)
 Per-worktree environment via direnv (`.envrc`):
 
 ```bash
-export AGENT_NAME="AliceDev"
+export AGENT_NAME="PurpleLake"  # Valid adjective+noun format
 # Optional client-side hint if needed later
 export AGENT_MAIL_PROJECT_IDENTITY_MODE="git-common-dir"
 ```

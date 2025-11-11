@@ -50,12 +50,12 @@ PY
 CLAIMS_DIR="${CLAIMS_DIR_OUTPUT}"
 mkdir -p "${CLAIMS_DIR}"
 
-# Create a conflicting exclusive claim held by another agent (Bob)
+# Create a conflicting exclusive claim held by another agent (RedSunset)
 ISO_NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EXPIRES=$(date -u -d "+10 minutes" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -v+10M -u +"%Y-%m-%dT%H:%M:%SZ")
 cat >"${CLAIMS_DIR}/test.json" <<JSON
 {
-  "agent": "Bob",
+  "agent": "RedSunset",
   "path_pattern": "foo.txt",
   "exclusive": true,
   "reason": "test",
@@ -64,8 +64,8 @@ cat >"${CLAIMS_DIR}/test.json" <<JSON
 }
 JSON
 
-echo "[1/2] Expect pre-commit to BLOCK as AGENT_NAME=Alice..."
-export AGENT_NAME=Alice
+echo "[1/2] Expect pre-commit to BLOCK as AGENT_NAME=GreenMountain..."
+export AGENT_NAME=GreenMountain
 if git commit -qm "test: should block"; then
   echo "ERROR: commit unexpectedly succeeded (expected block)" >&2
   exit 1
@@ -73,10 +73,10 @@ else
   echo "OK: commit blocked as expected"
 fi
 
-echo "[2/2] Expect pre-commit to ALLOW as AGENT_NAME=Bob..."
+echo "[2/2] Expect pre-commit to ALLOW as AGENT_NAME=RedSunset..."
 git reset -q
 git add foo.txt
-export AGENT_NAME=Bob
+export AGENT_NAME=RedSunset
 if git commit -qm "test: should pass for holder"; then
   echo "OK: commit allowed for holder"
 else

@@ -50,7 +50,7 @@ def test_precommit_bypass_allows_commit(tmp_path: Path) -> None:
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"
     env["AGENT_MAIL_BYPASS"] = "1"
-    env["AGENT_NAME"] = "Me"
+    env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(repo), env=env).returncode
     assert rc == 0
 
