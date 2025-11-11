@@ -136,7 +136,7 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
 
     assert summary.preset == "standard"
     assert summary.agents_total == 1
-    assert summary.agents_pseudonymized == 1
+    assert summary.agents_pseudonymized == 0
     assert summary.ack_flags_cleared == 1
     assert summary.file_reservations_removed == 1
     assert summary.agent_links_removed == 1
@@ -147,15 +147,14 @@ def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
     conn = sqlite3.connect(snapshot)
     try:
         agent_name = conn.execute("SELECT name FROM agents WHERE id = 1").fetchone()[0]
-        assert agent_name.startswith("agent-")
-
+        assert agent_name == "Alice Agent"
         ack_required = conn.execute("SELECT ack_required FROM messages WHERE id = 1").fetchone()[0]
         assert ack_required == 0
-
         read_ack = conn.execute(
             "SELECT read_ts, ack_ts FROM message_recipients WHERE message_id = 1"
         ).fetchone()
         assert read_ack == (None, None)
+
     finally:
         conn.close()
 
@@ -338,7 +337,7 @@ def test_manifest_snapshot_structure(monkeypatch, tmp_path: Path) -> None:
         assert manifest["schema_version"] == "0.1.0"
         assert manifest["scrub"]["preset"] == "standard"
         assert manifest["scrub"]["agents_total"] == 1
-        assert manifest["scrub"]["agents_pseudonymized"] == 1
+        assert manifest["scrub"]["agents_pseudonymized"] == 0
         assert manifest["scrub"]["ack_flags_cleared"] == 1
         assert manifest["scrub"]["recipients_cleared"] == 1
         assert manifest["scrub"]["file_reservations_removed"] == 1

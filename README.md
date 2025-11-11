@@ -1478,6 +1478,11 @@ sequenceDiagram
     - It executes `hooks.d/<hook>/*` in lexical order, then `<hook>.orig` if present (existing hooks are preserved, not overwritten).
     - Agent Mail installs its guard as `hooks.d/pre-commit/50-agent-mail.py` and `hooks.d/pre-push/50-agent-mail.py`.
     - Windows shims (`pre-commit.cmd/.ps1`, `pre-push.cmd/.ps1`) are written to invoke the Python chain-runner.
+  - Matching and safety details:
+    - Renames/moves are handled: both the old and new names are checked (`git diff --cached --name-status -M -z`).
+    - NUL-safe end-to-end: paths are collected and forwarded as NUL-delimited to avoid ambiguity.
+    - Git-native matching: reservations are checked using Git wildmatch pathspec semantics against repo-root relative paths; `core.ignorecase` is honored.
+    - Emergency bypass (use sparingly): set `AGENT_MAIL_BYPASS=1`, or use native Git `--no-verify`. In `warn` mode the guard never blocks.
 
 ## Git-based project identity (opt-in)
 
@@ -1497,6 +1502,40 @@ sequenceDiagram
 - Migration helpers:
   - Write committed marker: `mcp-agent-mail projects mark-identity . --commit`
   - Scaffold discovery file: `mcp-agent-mail projects discovery-init . --product <product_uid>`
+
+Example identity payload (resource):
+
+```json
+{
+  "project_uid": "c5b2c86b-7c36-4de6-9a0a-2c4e1c3a1c4a",
+  "slug": "repo-a1b2c3d4e5",
+  "identity_mode_used": "git-remote",
+  "canonical_path": "github.com/owner/repo",
+  "human_key": "/abs/worktree/path",
+  "repo_root": "/abs/repo",
+  "git_common_dir": "/abs/repo/.git",
+  "branch": "feature/x",
+  "worktree_name": "repo-wt-x",
+  "core_ignorecase": true,
+  "normalized_remote": "github.com/owner/repo"
+}
+```
+
+## Adopt/Merge legacy projects (optional)
+
+Consolidate legacy per-worktree projects into a canonical one (safe, explicit, and auditable).
+
+- Plan the merge (no changes):
+  - `mcp-agent-mail projects adopt <from> <to> --dry-run`
+- Apply the merge (moves artifacts and re-keys DB rows):
+  - `mcp-agent-mail projects adopt <from> <to> --apply`
+- Safeguards and behavior:
+  - Requires both projects be in the same repository (validated via `git-common-dir`).
+  - Moves archived Git artifacts from `projects/<old-slug>/…` to `projects/<new-slug>/…` while preserving history.
+  - Re-keys database rows (`agents`, `messages`, `file_reservations`) from source to target project.
+  - Records `aliases.json` under the target with `"former_slugs": [...]` for discoverability.
+  - Aborts if agent-name conflicts would break uniqueness in the target (fix names, then retry).
+  - Idempotent where possible; dry-run always prints a clear plan before apply.
 
 ## Build slots and helpers (opt-in)
 
