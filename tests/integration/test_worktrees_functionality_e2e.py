@@ -160,7 +160,7 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     nul_payload = "src/shared.txt\0".encode("utf-8")
     check_cmd = [sys.executable, "-m", "mcp_agent_mail.cli", "guard", "check", "--stdin-nul", "--repo", str(repo)]
     env_with_agent = os.environ.copy()
-    env_with_agent["AGENT_NAME"] = "Me"
+    env_with_agent["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run(check_cmd, input=nul_payload, env=env_with_agent, cwd=str(wt)).returncode
     console.print(Panel.fit(f"guard check rc={rc}", title="guard check result"))
     assert rc == 1  # conflict expected
