@@ -7,10 +7,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from decouple import Config as DecoupleConfig, RepositoryEnv
+from decouple import Config as DecoupleConfig, RepositoryEmpty, RepositoryEnv  # type: ignore[attr-defined]
 
 _DOTENV_PATH: Final[Path] = Path(".env")
-_decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
+# Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
+try:
+    _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
+except FileNotFoundError:
+    # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
+    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
 
 
 @dataclass(slots=True, frozen=True)
