@@ -159,13 +159,15 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     _git(wt, "add", "src/shared.txt")
     nul_payload = "src/shared.txt\0".encode("utf-8")
     check_cmd = [sys.executable, "-m", "mcp_agent_mail.cli", "guard", "check", "--stdin-nul", "--repo", str(repo)]
-    rc = subprocess.run(check_cmd, input=nul_payload, env=os.environ.copy(), cwd=str(wt)).returncode
+    env_with_agent = os.environ.copy()
+    env_with_agent["AGENT_NAME"] = "Me"
+    rc = subprocess.run(check_cmd, input=nul_payload, env=env_with_agent, cwd=str(wt)).returncode
     console.print(Panel.fit(f"guard check rc={rc}", title="guard check result"))
     assert rc == 1  # conflict expected
 
     # 5) Execute guard check via CLI (pre-push style: changed files gathered by range → feed as NUL list)
     console.print(Panel.fit("Run guard check (pre-push style input)", title="Step 5"))
-    rc2 = subprocess.run(check_cmd, input=nul_payload, env=os.environ.copy(), cwd=str(repo)).returncode
+    rc2 = subprocess.run(check_cmd, input=nul_payload, env=env_with_agent, cwd=str(repo)).returncode
     console.print(Panel.fit(f"guard check (pre-push style) rc={rc2}", title="guard check result"))
     assert rc2 == 1  # conflict expected
 
