@@ -536,7 +536,7 @@ Handle:
 ## 9) Surfaces & APIs (additive, low risk)
 
 - Tools: keep existing signatures; add `project_uid` in responses.
-- New resource: `resource://identity?project=<abs-path>` returns:
+- New resource (gated by `WORKTREES_ENABLED=1`): `resource://identity?project=<abs-path>` returns:
 
 ```json
 {

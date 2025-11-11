@@ -2274,6 +2274,13 @@ def build_mcp_server() -> FastMCP:
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
 
+    async def _ctx_info_safe(ctx: Context, message: str) -> None:
+        try:
+            await ctx.info(message)
+        except Exception:
+            # Context may not be available outside of a request; ignore logging
+            return
+
     async def _deliver_message(
         ctx: Context,
         tool_name: str,
@@ -2567,7 +2574,7 @@ def build_mcp_server() -> FastMCP:
                 "or 'C:\\projects\\backend' on Windows)."
             )
 
-        await ctx.info(f"Ensuring project for key '{human_key}'.")
+        await _ctx_info_safe(ctx, f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
         await ensure_archive(settings, project.slug)
         # Compose identity metadata similar to resource://identity
@@ -5002,7 +5009,7 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         repo_path = Path(code_repo_path).expanduser().resolve()
         hook_path = await install_guard_script(settings, project.slug, repo_path)
-        await ctx.info(f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
+        await _ctx_info_safe(ctx, f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
         return {"hook": str(hook_path)}
 
     @mcp.tool(name="uninstall_precommit_guard")
@@ -5024,9 +5031,9 @@ def build_mcp_server() -> FastMCP:
         repo_path = Path(code_repo_path).expanduser().resolve()
         removed = await uninstall_guard_script(repo_path)
         if removed:
-            await ctx.info(f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
+            await _ctx_info_safe(ctx, f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
         else:
-            await ctx.info(f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
+            await _ctx_info_safe(ctx, f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
         return {"removed": removed}
 
     @mcp.tool(name="file_reservation_paths")
