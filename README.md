@@ -1484,7 +1484,7 @@ sequenceDiagram
 - Gate: `WORKTREES_ENABLED=1` or `GIT_IDENTITY_ENABLED=1` enables git-based identity features. Default off.
 - Identity modes (default `dir`): `dir`, `git-remote`, `git-toplevel`, `git-common-dir`.
 - Inspect identity for a path:
-  - Resource (MCP): `resource://identity/{/abs/path}`
+  - Resource (MCP): `resource://identity/{/abs/path}` (available when `WORKTREES_ENABLED=1`)
   - CLI (diagnostics): `mcp-agent-mail mail status /abs/path`
 
 - Precedence (when gate is on):

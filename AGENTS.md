@@ -106,7 +106,7 @@ Macros vs granular tools
   - For trial posture, set `AGENT_MAIL_GUARD_MODE=warn` to surface conflicts without blocking.
 - Inspect identity for a worktree:
   - CLI: `mcp-agent-mail mail status .`
-  - Resource: `resource://identity/{/abs/path}`
+  - Resource: `resource://identity/{/abs/path}` (available only when `WORKTREES_ENABLED=1`)
 - Install guards (chain-runner friendly; honors `core.hooksPath` and Husky):
   - `mcp-agent-mail guard status .`
   - `mcp-agent-mail guard install <project_key> . --prepush`
