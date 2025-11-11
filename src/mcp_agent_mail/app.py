@@ -758,7 +758,13 @@ def _compute_project_slug(human_key: str) -> str:
     if mode == "git-common-dir":
         try:
             repo = Repo(human_key, search_parent_directories=True)
-            gdir = repo.git.rev_parse("--git-common-dir").strip()
+            # Prefer GitPython's common_dir which normalizes worktree paths
+            try:
+                gdir = getattr(repo, "common_dir", None)
+            except Exception:
+                gdir = None
+            if not gdir:
+                gdir = repo.git.rev_parse("--git-common-dir").strip()
             if gdir:
                 from pathlib import Path as _P
 

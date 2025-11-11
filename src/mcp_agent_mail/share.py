@@ -806,9 +806,10 @@ def scrub_snapshot(
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
 
-        # Agent names (BlueMountain, GreenCastle, etc.) are already meaningless pseudonyms by design
-        # No need to further pseudonymize them
+        # Agent names are already meaningless pseudonyms in our system.
+        # Do not rewrite or scrub agent names.
         agents_total = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
+        agents_pseudonymized = 0
 
         ack_cursor = conn.execute("UPDATE messages SET ack_required = 0")
         ack_flags_cleared = ack_cursor.rowcount or 0
@@ -879,7 +880,7 @@ def scrub_snapshot(
         preset=preset_key,
         pseudonym_salt="standard",
         agents_total=agents_total,
-        agents_pseudonymized=int(agents_total),
+        agents_pseudonymized=int(agents_pseudonymized),
         ack_flags_cleared=ack_flags_cleared,
         recipients_cleared=recipients_cleared,
         file_reservations_removed=file_res_removed,
