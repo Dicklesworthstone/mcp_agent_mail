@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.metadata as importlib_metadata
 import json
 import os
 import shutil
@@ -15,12 +16,13 @@ import threading
 import time
 import warnings
 import webbrowser
-from contextlib import suppress
-from dataclasses import dataclass
+from contextlib import nullcontext, suppress
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Annotated, Any, Optional, cast
+from typing import Annotated, Any, Optional, Sequence, cast
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
 import typer
@@ -62,6 +64,11 @@ warnings.filterwarnings("ignore", category=UserWarning, module="bleach")
 
 console = Console()
 DEFAULT_ENV_PATH = Path(".env")
+ARCHIVE_DIR_NAME = "archived_mailbox_states"
+ARCHIVE_METADATA_FILENAME = "metadata.json"
+ARCHIVE_SNAPSHOT_RELATIVE = Path("snapshot") / "mailbox.sqlite3"
+ARCHIVE_STORAGE_DIRNAME = Path("storage_repo")
+DEFAULT_ARCHIVE_SCRUB_PRESET = "archive"
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
 
 _PREVIEW_FORCE_TOKEN = 0
@@ -72,12 +79,14 @@ file_reservations_app = typer.Typer(help="Inspect advisory file_reservations")
 acks_app = typer.Typer(help="Review acknowledgement status")
 share_app = typer.Typer(help="Export MCP Agent Mail data for static sharing")
 config_app = typer.Typer(help="Configure server settings")
+archive_app = typer.Typer(help="Archive and restore local mailbox states (lossless disaster-recovery bundles)")
 
 app.add_typer(guard_app, name="guard")
 app.add_typer(file_reservations_app, name="file_reservations")
 app.add_typer(acks_app, name="acks")
 app.add_typer(share_app, name="share")
 app.add_typer(config_app, name="config")
+app.add_typer(archive_app, name="archive")
 mail_app = typer.Typer(help="Mail diagnostics and routing status")
 app.add_typer(mail_app, name="mail")
 projects_app = typer.Typer(help="Project maintenance utilities")
@@ -1782,9 +1791,466 @@ def _copy_bundle_contents(source: Path, destination: Path) -> None:
             shutil.copy2(src_file, dest_file)
 
 
+def _detect_project_root() -> Path:
+    cwd = Path.cwd().resolve()
+    candidates = [cwd, *cwd.parents]
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    for candidate in candidates:
+        if (candidate / ".git").exists():
+            return candidate
+    return cwd
+
+
+def _archive_states_dir(*, create: bool) -> Path:
+    root = _detect_project_root()
+    archive_dir = root / ARCHIVE_DIR_NAME
+    if create:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def _package_version() -> str:
+    try:
+        return importlib_metadata.version("mcp-agent-mail")
+    except importlib_metadata.PackageNotFoundError:  # pragma: no cover - dev installs
+        return "0.0.0+local"
+
+
+def _format_bytes(value: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    current = float(max(value, 0))
+    for unit in units:
+        if current < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(current)} {unit}"
+            return f"{current:.1f} {unit}"
+        current /= 1024.0
+    return f"{int(value)} B"
+
+
+def _detect_git_head(repo_path: Path) -> str | None:
+    git_dir = repo_path / ".git"
+    if not git_dir.exists():
+        return None
+    head_path = git_dir / "HEAD"
+    try:
+        head_contents = head_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head_contents:
+        return None
+    if head_contents.startswith("ref:"):
+        ref_name = head_contents.split(" ", 1)[1].strip()
+        ref_path = git_dir / ref_name
+        if ref_path.exists():
+            with suppress(OSError):
+                return ref_path.read_text(encoding="utf-8").strip()
+        packed_refs = git_dir / "packed-refs"
+        if packed_refs.exists():
+            with suppress(OSError):
+                for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("#") or not line.strip():
+                        continue
+                    commit, ref = line.split(" ", 1)
+                    if ref.strip() == ref_name:
+                        return commit.strip()
+        return None
+    return head_contents
+
+
+def _compose_archive_basename(
+    *,
+    timestamp: datetime,
+    project_filters: Sequence[str],
+    scrub_preset: str,
+    label: str | None,
+) -> str:
+    ts_segment = timestamp.strftime("%Y%m%d-%H%M%SZ")
+    projects_segment = "-".join(slugify(value) for value in project_filters) if project_filters else "all-projects"
+    preset_segment = slugify(scrub_preset)
+    segments = ["mailbox-state", ts_segment, projects_segment, preset_segment]
+    if label:
+        segments.append(slugify(label))
+    return "-".join(seg for seg in segments if seg)
+
+
+def _ensure_unique_archive_path(base_dir: Path, base_name: str) -> Path:
+    candidate = base_dir / f"{base_name}.zip"
+    counter = 1
+    while candidate.exists():
+        candidate = base_dir / f"{base_name}-{counter:02d}.zip"
+        counter += 1
+    return candidate
+
+
+def _write_directory_to_zip(zip_file: ZipFile, source_dir: Path, arc_prefix: Path) -> None:
+    source_dir = source_dir.resolve()
+    if not source_dir.exists():
+        raise ShareExportError(f"Storage root {source_dir} does not exist; nothing to archive.")
+    prefix = arc_prefix.as_posix().rstrip("/") + "/"
+    zip_file.writestr(prefix, b"")
+    for path in source_dir.rglob("*"):
+        arcname = (arc_prefix / path.relative_to(source_dir)).as_posix()
+        if path.is_dir():
+            zip_file.writestr(arcname.rstrip("/") + "/", b"")
+        else:
+            zip_file.write(path, arcname=arcname)
+
+
+def _load_archive_metadata(zip_path: Path) -> tuple[dict[str, Any], str | None]:
+    try:
+        with ZipFile(zip_path, "r") as archive, archive.open(ARCHIVE_METADATA_FILENAME) as meta_file:
+            data = json.loads(meta_file.read().decode("utf-8"))
+            return cast(dict[str, Any], data), None
+    except KeyError:
+        return {}, f"{ARCHIVE_METADATA_FILENAME} missing"
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"Invalid metadata: {exc}"
+
+
+def _resolve_archive_path(candidate: Path | str) -> Path:
+    path = Path(candidate)
+    if path.exists():
+        return path.resolve()
+    archive_dir = _archive_states_dir(create=False)
+    fallback = archive_dir / path.name
+    if fallback.exists():
+        return fallback.resolve()
+    raise FileNotFoundError(f"Archive '{candidate}' not found (checked {path} and {fallback}).")
+
+
+def _next_backup_path(path: Path, timestamp: str) -> Path:
+    base = path.with_name(f"{path.name}.backup-{timestamp}")
+    candidate = base
+    counter = 1
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.backup-{timestamp}-{counter:02d}")
+        counter += 1
+    return candidate
+
+
+def _create_mailbox_archive(
+    *,
+    project_filters: Sequence[str],
+    scrub_preset: str,
+    label: str | None,
+    status_message: str = "Creating mailbox archive...",
+) -> tuple[Path, dict[str, Any]]:
+    settings = get_settings()
+    database_path = resolve_sqlite_database_path(settings.database.url)
+    storage_root = _resolve_path(settings.storage.root)
+    if not storage_root.exists():
+        raise ShareExportError(f"Storage root {storage_root} does not exist; cannot archive.")
+    archive_dir = _archive_states_dir(create=True)
+    timestamp = datetime.now(timezone.utc).replace(microsecond=0)
+    base_name = _compose_archive_basename(
+        timestamp=timestamp,
+        project_filters=project_filters,
+        scrub_preset=scrub_preset,
+        label=label,
+    )
+    destination = _ensure_unique_archive_path(archive_dir, base_name)
+    status_ctx = console.status(status_message) if status_message else nullcontext()
+    with status_ctx, tempfile.TemporaryDirectory(prefix="mailbox-archive-") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        snapshot_path = temp_dir / ARCHIVE_SNAPSHOT_RELATIVE.name
+        context = create_snapshot_context(
+            source_database=database_path,
+            snapshot_path=snapshot_path,
+            project_filters=project_filters,
+            scrub_preset=scrub_preset,
+        )
+        metadata: dict[str, Any] = {
+            "version": 1,
+            "created_at": timestamp.isoformat(),
+            "archive": {
+                "filename": destination.name,
+                "directory": str(destination.parent),
+            },
+            "projects_requested": list(project_filters),
+            "projects_included": [
+                {"slug": record.slug, "human_key": record.human_key}
+                for record in context.scope.projects
+            ],
+            "projects_removed": context.scope.removed_count,
+            "scrub_preset": scrub_preset,
+            "scrub_summary": asdict(context.scrub_summary),
+            "fts_enabled": context.fts_enabled,
+            "database": {
+                "source_path": str(database_path),
+                "snapshot": ARCHIVE_SNAPSHOT_RELATIVE.as_posix(),
+                "size_bytes": snapshot_path.stat().st_size,
+            },
+            "storage": {
+                "source_path": str(storage_root),
+                "git_head": _detect_git_head(storage_root),
+                "archive_dir": ARCHIVE_STORAGE_DIRNAME.as_posix(),
+            },
+            "label": label or "",
+            "tooling": {
+                "package": "mcp-agent-mail",
+                "version": _package_version(),
+                "python": sys.version.split()[0],
+            },
+            "notes": [
+                "Restore with `mcp-agent-mail archive restore {filename}`".format(filename=destination.name)
+            ],
+        }
+        temp_zip_path = temp_dir / "mailbox-state.zip"
+        with ZipFile(temp_zip_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+            archive.writestr(
+                ARCHIVE_METADATA_FILENAME,
+                json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8"),
+            )
+            archive.write(snapshot_path, arcname=ARCHIVE_SNAPSHOT_RELATIVE.as_posix())
+            _write_directory_to_zip(archive, storage_root, ARCHIVE_STORAGE_DIRNAME)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(temp_zip_path), str(destination))
+    return destination, metadata
+
+
+@archive_app.command(
+    "save",
+    help="Create a lossless ZIP that captures the SQLite snapshot and storage repo (default preset keeps ack/read state).",
+)
+def archive_save_state(
+    projects: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--project",
+            "-p",
+            help="Limit archive to specific project slugs or human keys (pass multiple times to include several).",
+        ),
+    ] = None,
+    scrub_preset: Annotated[
+        str,
+        typer.Option(
+            "--scrub-preset",
+            help="Scrub preset (archive keeps everything; standard/strict scrub secrets).",
+            case_sensitive=False,
+            show_default=True,
+        ),
+    ] = DEFAULT_ARCHIVE_SCRUB_PRESET,
+    label: Annotated[
+        Optional[str],
+        typer.Option("--label", "-l", help="Optional label appended to the archive filename (e.g., nightly, pre-reset)."),
+    ] = None,
+) -> None:
+    project_filters: Sequence[str] = tuple(projects or ())
+    preset = (scrub_preset or "standard").strip().lower()
+    if preset not in SCRUB_PRESETS:
+        console.print(
+            f"[red]Invalid scrub preset '{scrub_preset}'. Choose one of: {', '.join(SCRUB_PRESETS)}.[/]"
+        )
+        raise typer.Exit(code=1)
+    try:
+        archive_path, metadata = _create_mailbox_archive(
+            project_filters=project_filters,
+            scrub_preset=preset,
+            label=label,
+            status_message="Creating mailbox archive...",
+        )
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to create mailbox archive:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    size_bytes = archive_path.stat().st_size if archive_path.exists() else 0
+    projects_desc = metadata.get("projects_requested") or ["all"]
+    console.print(f"[green]✓ Mailbox state saved to:[/] {archive_path}")
+    console.print(
+        f"[dim]Preset:[/] {metadata.get('scrub_preset', preset)} | [dim]Projects:[/] {', '.join(projects_desc)} | [dim]Size:[/] {_format_bytes(size_bytes)}"
+    )
+    console.print(f"[dim]Restore later with:[/] mcp-agent-mail archive restore {archive_path.name}")
+
+
+@archive_app.command(
+    "list",
+    help="Show saved mailbox states (with metadata) from the archived_mailbox_states directory.",
+)
+def archive_list_states(
+    limit: Annotated[
+        int,
+        typer.Option("--limit", "-n", min=0, help="Show only the most recent N archives."),
+    ] = 0,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON instead of a table")] = False,
+) -> None:
+    archive_dir = _archive_states_dir(create=False)
+    if not archive_dir.exists():
+        console.print(f"[yellow]Archive directory {archive_dir} does not exist yet.[/]")
+        raise typer.Exit(code=0)
+    files = sorted(archive_dir.glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if not files:
+        console.print(f"[yellow]No saved mailbox states found under {archive_dir}.[/]")
+        raise typer.Exit(code=0)
+    if limit > 0:
+        files = files[:limit]
+    entries: list[dict[str, Any]] = []
+    for file_path in files:
+        metadata, error = _load_archive_metadata(file_path)
+        entry = {
+            "file": file_path.name,
+            "path": str(file_path),
+            "size_bytes": file_path.stat().st_size,
+            "created_at": metadata.get("created_at")
+            or datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc).isoformat(),
+            "scrub_preset": metadata.get("scrub_preset", ""),
+            "projects": metadata.get("projects_requested") or ["all"],
+        }
+        if error:
+            entry["error"] = error
+        entries.append(entry)
+    if json_output:
+        json.dump(entries, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    table = Table(title="Saved Mailbox States", show_lines=False)
+    table.add_column("File")
+    table.add_column("Created (UTC)")
+    table.add_column("Size")
+    table.add_column("Preset")
+    table.add_column("Projects")
+    table.add_column("Notes")
+    for entry in entries:
+        notes = entry.get("error", "")
+        table.add_row(
+            entry["file"],
+            entry["created_at"],
+            _format_bytes(int(entry["size_bytes"])),
+            entry.get("scrub_preset", ""),
+            ", ".join(entry.get("projects", [])),
+            notes,
+        )
+    console.print(table)
+    console.print(f"[dim]Archives live under {archive_dir}. Restore with `mcp-agent-mail archive restore <file>`.[/]")
+
+
+@archive_app.command(
+    "restore",
+    help="Restore a previously saved mailbox state. Existing DB/storage are backed up automatically.",
+)
+def archive_restore_state(
+    archive_file: Annotated[Path, typer.Argument(help="Path or filename of the saved state zip file.")],
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            "-f",
+            help="Apply the archive even if backups already exist (still keeps safety backups, just skips the prompt).",
+        ),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Print the planned backup/restore steps without touching files (useful for audits).",
+        ),
+    ] = False,
+) -> None:
+    try:
+        archive_path = _resolve_archive_path(archive_file)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+    metadata, meta_error = _load_archive_metadata(archive_path)
+    if meta_error:
+        console.print(f"[yellow]Warning:[/] {meta_error}")
+    try:
+        database_path = resolve_sqlite_database_path()
+    except ShareExportError as exc:
+        console.print(f"[red]Failed to resolve target database path:[/] {exc}")
+        raise typer.Exit(code=1) from exc
+    settings = get_settings()
+    storage_root = _resolve_path(settings.storage.root)
+    archive_db_path = metadata.get("database", {}).get("source_path")
+    archive_storage_path = metadata.get("storage", {}).get("source_path")
+    if archive_db_path and archive_db_path != str(database_path):
+        console.print(
+            f"[yellow]Archive was created from database {archive_db_path}, current config is {database_path}. Continuing...[/]"
+        )
+    if archive_storage_path and archive_storage_path != str(storage_root):
+        console.print(
+            f"[yellow]Archive used storage root {archive_storage_path}, current config is {storage_root}. Continuing...[/]"
+        )
+    with tempfile.TemporaryDirectory(prefix="mailbox-restore-") as temp_dir_str:
+        temp_dir = Path(temp_dir_str)
+        with ZipFile(archive_path, "r") as archive:
+            archive.extractall(temp_dir)
+        snapshot_src = temp_dir / ARCHIVE_SNAPSHOT_RELATIVE
+        storage_src = temp_dir / ARCHIVE_STORAGE_DIRNAME
+        if not snapshot_src.exists():
+            console.print(f"[red]Snapshot missing inside archive ({ARCHIVE_SNAPSHOT_RELATIVE}).[/]")
+            raise typer.Exit(code=1)
+        if not storage_src.exists():
+            console.print(f"[red]Storage repository missing inside archive ({ARCHIVE_STORAGE_DIRNAME}).[/]")
+            raise typer.Exit(code=1)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        planned_ops: list[str] = []
+        if database_path.exists():
+            planned_ops.append(f"backup {database_path} -> {_next_backup_path(database_path, timestamp)}")
+        for suffix in ("-wal", "-shm"):
+            wal_path = Path(f"{database_path}{suffix}")
+            if wal_path.exists():
+                planned_ops.append(f"backup {wal_path} -> {_next_backup_path(wal_path, timestamp)}")
+        if storage_root.exists():
+            planned_ops.append(f"backup {storage_root} -> {_next_backup_path(storage_root, timestamp)}")
+        planned_ops.append(f"restore snapshot -> {database_path}")
+        planned_ops.append(f"restore storage repo -> {storage_root}")
+        if dry_run:
+            console.print("[cyan]Dry-run plan:[/]")
+            for op in planned_ops:
+                console.print(f"  • {op}")
+            return
+        if not force:
+            console.print("[yellow]The following operations will be performed:[/]")
+            for op in planned_ops:
+                console.print(f"  • {op}")
+            if not typer.confirm("Proceed with restore?", default=False):
+                raise typer.Exit(code=1)
+        backup_paths: list[Path] = []
+        if database_path.exists():
+            db_backup = _next_backup_path(database_path, timestamp)
+            shutil.move(str(database_path), str(db_backup))
+            backup_paths.append(db_backup)
+        for suffix in ("-wal", "-shm"):
+            wal_path = Path(f"{database_path}{suffix}")
+            if wal_path.exists():
+                wal_backup = _next_backup_path(wal_path, timestamp)
+                shutil.move(str(wal_path), str(wal_backup))
+                backup_paths.append(wal_backup)
+        if storage_root.exists():
+            storage_backup = _next_backup_path(storage_root, timestamp)
+            shutil.move(str(storage_root), str(storage_backup))
+            backup_paths.append(storage_backup)
+        database_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(snapshot_src, database_path)
+        storage_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(storage_src, storage_root, dirs_exist_ok=False)
+    console.print(f"[green]✓ Restore complete from {archive_path}.[/]")
+    if backup_paths:
+        console.print("[dim]Backups preserved at:[/]")
+        for path in backup_paths:
+            console.print(f"  • {path}")
+    console.print(
+        f"[dim]Database:[/] {database_path}\n[dim]Storage root:[/] {storage_root}\n[dim]Need to revert? Use the backups above or rerun with another archive."
+    )
+
+
 @app.command("clear-and-reset-everything")
 def clear_and_reset_everything(
-    force: bool = typer.Option(False, "--force", "-f", help="Skip confirmation prompt."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Skip the final destructive confirmation prompt (still asks about creating an archive).",
+    ),
+    archive_choice: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--archive/--no-archive",
+            help="Attempt a pre-reset archive before deleting data (default: prompt when interactive).",
+        ),
+    ] = None,
 ) -> None:
     """
     Delete the SQLite database (including WAL/SHM) and wipe all storage-root contents.
@@ -1818,8 +2284,36 @@ def clear_and_reset_everything(
             console.print("  • (no SQLite files detected)")
         console.print(f"  • All contents inside {storage_root} (including .git)")
         console.print()
-        if not typer.confirm("Proceed?"):
-            raise typer.Exit(code=1)
+
+    archived_state: Path | None = None
+    should_archive = archive_choice if archive_choice is not None else None
+    archive_mandatory = archive_choice is True or force
+    if should_archive is None:
+        if force:
+            should_archive = True
+        else:
+            should_archive = typer.confirm("Create a mailbox archive before wiping everything?", default=True)
+    if should_archive:
+        try:
+            archived_state, _ = _create_mailbox_archive(
+                project_filters=(),
+                scrub_preset=DEFAULT_ARCHIVE_SCRUB_PRESET,
+                label="pre-reset",
+                status_message="Archiving current mailbox before reset...",
+            )
+            console.print(f"[green]✓ Saved restore point to:[/] {archived_state}")
+            console.print(
+                f"[dim]Restore later with:[/] mcp-agent-mail archive restore {archived_state.name}"
+            )
+        except ShareExportError as exc:
+            console.print(f"[red]Failed to create archive:[/] {exc}")
+            if archive_mandatory:
+                raise typer.Exit(code=1) from exc
+            if not typer.confirm("Archive failed. Continue without a backup?", default=False):
+                raise typer.Exit(code=1) from exc
+
+    if not force and not typer.confirm("Proceed with destructive reset?", default=False):
+        raise typer.Exit(code=1)
 
     # Remove database files
     deleted_db_files: list[Path] = []

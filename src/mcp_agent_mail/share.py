@@ -178,12 +178,33 @@ SCRUB_PRESETS: dict[str, dict[str, Any]] = {
         "redact_body": False,
         "body_placeholder": None,
         "drop_attachments": False,
+        "scrub_secrets": True,
+        "clear_ack_state": True,
+        "clear_recipients": True,
+        "clear_file_reservations": True,
+        "clear_agent_links": True,
     },
     "strict": {
         "description": "High-scrub: replace message bodies with placeholders and omit all attachments from the snapshot.",
         "redact_body": True,
         "body_placeholder": "[Message body redacted]",
         "drop_attachments": True,
+        "scrub_secrets": True,
+        "clear_ack_state": True,
+        "clear_recipients": True,
+        "clear_file_reservations": True,
+        "clear_agent_links": True,
+    },
+    "archive": {
+        "description": "Lossless snapshot for disaster recovery: preserve ack/read state, recipients, attachments, and body content while still running the standard cleanup pipeline.",
+        "redact_body": False,
+        "body_placeholder": None,
+        "drop_attachments": False,
+        "scrub_secrets": False,
+        "clear_ack_state": False,
+        "clear_recipients": False,
+        "clear_file_reservations": False,
+        "clear_agent_links": False,
     },
 }
 
@@ -797,6 +818,11 @@ def scrub_snapshot(
 
     preset_key = _normalize_scrub_preset(preset)
     preset_opts = SCRUB_PRESETS[preset_key]
+    clear_ack_state = bool(preset_opts.get("clear_ack_state", True))
+    clear_recipients = bool(preset_opts.get("clear_recipients", True))
+    clear_file_reservations = bool(preset_opts.get("clear_file_reservations", True))
+    clear_agent_links = bool(preset_opts.get("clear_agent_links", True))
+    scrub_secrets = bool(preset_opts.get("scrub_secrets", True))
 
     bodies_redacted = 0
     attachments_cleared = 0
@@ -811,25 +837,47 @@ def scrub_snapshot(
         agents_total = conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         agents_pseudonymized = 0
 
-        ack_cursor = conn.execute("UPDATE messages SET ack_required = 0")
-        ack_flags_cleared = ack_cursor.rowcount or 0
+        if clear_ack_state:
+            ack_cursor = conn.execute("UPDATE messages SET ack_required = 0")
+            ack_flags_cleared = ack_cursor.rowcount or 0
+        else:
+            ack_flags_cleared = 0
 
-        recipients_cursor = conn.execute("UPDATE message_recipients SET read_ts = NULL, ack_ts = NULL")
-        recipients_cleared = recipients_cursor.rowcount or 0
+        if clear_recipients:
+            recipients_cursor = conn.execute(
+                "UPDATE message_recipients SET read_ts = NULL, ack_ts = NULL"
+            )
+            recipients_cleared = recipients_cursor.rowcount or 0
+        else:
+            recipients_cleared = 0
 
-        file_res_cursor = conn.execute("DELETE FROM file_reservations")
-        file_res_removed = file_res_cursor.rowcount or 0
+        if clear_file_reservations:
+            file_res_cursor = conn.execute("DELETE FROM file_reservations")
+            file_res_removed = file_res_cursor.rowcount or 0
+        else:
+            file_res_removed = 0
 
-        agent_links_cursor = conn.execute("DELETE FROM agent_links")
-        agent_links_removed = agent_links_cursor.rowcount or 0
+        if clear_agent_links:
+            agent_links_cursor = conn.execute("DELETE FROM agent_links")
+            agent_links_removed = agent_links_cursor.rowcount or 0
+        else:
+            agent_links_removed = 0
 
         secrets_replaced = 0
         attachments_sanitized = 0
 
         message_rows = conn.execute("SELECT id, subject, body_md, attachments FROM messages").fetchall()
         for msg in message_rows:
-            subject, subj_replacements = _scrub_text(msg["subject"])
-            body, body_replacements = _scrub_text(msg["body_md"])
+            subject_original = msg["subject"] or ""
+            body_original = msg["body_md"] or ""
+            if scrub_secrets:
+                subject, subj_replacements = _scrub_text(subject_original)
+                body, body_replacements = _scrub_text(body_original)
+            else:
+                subject = subject_original
+                body = body_original
+                subj_replacements = 0
+                body_replacements = 0
             secrets_replaced += subj_replacements + body_replacements
             attachments_value = msg["attachments"]
             attachments_updated = False
@@ -843,22 +891,25 @@ def scrub_snapshot(
                         attachments_data = attachments_value
                 else:
                     attachments_data = attachments_value
-                if preset_opts["drop_attachments"] and attachments_data:
-                    attachments_data = []
-                    attachments_cleared += 1
-                    attachments_updated = True
+            else:
+                attachments_data = []
+            if preset_opts["drop_attachments"] and attachments_data:
+                attachments_data = []
+                attachments_cleared += 1
+                attachments_updated = True
+            if scrub_secrets and attachments_data:
                 sanitized, rep_count, removed_count = _scrub_structure(attachments_data)
                 attachment_replacements += rep_count
                 attachment_keys_removed += removed_count
                 if sanitized != attachments_data:
                     attachments_data = sanitized
                     attachments_updated = True
-                if attachments_updated:
-                    sanitized_json = json.dumps(attachments_data, separators=(",", ":"), sort_keys=True)
-                    conn.execute(
-                        "UPDATE messages SET attachments = ? WHERE id = ?",
-                        (sanitized_json, msg["id"]),
-                    )
+            if attachments_updated:
+                sanitized_json = json.dumps(attachments_data, separators=(",", ":"), sort_keys=True)
+                conn.execute(
+                    "UPDATE messages SET attachments = ? WHERE id = ?",
+                    (sanitized_json, msg["id"]),
+                )
             if subject != msg["subject"]:
                 conn.execute("UPDATE messages SET subject = ? WHERE id = ?", (subject, msg["id"]))
             if preset_opts["redact_body"]:
@@ -878,7 +929,7 @@ def scrub_snapshot(
 
     return ScrubSummary(
         preset=preset_key,
-        pseudonym_salt="standard",
+        pseudonym_salt=preset_key,
         agents_total=agents_total,
         agents_pseudonymized=int(agents_pseudonymized),
         ack_flags_cleared=ack_flags_cleared,
