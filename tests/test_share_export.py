@@ -184,6 +184,42 @@ def test_scrub_snapshot_strict_preset(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_scrub_snapshot_archive_preset_preserves_runtime_state(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+
+    summary = scrub_snapshot(snapshot, preset="archive", export_salt=b"archive-mode")
+
+    assert summary.preset == "archive"
+    assert summary.ack_flags_cleared == 0
+    assert summary.recipients_cleared == 0
+    assert summary.file_reservations_removed == 0
+    assert summary.agent_links_removed == 0
+    assert summary.secrets_replaced == 0
+    assert summary.attachments_sanitized == 0
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.row_factory = sqlite3.Row
+        ack_required = conn.execute("SELECT ack_required FROM messages WHERE id = 1").fetchone()[0]
+        assert ack_required == 1
+        recipient_row = conn.execute(
+            "SELECT read_ts, ack_ts FROM message_recipients WHERE message_id = 1"
+        ).fetchone()
+        assert recipient_row[0] == "2025-01-01"
+        assert recipient_row[1] == "2025-01-02"
+        file_reservation_count = conn.execute("SELECT COUNT(*) FROM file_reservations").fetchone()[0]
+        assert file_reservation_count == 1
+        agent_links_count = conn.execute("SELECT COUNT(*) FROM agent_links").fetchone()[0]
+        assert agent_links_count == 1
+    finally:
+        conn.close()
+
+    subject, body, attachments = _read_message(snapshot)
+    assert "sk-" in subject
+    assert "bearer" in body.lower()
+    assert attachments and "download_url" in attachments[0]
+
+
 def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
     snapshot = _build_snapshot(tmp_path)
     storage_root = tmp_path / "storage"

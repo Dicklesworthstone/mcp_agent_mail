@@ -88,3 +88,31 @@ def test_cli_list_projects(isolated_env):
     assert result.exit_code == 0
     assert "demo" in result.stdout
     assert "BlueLake" not in result.stdout
+
+
+def test_archive_save_defaults_to_archive_preset(tmp_path, isolated_env, monkeypatch):
+    runner = CliRunner()
+    archive_path = tmp_path / "state.zip"
+    archive_path.write_bytes(b"zip")
+    captured: dict[str, Any] = {}
+
+    def fake_archive(**kwargs):
+        captured.update(kwargs)
+        metadata = {"scrub_preset": kwargs["scrub_preset"], "projects_requested": list(kwargs["project_filters"])}
+        return archive_path, metadata
+
+    monkeypatch.setattr("mcp_agent_mail.cli._create_mailbox_archive", fake_archive)
+    result = runner.invoke(app, ["archive", "save"])
+    assert result.exit_code == 0
+    assert captured["scrub_preset"] == "archive"
+
+
+def test_clear_and_reset_skips_archive_when_disabled(isolated_env, monkeypatch):
+    runner = CliRunner()
+
+    def _should_not_run(**_kwargs):  # pragma: no cover - defensive
+        raise AssertionError("archive should not be invoked when --no-archive is supplied")
+
+    monkeypatch.setattr("mcp_agent_mail.cli._create_mailbox_archive", _should_not_run)
+    result = runner.invoke(app, ["clear-and-reset-everything", "--force", "--no-archive"])
+    assert result.exit_code == 0

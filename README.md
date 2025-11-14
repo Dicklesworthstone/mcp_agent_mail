@@ -28,6 +28,27 @@ This project provides a lightweight, interoperable layer so agents can:
 
 It's designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
 
+## From Idea Spark to Shipping Swarm
+
+If a blank repo feels daunting, follow the field-tested workflow we documented in `project_idea_and_guide.md` (“Appendix: From Blank Repo to Coordinated Swarm”):
+
+- **Ideate fast:** Write a scrappy email-style blurb about the problem, desired UX, and any must-have stack picks (≈15 minutes).
+- **Promote it to a plan:** Feed that blurb to GPT-5 Pro (and optionally Grok4 Heavy / Opus 4.1) until you get a granular Markdown plan, then iterate on the plan file while it’s still cheap to change. The Markdown Web Browser sample plan shows the level of detail to aim for.
+- **Codify the rules:** Clone a tuned `AGENTS.md`, add any tech-specific best-practice guides, and let Codex scaffold the repo plus Beads tasks straight from the plan.
+- **Spin up the swarm:** Launch multiple Codex panes (or any agent mix), register each identity with Agent Mail, and have them acknowledge `AGENTS.md`, the plan document, and the Beads backlog before touching code.
+- **Keep everyone fed:** Reuse the canned instruction cadence from the tweet thread or, better yet, let the commercial Companion app’s Message Stacks broadcast those prompts automatically so you never hand-feed panes again.
+
+Watch the full 23-minute walkthrough (https://youtu.be/68VVcqMEDrs?si=pCm6AiJAndtZ6u7q) to see the loop in action.
+
+## Productivity Math & Automation Loop
+
+One disciplined hour of GPT-5 Codex—when it isn’t waiting on human prompts—often produces 10–20 “human hours” of work because the agents reason and type at machine speed. Agent Mail multiplies that advantage in two layers:
+
+1. **Base OSS server:** Git-backed mailboxes, advisory file reservations, Typer CLI helpers, and searchable archives keep independent agents aligned without babysitting. Every instruction, lease, and attachment is auditable.
+2. **Companion stack (commercial):** The iOS app + host automation can provision, pair, and steer heterogeneous fleets (Claude Code, Codex, Gemini CLI, etc.) from your phone using customizable Message Stacks, Human Overseer broadcasts, Beads awareness, and plan editing tools—no manual tmux choreography required. The automation closes the loop by scheduling prompts, honoring Limited Mode, and enforcing Double-Arm confirmations for destructive work.
+
+Result: you invest 1–2 hours of human supervision, but dozens of agent-hours execute in parallel with clear audit trails and conflict-avoidance baked in.
+
 ## TLDR Quickstart
 
 ### One-line installer
@@ -191,6 +212,12 @@ Pitfalls to avoid
 - Protecting critical migrations with exclusive file reservations and a pre-commit guard
 - Searching and summarizing long technical discussions as threads evolve
 - Discovering and linking related projects (e.g., frontend/backend) through AI-powered suggestions
+
+## Workflow FAQ
+
+**Do I still need the tmux broadcast script to “feed” every Codex pane?**
+
+No. The historical zsh loop from the tweet thread is still handy if you are running the OSS stack by itself, but the AgentMail Companion system now automates that cadence with Message Stacks. Once the companion host services are installed, you queue presets (builder loop, reviewer sweep, test focus, etc.) from the iOS app or CLI and the automation fans those instructions out to every enrolled agent—without touching tmux.
 
 ## Architecture
 
@@ -552,6 +579,38 @@ Each bundle contains:
 - **Verifiable integrity**: SHA-256 hashes for every asset plus optional Ed25519 signing make authenticity and tampering checks straightforward.
 - **Chunk-friendly archives**: Large databases can be chunked for httpvfs streaming; a companion `chunks.sha256` file lists digests for each chunk so clients can trust streamed blobs without recomputing hashes.
 - **One-click hosting**: The interactive wizard can publish straight to GitHub Pages or Cloudflare Pages, or you can serve the bundle locally with the CLI preview command.
+
+## Disaster Recovery Archives (`archive` commands)
+
+Use the `archive` subcommands when you need a *restorable* snapshot (not just a read-only share bundle). Each ZIP under `./archived_mailbox_states/` includes:
+
+- A SQLite snapshot processed by the same cleanup pipeline as `share`, but using the `archive` scrub preset so ack/read state, recipients, attachments, and message bodies remain untouched.
+- A byte-for-byte copy of the storage Git repo (`STORAGE_ROOT`), preserving markdown artifacts, attachments, and hook scripts.
+
+### Quick ref
+
+```bash
+# Save current state (defaults to the lossless preset)
+uv run python -m mcp_agent_mail.cli archive save --label nightly
+
+# List available restore points (JSON is handy for scripts)
+uv run python -m mcp_agent_mail.cli archive list --json
+
+# Restore after a disaster (backs up any existing DB/storage before overwriting)
+uv run python -m mcp_agent_mail.cli archive restore archived_mailbox_states/<file>.zip --force
+```
+
+During restore the CLI:
+
+1. Extracts the ZIP into a temp directory.
+2. Moves any existing `storage.sqlite3`, WAL/SHM siblings, and `STORAGE_ROOT` into timestamped `.backup-<ts>` folders so nothing is lost.
+3. Copies the snapshot back to the configured database path and rebuilds the storage repo from the archive contents.
+
+Every archive writes a `metadata.json` manifest describing the projects captured, scrub preset, and a friendly reminder of the exact `archive restore …` command to run later.
+
+### Reset safety net
+
+`clear-and-reset-everything` now offers to create one of these archives before deleting anything. By default it prompts interactively; pass `--archive/--no-archive` to force a choice, and pair with `--force --no-archive` for non-interactive automation. When an archive is created successfully, the CLI prints both the path and the restore command so you can undo the reset later.
 
 ### Quick Start: Interactive Deployment Wizard
 
@@ -2104,7 +2163,7 @@ The project exposes a developer CLI for common operations:
 - `share decrypt <encrypted_path> [--identity <file> | --passphrase]`: decrypt an age-encrypted bundle
 - `config set-port <port>`: change the HTTP server port (updates .env)
 - `config show-port`: display the current configured HTTP port
-- `clear-and-reset-everything [--force]`: DELETE the SQLite database (incl. WAL/SHM) and WIPE all contents under `STORAGE_ROOT` (including per-project Git archives). Use only when you intentionally want a clean slate.
+- `clear-and-reset-everything [--force] [--archive/--no-archive]`: DELETE the SQLite database (incl. WAL/SHM) and WIPE all contents under `STORAGE_ROOT` after optionally saving a restore point. Without flags it prompts to create an archive first; `--force --no-archive` skips all prompts for automation.
 - `list-acks --project <key> --agent <name> [--limit N]`: list messages requiring acknowledgement for an agent where ack is missing
 - `acks pending <project> <agent> [--limit N]`: show pending acknowledgements for an agent
 - `acks remind <project> <agent> [--min-age-minutes N] [--limit N]`: highlight pending ACKs older than a threshold

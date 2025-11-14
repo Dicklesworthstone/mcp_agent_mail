@@ -1,6 +1,7 @@
 # Original prompt:
 
 ```
+
 I have an idea for a python project I want you to help me design in the best way possible, doing research on the web and really thinking super hard about the best way to do things.
 
 Basically, it's a python mcp (model context protocol) server that is built using the fastmcp library with http transport only (not stdio or sse, which are deprecated).
@@ -13,6 +14,26 @@ That identity would then be linked to what is essentially like an "email account
 
 So what is the purpose of this? Well, you could have them all working on one big project; say you have a python fastapi backend and a nextjs frontend each in separate repos. You want to have a few agents working in the backend AND the frontend all at the same time. But you don't want to them to conflict with each other; you don't want the backend agents to pick the same file to work on and then get confused and freak out when unrecognized changes start happening and they decide to do a `git checkout` on the file and wipe out the other agent's work. Or you want your backend agents to be using codex with gpt5, while your frontend agents are using claude code with opus, and you want everything to be perfectly harmonized. You can manually do this now by having the agents created detailed documentation but that requires a ton of manual instructions and often the human in the loop has to act as the "liason" passing messages from one agent to another. It would be much better and easier if they could instead communicate without each other autonomously and keep each other informed of what's happening. But this has to be done in a way that fits into existing workflows nicely. So for one thing, it MUST be fully async; when an agent finishes working on a step, it can then call a "check_my_messages" mcp tool that retrieves any recent messages and shows them to the agent so they can keep them in mind. Some of these messages could have urgent action items requiring immediate response and action. Other might be more like "FYI" messages that the agent should keep in mind. And not every agent NEEDS to know about everything all the other agents are doing or working on; in fact, that would be distracting and detrimental and waste context space. But each agent could keep track or look up which agent is doing what, and then address messages just to the relevant agents to keep things efficient. 
 ```
+
+## Appendix: From Blank Repo to Coordinated Swarm (2025-11 field notes)
+
+The tweet-thread workflow that inspired this project has now been formalized so anyone can compress the scary “blank repo” phase into a few focused hours of human effort while Agent Mail supplies the multi-agent muscle. The high-level loop looks like this:
+
+1. **Start with a useful idea, not a niche science project.** Scratch your own itch and sanity-check that solving it would help lots of builders if it really worked.
+2. **Draft an informal idea blurb (10–15 minutes).** Write it like an email to a friend—describe the problem, desired UX, and any must-have stack choices. Screenshots/references encouraged.
+3. **Feed that blurb to GPT-5 Pro and let it cook.** Pro typically thinks for 15–20 minutes; follow up by pasting the same prompt into Grok 4 Heavy or Opus 4.1, then loop any smart deltas back into Pro so nothing clever gets lost.
+4. **Ask Pro for a detailed Markdown plan and save it.** Create the project folder, drop in the plan file, and treat it as the single source of truth.
+5. **Iterate on the plan while it’s still cheap to change.** Start a new Pro chat, paste the entire plan, and tell it to make the design more reliable, intuitive, and performant. Explicitly ask it to research the latest docs/blogs so the stack stays modern. Apply accepted revisions back into the plan document using Codex.
+6. **Clone a tuned `AGENTS.md` plus any best-practice guides.** Reuse a battle-tested template, then have Pro tailor it to this project’s stack (FastMCP, Next.js 15, SwiftData, etc.). For critical libraries (e.g., FastMCP, StoreKit 2), spin up targeted best-practices notes so agents stop guessing.
+7. **Let Codex scaffold the repo.** In a single session ask Codex to create folders, blank files, `.gitignore`, and baseline configs so there’s something concrete to iterate on.
+8. **Explode the plan into Beads tasks.** Still inside Codex, run Steve Yegge’s Beads CLI and break down the plan into ready-to-pull tasks/subtasks with dependencies. This keeps every agent honest about what “done” means.
+9. **Spin up tmux panes for multiple Codex instances (or other tools).** Eight panes works great; more is fine. Each pane runs the same repo but will soon focus on distinct Beads.
+10. **Boot Agent Mail and onboard the agents.** Register each agent identity, point them at the repo, tell them to read `AGENTS.md`, the plan file (by name), and the Beads backlog before touching code. Have them announce which bead they’re tackling in their first message.
+11. **Feed the agents with a proven cadence.** Historically this meant broadcasting canned prompts through tmux (see the sample zsh loop in the tweet thread) so every Codex session stays busy for an hour at a time: pick the next bead, keep momentum, review with fresh eyes, check Agent Mail, then perform peer review.
+12. **Watch the swarm work while you supervise.** Between Agent Mail threads, Beads updates, and git commits, you can keep context without babysitting. One hour of autonomous GPT-5 Codex often lands 10–20 “human hours” of progress because the agents think and type at machine speed.
+13. **See it live.** The 23-minute walkthrough video shows the full loop in action for the Markdown Web Browser sample project: https://youtu.be/68VVcqMEDrs?si=pCm6AiJAndtZ6u7q. The underlying plan doc is public here: https://github.com/Dicklesworthstone/markdown_web_browser/blob/main/PLAN_TO_IMPLEMENT_MARKDOWN_WEB_BROWSER_PROJECT.md.
+
+> **Note:** The manual tmux broadcast is only necessary if you are running the OSS stack alone. The commercial AgentMail Companion app + host automation now “closes the loop” by queuing Message Stacks, so you can steer entire fleets from your phone without nudging each pane.
 
 
 # Response 1 from GPT-5 Pro:
@@ -752,7 +773,26 @@ Why these choices are aligned with the ecosystem
     SQLite FTS5 gives efficient message search with minimal ops footprint.
     SQLite
 
-If you want, I can extend this MVP with (a) inline image conversion to WebP, (b) git pre‑commit enforcement, (c) richer threading and conversation summaries, or (d) a resource layer (resource://inbox/{agent}?since=...) so clients can pull message bodies as MCP resources.
+If you want, I can extend this MVP with (a) inline image conversion to WebP, (b) git pre-commit enforcement, (c) richer threading and conversation summaries, or (d) a resource layer (resource://inbox/{agent}?since=...) so clients can pull message bodies as MCP resources.
 
 
 ```
+
+## Disaster Recovery Runbook (Working Notes)
+
+- **When to archive**: Any time a human or agent plans to run destructive commands (schema rebuilds, repo pruning, `clear-and-reset-everything`).
+- **Commands**:
+  - `uv run python -m mcp_agent_mail.cli archive save --label <reason>` → writes `./archived_mailbox_states/mailbox-state-<timestamp>-all-projects-archive.zip`.
+  - `uv run python -m mcp_agent_mail.cli archive list --json` → inventory for dashboards/alerts.
+  - `uv run python -m mcp_agent_mail.cli archive restore <zip> --force` → backs up any existing DB/storage to `.backup-<ts>` folders, then restores the snapshot + Git repo.
+- **Preset**: The archive workflow defaults to the lossless `archive` preset so ack/read state, recipients, attachments, and message bodies remain untouched. Switch to `--scrub-preset standard` only when you intentionally need redaction.
+- **Reset loop**:
+  1. `archive save --label pre-reset`
+  2. Capture the printed restore command in the ops log.
+  3. Run `clear-and-reset-everything --force --no-archive` (automation) or interactively accept the archive prompt.
+- **Restoring in anger**:
+  1. `archive restore archived_mailbox_states/<file>.zip --force`
+  2. Validate DB contents (`sqlite3 storage.sqlite3 'select count(*) from messages'`) and storage repo integrity (`ls $STORAGE_ROOT/messages`)
+  3. Only then unblock agents/CI.
+
+Everything remains CLI-first so MCP tools, humans, and automation share the same guardrails (Git metadata, manifests, backups).
