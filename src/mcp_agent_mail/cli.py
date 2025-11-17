@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Annotated, Any, Optional, Sequence, cast
+from typing import Annotated, Any, Iterable, List, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import httpx
@@ -95,6 +95,8 @@ amctl_app = typer.Typer(help="Build and environment helpers")
 app.add_typer(amctl_app, name="amctl")
 products_app = typer.Typer(help="Product Bus: manage products and links")
 app.add_typer(products_app, name="products")
+docs_app = typer.Typer(help="Documentation helpers for agent onboarding")
+app.add_typer(docs_app, name="docs")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -3756,6 +3758,227 @@ def config_show_port() -> None:
     console.print(f"  Port: [bold]{settings.http.port}[/bold]")
     console.print(f"  Path: {settings.http.path}")
     console.print(f"\n[dim]Full URL: http://{settings.http.host}:{settings.http.port}{settings.http.path}[/dim]")
+
+
+# ---------- Documentation helpers ----------
+
+DOC_BLOCK_START = "<!-- MCP_AGENT_MAIL_AND_BEADS_SNIPPET_START -->"
+DOC_BLOCK_END = "<!-- MCP_AGENT_MAIL_AND_BEADS_SNIPPET_END -->"
+MAIL_SNIPPET_MARKERS = ("<!-- BEGIN_AGENT_MAIL_SNIPPET -->", "<!-- END_AGENT_MAIL_SNIPPET -->")
+BEADS_SNIPPET_MARKERS = ("<!-- BEGIN_BEADS_SNIPPET -->", "<!-- END_BEADS_SNIPPET -->")
+TARGET_DOC_FILENAMES = {"AGENTS.MD", "CLAUDE.MD"}
+SKIP_SCAN_DIRS = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".idea",
+    ".vscode",
+    ".tox",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".mcp-agent-mail",
+    "node_modules",
+    "__pycache__",
+    "venv",
+    ".venv",
+    "dist",
+    "build",
+    "out",
+    "logs",
+    "target",
+}
+
+
+@dataclass
+class DocCandidate:
+    path: Path
+    has_snippet: bool
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _extract_readme_section(markers: tuple[str, str]) -> str:
+    readme_path = _project_root() / "README.md"
+    if not readme_path.exists():
+        raise RuntimeError(f"README.md not found at {readme_path}")
+    data = readme_path.read_text(encoding="utf-8")
+    start_marker, end_marker = markers
+    try:
+        start_idx = data.index(start_marker) + len(start_marker)
+        end_idx = data.index(end_marker, start_idx)
+    except ValueError as exc:  # pragma: no cover - defensive branch
+        raise RuntimeError(f"Could not locate snippet markers {markers[0]}..{markers[1]} in README.md") from exc
+    snippet = data[start_idx:end_idx].strip()
+    return _strip_code_block(snippet)
+
+
+def _strip_code_block(snippet: str) -> str:
+    stripped = snippet.strip()
+    if stripped.startswith("```"):
+        stripped = "\n".join(stripped.splitlines()[1:])
+    stripped = stripped.rstrip()
+    if stripped.endswith("```"):
+        stripped = "\n".join(stripped.splitlines()[:-1])
+    return stripped.strip()
+
+
+def _combined_doc_snippet() -> str:
+    mail = _extract_readme_section(MAIL_SNIPPET_MARKERS).strip()
+    beads = _extract_readme_section(BEADS_SNIPPET_MARKERS).strip()
+    combined = f"{mail}\n\n{beads}".strip()
+    return combined + "\n"
+
+
+def _default_scan_roots() -> list[Path]:
+    cwd = Path.cwd().resolve()
+    home = Path.home()
+    candidates: list[Path] = [cwd]
+    if cwd.parent != cwd:
+        candidates.append(cwd.parent)
+    for rel in ("code", "codes", "projects", "workspace", "repos", "src"):
+        candidate = (home / rel).expanduser()
+        if candidate.exists():
+            candidates.append(candidate)
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.expanduser().resolve()
+        if resolved in seen or not resolved.exists() or not resolved.is_dir():
+            continue
+        seen.add(resolved)
+        deduped.append(resolved)
+    return deduped or [cwd]
+
+
+def _iter_doc_files(base: Path, max_depth: int) -> Iterable[Path]:
+    origin = base.resolve()
+    base_parts = len(origin.parts)
+
+    def _on_error(error: OSError) -> None:  # pragma: no cover - best effort logging
+        console.print(f"[yellow]Warning:[/yellow] Skipping {error.filename}: {error.strerror}")
+
+    for dirpath, dirnames, filenames in os.walk(
+        origin, topdown=True, followlinks=False, onerror=_on_error
+    ):
+        current_depth = len(Path(dirpath).parts) - base_parts
+        if max_depth >= 0 and current_depth >= max_depth:
+            dirnames[:] = []
+        dirnames[:] = [d for d in dirnames if d not in SKIP_SCAN_DIRS]
+        for name in filenames:
+            if name.upper() in TARGET_DOC_FILENAMES:
+                yield Path(dirpath) / name
+
+
+def _collect_doc_candidates(roots: Sequence[Path], max_depth: int) -> list[DocCandidate]:
+    seen: set[Path] = set()
+    candidates: list[DocCandidate] = []
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        for file_path in _iter_doc_files(root, max_depth):
+            resolved = file_path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                text = resolved.read_text(encoding="utf-8")
+            except OSError as exc:
+                console.print(f"[yellow]Warning:[/yellow] Could not read {resolved}: {exc}")
+                continue
+            candidates.append(DocCandidate(path=resolved, has_snippet=DOC_BLOCK_START in text))
+    return sorted(candidates, key=lambda c: str(c.path).lower())
+
+
+def _append_snippet_to_doc(path: Path, snippet: str) -> None:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - IO failure protection
+        raise RuntimeError(f"Failed to read {path}: {exc}") from exc
+    if content and not content.endswith("\n"):
+        content += "\n"
+    addition = f"\n{DOC_BLOCK_START}\n\n{snippet}\n\n{DOC_BLOCK_END}\n"
+    try:
+        path.write_text(content + addition, encoding="utf-8")
+    except OSError as exc:  # pragma: no cover - IO failure protection
+        raise RuntimeError(f"Failed to write {path}: {exc}") from exc
+
+
+@docs_app.command("insert-blurbs")
+def docs_insert_blurbs(
+    scan_dir: Annotated[
+        Optional[List[Path]], typer.Option("--scan-dir", "-d", help="Directories to scan (repeatable).")
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", help="Automatically confirm insertion for each file.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show actions without modifying files.")] = False,
+    max_depth: Annotated[
+        int,
+        typer.Option(
+            "--max-depth",
+            min=1,
+            help="Maximum directory depth to explore under each scan root (default: 6).",
+        ),
+    ] = 6,
+) -> None:
+    """Detect AGENTS.md/CLAUDE.md files and append the latest Agent Mail + Beads blurbs."""
+
+    snippet = _combined_doc_snippet()
+    roots = [path.expanduser().resolve() for path in scan_dir if path] if scan_dir else _default_scan_roots()
+    roots = [path for path in roots if path.exists() and path.is_dir()]
+    if not roots:
+        console.print("[red]Error:[/red] No valid scan directories were provided.")
+        raise typer.Exit(code=1)
+
+    console.print("[cyan]Scanning for AGENTS.md / CLAUDE.md files in:[/cyan]")
+    for root in roots:
+        console.print(f"  • {root}")
+
+    candidates = _collect_doc_candidates(roots, max_depth=max_depth)
+    if not candidates:
+        console.print(
+            "[yellow]No AGENTS.md or CLAUDE.md files found. Provide additional roots with --scan-dir.[/yellow]"
+        )
+        return
+
+    table = Table(title="Detected Agent Instructions", show_lines=False)
+    table.add_column("#", justify="right")
+    table.add_column("File")
+    table.add_column("Project")
+    table.add_column("Status")
+    for idx, candidate in enumerate(candidates, start=1):
+        status = "has snippet" if candidate.has_snippet else "needs snippet"
+        table.add_row(str(idx), candidate.path.name, str(candidate.path.parent), status)
+    console.print(table)
+
+    inserted = 0
+    skipped = 0
+    for candidate in candidates:
+        if candidate.has_snippet:
+            console.print(f"[dim]Skipping {candidate.path} (snippet already present).[/dim]")
+            continue
+        prompt = (
+            f"Insert Agent Mail + Beads snippet into {candidate.path}?"
+        )
+        if not yes and not typer.confirm(prompt, default=True):
+            skipped += 1
+            console.print(f"[yellow]Skipped {candidate.path}[/yellow]")
+            continue
+        if dry_run:
+            console.print(f"[yellow]Dry run:[/yellow] would insert snippet into {candidate.path}")
+        else:
+            _append_snippet_to_doc(candidate.path, snippet)
+            console.print(f"[green]Inserted snippet into {candidate.path}[/green]")
+            inserted += 1
+
+    if dry_run:
+        console.print("\n[dim]Dry run complete. Rerun without --dry-run to apply the changes.[/dim]")
+    else:
+        console.print(
+            f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); "
+            "other files already had the snippet."
+        )
 
 
 if __name__ == "__main__":

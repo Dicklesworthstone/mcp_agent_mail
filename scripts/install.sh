@@ -23,6 +23,10 @@ START_ONLY=0
 PROJECT_DIR=""
 INTEGRATION_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
 HTTP_PORT_OVERRIDE=""
+SKIP_BEADS=0
+BEADS_INSTALL_URL="https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh"
+SUMMARY_LINES=()
+LAST_BD_VERSION=""
 
 usage() {
   cat <<EOF
@@ -32,6 +36,7 @@ Options:
   --dir DIR              Clone/use repo at DIR (default: ./mcp_agent_mail)
   --branch NAME          Git branch to clone (default: main)
   --port PORT            HTTP server port (default: 8765); sets HTTP_PORT in .env
+  --skip-beads           Do not install the Beads (bd) CLI automatically
   -y, --yes              Non-interactive; assume Yes where applicable
   --no-start             Do not run integration/start; just set up venv + deps
   --start-only           Skip clone/setup; run integration/start in current repo
@@ -63,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --project-dir=*) PROJECT_DIR="${1#*=}" ;;
     --token) shift; INTEGRATION_TOKEN="${1:-}" ;;
     --token=*) INTEGRATION_TOKEN="${1#*=}" ;;
+    --skip-beads) SKIP_BEADS=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
   esac
@@ -88,16 +94,154 @@ err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || return 1; }
 
+record_summary() {
+  SUMMARY_LINES+=("$1")
+}
+
+print_summary() {
+  if [[ ${#SUMMARY_LINES[@]} -eq 0 ]]; then
+    return 0
+  fi
+  echo
+  info "Installation summary"
+  local line
+  for line in "${SUMMARY_LINES[@]}"; do
+    echo "  - ${line}"
+  done
+}
+
+find_bd_binary() {
+  if command -v bd >/dev/null 2>&1; then
+    command -v bd
+    return 0
+  fi
+
+  local candidates=("${HOME}/.local/bin/bd" "${HOME}/bin/bd" "/usr/local/bin/bd")
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+maybe_add_bd_path() {
+  local binary_path="$1"
+  local dir
+  dir=$(dirname "${binary_path}")
+  if [[ ":${PATH}:" != *":${dir}:"* ]]; then
+    export PATH="${dir}:${PATH}"
+    ok "Temporarily added ${dir} to PATH so this session can invoke 'bd' immediately"
+  fi
+}
+
+append_path_snippet() {
+  local dir="$1"
+  local rc_file="$2"
+  if [[ -z "${rc_file}" ]]; then
+    return 1
+  fi
+
+  local marker="# >>> MCP Agent Mail bd path ${dir}"
+  if [[ -f "${rc_file}" ]] && grep -Fq "${marker}" "${rc_file}"; then
+    return 0
+  fi
+
+  if ! touch "${rc_file}" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  {
+    printf '\n%s\n' "${marker}"
+    printf 'if [[ ":\\$PATH:" != *":%s:"* ]]; then\n' "${dir}"
+    printf '  export PATH="%s:\\$PATH"\n' "${dir}"
+    printf 'fi\n'
+    printf '# <<< MCP Agent Mail bd path\n'
+  } >> "${rc_file}"
+
+  ok "Added ${dir} to PATH via ${rc_file}"
+  return 0
+}
+
+persist_bd_path() {
+  local binary_path="$1"
+  local dir
+  dir=$(dirname "${binary_path}")
+
+  local shell_name=""
+  if [[ -n "${SHELL:-}" ]]; then
+    shell_name=$(basename "${SHELL}")
+  fi
+
+  local -a rc_candidates=()
+  if [[ "${shell_name}" == "zsh" ]]; then
+    rc_candidates+=("~/.zshrc")
+  elif [[ "${shell_name}" == "bash" ]]; then
+    rc_candidates+=("~/.bashrc")
+  fi
+  rc_candidates+=("~/.bashrc" "~/.zshrc" "~/.profile")
+
+  local appended=0
+  declare -A seen_rc=()
+  local rc
+  for rc in "${rc_candidates[@]}"; do
+    [[ -n "${rc}" ]] || continue
+    local rc_path
+    rc_path="${rc/#~/${HOME}}"
+    if [[ -z "${rc_path}" ]]; then
+      continue
+    fi
+    if [[ -n "${seen_rc["${rc_path}"]:-}" ]]; then
+      continue
+    fi
+    seen_rc["${rc_path}"]=1
+    if append_path_snippet "${dir}" "${rc_path}"; then
+      appended=1
+      break
+    fi
+  done
+
+  if [[ "${appended}" -eq 0 ]]; then
+    warn "Could not persist PATH update automatically; ensure ${dir} is in your PATH."
+  fi
+}
+
+ensure_bd_path_ready() {
+  local binary_path="$1"
+  maybe_add_bd_path "${binary_path}"
+  persist_bd_path "${binary_path}"
+}
+
+verify_bd_binary() {
+  local binary_path="$1"
+  if ! "${binary_path}" version >/dev/null 2>&1; then
+    err "Beads CLI at ${binary_path} failed 'bd version'. You can retry or rerun the installer with --skip-beads to handle it yourself."
+    return 1
+  fi
+
+  local version_line
+  version_line=$("${binary_path}" version 2>/dev/null | head -n 1 || true)
+  if [[ -z "${version_line}" ]]; then
+    version_line="bd version command succeeded"
+  fi
+  LAST_BD_VERSION="${version_line}"
+  ok "Beads CLI ready (${version_line})"
+}
+
 ensure_uv() {
   if need_cmd uv; then
     ok "uv is already installed"
+    record_summary "uv: already installed"
     return 0
   fi
   info "Installing uv (Astral)"
   if ! need_cmd curl; then err "curl is required to install uv"; exit 1; fi
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="${HOME}/.local/bin:${PATH}"
-  if need_cmd uv; then ok "uv installed"; else err "uv install failed"; exit 1; fi
+  if need_cmd uv; then ok "uv installed"; record_summary "uv: installed"; else err "uv install failed"; exit 1; fi
 }
 
 ensure_repo() {
@@ -108,6 +252,7 @@ ensure_repo() {
   if [[ -f "pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' pyproject.toml 2>/dev/null; then
     REPO_DIR="$PWD"
     ok "Using existing repo at: ${REPO_DIR}"
+    record_summary "Repo: existing at ${REPO_DIR}"
     return 0
   fi
 
@@ -115,6 +260,7 @@ ensure_repo() {
   if [[ -d "${CLONE_DIR}" ]] && [[ -f "${CLONE_DIR}/pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' "${CLONE_DIR}/pyproject.toml" 2>/dev/null; then
     REPO_DIR="${CLONE_DIR}"
     ok "Using existing repo at: ${REPO_DIR}"
+    record_summary "Repo: existing at ${REPO_DIR}"
     return 0
   fi
 
@@ -124,6 +270,7 @@ ensure_repo() {
   git clone --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${CLONE_DIR}"
   REPO_DIR="${CLONE_DIR}"
   ok "Cloned repo"
+  record_summary "Repo: cloned into ${REPO_DIR}"
 }
 
 ensure_python_and_venv() {
@@ -132,8 +279,10 @@ ensure_python_and_venv() {
   if [[ ! -d "${REPO_DIR}/.venv" ]]; then
     (cd "${REPO_DIR}" && uv venv -p 3.14)
     ok "Created venv at ${REPO_DIR}/.venv"
+    record_summary "Venv: created at ${REPO_DIR}/.venv"
   else
     ok "Found existing venv at ${REPO_DIR}/.venv"
+    record_summary "Venv: existing at ${REPO_DIR}/.venv"
   fi
 }
 
@@ -146,6 +295,7 @@ sync_deps() {
     uv sync
   )
   ok "Dependencies installed"
+  record_summary "Dependencies: uv sync complete"
 }
 
 configure_port() {
@@ -213,6 +363,7 @@ configure_port() {
 
   trap - EXIT INT TERM
   ok "HTTP_PORT set to ${HTTP_PORT_OVERRIDE}"
+  record_summary "HTTP port: ${HTTP_PORT_OVERRIDE}"
 }
 
 run_integration_and_start() {
@@ -233,21 +384,98 @@ run_integration_and_start() {
   )
 }
 
+ensure_beads() {
+  if [[ "${SKIP_BEADS}" -eq 1 ]]; then
+    warn "--skip-beads specified; not installing Beads CLI"
+    record_summary "Beads CLI: skipped (--skip-beads)"
+    return 0
+  fi
+
+  local bd_path
+  if bd_path=$(find_bd_binary); then
+    verify_bd_binary "${bd_path}" || exit 1
+    ensure_bd_path_ready "${bd_path}"
+    record_summary "Beads CLI: ${LAST_BD_VERSION}"
+    return 0
+  fi
+
+  info "Installing Beads (bd) CLI"
+  if ! need_cmd curl; then
+    err "curl is required to install Beads automatically"
+    exit 1
+  fi
+
+  if ! curl -fsSL "${BEADS_INSTALL_URL}" | bash; then
+    err "Failed to install Beads automatically. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
+    exit 1
+  fi
+
+  hash -r 2>/dev/null || true
+
+  if bd_path=$(find_bd_binary); then
+    verify_bd_binary "${bd_path}" || exit 1
+    ensure_bd_path_ready "${bd_path}"
+    record_summary "Beads CLI: ${LAST_BD_VERSION}"
+    return 0
+  fi
+
+  err "Beads installer finished but 'bd' was not detected. Ensure its install directory is on PATH or rerun with --skip-beads to handle installation manually."
+  exit 1
+}
+
+offer_doc_blurbs() {
+  if [[ "${YES}" -eq 1 ]]; then
+    info "Docs helper available anytime via: uv run python -m mcp_agent_mail.cli docs insert-blurbs"
+    return 0
+  fi
+
+  echo
+  echo "Would you like to automatically detect your code projects and insert the relevant blurbs for Agent Mail into your AGENTS.md and CLAUDE.md files?"
+  echo "You will be able to confirm for each detecting project if you want to do that. Otherwise, just skip that, but be sure to add the blurbs yourself manually for the system to work properly."
+  read -r -p "[y/N] " doc_choice
+  doc_choice=$(printf '%s' "${doc_choice}" | tr -d '[:space:]')
+  case "${doc_choice}" in
+    y|Y)
+      (
+        cd "${REPO_DIR}" && uv run python -m mcp_agent_mail.cli docs insert-blurbs
+      ) || warn "Docs helper encountered an issue. You can rerun it later with: uv run python -m mcp_agent_mail.cli docs insert-blurbs"
+      ;;
+    *)
+      info "Skipping automatic doc updates; remember to add the blurbs manually."
+      ;;
+  esac
+}
+
 main() {
   if [[ "${START_ONLY}" -eq 1 ]]; then
     info "--start-only specified: skipping clone/setup; starting integration"
     REPO_DIR="$PWD"
+    record_summary "Repo: existing at ${REPO_DIR} (--start-only)"
+    ensure_beads
     configure_port
-    run_integration_and_start
+    if ! run_integration_and_start; then
+      err "Integration failed; aborting."
+      exit 1
+    fi
+    record_summary "Integration: auto-detect + server start"
+    print_summary
+    offer_doc_blurbs
     exit 0
   fi
 
   ensure_uv
+  ensure_beads
   ensure_repo
   ensure_python_and_venv
   sync_deps
   configure_port
-  run_integration_and_start
+  if ! run_integration_and_start; then
+    err "Integration failed; aborting."
+    exit 1
+  fi
+  record_summary "Integration: auto-detect + server start"
+  print_summary
+  offer_doc_blurbs
 
   echo
   ok "All set!"
@@ -258,5 +486,3 @@ main() {
 }
 
 main "$@"
-
-
