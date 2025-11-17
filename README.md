@@ -64,8 +64,12 @@ What this does:
 - Runs the auto-detect integration to wire up supported agent tools
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
 - Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
+- Installs/updates, verifies, and wires the Beads `bd` CLI into your PATH via its official curl installer so the task planner is ready out of the box (pass `--skip-beads` to opt out or install manually)
+- Prints a short on-exit summary of each setup step so you immediately know what changed
 
 Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, `--port <number>`, or `--token <hex>`.
+
+Already have Beads installed or want to handle it yourself? Append `--skip-beads` to the installer command to bypass the automatic `bd` setup and PATH wiring.
 
 **Port conflicts?** Use `--port` to specify a different port (default: 8765):
 
@@ -109,6 +113,7 @@ uv run python -m mcp_agent_mail.cli config set-port 9000
 ```
 
 ## Ready-Made Blurb to Add to Your AGENTS.md or CLAUDE.md Files:
+<!-- BEGIN_AGENT_MAIL_SNIPPET -->
 ```
 ## MCP Agent Mail: coordination for multi-agent workflows
 
@@ -142,6 +147,7 @@ Common pitfalls
 - "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 ```
+<!-- END_AGENT_MAIL_SNIPPET -->
 
 ## Integrating with Beads (dependency-aware task planning)
 
@@ -154,6 +160,7 @@ Highlights:
 
 Copy/paste blurb for agent-facing docs (leave as-is for reuse):
 
+<!-- BEGIN_BEADS_SNIPPET -->
 ```
 
 ## Integrating with Beads (dependency-aware task planning)
@@ -194,6 +201,9 @@ Pitfalls to avoid
 - Always include `bd-###` in message `thread_id` to avoid ID drift across tools.
 
 ```
+<!-- END_BEADS_SNIPPET -->
+
+Prefer automation? Run `uv run python -m mcp_agent_mail.cli docs insert-blurbs` to scan your code directories for `AGENTS.md`/`CLAUDE.md` files and append the latest Agent Mail + Beads snippets with per-project confirmation. The installer also offers to launch this helper right after setup so you can take care of onboarding docs immediately.
 
 ## Core ideas (at a glance)
 
