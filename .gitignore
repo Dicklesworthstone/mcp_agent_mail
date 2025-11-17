@@ -222,3 +222,8 @@ out/
 # Cryptographic signing keys (Ed25519 key pairs for bundle signing)
 signing-*.key
 signing-*.pub
+
+# Claude Code sensitive configs (contain bearer tokens)
+.mcp.json
+.claude/settings*.json
+scripts/run_server_with_token.sh

@@ -254,6 +254,28 @@ if command -v claude >/dev/null 2>&1; then
   (cd "${TARGET_DIR}" && claude mcp add --transport http --scope project mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}") || true
 fi
 
+# Create/update project-scoped .mcp.json for Claude Code 2025
+log_step "Creating project-scoped .mcp.json"
+MCP_JSON_PATH="${TARGET_DIR}/.mcp.json"
+if [[ -f "$MCP_JSON_PATH" ]]; then
+  backup_file "$MCP_JSON_PATH"
+fi
+write_atomic "$MCP_JSON_PATH" <<JSON
+{
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "${_URL}",
+      "headers": {
+        "Authorization": "Bearer ${_TOKEN}"
+      }
+    }
+  }
+}
+JSON
+set_secure_file "$MCP_JSON_PATH" || true
+log_ok "Created/updated ${MCP_JSON_PATH}"
+
 log_step "Bootstrapping project and agent on server"
 if [[ $_curl_rc -ne 0 ]]; then
   log_warn "Skipping bootstrap: server not reachable (ensure_project/register_agent)."
