@@ -16,6 +16,7 @@ class Project(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     slug: str = Field(index=True, unique=True, max_length=255)
     human_key: str = Field(max_length=255, index=True)
+    display_name: Optional[str] = Field(default=None, max_length=128)  # User-editable name; defaults to last folder segment
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Product(SQLModel, table=True):

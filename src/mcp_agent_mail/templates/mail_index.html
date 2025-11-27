@@ -82,8 +82,8 @@
       </div>
       <div class="space-y-2">
         <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Active Agents</p>
-        <p class="text-4xl font-bold text-slate-400 dark:text-slate-500 stat-number">—</p>
-        <p class="text-sm text-slate-500 dark:text-slate-500">Metrics coming soon</p>
+        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">{{ projects|sum(attribute='agent_count') }}</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Across all projects</p>
       </div>
     </div>
 
@@ -98,8 +98,8 @@
       </div>
       <div class="space-y-2">
         <p class="text-sm font-semibold text-slate-600 dark:text-slate-400 uppercase tracking-wide">Total Messages</p>
-        <p class="text-4xl font-bold text-slate-400 dark:text-slate-500 stat-number">—</p>
-        <p class="text-sm text-slate-500 dark:text-slate-500">Metrics coming soon</p>
+        <p class="text-4xl font-bold text-slate-900 dark:text-white stat-number">{{ projects|sum(attribute='message_count') }}</p>
+        <p class="text-sm text-slate-500 dark:text-slate-500">Across all projects</p>
       </div>
     </div>
   </div>
@@ -166,7 +166,7 @@
            data-anim-delay="{{ [loop.index0 * 0.05, 1.0]|min }}"
            data-project-card="true"
            data-project-id="{{ p.id }}"
-           data-project-search="{{ (p.human_key ~ ' ' ~ p.slug)|lower }}">
+           data-project-search="{{ (p.display_name ~ ' ' ~ p.human_key ~ ' ' ~ p.slug)|lower }}">
 
           <!-- Decorative gradient blob -->
           <div class="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-primary-500/10 to-purple-500/10 rounded-full blur-3xl group-hover:scale-150 transition-transform duration-500 pointer-events-none"></div>
@@ -184,10 +184,43 @@
             </div>
           </div>
 
-          <!-- Project Name -->
-          <h3 class="relative text-xl font-bold text-slate-900 dark:text-white mb-3 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2 min-h-[3.5rem]">
-            {{ p.human_key }}
-          </h3>
+          <!-- Project Name with edit capability -->
+          <div class="relative mb-3" x-data="{ editing: false, newName: '{{ p.display_name|e }}' }">
+            <h3 x-show="!editing"
+                class="text-xl font-bold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-2 min-h-[3.5rem] cursor-default"
+                data-tippy-content="Full path: {{ p.human_key }}"
+                @dblclick.prevent.stop="editing = true; $nextTick(() => $refs.nameInput.focus())">
+              {{ p.display_name }}
+              <button @click.prevent.stop="editing = true; $nextTick(() => $refs.nameInput.focus())"
+                      class="ml-2 opacity-0 group-hover:opacity-60 hover:!opacity-100 inline-flex items-center text-slate-400 hover:text-primary-500 transition-all"
+                      data-tippy-content="Click to rename">
+                <i data-lucide="pencil" class="w-3.5 h-3.5"></i>
+              </button>
+            </h3>
+            <div x-show="editing" x-cloak class="flex items-center gap-2" @click.stop>
+              <input type="text"
+                     x-ref="nameInput"
+                     x-model="newName"
+                     @keydown.enter.prevent="
+                       fetch('/api/projects/{{ p.id }}/display-name', {
+                         method: 'POST',
+                         headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({ display_name: newName })
+                       }).then(r => r.json()).then(data => {
+                         if (data.effective_name) {
+                           $el.closest('[data-project-card]').querySelector('h3').textContent = data.effective_name;
+                           window.showToast && window.showToast('Name updated', 'success', 2000);
+                         }
+                         editing = false;
+                       }).catch(() => { editing = false; });
+                     "
+                     @keydown.escape.prevent="editing = false"
+                     @blur="editing = false"
+                     class="flex-1 px-2 py-1 text-lg font-bold bg-white dark:bg-slate-700 border-2 border-primary-500 rounded-lg text-slate-900 dark:text-white focus:outline-none"
+                     maxlength="128"
+                     placeholder="Project name..." />
+            </div>
+          </div>
 
           <!-- Project Meta -->
           <div class="relative space-y-3 mb-6">
@@ -208,16 +241,26 @@
           <!-- Project Stats -->
           <div class="relative pt-6 border-t border-slate-200 dark:border-slate-700">
             <div class="flex items-center justify-between text-sm">
-              <div class="flex items-center gap-2 text-slate-600 dark:text-slate-400">
-                <div class="flex -space-x-2">
-                  <div class="w-7 h-7 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full border-2 border-white dark:border-slate-800 flex items-center justify-center" data-tippy-content="Agents">
-                    <i data-lucide="users" class="w-3.5 h-3.5 text-white"></i>
+              <div class="flex items-center gap-3 text-slate-600 dark:text-slate-400">
+                <div class="flex items-center gap-1.5">
+                  <div class="w-6 h-6 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center" data-tippy-content="Agents">
+                    <i data-lucide="users" class="w-3 h-3 text-white"></i>
                   </div>
-                  <div class="w-7 h-7 bg-gradient-to-br from-purple-500 to-purple-600 rounded-full border-2 border-white dark:border-slate-800 flex items-center justify-center" data-tippy-content="Messages">
-                    <i data-lucide="mail" class="w-3.5 h-3.5 text-white"></i>
-                  </div>
+                  <span class="text-xs font-semibold">{{ p.agent_count }}</span>
                 </div>
-                <span class="text-xs font-medium">0 agents • 0 msgs</span>
+                <div class="flex items-center gap-1.5">
+                  <div class="w-6 h-6 bg-gradient-to-br from-purple-500 to-purple-600 rounded-full flex items-center justify-center" data-tippy-content="Messages">
+                    <i data-lucide="mail" class="w-3 h-3 text-white"></i>
+                  </div>
+                  <span class="text-xs font-semibold">{{ p.message_count }}</span>
+                </div>
+                <!-- 7-day Activity Sparkline -->
+                <div class="flex items-end gap-0.5 h-4 ml-2" data-tippy-content="7-day activity">
+                  {% for val in p.sparkline %}
+                  <div class="w-1 rounded-t bg-gradient-to-t from-primary-400 to-primary-600 transition-all duration-300"
+                       style="height: {{ [((val / ([p.sparkline|max, 1]|max)) * 100)|round, 10]|max if val > 0 else 4 }}%;"></div>
+                  {% endfor %}
+                </div>
               </div>
               <div class="flex items-center gap-2 text-primary-600 dark:text-primary-400 font-medium group-hover:gap-3 transition-all duration-300">
                 <span class="text-xs">Open</span>

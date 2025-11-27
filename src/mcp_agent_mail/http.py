@@ -10,7 +10,7 @@ import importlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -1021,6 +1021,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             loader=FileSystemLoader(str(templates_root)),
             autoescape=select_autoescape(["html", "xml"]),
             enable_async=True,
+            auto_reload=True,  # Reload templates when source file changes
         )
         # HTML sanitizer (allow safe images and limited CSS)
         _css_sanitizer = (
@@ -1255,18 +1256,70 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         )
 
                     if include_projects:
+                        # Enhanced query with agent/message counts and last activity
                         rows = await session.execute(
-                            text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                            text("""
+                                SELECT
+                                    p.id, p.slug, p.human_key, p.display_name, p.created_at,
+                                    COUNT(DISTINCT a.id) as agent_count,
+                                    COUNT(DISTINCT m.id) as message_count,
+                                    MAX(COALESCE(a.last_active_ts, m.created_ts)) as last_activity
+                                FROM projects p
+                                LEFT JOIN agents a ON a.project_id = p.id
+                                LEFT JOIN messages m ON m.project_id = p.id
+                                GROUP BY p.id, p.slug, p.human_key, p.display_name, p.created_at
+                                ORDER BY p.created_at DESC
+                            """)
                         )
+
+                        # Get 7-day sparkline data for all projects
+                        sparkline_rows = await session.execute(
+                            text("""
+                                SELECT
+                                    project_id,
+                                    DATE(created_ts) as day,
+                                    COUNT(*) as msg_count
+                                FROM messages
+                                WHERE created_ts >= DATE('now', '-7 days')
+                                GROUP BY project_id, DATE(created_ts)
+                                ORDER BY project_id, day
+                            """)
+                        )
+
+                        # Build sparkline map: project_id -> [day0_count, day1_count, ..., day6_count]
+                        today = datetime.now().date()
+                        sparkline_map: dict[int, list[int]] = {}
+                        for sr in sparkline_rows.fetchall():
+                            pid = int(sr[0])
+                            day_str = sr[1]
+                            count = int(sr[2])
+                            if pid not in sparkline_map:
+                                sparkline_map[pid] = [0] * 7
+                            # Calculate day index (0 = 6 days ago, 6 = today)
+                            day_date = datetime.strptime(day_str, "%Y-%m-%d").date() if isinstance(day_str, str) else day_str
+                            day_index = (day_date - (today - timedelta(days=6))).days
+                            if 0 <= day_index < 7:
+                                sparkline_map[pid][day_index] = count
+
                         for r in rows.fetchall():
                             project_id = int(r[0])
                             siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
+                            human_key = r[2]
+                            display_name = r[3]
+                            # Default display_name to last folder segment if not set
+                            if not display_name:
+                                display_name = human_key.rstrip("/").split("/")[-1] if human_key else human_key
                             projects.append(
                                 {
                                     "id": project_id,
                                     "slug": r[1],
-                                    "human_key": r[2],
-                                    "created_at": str(r[3]),
+                                    "human_key": human_key,
+                                    "display_name": display_name,
+                                    "created_at": str(r[4]),
+                                    "agent_count": int(r[5]) if r[5] else 0,
+                                    "message_count": int(r[6]) if r[6] else 0,
+                                    "last_activity": str(r[7]) if r[7] else None,
+                                    "sparkline": sparkline_map.get(project_id, [0] * 7),
                                     "confirmed_siblings": siblings.get("confirmed", []),
                                     "suggested_siblings": siblings.get("suggested", []),
                                 }
@@ -1308,19 +1361,72 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             await refresh_project_sibling_suggestions()
             sibling_map = await get_project_sibling_data()
             async with get_session() as session:
+                # Main query with agent/message counts and last activity
                 rows = await session.execute(
-                    text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                    text("""
+                        SELECT
+                            p.id, p.slug, p.human_key, p.display_name, p.created_at,
+                            COUNT(DISTINCT a.id) as agent_count,
+                            COUNT(DISTINCT m.id) as message_count,
+                            MAX(COALESCE(a.last_active_ts, m.created_ts)) as last_activity
+                        FROM projects p
+                        LEFT JOIN agents a ON a.project_id = p.id
+                        LEFT JOIN messages m ON m.project_id = p.id
+                        GROUP BY p.id, p.slug, p.human_key, p.display_name, p.created_at
+                        ORDER BY p.created_at DESC
+                    """)
                 )
+
+                # Get 7-day sparkline data for all projects
+                sparkline_rows = await session.execute(
+                    text("""
+                        SELECT
+                            project_id,
+                            DATE(created_ts) as day,
+                            COUNT(*) as msg_count
+                        FROM messages
+                        WHERE created_ts >= DATE('now', '-7 days')
+                        GROUP BY project_id, DATE(created_ts)
+                        ORDER BY project_id, day
+                    """)
+                )
+
+                # Build sparkline map: project_id -> [day0_count, day1_count, ..., day6_count]
+                from datetime import datetime, timedelta
+                today = datetime.now().date()
+                sparkline_map: dict[int, list[int]] = {}
+                for sr in sparkline_rows.fetchall():
+                    pid = int(sr[0])
+                    day_str = sr[1]
+                    count = int(sr[2])
+                    if pid not in sparkline_map:
+                        sparkline_map[pid] = [0] * 7
+                    # Calculate day index (0 = 6 days ago, 6 = today)
+                    day_date = datetime.strptime(day_str, "%Y-%m-%d").date() if isinstance(day_str, str) else day_str
+                    day_index = (day_date - (today - timedelta(days=6))).days
+                    if 0 <= day_index < 7:
+                        sparkline_map[pid][day_index] = count
+
                 projects = []
                 for r in rows.fetchall():
                     project_id = int(r[0])
                     siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
+                    human_key = r[2]
+                    display_name = r[3]
+                    # Default display_name to last folder segment if not set
+                    if not display_name:
+                        display_name = human_key.rstrip("/").split("/")[-1] if human_key else human_key
                     projects.append(
                         {
                             "id": project_id,
                             "slug": r[1],
-                            "human_key": r[2],
-                            "created_at": str(r[3]),
+                            "human_key": human_key,
+                            "display_name": display_name,
+                            "created_at": str(r[4]),
+                            "agent_count": int(r[5]) if r[5] else 0,
+                            "message_count": int(r[6]) if r[6] else 0,
+                            "last_activity": str(r[7]) if r[7] else None,
+                            "sparkline": sparkline_map.get(project_id, [0] * 7),
                             "confirmed_siblings": siblings.get("confirmed", []),
                             "suggested_siblings": siblings.get("suggested", []),
                         }
@@ -1451,6 +1557,62 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 )
 
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
+
+        @fastapi_app.post("/api/projects/{project_id}/display-name", response_class=JSONResponse)
+        async def update_project_display_name(project_id: int, request: Request) -> JSONResponse:
+            """Update a project's display name."""
+            try:
+                payload = await request.json()
+            except Exception:
+                payload = {}
+
+            display_name = payload.get("display_name")
+            if display_name is not None:
+                display_name = str(display_name).strip()
+                if len(display_name) > 128:
+                    return JSONResponse(
+                        {"error": "Display name must be 128 characters or less"},
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    )
+                # Empty string means reset to default (None)
+                if display_name == "":
+                    display_name = None
+
+            try:
+                async with get_session() as session:
+                    result = await session.execute(
+                        text("SELECT id, slug, human_key FROM projects WHERE id = :pid"),
+                        {"pid": project_id},
+                    )
+                    row = result.fetchone()
+                    if not row:
+                        return JSONResponse({"error": "Project not found"}, status_code=status.HTTP_404_NOT_FOUND)
+
+                    await session.execute(
+                        text("UPDATE projects SET display_name = :name WHERE id = :pid"),
+                        {"name": display_name, "pid": project_id},
+                    )
+                    await session.commit()
+
+                    # Return the effective display name (computed if null)
+                    human_key = row[2]
+                    effective_name = display_name or (human_key.rstrip("/").split("/")[-1] if human_key else human_key)
+
+                    return JSONResponse({
+                        "id": project_id,
+                        "display_name": display_name,
+                        "effective_name": effective_name,
+                    })
+            except Exception as exc:
+                structlog.get_logger("project").exception(
+                    "project.update_display_name_failed",
+                    project_id=project_id,
+                    error=str(exc),
+                )
+                return JSONResponse(
+                    {"error": "Unable to update display name"},
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
         async def unified_inbox(limit: int = 10000, filter_importance: str | None = None) -> HTMLResponse:

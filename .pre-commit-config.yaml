@@ -1,0 +1,36 @@
+# Global Pre-Commit Configuration Template
+# This file is automatically copied to new repositories via git init/clone
+# Customize per-project by editing the local .pre-commit-config.yaml
+
+repos:
+  - repo: local
+    hooks:
+      - id: megalinter
+        name: MegaLinter (KellerAI Flavor)
+        entry: mega-linter-runner
+        args: ["--flavor", "kellerai_megalinter", "--filesonly"]
+        language: system
+        pass_filenames: false
+        stages: [commit]
+        verbose: true
+
+# Alternative: Use official MegaLinter pre-commit hook
+# Uncomment below to use official hook instead of local mega-linter-runner
+#
+# repos:
+#   - repo: https://github.com/oxsecurity/megalinter
+#     rev: v9.1.0
+#     hooks:
+#       - id: megalinter-incremental
+#         args: ["--flavor", "kellerai_megalinter"]
+#         stages: [commit]
+
+# To install in a repository:
+# 1. Ensure .pre-commit-config.yaml exists (auto-copied from this template)
+# 2. Run: pre-commit install
+#
+# To skip for a specific commit:
+# git commit --no-verify -m "message"
+#
+# To update hooks:
+# pre-commit autoupdate
