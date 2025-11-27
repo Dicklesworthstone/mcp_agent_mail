@@ -1,0 +1,358 @@
+/**
+ * KellerAI Theme - Design Token System
+ *
+ * This file defines all CSS custom properties (design tokens) for the KellerAI
+ * design system. Covers colors, typography, spacing, sizing, and base element styles.
+ *
+ * Based on: Sentinel Research design system
+ * Last Updated: 2025-11-27
+ */
+
+/* ============================================================================
+   ROOT DESIGN TOKENS - All CSS Variables
+   ============================================================================ */
+
+:root {
+  /* ─────────────────────────────────────────────────────────────────────────
+     Background Colors
+     ───────────────────────────────────────────────────────────────────────── */
+  --bg-primary: #0a0a0b;      /* Main background */
+  --bg-secondary: #111113;    /* Secondary background */
+  --bg-tertiary: #1a1a1d;     /* Tertiary background (code, inputs, tables) */
+  --bg-card: #16161a;         /* Card background */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Text Colors
+     ───────────────────────────────────────────────────────────────────────── */
+  --text-primary: #fafafa;    /* Primary text (headings, body) */
+  --text-secondary: #a1a1aa;  /* Secondary text (meta, labels) */
+  --text-muted: #71717a;      /* Muted text (placeholders, hints) */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Accent Colors
+     ───────────────────────────────────────────────────────────────────────── */
+  --accent-cyan: #22d3ee;     /* Primary accent (links, CTAs) */
+  --accent-emerald: #34d399;  /* Success/positive (badges, success states) */
+  --accent-amber: #fbbf24;    /* Warning/attention (alerts) */
+  --accent-rose: #fb7185;     /* Error/destructive (error states) */
+  --accent-violet: #a78bfa;   /* Interactive/secondary (focus states) */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Border & Glow Colors
+     ───────────────────────────────────────────────────────────────────────── */
+  --border-subtle: rgba(255, 255, 255, 0.06);  /* Subtle borders (1px) */
+  --border-medium: rgba(255, 255, 255, 0.1);   /* Medium borders (interactive) */
+  --glow-cyan: rgba(34, 211, 238, 0.15);       /* Cyan glow at 15% opacity */
+  --glow-emerald: rgba(52, 211, 153, 0.15);    /* Emerald glow at 15% opacity */
+  --glow-amber: rgba(251, 191, 36, 0.15);      /* Amber glow at 15% opacity */
+  --glow-rose: rgba(251, 113, 133, 0.15);      /* Rose glow at 15% opacity */
+  --glow-violet: rgba(167, 139, 250, 0.15);    /* Violet glow at 15% opacity */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Typography - Font Families
+     ───────────────────────────────────────────────────────────────────────── */
+  --font-display: 'Instrument Serif', Georgia, serif;
+  --font-body: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Monaco', 'Courier New', monospace;
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Typography - Scale & Styling
+     ───────────────────────────────────────────────────────────────────────── */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  --line-height-tight: 1.2;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.6;
+
+  --letter-spacing-tight: -0.02em;
+  --letter-spacing-normal: 0;
+  --letter-spacing-wide: 0.02em;
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Spacing System (8px base)
+     ───────────────────────────────────────────────────────────────────────── */
+  --space-xs: 0.25rem;    /* 4px */
+  --space-sm: 0.5rem;     /* 8px */
+  --space-md: 1rem;       /* 16px */
+  --space-lg: 1.5rem;     /* 24px */
+  --space-xl: 2rem;       /* 32px */
+  --space-2xl: 3rem;      /* 48px */
+  --space-3xl: 4rem;      /* 64px */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Sizing System
+     ───────────────────────────────────────────────────────────────────────── */
+  --touch-target: 48px;           /* Minimum touch target size */
+  --border-radius-sm: 4px;        /* Small rounded corners */
+  --border-radius-md: 8px;        /* Medium rounded corners */
+  --border-radius-lg: 12px;       /* Large rounded corners */
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Transitions & Animations
+     ───────────────────────────────────────────────────────────────────────── */
+  --transition-fast: 0.2s ease-in-out;
+  --transition-normal: 0.3s ease-in-out;
+  --transition-slow: 0.5s ease-in-out;
+
+  /* ─────────────────────────────────────────────────────────────────────────
+     Shadows
+     ───────────────────────────────────────────────────────────────────────── */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
+}
+
+/* ============================================================================
+   BASE ELEMENT STYLES
+   ============================================================================ */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-relaxed);
+  color: var(--text-primary);
+  background-color: var(--bg-primary);
+  letter-spacing: var(--letter-spacing-normal);
+  transition: background-color var(--transition-fast);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Headings - Responsive with clamp()
+   ───────────────────────────────────────────────────────────────────────── */
+
+h1 {
+  font-family: var(--font-display);
+  font-size: clamp(1.5rem, 3vw, 3.5rem);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-tight);
+  margin-bottom: var(--space-lg);
+  letter-spacing: var(--letter-spacing-tight);
+}
+
+h2 {
+  font-family: var(--font-display);
+  font-size: clamp(1.25rem, 2.5vw, 3rem);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-tight);
+  margin-bottom: var(--space-md);
+  margin-top: var(--space-2xl);
+  letter-spacing: var(--letter-spacing-tight);
+}
+
+h3 {
+  font-family: var(--font-body);
+  font-size: 1.125rem;
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-normal);
+  margin-bottom: var(--space-md);
+  margin-top: var(--space-lg);
+}
+
+h4 {
+  font-size: 1rem;
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-normal);
+  margin-bottom: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+h5 {
+  font-size: 0.875rem;
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-sm);
+}
+
+h6 {
+  font-size: 0.75rem;
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-sm);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-wide);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Paragraph & Text
+   ───────────────────────────────────────────────────────────────────────── */
+
+p {
+  margin-bottom: var(--space-md);
+  line-height: var(--line-height-relaxed);
+}
+
+p:last-child {
+  margin-bottom: 0;
+}
+
+small {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+strong {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+em {
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Links
+   ───────────────────────────────────────────────────────────────────────── */
+
+a {
+  color: var(--accent-cyan);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+  cursor: pointer;
+}
+
+a:hover {
+  color: var(--accent-cyan);
+  text-decoration: underline;
+}
+
+a:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+a:active {
+  opacity: 0.8;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Lists
+   ───────────────────────────────────────────────────────────────────────── */
+
+ul,
+ol {
+  margin-bottom: var(--space-md);
+  margin-left: var(--space-lg);
+  line-height: var(--line-height-relaxed);
+}
+
+li {
+  margin-bottom: var(--space-sm);
+}
+
+ul li {
+  list-style-type: disc;
+}
+
+ol li {
+  list-style-type: decimal;
+}
+
+ul ul,
+ol ul {
+  list-style-type: circle;
+  margin-bottom: 0;
+}
+
+ol ol,
+ul ol {
+  list-style-type: lower-alpha;
+  margin-bottom: 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Horizontal Rule
+   ───────────────────────────────────────────────────────────────────────── */
+
+hr {
+  border: none;
+  height: 1px;
+  background-color: var(--border-subtle);
+  margin: var(--space-2xl) 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Selection Styling
+   ───────────────────────────────────────────────────────────────────────── */
+
+::selection {
+  background-color: var(--accent-cyan);
+  color: var(--bg-primary);
+}
+
+::-moz-selection {
+  background-color: var(--accent-cyan);
+  color: var(--bg-primary);
+}
+
+/* ============================================================================
+   UTILITIES
+   ============================================================================ */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ============================================================================
+   PRINT STYLES
+   ============================================================================ */
+
+@media print {
+  body {
+    background-color: white;
+    color: black;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  h1,
+  h2,
+  h3 {
+    break-after: avoid;
+  }
+
+  p {
+    orphans: 3;
+    widows: 3;
+  }
+}
+
+/* ============================================================================
+   ACCESSIBILITY - Reduced Motion
+   ============================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
