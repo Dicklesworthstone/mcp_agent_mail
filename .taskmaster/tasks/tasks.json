@@ -3,46 +3,212 @@
     {
       "id": 1,
       "tag": "master",
-      "title": "Apply KellerAI Theme to Agent Mail Interface",
-      "description": "Apply KellerAI theme system to the agent mail interface. Implement consistent design tokens, colors, typography, and components across mail_index.html and mail_unified_inbox.html templates to match the look-and-feel of other KellerAI sites.",
+      "title": "Create theme.css with Design Tokens",
+      "description": "Define all CSS variables for colors, typography, spacing, and sizing. Implement base element styles and reset/normalize.",
       "status": "pending",
       "priority": "high",
       "dependencies": [],
-      "details": "Audit current HTML templates, define KellerAI design tokens (colors, fonts, spacing, shadows), apply design system to template styles, ensure responsive design compatibility, validate against other KellerAI sites.",
-      "testStrategy": "Visual inspection, responsive testing across breakpoints, brand guideline validation",
+      "details": "Create CSS custom properties for all design tokens from the PRD. Include color palette (backgrounds, text, accents), typography (font families, scales), spacing system, and sizing. Implement base body, heading, and link styles.",
+      "testStrategy": "Verify all CSS variables defined in :root. Test color accuracy against Sentinel Research reference. Validate contrast ratios (WCAG AA).",
       "subtasks": [
-        {
-          "id": "1.1",
-          "title": "Research KellerAI design system and tokens",
-          "status": "pending"
-        },
-        {
-          "id": "1.2",
-          "title": "Create CSS variable definitions for theme",
-          "status": "pending"
-        },
-        {
-          "id": "1.3",
-          "title": "Update mail_index.html with KellerAI styling",
-          "status": "pending"
-        },
-        {
-          "id": "1.4",
-          "title": "Update mail_unified_inbox.html with KellerAI styling",
-          "status": "pending"
-        },
-        {
-          "id": "1.5",
-          "title": "Test responsive design across breakpoints",
-          "status": "pending"
-        },
-        {
-          "id": "1.6",
-          "title": "Validate against brand guidelines",
-          "status": "pending"
-        }
+        {"id": "1.1", "title": "Define color token variables", "status": "pending", "notes": "Create :root CSS variables: --bg-primary, --bg-secondary, --bg-tertiary, --bg-card, --text-primary, --text-secondary, --text-muted, --accent-cyan, --accent-emerald, --accent-amber, --accent-rose, --accent-violet, --border-subtle, --border-medium, and glow color variants"},
+        {"id": "1.2", "title": "Define typography token variables", "status": "pending", "notes": "Create font-family variables: --font-display (Instrument Serif), --font-body (DM Sans), --font-mono (JetBrains Mono). Define letter-spacing and line-height base values"},
+        {"id": "1.3", "title": "Define spacing and sizing tokens", "status": "pending", "notes": "Create spacing scale: --space-xs (0.25rem) through --space-3xl (4rem). Create sizing tokens: --touch-target (48px), --border-radius-sm/md/lg"},
+        {"id": "1.4", "title": "Implement base element styles (body, h1-h6, p, a)", "status": "pending", "notes": "Set body defaults (font, line-height), heading hierarchy with clamp() for responsive sizing, paragraph spacing, link colors with hover states"},
+        {"id": "1.5", "title": "Test color accuracy and contrast ratios", "status": "pending", "notes": "Verify against Sentinel Research reference colors. Validate WCAG AA contrast (4.5:1 for normal text, 3:1 for large text)"}
+      ]
+    },
+    {
+      "id": 2,
+      "tag": "master",
+      "title": "Create components.css - Buttons & Cards",
+      "description": "Style button and card components according to KellerAI design system with hover, active, and focus states.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1],
+      "details": "Implement button component with transparent default, hover (glow transition), active (solid border), focus (2px outline). Create card component with bg-card background, subtle border, 1.5rem padding, and hover lift effect.",
+      "testStrategy": "Verify button states render correctly. Test card hover transforms at 0.2s. Ensure touch targets are 48px minimum.",
+      "subtasks": [
+        {"id": "2.1", "title": "Implement button default state", "status": "pending", "notes": "Button element: transparent bg, accent color text, no border, inherit font. Min 48px height. Cursor pointer"},
+        {"id": "2.2", "title": "Implement button hover/active/focus states", "status": "pending", "notes": "Hover: glow bg with 0.2s transition. Active: solid accent border. Focus: 2px cyan outline with 2px offset. Disabled: opacity 0.5, pointer-events none"},
+        {"id": "2.3", "title": "Implement card component base styles", "status": "pending", "notes": "Card: bg-card background, 1px border-subtle, 12px border-radius, 1.5rem padding. Box-shadow subtle elevation"},
+        {"id": "2.4", "title": "Implement card hover transform and transition", "status": "pending", "notes": "Hover: translateY(-2px), border changes to border-medium, 0.2s transition. Cursor pointer for interactive cards"},
+        {"id": "2.5", "title": "Test button and card component states", "status": "pending", "notes": "Verify all states render, transitions smooth. Test on touch devices (hover states). Validate 48px minimum"}
+      ]
+    },
+    {
+      "id": 3,
+      "tag": "master",
+      "title": "Create components.css - Badges, Code Blocks, Forms",
+      "description": "Style badge (pill-shaped labels), code block (syntax highlighting), and form input components.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1],
+      "details": "Badges: inline-flex, bg-tertiary, rounded 100px, mono font 0.75rem. Code blocks: bg-tertiary, border, 1.5rem padding, overflow-x auto, cyan text. Forms: tertiary bg, subtle border, focus on border-medium, min 48px height.",
+      "testStrategy": "Verify badge pill shape and spacing. Test code block scrolling on small screens. Validate input focus states and touch targets.",
+      "subtasks": [
+        {"id": "3.1", "title": "Implement badge component", "status": "pending", "notes": "Badge (span/inline): display inline-flex, bg-tertiary, 1px border-medium, 0.5rem/1rem padding, 100px border-radius, mono font 0.75rem, accent-emerald text"},
+        {"id": "3.2", "title": "Implement code block component", "status": "pending", "notes": "Pre/code: bg-tertiary, 1px border-subtle, 8px border-radius, 1.5rem padding, overflow-x auto, font-mono, accent-cyan text. Preserve whitespace"},
+        {"id": "3.3", "title": "Implement form input components", "status": "pending", "notes": "Input/textarea/select: bg-tertiary, 1px border-subtle, 8px border-radius, 0.75rem/1rem padding, inherit font. Min 48px height for touch"},
+        {"id": "3.4", "title": "Implement form focus and validation states", "status": "pending", "notes": "Focus: border-medium, 2px cyan outline. Invalid: border-rose, text-rose feedback. Placeholder: text-muted. Label: display block, font-weight 600, margin-bottom 0.5rem"},
+        {"id": "3.5", "title": "Test form components across browsers", "status": "pending", "notes": "Test input types (text, email, password, textarea, select). Verify placeholder visibility. Check accessibility (labels associated)"}
+      ]
+    },
+    {
+      "id": 4,
+      "tag": "master",
+      "title": "Create components.css - Tables & Advanced Components",
+      "description": "Style table component with headers, rows, and responsive behavior. Add support for advanced component patterns.",
+      "status": "pending",
+      "priority": "medium",
+      "dependencies": [1],
+      "details": "Table: wrapper border/radius, header bg-tertiary with uppercase labels, 1rem cell padding, cyan code text. Responsive: overflow-x auto on small screens. Add support for data tables, sortable headers, and row highlighting.",
+      "testStrategy": "Verify table structure and styling. Test overflow behavior. Validate header and cell spacing.",
+      "subtasks": [
+        {"id": "4.1", "title": "Implement table wrapper and header styles", "status": "pending", "notes": "Table wrapper: 1px border-subtle, 12px border-radius, overflow hidden. Thead: bg-tertiary, uppercase labels (0.75rem), letter-spacing. Sticky header on scroll"},
+        {"id": "4.2", "title": "Implement table row and cell styles", "status": "pending", "notes": "Tr: border-bottom border-subtle. Td/th: 1rem padding, text-left. Alternate row: bg-secondary (subtle). Code in tables: accent-cyan"},
+        {"id": "4.3", "title": "Implement table responsive overflow", "status": "pending", "notes": "Desktop: default rendering. Tablet/Mobile: wrapper with overflow-x auto. Min-width on table. Horizontal scrollbar styling"},
+        {"id": "4.4", "title": "Test table styling across content", "status": "pending", "notes": "Test with various content (long text, code, numbers). Verify overflow on small screens. Check accessibility (scope on headers)"}
+      ]
+    },
+    {
+      "id": 5,
+      "tag": "master",
+      "title": "Create layout.css - Navigation & Fixed Header",
+      "description": "Style fixed navigation bar with logo, links, and backdrop blur. Implement z-index stacking and responsive behavior.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1, 2],
+      "details": "Nav: fixed top, z-index 100, backdrop blur 20px, bg with transparency. Logo: mono font, cyan color. Links: flex layout, 2rem gap, 48px min-height, hover to primary text. Responsive: hide links on mobile.",
+      "testStrategy": "Verify nav fixed positioning and z-index. Test backdrop blur rendering. Validate logo and link styling.",
+      "subtasks": [
+        {"id": "5.1", "title": "Implement fixed navigation positioning", "status": "pending", "notes": "Nav: position fixed, top 0, left 0, right 0, z-index 100, width 100%, padding 1rem 2rem. Min-height 4rem. Border-bottom border-subtle. Safe-area-inset-top for notch devices"},
+        {"id": "5.2", "title": "Implement backdrop blur effect", "status": "pending", "notes": "Background: rgba(10, 10, 11, 0.8) with backdrop-filter blur(20px). Optional: supports() fallback solid bg"},
+        {"id": "5.3", "title": "Implement logo and nav link styles", "status": "pending", "notes": "Logo: mono font, accent-cyan color, font-weight 600. Links: flex layout, 2rem gap, min-height 48px, text-secondary with hover to text-primary, 0.2s transition"},
+        {"id": "5.4", "title": "Implement responsive nav behavior", "status": "pending", "notes": "Desktop: logo left, links right (flex space-between). Tablet/Mobile: logo left, hamburger right, links hidden (or drawer). Adjust padding for viewport"}
+      ]
+    },
+    {
+      "id": 6,
+      "tag": "master",
+      "title": "Create layout.css - Inbox Grid & Message Layout",
+      "description": "Implement responsive grid layout for message cards. Support auto-fit columns with 280px minimum width.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [2, 5],
+      "details": "Cards grid: display grid, auto-fit columns, 280px minmax, 1.5rem gap. Desktop: two-column (sidebar + messages), Tablet/Mobile: full-width single column. Top padding 5rem for fixed nav.",
+      "testStrategy": "Verify grid layout on desktop/tablet/mobile. Test card sizing and gap. Validate responsive column count.",
+      "subtasks": [
+        {"id": "6.1", "title": "Implement cards grid base styles", "status": "pending", "notes": "Grid: display grid, grid-template-columns repeat(auto-fit, minmax(280px, 1fr)), gap 1.5rem, padding 2rem"},
+        {"id": "6.2", "title": "Implement desktop sidebar layout", "status": "pending", "notes": "Desktop 2-column: sidebar 25% (width 300px max), messages 75%. Flex layout. Sidebar: filters, labels, settings sections"},
+        {"id": "6.3", "title": "Implement responsive grid behavior", "status": "pending", "notes": "Tablet: single-column grid. Mobile: full-width cards. Hide sidebar. Add top padding 5rem (fixed nav). Adjust for safe-area-inset"},
+        {"id": "6.4", "title": "Test inbox layout on all breakpoints", "status": "pending", "notes": "Test at 320px, 768px, 1024px. Verify grid columns change. Check sidebar visibility toggle. Validate spacing"}
+      ]
+    },
+    {
+      "id": 7,
+      "tag": "master",
+      "title": "Create layout.css - Thread View & Sidebar",
+      "description": "Implement thread view container with max-width centering and sidebar layout. Support sticky sidebar on desktop.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [5, 6],
+      "details": "Thread: max-width 900px, centered, consistent spacing. Desktop: two-column layout with sticky sidebar (25%). Tablet/Mobile: single column, sidebar below or toggleable. Responsive padding: 2rem desktop, 1rem mobile.",
+      "testStrategy": "Verify max-width and centering. Test two-column layout. Validate responsive single column on mobile.",
+      "subtasks": [
+        {"id": "7.1", "title": "Implement thread view container", "status": "pending", "notes": "Main: max-width 900px, margin auto, padding 2rem desktop / 1rem mobile. Message cards: bg-card, border-subtle, 1.5rem padding, margin-bottom 1.5rem. Sequential layout"},
+        {"id": "7.2", "title": "Implement desktop sidebar layout", "status": "pending", "notes": "Desktop: 2-column flex. Thread 75%, sidebar 25%. Sidebar: actions, info section. Gap 2rem"},
+        {"id": "7.3", "title": "Implement sticky sidebar behavior", "status": "pending", "notes": "Sidebar: position sticky, top 5rem (below nav), max-height calc(100vh - 5rem), overflow-y auto. Desktop only"},
+        {"id": "7.4", "title": "Implement responsive mobile layout", "status": "pending", "notes": "Tablet/Mobile: single column, sidebar below thread. Full-width content. Remove sticky positioning"},
+        {"id": "7.5", "title": "Test thread view on all breakpoints", "status": "pending", "notes": "Test message rendering, sidebar position, scrolling behavior. Check read/unread indicators. Validate spacing"}
+      ]
+    },
+    {
+      "id": 8,
+      "tag": "master",
+      "title": "Implement Responsive Breakpoints (Mobile & Tablet)",
+      "description": "Add media queries for mobile (<768px) and tablet (768px-1024px) breakpoints with appropriate layout adjustments.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [5, 6, 7],
+      "details": "Mobile: full-width layouts, single columns, hidden sidebars, reduced padding. Tablet: adaptive grid, sidebar toggleable, adjusted typography. Implement touch-friendly spacing and larger interaction targets.",
+      "testStrategy": "Test layout at 320px, 640px, 768px, 1024px viewports. Verify all elements responsive. Validate typography scaling.",
+      "subtasks": [
+        {"id": "8.1", "title": "Implement mobile breakpoint styles", "status": "pending", "notes": "@media (max-width: 640px): full-width layouts, single column, hide sidebars, reduce padding to 1rem, adjust h1-h2 sizes with clamp()"},
+        {"id": "8.2", "title": "Implement tablet breakpoint styles", "status": "pending", "notes": "@media (640px-1024px): adaptive grid (2 columns), toggleable sidebar, medium padding 1.5rem, adjust spacing"},
+        {"id": "8.3", "title": "Implement desktop breakpoint optimization", "status": "pending", "notes": "@media (min-width: 1024px): 2-column layouts, sidebar visible, full padding 2rem, maximize spacing"},
+        {"id": "8.4", "title": "Test responsive layout across viewports", "status": "pending", "notes": "Test at 320px, 480px, 640px, 768px, 1024px, 1440px. Verify font scaling, grid changes, sidebar visibility"}
+      ]
+    },
+    {
+      "id": 9,
+      "tag": "master",
+      "title": "Apply KellerAI Theme to mail_index.html",
+      "description": "Update mail_index.html template with new KellerAI styling. Replace inline styles with CSS classes and design tokens.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1, 2, 3, 4, 5, 6],
+      "details": "Update HTML to use new CSS classes. Apply theme colors, typography, and spacing. Ensure semantic HTML. Update component classes to match new component.css naming. Validate that all design tokens are utilized.",
+      "testStrategy": "Verify all elements styled correctly. Test visual appearance matches mockups. Validate HTML semantic structure.",
+      "subtasks": [
+        {"id": "9.1", "title": "Update mail_index.html template structure", "status": "pending", "notes": "Review existing HTML, identify sections (nav, header, content). Update semantic structure (proper heading hierarchy, nav landmark). Remove old inline styles"},
+        {"id": "9.2", "title": "Apply new CSS classes and design tokens", "status": "pending", "notes": "Add link to theme.css, components.css, layout.css. Apply button/card/badge classes. Replace colors with CSS variables. Add responsive classes"},
+        {"id": "9.3", "title": "Verify all elements styled correctly", "status": "pending", "notes": "Check navigation appearance, header styling, content spacing. Verify buttons, cards, typography. Test links and interactive elements"},
+        {"id": "9.4", "title": "Test mail_index.html appearance", "status": "pending", "notes": "Visual regression test against Sentinel Research. Test on desktop, tablet, mobile. Validate all colors match tokens"}
+      ]
+    },
+    {
+      "id": 10,
+      "tag": "master",
+      "title": "Apply KellerAI Theme to mail_unified_inbox.html",
+      "description": "Update mail_unified_inbox.html template with new KellerAI styling. Apply component styles and responsive layout.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1, 2, 3, 4, 5, 6, 7, 8],
+      "details": "Update HTML structure. Apply new CSS classes. Style inbox grid, message cards, sidebar. Ensure responsive layout works on all breakpoints. Apply all design tokens consistently.",
+      "testStrategy": "Verify grid layout and card styling. Test responsiveness. Validate visual appearance.",
+      "subtasks": [
+        {"id": "10.1", "title": "Update mail_unified_inbox.html template", "status": "pending", "notes": "Review existing HTML structure. Update semantic markup. Remove old inline styles. Ensure proper hierarchy (nav, sidebar, main content area)"},
+        {"id": "10.2", "title": "Apply inbox grid layout", "status": "pending", "notes": "Apply layout.css classes for 2-column desktop (sidebar + grid). Add responsive behavior. Apply padding/margin tokens consistently"},
+        {"id": "10.3", "title": "Apply message card styling", "status": "pending", "notes": "Apply card component styles to message cards. Add badge for labels. Ensure 280px min-width. Verify hover states. Apply accent colors for read/unread"},
+        {"id": "10.4", "title": "Test unified inbox appearance and responsiveness", "status": "pending", "notes": "Test desktop (2-column), tablet (single grid), mobile (full-width). Verify cards resize properly. Check sidebar toggle. Visual regression test"}
+      ]
+    },
+    {
+      "id": 11,
+      "tag": "master",
+      "title": "Implement Accessibility & Motion Preferences",
+      "description": "Add focus state styling, prefers-reduced-motion support, high contrast mode, and accessibility features.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [1, 2, 3, 4, 5],
+      "details": "Focus states: 2px cyan outline with 2px offset on all interactive elements. prefers-reduced-motion: disable animations and transitions. High contrast: increase borders and outlines. Semantic HTML validation.",
+      "testStrategy": "Test focus visibility on all interactive elements. Verify prefers-reduced-motion works. Test with screen readers. Validate color contrast (WCAG AA).",
+      "subtasks": [
+        {"id": "11.1", "title": "Implement focus state styling", "status": "pending", "notes": "*:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }. Apply to buttons, links, inputs, cards. Ensure 3:1 contrast minimum"},
+        {"id": "11.2", "title": "Implement prefers-reduced-motion support", "status": "pending", "notes": "@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }. Remove all transitions/animations for motion-sensitive users"},
+        {"id": "11.3", "title": "Test color contrast ratios", "status": "pending", "notes": "Use contrast checker tool. Verify text on backgrounds >= 4.5:1. Large text >= 3:1. Interactive elements >= 3:1. Test on desktop and mobile"},
+        {"id": "11.4", "title": "Validate semantic HTML and accessibility", "status": "pending", "notes": "Check heading hierarchy (h1>h2>h3). Verify form labels associated. ARIA labels where needed. Tab order logical. Run accessibility audit (WAVE, axe)"}
+      ]
+    },
+    {
+      "id": 12,
+      "tag": "master",
+      "title": "Visual Regression Testing & Quality Assurance",
+      "description": "Comprehensive testing across browsers, devices, and scenarios. Verify no regressions from previous implementation.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [9, 10, 11],
+      "details": "Browser testing: Chrome, Firefox, Safari. Device testing: mobile, tablet, desktop. Visual regression: compare against Sentinel Research reference. Performance: verify <16ms frame rate. Accessibility: full audit.",
+      "testStrategy": "Screenshot testing on multiple devices. Performance profiling. Accessibility audit with WCAG AA. Cross-browser compatibility check.",
+      "subtasks": [
+        {"id": "12.1", "title": "Perform browser compatibility testing", "status": "pending", "notes": "Test Chrome, Firefox, Safari (latest versions). Check CSS features support (grid, flexbox, backdrop-filter). Verify fallbacks work. Test on Windows, macOS, Linux"},
+        {"id": "12.2", "title": "Test responsive design on real devices", "status": "pending", "notes": "Test iPhone SE, iPad Air, MacBook Air, Android (Galaxy S24, Pixel). Check touch interactions, tap targets, viewport meta. Test portrait/landscape"},
+        {"id": "12.3", "title": "Perform visual regression testing", "status": "pending", "notes": "Compare screenshots against Sentinel Research reference. Use Percy or similar tool. Capture at desktop (1440px), tablet (768px), mobile (375px). Document any differences"},
+        {"id": "12.4", "title": "Verify performance metrics", "status": "pending", "notes": "Measure: FCP <1.8s, LCP <2.5s, CLS <0.1, FID <100ms. Check frame rate (60fps animations). CSS parsing time <50ms. No layout thrashing"},
+        {"id": "12.5", "title": "Final accessibility audit", "status": "pending", "notes": "Run WAVE, axe, Lighthouse. Fix all errors. Document and resolve warnings. Test with keyboard navigation. Test with screen reader (NVDA/JAWS)"}
       ]
     }
   ],
-  "nextId": 2
+  "nextId": 13
 }
