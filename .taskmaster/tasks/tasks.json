@@ -1,0 +1,48 @@
+{
+  "tasks": [
+    {
+      "id": 1,
+      "tag": "master",
+      "title": "Apply KellerAI Theme to Agent Mail Interface",
+      "description": "Apply KellerAI theme system to the agent mail interface. Implement consistent design tokens, colors, typography, and components across mail_index.html and mail_unified_inbox.html templates to match the look-and-feel of other KellerAI sites.",
+      "status": "pending",
+      "priority": "high",
+      "dependencies": [],
+      "details": "Audit current HTML templates, define KellerAI design tokens (colors, fonts, spacing, shadows), apply design system to template styles, ensure responsive design compatibility, validate against other KellerAI sites.",
+      "testStrategy": "Visual inspection, responsive testing across breakpoints, brand guideline validation",
+      "subtasks": [
+        {
+          "id": "1.1",
+          "title": "Research KellerAI design system and tokens",
+          "status": "pending"
+        },
+        {
+          "id": "1.2",
+          "title": "Create CSS variable definitions for theme",
+          "status": "pending"
+        },
+        {
+          "id": "1.3",
+          "title": "Update mail_index.html with KellerAI styling",
+          "status": "pending"
+        },
+        {
+          "id": "1.4",
+          "title": "Update mail_unified_inbox.html with KellerAI styling",
+          "status": "pending"
+        },
+        {
+          "id": "1.5",
+          "title": "Test responsive design across breakpoints",
+          "status": "pending"
+        },
+        {
+          "id": "1.6",
+          "title": "Validate against brand guidelines",
+          "status": "pending"
+        }
+      ]
+    }
+  ],
+  "nextId": 2
+}
