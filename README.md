@@ -206,6 +206,69 @@ Pitfalls to avoid
 
 Prefer automation? Run `uv run python -m mcp_agent_mail.cli docs insert-blurbs` to scan your code directories for `AGENTS.md`/`CLAUDE.md` files and append the latest Agent Mail + Beads snippets with per-project confirmation. The installer also offers to launch this helper right after setup so you can take care of onboarding docs immediately.
 
+## Beads Viewer (bv) — AI-Friendly Task Analysis
+
+The Beads Viewer (`bv`) is a fast terminal UI for Beads projects that also provides **robot flags** designed specifically for AI agent integration. Project: [Dicklesworthstone/beads_viewer](https://github.com/Dicklesworthstone/beads_viewer)
+
+### Why bv for Agents?
+
+While `bd` (Beads CLI) handles task CRUD operations, `bv` provides **precomputed graph analytics** that help agents make intelligent prioritization decisions:
+
+- **PageRank scores**: Identify high-impact tasks that unblock the most downstream work
+- **Critical path analysis**: Find the longest dependency chain to completion
+- **Cycle detection**: Spot circular dependencies before they cause deadlocks
+- **Parallel track planning**: Determine which tasks can run concurrently
+
+Instead of agents parsing `.beads/beads.jsonl` directly or attempting to compute graph metrics (risking hallucinated results), they can call bv's deterministic robot flags and get JSON output they can trust.
+
+### Robot Flags for AI Integration
+
+| Flag | Output | Agent Use Case |
+|------|--------|----------------|
+| `bv --robot-help` | All AI-facing commands | Discovery / capability check |
+| `bv --robot-insights` | PageRank, betweenness, HITS, critical path, cycles | Quick triage: "What's most impactful?" |
+| `bv --robot-plan` | Parallel tracks, items per track, unblocks lists | Execution planning: "What can run in parallel?" |
+| `bv --robot-priority` | Priority recommendations with reasoning + confidence | Task selection: "What should I work on next?" |
+| `bv --robot-recipes` | Available filter presets (actionable, blocked, etc.) | Workflow setup: "Show me ready work" |
+| `bv --robot-diff --diff-since <ref>` | Changes since commit/date, new/closed items, cycles | Progress tracking: "What changed?" |
+
+### Example: Agent Task Selection Workflow
+
+```bash
+# 1. Get priority recommendations with reasoning
+bv --robot-priority
+# Returns JSON with ranked tasks, impact scores, and confidence levels
+
+# 2. Check what completing a task would unblock
+bv --robot-plan
+# Returns parallel tracks showing dependency chains
+
+# 3. After completing work, check what changed
+bv --robot-diff --diff-since "1 hour ago"
+# Returns new items, closed items, cycle changes
+```
+
+### When to Use bv vs bd
+
+| Tool | Best For |
+|------|----------|
+| `bd` | Creating, updating, closing tasks; `bd ready` for simple "what's next" |
+| `bv` | Graph analysis, impact assessment, parallel planning, change tracking |
+
+**Rule of thumb**: Use `bd` for task operations, use `bv` for task intelligence.
+
+### Integration with Agent Mail
+
+Combine bv insights with Agent Mail coordination:
+
+1. **Agent A** runs `bv --robot-priority` → identifies `bd-42` as highest-impact
+2. **Agent A** reserves files: `file_reservation_paths(..., reason="bd-42")`
+3. **Agent A** announces: `send_message(..., thread_id="bd-42", subject="[bd-42] Starting high-impact refactor")`
+4. **Other agents** see the reservation and Mail announcement, pick different tasks
+5. **Agent A** completes, runs `bv --robot-diff` to report downstream unblocks
+
+This creates a feedback loop where graph intelligence drives coordination.
+
 ## Core ideas (at a glance)
 
 - HTTP-only FastMCP server (Streamable HTTP). No SSE, no STDIO.
