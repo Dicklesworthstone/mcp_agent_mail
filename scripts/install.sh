@@ -24,9 +24,12 @@ PROJECT_DIR=""
 INTEGRATION_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
 HTTP_PORT_OVERRIDE=""
 SKIP_BEADS=0
+SKIP_BV=0
 BEADS_INSTALL_URL="https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh"
+BV_INSTALL_URL="https://raw.githubusercontent.com/Dicklesworthstone/beads_viewer/main/install.sh"
 SUMMARY_LINES=()
 LAST_BD_VERSION=""
+LAST_BV_VERSION=""
 
 usage() {
   cat <<EOF
@@ -37,6 +40,7 @@ Options:
   --branch NAME          Git branch to clone (default: main)
   --port PORT            HTTP server port (default: 8765); sets HTTP_PORT in .env
   --skip-beads           Do not install the Beads (bd) CLI automatically
+  --skip-bv              Do not install the Beads Viewer (bv) TUI automatically
   -y, --yes              Non-interactive; assume Yes where applicable
   --no-start             Do not run integration/start; just set up venv + deps
   --start-only           Skip clone/setup; run integration/start in current repo
@@ -69,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --token) shift; INTEGRATION_TOKEN="${1:-}" ;;
     --token=*) INTEGRATION_TOKEN="${1#*=}" ;;
     --skip-beads) SKIP_BEADS=1 ;;
+    --skip-bv) SKIP_BV=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
   esac
@@ -286,6 +291,51 @@ verify_bd_binary() {
   ok "Beads CLI ready (${version_line})"
 }
 
+find_bv_binary() {
+  if command -v bv >/dev/null 2>&1; then
+    command -v bv
+    return 0
+  fi
+
+  local candidates=("${HOME}/.local/bin/bv" "${HOME}/bin/bv" "/usr/local/bin/bv")
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+maybe_add_bv_path() {
+  local binary_path="$1"
+  local dir
+  dir=$(dirname "${binary_path}")
+  if [[ ":${PATH}:" != *":${dir}:"* ]]; then
+    export PATH="${dir}:${PATH}"
+    ok "Temporarily added ${dir} to PATH so this session can invoke 'bv' immediately"
+  fi
+}
+
+verify_bv_binary() {
+  local binary_path="$1"
+  if ! "${binary_path}" --version >/dev/null 2>&1; then
+    warn "Beads Viewer at ${binary_path} failed 'bv --version'"
+    return 1
+  fi
+
+  local version_line
+  version_line=$("${binary_path}" --version 2>/dev/null | head -n 1 || true)
+  if [[ -z "${version_line}" ]]; then
+    version_line="bv --version command succeeded"
+  fi
+  LAST_BV_VERSION="${version_line}"
+  ok "Beads Viewer ready (${version_line})"
+  return 0
+}
+
 ensure_uv() {
   if need_cmd uv; then
     ok "uv is already installed"
@@ -478,6 +528,56 @@ ensure_beads() {
   exit 1
 }
 
+ensure_bv() {
+  if [[ "${SKIP_BV}" -eq 1 ]]; then
+    warn "--skip-bv specified; not installing Beads Viewer"
+    record_summary "Beads Viewer: skipped (--skip-bv)"
+    return 0
+  fi
+
+  local bv_path
+  if bv_path=$(find_bv_binary); then
+    if verify_bv_binary "${bv_path}"; then
+      maybe_add_bv_path "${bv_path}"
+      record_summary "Beads Viewer: ${LAST_BV_VERSION}"
+    else
+      warn "Beads Viewer found but verification failed; continuing without bv"
+      record_summary "Beads Viewer: found but failed verification"
+    fi
+    return 0
+  fi
+
+  info "Installing Beads Viewer (bv) TUI (optional)"
+  if ! need_cmd curl; then
+    warn "curl not available; skipping Beads Viewer installation"
+    record_summary "Beads Viewer: skipped (no curl)"
+    return 0
+  fi
+
+  if ! curl -fsSL "${BV_INSTALL_URL}" | bash; then
+    warn "Beads Viewer installation failed (non-fatal). You can install manually via: curl -fsSL ${BV_INSTALL_URL} | bash"
+    record_summary "Beads Viewer: installation failed (optional)"
+    return 0
+  fi
+
+  hash -r 2>/dev/null || true
+
+  if bv_path=$(find_bv_binary); then
+    if verify_bv_binary "${bv_path}"; then
+      maybe_add_bv_path "${bv_path}"
+      record_summary "Beads Viewer: ${LAST_BV_VERSION}"
+    else
+      warn "Beads Viewer installed but verification failed"
+      record_summary "Beads Viewer: installed but failed verification"
+    fi
+    return 0
+  fi
+
+  warn "Beads Viewer installer finished but 'bv' was not detected. You can install manually via: curl -fsSL ${BV_INSTALL_URL} | bash"
+  record_summary "Beads Viewer: not detected after install (optional)"
+  return 0
+}
+
 offer_doc_blurbs() {
   if [[ "${YES}" -eq 1 ]]; then
     info "Docs helper available anytime via: uv run python -m mcp_agent_mail.cli docs insert-blurbs"
@@ -507,6 +607,7 @@ main() {
     REPO_DIR="$PWD"
     record_summary "Repo: existing at ${REPO_DIR} (--start-only)"
     ensure_beads
+    ensure_bv
     configure_port
     if ! run_integration_and_start; then
       err "Integration failed; aborting."
@@ -520,6 +621,7 @@ main() {
 
   ensure_uv
   ensure_beads
+  ensure_bv
   ensure_repo
   ensure_python_and_venv
   sync_deps
