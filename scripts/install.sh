@@ -138,6 +138,55 @@ maybe_add_bd_path() {
   fi
 }
 
+rewrite_path_snippet() {
+  local rc_file="$1"
+  local marker="$2"
+  local end_marker="$3"
+  local snippet="$4"
+
+  local tmp
+  tmp=$(mktemp "${rc_file}.XXXXXX") || return 1
+
+  local in_block=0
+  local replaced=0
+  local line
+
+  while IFS='' read -r line || [[ -n "${line}" ]]; do
+    if [[ "${in_block}" -eq 0 && "${line}" == "${marker}" ]]; then
+      printf '%s' "${snippet}" >> "${tmp}"
+      in_block=1
+      replaced=1
+      continue
+    fi
+
+    if [[ "${in_block}" -eq 1 ]]; then
+      if [[ "${line}" == "${end_marker}" ]]; then
+        in_block=0
+      fi
+      continue
+    fi
+
+    printf '%s\n' "${line}" >> "${tmp}"
+  done < "${rc_file}"
+
+  if [[ "${in_block}" -eq 1 ]]; then
+    rm -f "${tmp}"
+    return 1
+  fi
+
+  if [[ "${replaced}" -eq 0 ]]; then
+    rm -f "${tmp}"
+    return 1
+  fi
+
+  if ! mv "${tmp}" "${rc_file}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+
+  return 0
+}
+
 append_path_snippet() {
   local dir="$1"
   local rc_file="$2"
@@ -146,8 +195,18 @@ append_path_snippet() {
   fi
 
   local marker="# >>> MCP Agent Mail bd path ${dir}"
+  local end_marker="# <<< MCP Agent Mail bd path"
+  local snippet=""
+  printf -v snippet '%s\nif [[ ":$PATH:" != *":%s:"* ]]; then\n  export PATH="%s:$PATH"\nfi\n%s\n' \
+    "${marker}" "${dir}" "${dir}" "${end_marker}"
+
   if [[ -f "${rc_file}" ]] && grep -Fq "${marker}" "${rc_file}"; then
-    return 0
+    if rewrite_path_snippet "${rc_file}" "${marker}" "${end_marker}" "${snippet}"; then
+      ok "Updated ${dir} PATH snippet via ${rc_file}"
+      return 0
+    fi
+    warn "Existing PATH snippet in ${rc_file} could not be updated automatically"
+    return 1
   fi
 
   if ! touch "${rc_file}" >/dev/null 2>&1; then
@@ -155,11 +214,7 @@ append_path_snippet() {
   fi
 
   {
-    printf '\n%s\n' "${marker}"
-    printf 'if [[ ":\\$PATH:" != *":%s:"* ]]; then\n' "${dir}"
-    printf '  export PATH="%s:\\$PATH"\n' "${dir}"
-    printf 'fi\n'
-    printf '# <<< MCP Agent Mail bd path\n'
+    printf '\n%s' "${snippet}"
   } >> "${rc_file}"
 
   ok "Added ${dir} to PATH via ${rc_file}"
@@ -485,4 +540,6 @@ main() {
   echo "  bash scripts/run_server_with_token.sh"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
