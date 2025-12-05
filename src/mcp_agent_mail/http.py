@@ -946,7 +946,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
-                    with contextlib.suppress(Exception):
+                    # Cancel the server task instead of awaiting - it runs forever in stateless mode
+                    server_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await server_task
 
     # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
