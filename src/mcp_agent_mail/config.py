@@ -169,6 +169,11 @@ class Settings:
     messaging_auto_register_recipients: bool
     # When true, attempt a contact handshake automatically if delivery is blocked
     messaging_auto_handshake_on_block: bool
+    # Message notifications (run command on new messages for autonomous agent spawning)
+    webhook_enabled: bool
+    webhook_platform: str | None  # Platform to use: claude, gemini, codex, cursor (auto-generates command)
+    webhook_command: str | None  # Custom command (overrides webhook_platform if set)
+    webhook_passthrough: bool  # If true, pass stdout/stderr directly to server terminal
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -328,6 +333,10 @@ def get_settings() -> Settings:
         agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
         messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="true"), default=True),
         messaging_auto_handshake_on_block=_bool(_decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
+        webhook_enabled=_bool(_decouple_config("WEBHOOK_ENABLED", default="false"), default=False),
+        webhook_platform=_decouple_config("WEBHOOK_PLATFORM", default="") or None,
+        webhook_command=_decouple_config("WEBHOOK_COMMAND", default="") or None,
+        webhook_passthrough=_bool(_decouple_config("WEBHOOK_PASSTHROUGH", default="false"), default=False),
     )
 
 

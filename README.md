@@ -1760,6 +1760,20 @@ Install the guard into a code repo (conceptual tool call):
 }
 ```
 
+## Message Notifications
+
+Run a command when messages are delivered, enabling autonomous agent-to-agent communication.
+
+```bash
+# .env
+WEBHOOK_ENABLED=true
+WEBHOOK_COMMAND=claude --print -p "You are {recipient}. Check inbox in {project} and respond to {sender}."
+```
+
+**Placeholders:** `{recipient}`, `{project}`, `{message_id}`, `{subject}`, `{sender}`, `{thread_id}`, `{importance}` (all shell-escaped)
+
+Command runs once per recipient, non-blocking. Agents can spawn each other in a loop until task completion.
+
 ## Configuration
 
 Configuration is loaded from an existing `.env` via `python-decouple`. Do not use `os.getenv` or auto-dotenv loaders.
@@ -1892,6 +1906,8 @@ Common variables you may set:
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
 | `MESSAGING_AUTO_REGISTER_RECIPIENTS` | `true` | Automatically create missing local recipients during `send_message` and retry routing |
 | `MESSAGING_AUTO_HANDSHAKE_ON_BLOCK` | `true` | When contact policy blocks delivery, attempt a contact handshake (auto-accept) and retry |
+| `WEBHOOK_ENABLED` | `false` | Enable command execution on new messages |
+| `WEBHOOK_COMMAND` | | Shell command to run per recipient (supports {recipient}, {project}, {sender}, etc.) |
 | `TOOLS_LOG_ENABLED` | `true` | Log tool invocations for debugging |
 | `LOG_RICH_ENABLED` | `true` | Enable Rich console logging |
 | `LOG_INCLUDE_TRACE` | `false` | Include trace-level logs |

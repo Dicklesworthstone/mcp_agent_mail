@@ -193,6 +193,22 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
+def _run_migrations(connection) -> None:
+    """Run lightweight schema migrations for SQLite.
+
+    Since we don't use Alembic, this handles adding new columns to existing tables.
+    Each migration checks if the column exists before adding it.
+    """
+    # Migration: Add platform column to agents table (for per-agent webhook platforms)
+    try:
+        result = connection.exec_driver_sql("PRAGMA table_info(agents)")
+        columns = {row[1] for row in result.fetchall()}
+        if "platform" not in columns:
+            connection.exec_driver_sql("ALTER TABLE agents ADD COLUMN platform VARCHAR(32)")
+    except Exception:
+        pass  # Table might not exist yet, create_all will handle it
+
+
 @retry_on_db_lock(max_retries=5, base_delay=0.1, max_delay=5.0)
 async def ensure_schema(settings: Settings | None = None) -> None:
     """Ensure database schema exists (creates tables from SQLModel definitions).
@@ -200,7 +216,7 @@ async def ensure_schema(settings: Settings | None = None) -> None:
     This is the pure SQLModel approach:
     - Models define the schema
     - create_all() creates tables that don't exist yet
-    - For schema changes: delete the DB and regenerate (dev) or use Alembic (prod)
+    - _run_migrations() adds new columns to existing tables
 
     Also enables SQLite WAL mode for better concurrent access.
     """
@@ -218,6 +234,8 @@ async def ensure_schema(settings: Settings | None = None) -> None:
             # Pure SQLModel: create tables from metadata
             # (WAL mode is set automatically via event listener in _build_engine)
             await conn.run_sync(SQLModel.metadata.create_all)
+            # Run lightweight migrations for schema changes
+            await conn.run_sync(_run_migrations)
             # Setup FTS and custom indexes
             await conn.run_sync(_setup_fts)
         _schema_ready = True
