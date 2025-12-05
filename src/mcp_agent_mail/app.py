@@ -21,6 +21,10 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Optional, cast
 from urllib.parse import parse_qsl
+import os
+import shlex
+import subprocess
+import sys
 import uuid
 
 from fastmcp import Context, FastMCP
@@ -472,6 +476,152 @@ def _latest_git_activity(repo: Optional[Repo], matches: Sequence[Path]) -> Optio
     return max(commit_times)
 
 
+# Platform-specific webhook command templates
+# Each template uses placeholders: {recipient}, {project}, {sender}
+WEBHOOK_PLATFORM_COMMANDS: dict[str, str] = {
+    "claude": 'cd {project} && claude -p "You are {recipient}. Check your inbox and respond to the message from {sender}."',
+    "gemini": 'cd {project} && gemini --yolo "You are {recipient}. Check your inbox and respond to the message from {sender}."',
+    "codex": 'cd {project} && codex exec --full-auto "You are {recipient}. Check your inbox and respond to the message from {sender}."',
+}
+
+
+DEFAULT_WEBHOOK_PLATFORM = "claude"
+
+
+def _get_webhook_command(settings: Settings, agent_platform: str | None = None) -> str | None:
+    """Get the webhook command for a specific platform.
+
+    Priority order:
+    1. Custom WEBHOOK_COMMAND (always used if set)
+    2. Agent's platform setting
+    3. Global WEBHOOK_PLATFORM setting
+    4. Default: claude
+    """
+    # Custom command takes priority
+    if settings.webhook_command:
+        return settings.webhook_command
+    # Use agent's platform if set
+    if agent_platform:
+        platform = agent_platform.lower()
+        cmd = WEBHOOK_PLATFORM_COMMANDS.get(platform)
+        if cmd:
+            return cmd
+    # Fall back to global platform setting, then default to claude
+    platform = (settings.webhook_platform or DEFAULT_WEBHOOK_PLATFORM).lower()
+    return WEBHOOK_PLATFORM_COMMANDS.get(platform)
+
+
+async def _fire_webhook(recipients: list[str], project_key: str, payload: dict[str, Any]) -> None:
+    """Run webhook command for new message (best-effort, non-blocking).
+
+    Spawns a command for each recipient with placeholders substituted:
+    - {recipient}: Agent name receiving the message
+    - {project}: Project path
+    - {message_id}: Message ID
+    - {subject}: Message subject
+    - {sender}: Sender agent name
+    - {thread_id}: Thread ID (if any)
+    - {importance}: Message importance level
+
+    Each recipient's platform is looked up from their agent record.
+    Falls back to WEBHOOK_PLATFORM if agent has no platform set.
+    """
+    settings = get_settings()
+    if not settings.webhook_enabled:
+        return
+
+    # Look up project for agent queries
+    try:
+        project = await _get_project_by_identifier(project_key)
+    except Exception as e:
+        logger.warning(f"Webhook: failed to look up project '{project_key}': {e}")
+        return
+
+    for recipient in recipients:
+        try:
+            # Look up recipient's platform
+            agent_platform = None
+            try:
+                async with get_session() as session:
+                    result = await session.execute(
+                        select(Agent).where(
+                            Agent.project_id == project.id,
+                            func.lower(Agent.name) == recipient.lower()
+                        )
+                    )
+                    agent = result.scalars().first()
+                    if agent:
+                        agent_platform = getattr(agent, "platform", None)
+            except Exception as e:
+                logger.debug(f"Webhook: could not look up platform for {recipient}: {e}")
+
+            # Get webhook command for this recipient's platform
+            webhook_command = _get_webhook_command(settings, agent_platform)
+            if not webhook_command:
+                logger.debug(f"Webhook: no command configured for {recipient} (platform={agent_platform})")
+                continue
+
+            cmd = webhook_command.format(
+                recipient=shlex.quote(recipient),
+                project=shlex.quote(project_key),
+                message_id=payload.get("id", ""),
+                subject=shlex.quote(str(payload.get("subject", ""))),
+                sender=shlex.quote(str(payload.get("from", ""))),
+                thread_id=shlex.quote(str(payload.get("thread_id", ""))),
+                importance=shlex.quote(str(payload.get("importance", "normal"))),
+            )
+            logger.info(f"Webhook: executing command for {recipient} (platform={agent_platform or settings.webhook_platform}): {cmd}")
+            if settings.webhook_passthrough:
+                # Passthrough mode: run in background thread with inherited stdio
+                # Using subprocess.Popen directly for better terminal handling
+                def run_passthrough():
+                    try:
+                        # Try to open /dev/tty for direct terminal access
+                        try:
+                            tty = open("/dev/tty", "r+b", buffering=0)
+                            subprocess.Popen(
+                                cmd,
+                                shell=True,
+                                stdin=tty,
+                                stdout=tty,
+                                stderr=tty,
+                            )
+                            # Don't close tty - let subprocess use it
+                        except (OSError, FileNotFoundError):
+                            # Fallback: inherit from parent process
+                            subprocess.Popen(cmd, shell=True)
+                    except Exception as e:
+                        logger.warning(f"Webhook passthrough failed for {recipient}: {e}")
+
+                loop = asyncio.get_event_loop()
+                loop.run_in_executor(None, run_passthrough)
+                logger.info(f"Webhook for {recipient} spawned in passthrough mode")
+            else:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                # Fire and forget - but log any immediate errors
+                asyncio.create_task(_log_webhook_result(recipient, proc))
+        except Exception as e:
+            logger.warning(f"Webhook command failed for {recipient}: {e}")
+
+
+async def _log_webhook_result(recipient: str, proc: asyncio.subprocess.Process) -> None:
+    """Log webhook subprocess result (fire-and-forget helper)."""
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode != 0:
+            logger.warning(f"Webhook for {recipient} exited with code {proc.returncode}: {stderr.decode()[:500]}")
+        else:
+            logger.info(f"Webhook for {recipient} completed successfully")
+    except asyncio.TimeoutError:
+        logger.info(f"Webhook for {recipient} still running (detached)")
+    except Exception as e:
+        logger.warning(f"Webhook result logging failed for {recipient}: {e}")
+
+
 def _project_workspace_path(project: Project) -> Optional[Path]:
     try:
         candidate = Path(project.human_key).expanduser()
@@ -623,6 +773,7 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "last_active_ts": _iso(agent.last_active_ts),
         "project_id": agent.project_id,
         "attachments_policy": getattr(agent, "attachments_policy", "auto"),
+        "platform": getattr(agent, "platform", None),
     }
 
 
@@ -1508,6 +1659,26 @@ async def _create_agent_record(
         return agent
 
 
+def _infer_platform(program: str, model: str) -> str | None:
+    """Infer webhook platform from agent's program and model fields.
+
+    Maps common program/model names to their webhook platforms.
+    Returns None if no match found.
+    """
+    # Check both program and model (some CLIs use generic program names)
+    combined = f"{program} {model}".lower()
+
+    if "claude" in combined:
+        return "claude"
+    if "gemini" in combined:
+        return "gemini"
+    if "codex" in combined:
+        return "codex"
+    if "gpt" in combined or "openai" in combined:
+        return "codex"  # OpenAI models likely use Codex CLI
+    return None
+
+
 async def _get_or_create_agent(
     project: Project,
     name: Optional[str],
@@ -1515,9 +1686,14 @@ async def _get_or_create_agent(
     model: str,
     task_description: str,
     settings: Settings,
+    platform: Optional[str] = None,
 ) -> Agent:
     if project.id is None:
         raise ValueError("Project must have an id before creating agents.")
+
+    # Auto-detect platform from program/model if not explicitly provided
+    if not platform:
+        platform = _infer_platform(program, model)
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
@@ -1552,6 +1728,8 @@ async def _get_or_create_agent(
             agent.model = model
             agent.task_description = task_description
             agent.last_active_ts = datetime.now(timezone.utc)
+            if platform:
+                agent.platform = platform.lower()
             session.add(agent)
             await session.commit()
             await session.refresh(agent)
@@ -1562,6 +1740,7 @@ async def _get_or_create_agent(
                 program=program,
                 model=model,
                 task_description=task_description,
+                platform=platform.lower() if platform else None,
             )
             session.add(agent)
             await session.commit()
@@ -2606,6 +2785,7 @@ def build_mcp_server() -> FastMCP:
         name: Optional[str] = None,
         task_description: str = "",
         attachments_policy: str = "auto",
+        platform: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Create or update an agent identity within a project and persist its profile to Git.
@@ -2645,11 +2825,15 @@ def build_mcp_server() -> FastMCP:
             Names are unique per project; passing the same name updates the profile.
         task_description : str
             Short description of current focus (shows up in directory listings).
+        platform : Optional[str]
+            The CLI platform this agent uses: "claude", "gemini", "codex", or "cursor".
+            Used by webhooks to spawn the correct CLI when notifying the agent of new messages.
+            If omitted, auto-detected from `program` and `model` fields (e.g., model="gemini-flash" → platform="gemini").
 
         Returns
         -------
         dict
-            { id, name, program, model, task_description, inception_ts, last_active_ts, project_id }
+            { id, name, program, model, task_description, inception_ts, last_active_ts, project_id, platform }
 
         Examples
         --------
@@ -2689,7 +2873,7 @@ def build_mcp_server() -> FastMCP:
         ap = (attachments_policy or "auto").lower()
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
-        agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
+        agent = await _get_or_create_agent(project, name, program, model, task_description, settings, platform)
         # Persist attachment policy if changed
         if getattr(agent, "attachments_policy", None) != ap:
             async with get_session() as session:
@@ -3670,6 +3854,12 @@ def build_mcp_server() -> FastMCP:
             payload = deliveries[0].get("payload") or {}
             if isinstance(payload, dict) and "attachments" in payload:
                 result["attachments"] = payload.get("attachments")
+        # Fire webhook notification (non-blocking, best-effort)
+        if deliveries:
+            all_recipients = to + (cc or []) + (bcc or [])
+            first_payload = deliveries[0].get("payload", {})
+            if isinstance(first_payload, dict):
+                asyncio.create_task(_fire_webhook(all_recipients, project.human_key, first_payload))
         return result
 
     @mcp.tool(name="reply_message")
@@ -3922,6 +4112,14 @@ def build_mcp_server() -> FastMCP:
             attachments = base_payload.get("attachments") if isinstance(base_payload, dict) else None
             if attachments is not None:
                 primary_payload.setdefault("attachments", attachments)
+
+        # Fire webhook notification (non-blocking, best-effort)
+        if deliveries:
+            all_recipients = to_names + cc_list + bcc_list
+            first_payload = deliveries[0].get("payload", {})
+            if isinstance(first_payload, dict):
+                asyncio.create_task(_fire_webhook(all_recipients, project.human_key, first_payload))
+
         return primary_payload
 
     @mcp.tool(name="request_contact")

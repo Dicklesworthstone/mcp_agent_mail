@@ -11,7 +11,7 @@ import json
 import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from rich import box
@@ -872,7 +872,11 @@ def _get_database_stats() -> dict[str, int]:
             try:
                 async with get_session() as session:
                     projects = await session.scalar(select(func.count()).select_from(Project))
-                    agents = await session.scalar(select(func.count()).select_from(Agent))
+                    # Only count agents active in the last 30 minutes
+                    active_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+                    agents = await session.scalar(
+                        select(func.count()).select_from(Agent).where(Agent.last_active_ts >= active_cutoff)
+                    )
                     messages = await session.scalar(select(func.count()).select_from(Message))
                     file_reservations = await session.scalar(select(func.count()).select_from(FileReservation))
                     contact_links = await session.scalar(select(func.count()).select_from(AgentLink))
