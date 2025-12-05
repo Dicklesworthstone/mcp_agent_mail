@@ -1048,14 +1048,38 @@ async def _ensure_project(human_key: str) -> Project:
 
 
 async def _get_project_by_identifier(identifier: str) -> Project:
+    """Resolve a project by slug, human_key, or partial slug match.
+
+    Accepts:
+    - Full absolute path: /Users/john/projects/aurora-portal
+    - Full slug: users-john-projects-aurora-portal
+    - Short slug/alias: aurora-portal (matches end of slug)
+    """
     await ensure_schema()
     slug = slugify(identifier)
     async with get_session() as session:
+        # Try exact slug match first
         result = await session.execute(select(Project).where(Project.slug == slug))
         project = result.scalars().first()
-        if not project:
-            raise NoResultFound(f"Project '{identifier}' not found.")
-        return project
+        if project:
+            return project
+
+        # Try exact human_key match (for absolute paths)
+        result = await session.execute(select(Project).where(Project.human_key == identifier))
+        project = result.scalars().first()
+        if project:
+            return project
+
+        # Try partial match: slug ends with the identifier (for short aliases like "aurora-portal")
+        # This allows "aurora-portal" to match "users-johncurtis-projects-aurora-portal"
+        result = await session.execute(
+            select(Project).where(Project.slug.endswith(f"-{slug}"))
+        )
+        project = result.scalars().first()
+        if project:
+            return project
+
+        raise NoResultFound(f"Project '{identifier}' not found.")
 
 
 # --- Project sibling suggestion helpers -----------------------------------------------------
