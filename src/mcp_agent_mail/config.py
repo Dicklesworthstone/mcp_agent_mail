@@ -159,10 +159,11 @@ class Settings:
     # Retention/project listing filters
     retention_ignore_project_patterns: list[str]
     # Agent identity naming policy
-    # Values: "strict" | "coerce" | "always_auto"
+    # Values: "strict" | "coerce" | "always_auto" | "none"
     # - strict: reject invalid provided names (current hard-fail behavior)
     # - coerce: ignore invalid provided names and auto-generate a valid one (default)
     # - always_auto: ignore any provided name and always auto-generate
+    # - none: accept any provided name without validation (for custom agent naming)
     agent_name_enforcement_mode: str
     # Messaging ergonomics
     # When true, attempt to register missing local recipients during send_message
@@ -274,7 +275,7 @@ def get_settings() -> Settings:
 
     def _agent_name_mode(value: str) -> str:
         v = (value or "").strip().lower()
-        if v in {"strict", "coerce", "always_auto"}:
+        if v in {"strict", "coerce", "always_auto", "none"}:
             return v
         return "coerce"
 

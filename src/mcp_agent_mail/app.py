@@ -1545,6 +1545,12 @@ async def _get_or_create_agent(
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
+    elif mode == "none":
+        # Accept any provided name without adjective+noun validation
+        sanitized = sanitize_agent_name(name)
+        if not sanitized:
+            raise ValueError("Agent name must contain alphanumeric characters.")
+        desired_name = sanitized
     else:
         sanitized = sanitize_agent_name(name)
         if not sanitized:
