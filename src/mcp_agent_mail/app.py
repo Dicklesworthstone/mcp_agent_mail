@@ -478,10 +478,15 @@ def _latest_git_activity(repo: Optional[Repo], matches: Sequence[Path]) -> Optio
 
 # Platform-specific webhook command templates
 # Each template uses placeholders: {recipient}, {project}, {sender}
+_WEBHOOK_PROMPT = (
+    "You are {recipient}. Check your inbox for the message from {sender}. "
+    "Respond if action is needed. If the conversation is complete or no response is required, "
+    "simply exit without replying. Do not continue chatting unnecessarily."
+)
 WEBHOOK_PLATFORM_COMMANDS: dict[str, str] = {
-    "claude": 'cd {project} && claude -p "You are {recipient}. Check your inbox and respond to the message from {sender}."',
-    "gemini": 'cd {project} && gemini --yolo "You are {recipient}. Check your inbox and respond to the message from {sender}."',
-    "codex": 'cd {project} && codex exec --full-auto "You are {recipient}. Check your inbox and respond to the message from {sender}."',
+    "claude": f'cd {{project}} && claude -p "{_WEBHOOK_PROMPT}"',
+    "gemini": f'cd {{project}} && gemini --yolo "{_WEBHOOK_PROMPT}"',
+    "codex": f'cd {{project}} && codex exec --full-auto "{_WEBHOOK_PROMPT}"',
 }
 
 
@@ -572,30 +577,12 @@ async def _fire_webhook(recipients: list[str], project_key: str, payload: dict[s
             )
             logger.info(f"Webhook: executing command for {recipient} (platform={agent_platform or settings.webhook_platform}): {cmd}")
             if settings.webhook_passthrough:
-                # Passthrough mode: run in background thread with inherited stdio
-                # Using subprocess.Popen directly for better terminal handling
-                def run_passthrough():
-                    try:
-                        # Try to open /dev/tty for direct terminal access
-                        try:
-                            tty = open("/dev/tty", "r+b", buffering=0)
-                            subprocess.Popen(
-                                cmd,
-                                shell=True,
-                                stdin=tty,
-                                stdout=tty,
-                                stderr=tty,
-                            )
-                            # Don't close tty - let subprocess use it
-                        except (OSError, FileNotFoundError):
-                            # Fallback: inherit from parent process
-                            subprocess.Popen(cmd, shell=True)
-                    except Exception as e:
-                        logger.warning(f"Webhook passthrough failed for {recipient}: {e}")
-
-                loop = asyncio.get_event_loop()
-                loop.run_in_executor(None, run_passthrough)
-                logger.info(f"Webhook for {recipient} spawned in passthrough mode")
+                # Passthrough mode: spawn subprocess without capturing output
+                try:
+                    subprocess.Popen(cmd, shell=True)
+                    logger.info(f"Webhook for {recipient} spawned in passthrough mode")
+                except Exception as e:
+                    logger.warning(f"Webhook passthrough failed for {recipient}: {e}")
             else:
                 proc = await asyncio.create_subprocess_shell(
                     cmd,
