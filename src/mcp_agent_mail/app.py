@@ -234,14 +234,97 @@ def _instrument_tool(
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
-            except Exception as exc:
+            except ValueError as exc:
+                # Invalid argument value
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
                 wrapped_exc = ToolExecutionError(
-                    "UNHANDLED_EXCEPTION",
-                    "Server encountered an unexpected error while executing tool.",
-                    recoverable=False,
-                    data={"tool": tool_name, "original_error": type(exc).__name__},
+                    "INVALID_ARGUMENT",
+                    f"Invalid argument value: {exc}. Check that all parameters have valid values.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TypeError as exc:
+                # Wrong argument type
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_msg = str(exc)
+                # Try to extract helpful info from TypeError
+                hint = ""
+                if "got an unexpected keyword argument" in error_msg:
+                    hint = " Check parameter names for typos."
+                elif "missing" in error_msg and "required" in error_msg:
+                    hint = " Ensure all required parameters are provided."
+                elif "NoneType" in error_msg:
+                    hint = " A required value was None/null."
+                wrapped_exc = ToolExecutionError(
+                    "TYPE_ERROR",
+                    f"Argument type mismatch: {exc}.{hint}",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except KeyError as exc:
+                # Missing key/field
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "MISSING_FIELD",
+                    f"Missing required field: {exc}. Ensure all required parameters are provided.",
+                    recoverable=True,
+                    data={"tool": tool_name, "missing_field": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TimeoutError as exc:
+                # Timeout (database lock, network, etc.)
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "TIMEOUT",
+                    f"Operation timed out: {exc}. The server may be under heavy load. Try again in a moment.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except Exception as exc:
+                # Catch-all for unexpected errors - provide helpful categorization
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_type = type(exc).__name__
+                error_msg = str(exc)
+
+                # Try to categorize common error patterns
+                if "database" in error_msg.lower() or "sqlite" in error_msg.lower():
+                    error_category = "DATABASE_ERROR"
+                    friendly_msg = "A database error occurred. This may be a transient issue - try again."
+                    recoverable = True
+                elif "lock" in error_msg.lower() or "busy" in error_msg.lower():
+                    error_category = "RESOURCE_BUSY"
+                    friendly_msg = "Resource is temporarily busy. Wait a moment and try again."
+                    recoverable = True
+                elif "permission" in error_msg.lower() or "access" in error_msg.lower():
+                    error_category = "PERMISSION_ERROR"
+                    friendly_msg = f"Access denied: {error_msg}"
+                    recoverable = False
+                elif "connection" in error_msg.lower() or "network" in error_msg.lower():
+                    error_category = "CONNECTION_ERROR"
+                    friendly_msg = "Connection error occurred. Check network and try again."
+                    recoverable = True
+                else:
+                    error_category = "UNHANDLED_EXCEPTION"
+                    friendly_msg = f"Unexpected error ({error_type}): {error_msg}"
+                    recoverable = False
+
+                wrapped_exc = ToolExecutionError(
+                    error_category,
+                    friendly_msg,
+                    recoverable=recoverable,
+                    data={"tool": tool_name, "original_error": error_type, "error_detail": error_msg},
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
@@ -1054,18 +1137,105 @@ async def _ensure_project(human_key: str) -> Project:
     # -- Identity inspection resource is registered inside build_mcp_server below
 
 
+# --- Smart lookup helpers with fuzzy matching and suggestions -----------------------------------
+
+
+def _similarity_score(a: str, b: str) -> float:
+    """Compute similarity score between two strings (0.0 to 1.0)."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+async def _find_similar_projects(identifier: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, str, float]]:
+    """Find projects with similar slugs/names. Returns list of (slug, human_key, score)."""
+    slug = slugify(identifier)
+    suggestions: list[tuple[str, str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(select(Project))
+        projects = result.scalars().all()
+        for p in projects:
+            # Check both slug and human_key similarity
+            slug_score = _similarity_score(slug, p.slug)
+            key_score = _similarity_score(identifier, p.human_key) if p.human_key else 0.0
+            best_score = max(slug_score, key_score)
+            if best_score >= min_score:
+                suggestions.append((p.slug, p.human_key, best_score))
+    suggestions.sort(key=lambda x: x[2], reverse=True)
+    return suggestions[:limit]
+
+
+async def _find_similar_agents(project: Project, name: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, float]]:
+    """Find agents with similar names in the project. Returns list of (name, score)."""
+    suggestions: list[tuple[str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(cast(Any, Agent.project_id == project.id))
+        )
+        agents = result.scalars().all()
+        for a in agents:
+            score = _similarity_score(name, a.name)
+            if score >= min_score:
+                suggestions.append((a.name, score))
+    suggestions.sort(key=lambda x: x[1], reverse=True)
+    return suggestions[:limit]
+
+
+async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
+    """List agent names in a project."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)
+        )
+        return [row[0] for row in result.all()]
+
+
 async def _get_project_by_identifier(identifier: str) -> Project:
+    """Get project by identifier with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not identifier or not identifier.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            "Project identifier cannot be empty. Provide a project path like '/data/projects/myproject' or a slug like 'myproject'.",
+            recoverable=True,
+            data={"parameter": "project_key", "provided": repr(identifier)},
+        )
+
     slug = slugify(identifier)
     async with get_session() as session:
         result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
         project = result.scalars().first()
-        if not project:
-            raise NoResultFound(f"Project '{identifier}' not found.")
-        return project
+        if project:
+            return project
+
+    # Project not found - provide helpful suggestions
+    suggestions = await _find_similar_projects(identifier)
+
+    if suggestions:
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found. Did you mean: {suggestion_text}? "
+            f"Use ensure_project to create a new project, or check spelling.",
+            recoverable=True,
+            data={
+                "identifier": identifier,
+                "slug_searched": slug,
+                "suggestions": [{"slug": s[0], "human_key": s[1], "score": round(s[2], 2)} for s in suggestions],
+            },
+        )
+    else:
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found and no similar projects exist. "
+            f"Use ensure_project to create a new project first. "
+            f"Example: ensure_project(human_key='/path/to/your/project')",
+            recoverable=True,
+            data={"identifier": identifier, "slug_searched": slug},
+        )
 
 
-# --- Project sibling suggestion helpers -----------------------------------------------------  # type: ignore[arg-type]
+# --- Project sibling suggestion helpers -----------------------------------------------------
 
 _PROJECT_PROFILE_FILENAMES: tuple[str, ...] = (
     "README.md",
@@ -1580,18 +1750,71 @@ async def _get_or_create_agent(
 
 
 async def _get_agent(project: Project, name: str) -> Agent:
+    """Get agent by name with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not name or not name.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            f"Agent name cannot be empty. Provide a valid agent name for project '{project.human_key}'.",
+            recoverable=True,
+            data={"parameter": "agent_name", "provided": repr(name), "project": project.slug},
+        )
+
     async with get_session() as session:
         result = await session.execute(
             select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
-        if not agent:
-            raise NoResultFound(
-                f"Agent '{name}' not registered for project '{project.human_key}'. "
-                f"Tip: Use resource://agents/{project.slug} to discover registered agents."
-            )  # type: ignore[arg-type]
-        return agent
+        if agent:
+            return agent
+
+    # Agent not found - provide helpful suggestions
+    suggestions = await _find_similar_agents(project, name)
+    available_agents = await _list_project_agents(project)
+
+    if suggestions:
+        # Found similar names - probably a typo
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. Did you mean: {suggestion_text}? "
+            f"Agent names are case-insensitive but must match exactly.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "suggestions": [{"name": s[0], "score": round(s[1], 2)} for s in suggestions],
+                "available_agents": available_agents,
+            },
+        )
+    elif available_agents:
+        # No similar names but project has agents
+        agents_list = ", ".join([f"'{a}'" for a in available_agents[:5]])
+        more_text = f" and {len(available_agents) - 5} more" if len(available_agents) > 5 else ""
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. "
+            f"Available agents: {agents_list}{more_text}. "
+            f"Use register_agent to create a new agent identity.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "available_agents": available_agents,
+            },
+        )
+    else:
+        # Project has no agents
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found. Project '{project.human_key}' has no registered agents yet. "
+            f"Use register_agent to create an agent identity first. "
+            f"Example: register_agent(project_key='{project.slug}', program='claude-code', model='opus-4', name='{name}')",
+            recoverable=True,
+            data={"agent_name": name, "project": project.slug, "available_agents": []},
+        )
 
 
 async def _create_message(
@@ -3993,8 +4216,12 @@ def build_mcp_server() -> FastMCP:
                 target_name = to_agent
         try:
             b = await _get_agent(target_project, target_name)
-        except NoResultFound:
-            if register_if_missing and validate_agent_name_format(target_name):
+        except (NoResultFound, ToolExecutionError) as exc:
+            # Check if this is a NOT_FOUND error we can handle with register_if_missing
+            is_not_found = isinstance(exc, NoResultFound) or (
+                isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
+            )
+            if is_not_found and register_if_missing and validate_agent_name_format(target_name):
                 # Create the missing target identity using provided metadata (best effort)
                 b = await _get_or_create_agent(
                     target_project,

@@ -7,10 +7,14 @@ import pytest
 from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.config import clear_settings_cache
 
 
 @pytest.mark.asyncio
-async def test_install_and_uninstall_precommit_guard_tools(isolated_env, tmp_path: Path):
+async def test_install_and_uninstall_precommit_guard_tools(isolated_env, tmp_path: Path, monkeypatch):
+    # Guard functionality requires WORKTREES_ENABLED to be set
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()  # Ensure new env var is picked up
     server = build_mcp_server()
 
     async with Client(server) as client:

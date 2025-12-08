@@ -138,8 +138,10 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         echo=settings.echo,
         future=True,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=10,
+        pool_size=25,  # Increased for high-concurrency workloads
+        max_overflow=25,  # Allow up to 50 total connections under load
+        pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
+        pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
         connect_args=connect_args,
     )
 
