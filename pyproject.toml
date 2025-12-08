@@ -7,7 +7,7 @@ name = "mcp-agent-mail"
 version = "0.1.0"
 description = "Coordinated multi-agent messaging and coordination MCP server."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [
   { name = "mcp-agent-mail maintainers" },
@@ -35,7 +35,7 @@ dependencies = [
   "python-decouple>=3.8",
   "sqlmodel>=0.0.16",
   "sqlalchemy[asyncio]>=2.0.35",
-  "asyncpg>=0.30.0",
+  "asyncpg>=0.31.0",
   "aiosqlite>=0.20.0",
   "httpx[http2]>=0.27.2",
   "aiolimiter>=1.1.0",
@@ -80,7 +80,7 @@ exclude = ["/.venv", "/.vscode", "/.idea", "/.git", "/__pycache__", "*.py[cod]",
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = [
@@ -106,7 +106,7 @@ known-first-party = ["mcp_agent_mail"]
 combine-as-imports = true
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
