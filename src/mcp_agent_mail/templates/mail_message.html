@@ -40,7 +40,7 @@
 {% block content %}
 <div class="space-y-6 animate-fade-in">
   <!-- Message Header Card -->
-  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+  <div class="card p-8">
     <!-- Subject -->
     <div class="mb-6">
       <div class="flex items-start justify-between gap-4 mb-3">
@@ -50,17 +50,17 @@
 
         <!-- Importance Badge -->
         {% if message.importance == 'urgent' %}
-          <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-sm font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+          <span class="badge variant-error badge-pulse flex items-center gap-1.5">
             <i data-lucide="alert-circle" class="w-4 h-4"></i>
             Urgent
           </span>
         {% elif message.importance == 'high' %}
-          <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-sm font-semibold rounded-full flex items-center gap-1.5">
+          <span class="badge variant-warning flex items-center gap-1.5">
             <i data-lucide="alert-triangle" class="w-4 h-4"></i>
             High Priority
           </span>
         {% elif message.importance == 'low' %}
-          <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-sm font-medium rounded-full">
+          <span class="badge variant-secondary">
             Low Priority
           </span>
         {% endif %}
@@ -78,7 +78,7 @@
         </div>
         {% if message.thread_id %}
           <a href="/mail/{{ project.slug }}/thread/{{ message.thread_id }}"
-             class="inline-flex items-center gap-2 px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-lg transition-all duration-200 font-medium">
+             class="badge variant-info inline-flex items-center gap-2">
             <i data-lucide="messages-square" class="w-4 h-4"></i>
             <span class="text-sm">View Thread</span>
             <span class="font-mono text-xs opacity-75">#{{ message.thread_id }}</span>
@@ -105,14 +105,7 @@
         <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-3">Recipients</h3>
         <div class="flex flex-wrap gap-2">
           {% for r in recipients %}
-            <span class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium
-              {% if r.kind == 'to' %}
-                bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300
-              {% elif r.kind == 'cc' %}
-                bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300
-              {% elif r.kind == 'bcc' %}
-                bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400
-              {% endif %}">
+            <span class="badge {% if r.kind == 'to' %}variant-info{% elif r.kind == 'cc' %}variant-secondary{% elif r.kind == 'bcc' %}variant-secondary{% endif %} inline-flex items-center gap-1.5">
               {% if r.kind == 'to' %}
                 <i data-lucide="mail" class="w-3.5 h-3.5"></i>
               {% elif r.kind == 'cc' %}
@@ -130,7 +123,7 @@
   </div>
 
   <!-- Message Body -->
-  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+  <div class="card p-8">
     <div class="prose prose-slate dark:prose-invert max-w-none">
       {% if message.body_html %}
         <!-- SECURITY: Using | safe assumes backend properly sanitizes HTML to prevent XSS -->

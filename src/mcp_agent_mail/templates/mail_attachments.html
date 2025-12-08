@@ -19,7 +19,7 @@
 {% block content %}
 <div class="space-y-6 animate-fade-in">
   <!-- Attachments Header -->
-  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+  <div class="card p-8">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
         <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
@@ -43,7 +43,7 @@
     <!-- Attachments Grid -->
     <div class="space-y-4">
       {% for it in items %}
-        <div class="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-medium transition-all duration-300">
+        <div class="card p-6 hover:shadow-medium transition-all duration-300">
           <div class="flex items-start justify-between mb-4">
             <a href="/mail/{{ project.slug }}/message/{{ it.id }}"
                class="flex-1 group">
@@ -105,7 +105,7 @@
 
   {% else %}
     <!-- Empty State -->
-    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+    <div class="card p-16 text-center">
       <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
         <i data-lucide="inbox" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
       </div>

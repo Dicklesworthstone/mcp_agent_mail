@@ -53,7 +53,7 @@
 
   <!-- Stats Overview -->
   <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item">
+    <div class="group card bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item">
       <div class="flex items-center justify-between mb-4">
         <div class="w-14 h-14 bg-gradient-to-br from-primary-500 to-primary-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float">
           <i data-lucide="folder" class="w-7 h-7 text-white"></i>
@@ -71,7 +71,7 @@
       </div>
     </div>
 
-    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.1s;">
+    <div class="group card bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.1s;">
       <div class="flex items-center justify-between mb-4">
         <div class="w-14 h-14 bg-gradient-to-br from-success-500 to-success-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float" style="animation-delay: 0.5s;">
           <i data-lucide="users" class="w-7 h-7 text-white"></i>
@@ -87,7 +87,7 @@
       </div>
     </div>
 
-    <div class="group bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.2s;">
+    <div class="group card bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700 hover:shadow-large transition-all duration-300 card-hover stagger-item" style="animation-delay: 0.2s;">
       <div class="flex items-center justify-between mb-4">
         <div class="w-14 h-14 bg-gradient-to-br from-warning-500 to-warning-700 rounded-2xl flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300 float" style="animation-delay: 1s;">
           <i data-lucide="message-square" class="w-7 h-7 text-white"></i>
@@ -162,7 +162,7 @@
            x-transition:leave="transition ease-in duration-150"
            x-transition:leave-start="opacity-100 transform scale-100"
            x-transition:leave-end="opacity-0 transform scale-95"
-           class="group relative bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
+           class="group relative card bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
            data-anim-delay="{{ [loop.index0 * 0.05, 1.0]|min }}"
            data-project-card="true"
            data-project-id="{{ p.id }}"
@@ -177,7 +177,7 @@
               <i data-lucide="git-branch" class="w-8 h-8 text-white"></i>
             </div>
             <div class="flex flex-col items-end gap-2">
-              <span class="px-3 py-1.5 bg-gradient-to-r from-success-100 to-success-200 dark:from-success-900/30 dark:to-success-800/30 text-success-700 dark:text-success-300 text-xs font-bold rounded-full flex items-center gap-1.5 shadow-sm">
+              <span class="badge variant-success flex items-center gap-1.5">
                 <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
                 Active
               </span>
@@ -318,7 +318,7 @@
             <div class="flex flex-wrap gap-2" data-sibling-confirmed-container>
               {% for sibling in p.confirmed_siblings %}
               <button type="button"
-                      class="group inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-900/20 dark:to-teal-900/20 border border-emerald-200 dark:border-emerald-800 hover:shadow-md hover:scale-105 transition-all duration-200"
+                      class="group badge variant-success inline-flex items-center gap-2"
                       data-sibling-confirmed="true"
                       data-sibling-action="reset"
                       data-project="{{ p.id }}"
@@ -344,7 +344,7 @@
             {% if p.suggested_siblings %}
             <div class="space-y-3" data-sibling-suggested-container>
               {% for sibling in p.suggested_siblings %}
-              <div class="group relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-gradient-to-br from-white to-slate-50/50 dark:from-slate-800 dark:to-slate-900/50 hover:shadow-lg hover:border-violet-300 dark:hover:border-violet-700 transition-all duration-300"
+              <div class="card group relative overflow-hidden rounded-2xl border border-slate-200 dark:border-slate-700 bg-gradient-to-br from-white to-slate-50/50 dark:from-slate-800 dark:to-slate-900/50 hover:shadow-lg hover:border-violet-300 dark:hover:border-violet-700 transition-all duration-300"
                    data-sibling-row
                    data-project="{{ p.id }}"
                    data-other="{{ sibling.peer.id }}"
@@ -473,21 +473,21 @@
 
       <!-- Feature highlights -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 max-w-3xl">
-        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+        <div class="card flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
           <div class="w-12 h-12 bg-primary-100 dark:bg-primary-900/30 rounded-xl flex items-center justify-center mb-3">
             <i data-lucide="mail" class="w-6 h-6 text-primary-600 dark:text-primary-400"></i>
           </div>
           <h4 class="font-semibold text-slate-900 dark:text-white mb-2">Agent Messaging</h4>
           <p class="text-sm text-slate-600 dark:text-slate-400">Enable agents to communicate and share context</p>
         </div>
-        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+        <div class="card flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
           <div class="w-12 h-12 bg-success-100 dark:bg-success-900/30 rounded-xl flex items-center justify-center mb-3">
             <i data-lucide="lock" class="w-6 h-6 text-success-600 dark:text-success-400"></i>
           </div>
           <h4 class="font-semibold text-slate-900 dark:text-white mb-2">File Reservations</h4>
           <p class="text-sm text-slate-600 dark:text-slate-400">Signal editing intent to coordinate between agents</p>
         </div>
-        <div class="flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
+        <div class="card flex flex-col items-center text-center p-6 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700">
           <div class="w-12 h-12 bg-warning-100 dark:bg-warning-900/30 rounded-xl flex items-center justify-center mb-3">
             <i data-lucide="git-branch" class="w-6 h-6 text-warning-600 dark:text-warning-400"></i>
           </div>

@@ -137,3 +137,58 @@ class ProjectSiblingSuggestion(SQLModel, table=True):
     evaluated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     confirmed_ts: Optional[datetime] = Field(default=None)
     dismissed_ts: Optional[datetime] = Field(default=None)
+
+
+class PRD(SQLModel, table=True):
+    """Product Requirements Document with wizard-collected data and generated content."""
+
+    __tablename__ = "prds"
+    __table_args__ = (UniqueConstraint("project_id", "name", name="uq_prd_project_name"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    name: str = Field(max_length=255)  # e.g., "KellerAI Design System"
+    idea: str  # Problem statement / core concept
+    scope_in: str = Field(default="")  # What is in scope
+    scope_out: str = Field(default="")  # What is explicitly out of scope
+    personas: str = Field(default="")  # Target users/personas
+    success_metrics: str = Field(default="")  # Measurement criteria for success
+
+    # Round-specific wizard answers (stored as JSON)
+    round1_tokens: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False, server_default="{}"),
+    )  # e.g., {"colors": "...", "spacing": "...", "focus": "..."}
+    round2_components: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False, server_default="{}"),
+    )  # e.g., {"components": [...], "priorities": "...", "focus": "..."}
+    round3_layouts: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSON, nullable=False, server_default="{}"),
+    )  # e.g., {"breakpoints": [...], "templates": [...], "focus": "..."}
+
+    # Generated content (cached)
+    content_md: str = Field(default="")  # Rendered markdown PRD
+    generation_mode: str = Field(default="quick", max_length=16)  # quick | full
+    ai_enriched: bool = Field(default=False)
+
+    # Metadata
+    status: str = Field(default="draft", max_length=16)  # draft | published | archived
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PRDComponentLink(SQLModel, table=True):
+    """Links a PRD to a published component and tracks PR implementation status."""
+
+    __tablename__ = "prd_component_links"
+    __table_args__ = (UniqueConstraint("prd_id", "component_name", name="uq_prd_component"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    prd_id: int = Field(foreign_key="prds.id", index=True)
+    component_name: str = Field(max_length=128)  # e.g., ".card", ".badge", "button"
+    pr_url: Optional[str] = Field(default=None, max_length=512)  # GitHub PR URL
+    pr_status: str = Field(default="not_started", max_length=32)  # not_started | in_progress | published | merged
+    synced_ts: Optional[datetime] = Field(default=None)  # When PR status was last updated
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

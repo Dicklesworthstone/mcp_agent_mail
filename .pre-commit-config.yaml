@@ -1,36 +1,66 @@
-# Global Pre-Commit Configuration Template
-# This file is automatically copied to new repositories via git init/clone
-# Customize per-project by editing the local .pre-commit-config.yaml
+# Pre-commit hooks configuration for MegaLinter Docker integration
+# MegaLinter is comprehensive - handles all linting, formatting, and security
+# No need for redundant pre-linters (Black, Ruff, Prettier, etc.)
 
 repos:
+  # MegaLinter Docker Integration (KellerAI Custom Flavor)
+  # ARM64-optimized for Apple Silicon - no AMD64 warnings
+
   - repo: local
     hooks:
-      - id: megalinter
-        name: MegaLinter (KellerAI Flavor)
-        entry: mega-linter-runner
-        args: ["--flavor", "kellerai_megalinter", "--filesonly"]
+      # Incremental Mode (Commit): Fast checks on modified files only
+      - id: megalinter-incremental
+        name: MegaLinter (Incremental - KellerAI Custom)
+        entry:
+          bash -c 'docker run --platform linux/arm64 --rm -v
+          "$(pwd)":/tmp/lint:rw -e SKIP_PROJECT_MODE_LINTERS=true -e
+          APPLY_FIXES=all kellerai-reaper-lint:latest || docker run --platform
+          linux/arm64 --rm -v "$(pwd)":/tmp/lint:rw -e
+          SKIP_PROJECT_MODE_LINTERS=true
+          ghcr.io/kellerai/megalinter-custom-flavor-kellerai/megalinter-custom-flavor:latest'
         language: system
+        stages: [pre-commit]
         pass_filenames: false
-        stages: [commit]
-        verbose: true
 
-# Alternative: Use official MegaLinter pre-commit hook
-# Uncomment below to use official hook instead of local mega-linter-runner
-#
-# repos:
-#   - repo: https://github.com/oxsecurity/megalinter
-#     rev: v9.1.0
-#     hooks:
-#       - id: megalinter-incremental
-#         args: ["--flavor", "kellerai_megalinter"]
-#         stages: [commit]
+      # Full Mode (Push): Comprehensive analysis
+      - id: megalinter-full
+        name: MegaLinter (Full - KellerAI Custom)
+        entry:
+          bash -c 'docker run --platform linux/arm64 --rm -v
+          "$(pwd)":/tmp/lint:rw -e APPLY_FIXES=all kellerai-reaper-lint:latest
+          || docker run --platform linux/arm64 --rm -v "$(pwd)":/tmp/lint:rw
+          ghcr.io/kellerai/megalinter-custom-flavor-kellerai/megalinter-custom-flavor:latest'
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
 
-# To install in a repository:
-# 1. Ensure .pre-commit-config.yaml exists (auto-copied from this template)
-# 2. Run: pre-commit install
-#
-# To skip for a specific commit:
-# git commit --no-verify -m "message"
-#
-# To update hooks:
-# pre-commit autoupdate
+# Global Configuration
+default_language_version:
+  python: python3.14
+
+# Exclude directories
+exclude: |
+  (?x)^(
+    \.venv/|
+    venv/|
+    build/|
+    dist/|
+    \.eggs/|
+    \.git/|
+    node_modules/|
+    __pycache__/|
+    \.pytest_cache/|
+    \.mypy_cache/|
+    \.ruff_cache/|
+    megalinter-reports/|
+    \.archive/|
+    \.worktrees/|
+    \.taskmaster/|
+    \.DS_Store
+  )
+
+# Don't fail fast - run all hooks even if one fails
+fail_fast: false
+
+# Minimum pre-commit version
+minimum_pre_commit_version: "3.0.0"

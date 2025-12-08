@@ -19,7 +19,7 @@
 {% block content %}
 <div class="space-y-6 animate-fade-in" x-data="inboxManager()">
   <!-- Inbox Header with Filters -->
-  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+  <div class="card p-8">
     <!-- Top Row: Title and Actions -->
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-4">
@@ -37,7 +37,7 @@
                 <span class="text-slate-400 dark:text-slate-500">•</span>
                 <span class="font-medium" x-text="filteredItems.length + ' message' + (filteredItems.length !== 1 ? 's' : '')"></span>
                 <template x-if="unreadCount > 0">
-                  <span class="ml-2 px-2 py-0.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-bold rounded-full" x-text="unreadCount + ' unread'"></span>
+                  <span class="badge variant-info ml-2" x-text="unreadCount + ' unread'"></span>
                 </template>
               </span>
             </template>
@@ -89,7 +89,7 @@
     </div>
 
     <!-- Filters and Search Bar -->
-    <div class="flex flex-col sm:flex-row gap-4 p-6 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
+    <div class="flex flex-col sm:flex-row gap-4 p-6 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 space-y-4 sm:space-y-0">
       <!-- Search -->
       <div class="relative flex-1">
         <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
@@ -167,7 +167,7 @@
   <template x-if="filteredItems.length > 0">
     <div class="space-y-3">
       <template x-for="(item, index) in filteredItems" :key="item.id">
-        <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:shadow-medium hover:border-primary-300 dark:hover:border-primary-700 transition-all duration-300 transform hover:-translate-y-0.5 overflow-hidden stagger-item"
+        <div class="card border-2 border-slate-200 dark:border-slate-700 hover:border-primary-300 dark:hover:border-primary-700 overflow-hidden stagger-item"
              :style="`animation-delay: ${Math.min(index * 0.05, 1.0)}s;`">
           <div class="flex items-start p-6 gap-4">
             <!-- Checkbox for bulk selection -->
@@ -203,7 +203,7 @@
                     <template x-if="item.thread_id">
                       <a :href="`/mail/{{ project.slug }}/thread/${item.thread_id}`"
                          @click.stop
-                         class="flex items-center gap-1.5 px-2 py-1 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-md transition-colors">
+                         class="badge variant-info flex items-center gap-1.5">
                         <i data-lucide="messages-square" class="w-3.5 h-3.5"></i>
                         <span class="font-mono text-xs font-medium">Thread</span>
                         <span class="font-mono text-xs opacity-75" x-text="'#' + item.thread_id"></span>
@@ -216,24 +216,24 @@
                 <div class="flex items-center gap-2 ml-4">
                   <!-- Importance Badge -->
                   <template x-if="item.importance === 'urgent'">
-                    <span class="px-3 py-1.5 bg-danger-100 dark:bg-danger-900/30 text-danger-700 dark:text-danger-300 text-xs font-semibold rounded-full flex items-center gap-1.5 badge-pulse">
+                    <span class="badge variant-error badge-pulse flex items-center gap-1.5">
                       <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i>
                       Urgent
                     </span>
                   </template>
                   <template x-if="item.importance === 'high'">
-                    <span class="px-3 py-1.5 bg-warning-100 dark:bg-warning-900/30 text-warning-700 dark:text-warning-300 text-xs font-semibold rounded-full flex items-center gap-1.5">
+                    <span class="badge variant-warning flex items-center gap-1.5">
                       <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i>
                       High
                     </span>
                   </template>
                   <template x-if="item.importance === 'low'">
-                    <span class="px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-400 text-xs font-medium rounded-full">
+                    <span class="badge variant-secondary">
                       Low
                     </span>
                   </template>
                   <template x-if="!item.importance || item.importance === 'normal'">
-                    <span class="px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                    <span class="badge variant-info">
                       Normal
                     </span>
                   </template>
@@ -275,7 +275,7 @@
 
   <!-- Dynamic Empty State (when filtered) -->
   <template x-if="filteredItems.length === 0">
-    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+    <div class="card p-16 text-center">
       <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
         <i data-lucide="mail-open" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
       </div>

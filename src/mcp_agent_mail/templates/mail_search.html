@@ -19,7 +19,7 @@
 {% block content %}
 <div class="space-y-6 animate-fade-in" x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, showHelp: false }">
   <!-- Search Header -->
-  <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
+  <div class="card p-8">
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-4">
         <div class="w-16 h-16 bg-gradient-to-br from-primary-500 to-primary-700 rounded-xl flex items-center justify-center shadow-medium">
@@ -45,7 +45,7 @@
          x-transition:leave="transition ease-in duration-150"
          x-transition:leave-start="opacity-100 transform translate-y-0"
          x-transition:leave-end="opacity-0 transform -translate-y-2"
-         class="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 rounded-lg p-6 mb-6">
+         class="bg-primary-50 dark:bg-primary-900/20 rounded-lg border border-primary-300 dark:border-primary-700 p-6 mb-6">
       <h3 class="text-lg font-semibold text-primary-900 dark:text-primary-100 mb-4">Query Syntax</h3>
       <div class="space-y-3 text-sm text-primary-800 dark:text-primary-200">
         <div class="flex items-start gap-3">
@@ -195,13 +195,13 @@
 
   <!-- Search Results -->
   {% if results %}
-    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-soft border border-slate-200 dark:border-slate-700 overflow-hidden">
+    <div class="card overflow-hidden">
       <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-3">
             <i data-lucide="list" class="w-5 h-5 text-primary-600 dark:text-primary-400"></i>
             <h3 class="text-lg font-semibold text-slate-900 dark:text-white">Results</h3>
-            <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+            <span class="badge variant-info text-xs">
               {{ results|length }} found
             </span>
           </div>
@@ -217,7 +217,7 @@
                 {{ r.subject }}
               </h4>
               {% if r.hits %}
-                <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
+                <span class="badge variant-info text-xs">
                   {{ r.hits }} match{{ 'es' if r.hits != 1 else '' }}
                 </span>
               {% endif %}
@@ -257,7 +257,7 @@
 
   {% elif q %}
     <!-- No Results -->
-    <div class="bg-white dark:bg-slate-800 rounded-xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
+    <div class="card p-16 text-center">
       <div class="w-24 h-24 bg-slate-100 dark:bg-slate-700 rounded-full flex items-center justify-center mx-auto mb-6">
         <i data-lucide="search-x" class="w-12 h-12 text-slate-400 dark:text-slate-500"></i>
       </div>

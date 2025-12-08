@@ -1,0 +1,228 @@
+---
+prd_id: {{ prd_id }}
+name: "{{ name }}"
+idea: "{{ idea }}"
+created_ts: {{ created_ts }}
+updated_ts: {{ updated_ts }}
+status: "{{ status }}"
+generation_mode: "{{ generation_mode }}"
+ai_enriched: {{ "true" if ai_enriched else "false" }}
+---
+
+# Product Requirements Document: {{ name }}
+
+## Executive Summary
+
+**Idea/Concept:**
+{{ idea }}
+
+### Scope
+
+**In Scope:**
+{{ scope_in }}
+
+**Out of Scope:**
+{{ scope_out }}
+
+### Target Personas
+
+{{ personas }}
+
+### Success Metrics
+
+{{ success_metrics }}
+
+---
+
+## ROUND 1: FOUNDATIONAL TOKENS & STRUCTURE
+
+### Focus for Round 1
+
+{{ round1_focus }}
+
+{% if round1_content %}
+{{ round1_content }}
+{% else %}
+### 1.1 Design Token Architecture
+
+*Note: AI-enriched content not available. This is a skeleton structure.*
+
+In Quick Mode, the following categories should be defined:
+- Colors (primary, accents, neutral, semantic)
+- Spacing (base unit, scales for padding/margin/gap)
+- Typography (font stacks, size scales, weights, line heights)
+- Shadows (elevation levels, depth perception)
+- Border Radius (scale from none to full)
+- Interactive States (hover, focus, active, disabled)
+- Animations (transitions, easing, timing)
+- Z-Index (layering hierarchy)
+
+### 1.2 Component Foundation Tokens
+
+*Define tokens that support interactive components:*
+- Interactive state transitions (color shifts, shadow changes)
+- Focus indicator styling
+- Disabled state appearance
+- Accessibility requirements
+
+### 1.3 Round 1 Test Execution
+
+*Test specifications should cover:*
+- Token value validation (correct colors, spacing, sizes)
+- Mathematical consistency (scales, ratios)
+- Contrast ratios (WCAG AA for colors)
+- Dark mode compatibility
+- Accessibility compliance
+{% endif %}
+
+---
+
+## ROUND 2: CORE COMPONENTS
+
+### Focus for Round 2
+
+{{ round2_focus }}
+
+{% if round2_content %}
+{{ round2_content }}
+{% else %}
+### 2.1 Semantic Component Structure
+
+*Note: AI-enriched content not available. This is a skeleton structure.*
+
+Components should include:
+- Component purpose and use case
+- Base CSS definition
+- Variant system (e.g., success, warning, error)
+- Interactive states
+- Responsive behavior
+- Accessibility requirements
+
+### 2.2 Component Categories
+
+Expected components might include:
+- **Cards**: Container for grouped content
+- **Badges**: Inline status indicators
+- **Buttons**: Interactive elements for actions
+- **Inputs**: Form elements with validation
+- **Other semantic components**: As needed for your design system
+
+### 2.3 Component Integration Tests
+
+*Test specifications should cover:*
+- Base styling matches specification
+- Variants render correctly
+- Interactive states provide feedback
+- Responsive behavior at breakpoints
+- Dark mode colors and contrast
+- Accessibility (keyboard nav, focus, labels)
+- Touch targets (44px minimum)
+{% endif %}
+
+---
+
+## ROUND 3: LAYOUTS & RESPONSIVE DESIGN
+
+### Focus for Round 3
+
+{{ round3_focus }}
+
+{% if round3_content %}
+{{ round3_content }}
+{% else %}
+### 3.1 Responsive Breakpoint System
+
+*Note: AI-enriched content not available. This is a skeleton structure.*
+
+Define breakpoints for:
+- Mobile (smallest: 375px)
+- Mobile Large
+- Tablet (medium: 768px)
+- Desktop (large: 1024px)
+- Desktop Large (1280px+)
+- Ultra-wide (1920px+)
+
+### 3.2 Layout Templates
+
+Create layout templates for key user flows:
+- Primary content layout (dashboard, listing, etc.)
+- Detail/thread view layout
+- Navigation layout (responsive header/drawer)
+- Form layout
+- Other key templates
+
+### 3.3 Accessibility & Dark Mode
+
+*Layout tests should cover:*
+- Keyboard navigation (logical tab order, no traps)
+- Screen reader support (landmarks, headings, labels)
+- Color contrast across all modes
+- Dark mode color mapping
+- Touch targets at all breakpoints
+- Prefers-reduced-motion respect
+
+### 3.4 Performance Considerations
+
+*Validate:*
+- Layout shifts (CLS) minimal
+- Responsive resizing smooth
+- No reflow/repaint issues
+- Image responsive loading
+{% endif %}
+
+---
+
+## IMPLEMENTATION ROADMAP
+
+### Phase 1: Design Token Implementation
+- Define all design tokens (colors, spacing, typography, shadows, borders, animations, z-index)
+- Create CSS custom property system
+- Validate token values and consistency
+- Test contrast and accessibility
+
+### Phase 2: Component System
+- Build semantic components
+- Define variant and state system
+- Test component styling and interactions
+- Verify accessibility and responsive behavior
+
+### Phase 3: Layout & Templates
+- Implement responsive grid system
+- Create layout templates
+- Test responsive behavior at all breakpoints
+- Verify accessibility across all layouts
+- Validate dark mode
+
+---
+
+## SUCCESS METRICS
+
+**Visual Design:**
+- All components use semantic classes from design system
+- Color tokens used consistently (no inline colors)
+- Spacing follows design scale
+- Dark mode colors verified
+
+**Accessibility:**
+- WCAG AA compliance (contrast >= 4.5:1)
+- Keyboard navigation works on all pages
+- Touch targets >= 44px × 44px
+- Screen reader compatible
+
+**Responsiveness:**
+- No horizontal scrolling on mobile (375px)
+- Proper layout reflow at breakpoints
+- Touch-friendly on all device sizes
+- Performance acceptable (CLS < 0.1)
+
+**Code Quality:**
+- CSS organized by token → component → layout
+- DRY principle applied (no duplication)
+- Test coverage comprehensive
+- HTML validates against standards
+
+---
+
+**Status**: Generated {{ "with AI enrichment" if ai_enriched else "in Quick Mode" }}
+**Created**: {{ created_ts | format_date }}
+**Last Updated**: {{ updated_ts | format_date }}
