@@ -1235,6 +1235,129 @@ async def _get_project_by_identifier(identifier: str) -> Project:
         )
 
 
+# --- Common mistake detection helpers --------------------------------------------------------
+
+# Known program names that agents might mistakenly use as agent names
+_KNOWN_PROGRAM_NAMES: frozenset[str] = frozenset({
+    "claude-code", "claude", "codex-cli", "codex", "cursor", "windsurf",
+    "cline", "aider", "copilot", "github-copilot", "gemini-cli", "gemini",
+    "opencode", "vscode", "neovim", "vim", "emacs", "zed", "continue",
+})
+
+# Known model name patterns that agents might mistakenly use as agent names
+_MODEL_NAME_PATTERNS: tuple[str, ...] = (
+    "gpt-", "gpt4", "gpt3", "claude-", "opus", "sonnet", "haiku",
+    "gemini-", "llama", "mistral", "codestral", "o1-", "o3-",
+)
+
+
+def _looks_like_program_name(value: str) -> bool:
+    """Check if value looks like a program name (not a valid agent name)."""
+    v = value.lower().strip()
+    return v in _KNOWN_PROGRAM_NAMES
+
+
+def _looks_like_model_name(value: str) -> bool:
+    """Check if value looks like a model name (not a valid agent name)."""
+    v = value.lower().strip()
+    return any(p in v for p in _MODEL_NAME_PATTERNS)
+
+
+def _looks_like_email(value: str) -> bool:
+    """Check if value looks like an email address."""
+    return "@" in value and "." in value.split("@")[-1]
+
+
+def _looks_like_broadcast(value: str) -> bool:
+    """Check if value looks like a broadcast attempt."""
+    v = value.lower().strip()
+    return v in {"all", "*", "everyone", "broadcast", "@all", "@everyone"}
+
+
+def _looks_like_descriptive_name(value: str) -> bool:
+    """Check if value looks like a descriptive role name instead of adjective+noun."""
+    v = value.lower()
+    # Common suffixes for descriptive agent names
+    descriptive_patterns = (
+        "agent", "bot", "assistant", "helper", "manager", "coordinator",
+        "developer", "engineer", "migrator", "refactorer", "fixer",
+        "harmonizer", "integrator", "optimizer", "analyzer", "worker",
+    )
+    return any(v.endswith(p) for p in descriptive_patterns)
+
+
+def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
+    """
+    Detect common mistakes when agents provide invalid agent names.
+    Returns (mistake_type, helpful_message) or None if no obvious mistake detected.
+    """
+    if _looks_like_program_name(value):
+        return (
+            "PROGRAM_NAME_AS_AGENT",
+            f"'{value}' looks like a program name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'BlueLake' or 'GreenCastle'. "
+            f"Use the 'program' parameter for program names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_model_name(value):
+        return (
+            "MODEL_NAME_AS_AGENT",
+            f"'{value}' looks like a model name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'RedStone' or 'PurpleBear'. "
+            f"Use the 'model' parameter for model names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_email(value):
+        return (
+            "EMAIL_AS_AGENT",
+            f"'{value}' looks like an email address. Agent names are simple identifiers like 'BlueDog', "
+            f"not email addresses. Check the 'to' parameter format."
+        )
+    if _looks_like_broadcast(value):
+        return (
+            "BROADCAST_ATTEMPT",
+            f"'{value}' looks like a broadcast attempt. Agent Mail doesn't support broadcasting to all agents. "
+            f"List specific recipient agent names in the 'to' parameter."
+        )
+    if _looks_like_descriptive_name(value):
+        return (
+            "DESCRIPTIVE_NAME",
+            f"'{value}' looks like a descriptive role name. Agent names must be randomly generated "
+            f"adjective+noun combinations like 'WhiteMountain' or 'BrownCreek', NOT descriptive of the agent's task. "
+            f"Omit the 'name' parameter to auto-generate a valid name."
+        )
+    return None
+
+
+def _detect_suspicious_file_reservation(pattern: str) -> str | None:
+    """
+    Detect suspicious file reservation patterns that might be too broad.
+    Returns a warning message or None if the pattern looks reasonable.
+    """
+    p = pattern.strip()
+
+    # Catch overly broad patterns
+    if p in ("*", "**", "**/*", "**/**", "."):
+        return (
+            f"Pattern '{p}' is too broad and would reserve the entire project. "
+            f"Use more specific patterns like 'src/api/*.py' or 'lib/auth/**'."
+        )
+
+    # Catch absolute paths when relative expected
+    if p.startswith("/") and not p.startswith("//"):
+        return (
+            f"Pattern '{p}' looks like an absolute path. File reservation patterns should be "
+            f"project-relative (e.g., 'src/module.py' not '/full/path/src/module.py')."
+        )
+
+    # Warn about very short patterns that might be unintentionally broad
+    if len(p) <= 2 and "*" in p:
+        return (
+            f"Pattern '{p}' is very short and may match more files than intended. "
+            f"Consider using a more specific pattern."
+        )
+
+    return None
+
+
 # --- Project sibling suggestion helpers -----------------------------------------------------
 
 _PROJECT_PROFILE_FILENAMES: tuple[str, ...] = (
@@ -1709,11 +1832,23 @@ async def _get_or_create_agent(
                 desired_name = sanitized
             else:
                 if mode == "strict":
-                    raise ValueError(
+                    # Check for common mistakes and provide specific guidance
+                    mistake = _detect_agent_name_mistake(sanitized)
+                    if mistake:
+                        raise ToolExecutionError(
+                            mistake[0],
+                            mistake[1],
+                            recoverable=True,
+                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
+                        )
+                    raise ToolExecutionError(
+                        "INVALID_AGENT_NAME",
                         f"Invalid agent name format: '{sanitized}'. "
                         f"Agent names MUST be randomly generated adjective+noun combinations "
                         f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name."
+                        f"Omit the 'name' parameter to auto-generate a valid name.",
+                        recoverable=True,
+                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
                     )
                 # coerce -> ignore invalid provided name and auto-generate
                 desired_name = await _generate_unique_agent_name(project, settings, None)
@@ -3183,6 +3318,37 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+
+        # Normalize 'to' parameter - accept single string and convert to list
+        if isinstance(to, str):
+            to = [to]
+        if not isinstance(to, list):
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                f"'to' must be a list of agent names (e.g., ['BlueLake']) or a single agent name string. "
+                f"Received: {type(to).__name__}",
+                recoverable=True,
+                data={"argument": "to", "received_type": type(to).__name__},
+            )
+
+        # Check for common recipient mistakes and provide helpful guidance
+        for recipient in to:
+            if not isinstance(recipient, str):
+                raise ToolExecutionError(
+                    "INVALID_ARGUMENT",
+                    f"Each recipient in 'to' must be a string (agent name). Got: {type(recipient).__name__}",
+                    recoverable=True,
+                    data={"argument": "to", "invalid_item": repr(recipient)},
+                )
+            mistake = _detect_agent_name_mistake(recipient)
+            if mistake:
+                raise ToolExecutionError(
+                    mistake[0],
+                    f"Invalid recipient '{recipient}': {mistake[1]}",
+                    recoverable=True,
+                    data={"recipient": recipient, "hint": "Use agent names like 'BlueLake', not program/model names"},
+                )
+
         # Normalize cc/bcc inputs and validate types for friendlier UX
         if isinstance(cc, str):
             cc = [cc]
@@ -3220,6 +3386,19 @@ def build_mcp_server() -> FastMCP:
                 recoverable=True,
                 data={"argument": "bcc"},
             )
+
+        # Self-send detection: warn if sender is sending to themselves
+        sender_lower = sender_name.lower().strip()
+        all_recipients = (to or []) + (cc or []) + (bcc or [])
+        self_send_matches = [r for r in all_recipients if r.lower().strip() == sender_lower]
+        if self_send_matches:
+            await ctx.info(
+                f"[note] You ({sender_name}) are sending a message to yourself. "
+                f"This is allowed but usually not intended. To communicate with other agents, "
+                f"use their agent names (e.g., 'BlueLake'). To discover agents, "
+                f"use resource://agents/{project_key}."
+            )
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -5365,10 +5544,11 @@ def build_mcp_server() -> FastMCP:
             extra = f" ({summary})" if summary else ""
             await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
         project_id = project.id
-        # Lightweight validation: warn on ultra-broad patterns
-        broad = [p for p in paths if p.strip() in {"*", "**/*", "**", "/**/*"}]
-        if broad:
-            await ctx.info(f"[warn] Reservation pattern(s) extremely broad: {', '.join(broad)} — consider narrowing to repo-root relative paths (e.g., 'app/api/*.py').")
+        # Validate path patterns and warn on suspicious patterns
+        for pattern in paths:
+            warning = _detect_suspicious_file_reservation(pattern)
+            if warning:
+                await ctx.info(f"[warn] {warning}")
         async with get_session() as session:
             existing_rows = await session.execute(
                 cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
