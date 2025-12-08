@@ -68,6 +68,9 @@ dev = [
   "ipython>=8.27.0",
 ]
 
+[project.scripts]
+mcp-agent-mail = "mcp_agent_mail.cli:_cli_entry"
+
 [project.urls]
 Homepage = "https://example.com/mcp-agent-mail"
 Repository = "https://example.com/mcp-agent-mail"

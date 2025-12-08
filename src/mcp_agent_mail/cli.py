@@ -2444,7 +2444,7 @@ def guard_install(
         hook_path = await install_guard_script(settings, project_record.slug, repo_path)
         if prepush:
             try:
-                from .guard import install_prepush_guard as _install_prepush
+                from .guard import install_prepush_guard as _install_prepush  # type: ignore
                 await _install_prepush(settings, project_record.slug, repo_path)
             except Exception as exc:
                 console.print(f"[yellow]Warning: failed to install pre-push guard: {exc}[/]")
@@ -2873,7 +2873,7 @@ def projects_mark_identity(
         raise typer.BadParameter("Unable to resolve project_uid for this path.")
     # Determine repo root
     try:
-        from git import Repo as _Repo
+        from git import Repo as _Repo  # local import to avoid CLI startup cost
         repo = _Repo(str(p), search_parent_directories=True)
         root = Path(repo.working_tree_dir or str(p))
     except Exception:
@@ -3007,7 +3007,7 @@ def guard_status(
 
     hooks_path = _git(p, "config", "--get", "core.hooksPath")
     if hooks_path:
-        if hooks_path.startswith("/") or ((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/"))):
+        if hooks_path.startswith("/") or (((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")))):
             hooks_dir = Path(hooks_path)
         else:
             root = _git(p, "rev-parse", "--show-toplevel") or str(p)
@@ -3213,7 +3213,8 @@ def projects_adopt(
 
     # Describe filesystem moves (archive layout)
     settings = get_settings()
-    from .storage import ensure_archive as _ensure_archive
+    # local import to minimize top-level churn and keep ordering stable
+    from .storage import AsyncFileLock as _AsyncFileLock, ensure_archive as _ensure_archive  # type: ignore
     src_archive = asyncio.run(_ensure_archive(settings, src.slug))
     dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
     plan.append(f"Move Git artifacts: {src_archive.root} -> {dst_archive.root}")
@@ -3328,7 +3329,7 @@ def file_reservations_active(
         m, s = divmod(r, 60)
         return f"{sign}{h:02d}:{m:02d}:{s:02d}"
 
-    table = Table(title=f"Active File Reservations — {project_record.human_key}")
+    table = Table(title=f"Active File Reservations — {project_record.human_key}", show_lines=False)
     table.add_column("ID")
     table.add_column("Agent")
     table.add_column("Pattern")
@@ -3465,14 +3466,14 @@ def acks_pending(
         m, s = divmod(r, 60)
         return f"{h:02d}:{m:02d}:{s:02d}"
 
-    for message, read_ts, _ack_ts, kind in rows:
-        age = _age(message.created_ts)
+    for msg, read_ts, _ack_ts, kind in rows:
+        age = _age(msg.created_ts)
         table.add_row(
-            str(message.id),
-            message.thread_id or "",
-            message.subject,
+            str(msg.id),
+            msg.thread_id or "",
+            msg.subject,
             kind,
-            _iso(message.created_ts),
+            _iso(msg.created_ts),
             _iso(read_ts) if read_ts else "",
             age,
         )
@@ -3880,7 +3881,7 @@ def _collect_doc_candidates(roots: Sequence[Path], max_depth: int) -> list[DocCa
             continue
         for file_path in _iter_doc_files(root, max_depth):
             resolved = file_path.resolve()
-            if resolved in seen:
+            if resolved in seen or not resolved.exists() or not resolved.is_file():
                 continue
             seen.add(resolved)
             try:
@@ -3979,6 +3980,11 @@ def docs_insert_blurbs(
             f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); "
             "other files already had the snippet."
         )
+
+
+def _cli_entry() -> None:
+    """Entry point for the mcp-agent-mail CLI script."""
+    app()
 
 
 if __name__ == "__main__":
