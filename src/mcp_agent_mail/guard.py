@@ -595,11 +595,11 @@ async def uninstall_guard(repo_path: Path) -> bool:
                 content = (await asyncio.to_thread(hook_path.read_text, "utf-8")).strip()
             except Exception:
                 content = ""
-            # Keep chain-runner files
+            # Remove our chain-runner files (leave other hooks intact)
             if "mcp-agent-mail chain-runner" in content:
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
-            if any(s in content for s in SENTINELS):
+            elif any(s in content for s in SENTINELS):
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
     return removed
