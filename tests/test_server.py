@@ -87,7 +87,7 @@ async def test_messaging_flow(isolated_env):
         assert "Test" in message_file.read_text()
         repo = Repo(str(storage_root))
         # Commit message is a rich panel; ensure the subject is captured
-        assert '"subject": "Test"' in repo.head.commit.message
+        assert '"subject": "Test"' in str(repo.head.commit.message)
 
 
 @pytest.mark.asyncio
