@@ -23,7 +23,7 @@ _schema_ready = False
 _schema_lock: asyncio.Lock | None = None
 
 
-def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: float = 5.0):
+def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: float = 5.0) -> Callable[..., Any]:
     """Decorator to retry async functions on SQLite database lock errors with exponential backoff + jitter.
 
     Args:
@@ -100,11 +100,11 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         import datetime as dt_module
         import sqlite3
 
-        def adapt_datetime_iso(val):
+        def adapt_datetime_iso(val: Any) -> str:
             """Adapt datetime.datetime to ISO 8601 date."""
-            return val.isoformat()
+            return str(val.isoformat())
 
-        def convert_datetime(val):
+        def convert_datetime(val: bytes | str) -> dt_module.datetime | None:
             """Convert ISO 8601 datetime to datetime.datetime object.
 
             Returns None for any conversion errors (invalid format, wrong type,
@@ -147,7 +147,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     if is_sqlite:
 
         @event.listens_for(engine.sync_engine, "connect")
-        def set_sqlite_pragma(dbapi_conn, connection_record):
+        def set_sqlite_pragma(dbapi_conn: Any, connection_record: Any) -> None:
             """Set SQLite PRAGMAs for better concurrent performance on each connection."""
             cursor = dbapi_conn.cursor()
             # Enable WAL mode for concurrent reads/writes
@@ -232,7 +232,7 @@ def reset_database_state() -> None:
     _schema_lock = None
 
 
-def _setup_fts(connection) -> None:
+def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(message_id UNINDEXED, subject, body)"
     )
