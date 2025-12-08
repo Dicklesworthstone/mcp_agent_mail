@@ -15,7 +15,7 @@ try:
     _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
 except FileNotFoundError:
     # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
-    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
+    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type,misc]
 
 
 @dataclass(slots=True, frozen=True)

@@ -15,10 +15,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
+from git.objects.tree import Tree
 from PIL import Image
 
 from .config import Settings
@@ -139,8 +140,9 @@ class AsyncFileLock:
                 metadata = {}
         pid_val = metadata.get("pid")
         pid_int: int | None = None
-        with contextlib.suppress(Exception):
-            pid_int = int(pid_val)
+        if pid_val is not None:
+            with contextlib.suppress(Exception):
+                pid_int = int(pid_val)
         owner_alive = self._pid_alive(pid_int) if pid_int else False
         created_ts = metadata.get("created_ts")
         age = None
@@ -179,7 +181,7 @@ class AsyncFileLock:
         self._metadata_path.write_text(json.dumps(payload), encoding="utf-8")
         return None
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         if self._held:
             # Release the file lock first
             with contextlib.suppress(Exception):
@@ -223,8 +225,8 @@ class AsyncFileLock:
 
         # Try psutil first if available (most reliable cross-platform method)
         try:
-            import psutil
-            return psutil.pid_exists(pid)
+            import psutil  # type: ignore[import-not-found]
+            return bool(psutil.pid_exists(pid))
         except ImportError:
             pass
 
@@ -260,7 +262,7 @@ class AsyncFileLock:
 
 
 @asynccontextmanager
-async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     """Context manager for safely mutating archive surfaces."""
 
     lock = AsyncFileLock(archive.lock_path, timeout_seconds=timeout_seconds)
@@ -274,8 +276,17 @@ async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float 
         await lock.__aexit__(None, None, None)
 
 
-async def _to_thread(func, /, *args, **kwargs):
+T = TypeVar('T')
+
+async def _to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _ensure_str(value: str | bytes) -> str:
+    """Ensure a value is a string, decoding bytes if necessary."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def collect_lock_status(settings: Settings) -> dict[str, Any]:
@@ -318,8 +329,9 @@ def collect_lock_status(settings: Settings) -> dict[str, Any]:
 
             pid_val = metadata.get("pid")
             pid_int: int | None = None
-            with contextlib.suppress(Exception):
-                pid_int = int(pid_val)
+            if pid_val is not None:
+                with contextlib.suppress(Exception):
+                    pid_int = int(pid_val)
             info["owner_pid"] = pid_int
             info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
 
@@ -388,7 +400,8 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     if git_dir.exists():
         return Repo(str(root))
 
-    repo = await _to_thread(Repo.init, str(root))
+    repo_result = await _to_thread(Repo.init, str(root))
+    repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
     # Ensure deterministic, non-interactive commits (disable GPG signing)
     try:
         def _configure_repo() -> None:
@@ -659,10 +672,11 @@ async def _convert_markdown_images(
             last_idx = path_end
             continue
         attachment_meta, rel_path = await _store_image(archive, file_path, embed_policy=embed_policy)
+        replacement_value: str
         if attachment_meta["type"] == "inline":
             replacement_value = f"data:image/webp;base64,{attachment_meta['data_base64']}"
         else:
-            replacement_value = attachment_meta["path"]
+            replacement_value = str(attachment_meta["path"])
         leading_ws_len = len(raw_path) - len(raw_path.lstrip())
         trailing_ws_len = len(raw_path) - len(raw_path.rstrip())
         leading_ws = raw_path[:leading_ws_len] if leading_ws_len else ""
@@ -834,7 +848,10 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
             repo.index.commit(final_message, author=actor, committer=actor)
     # Serialize commits across all projects sharing the same Git repo to avoid index races
-    commit_lock_path = Path(repo.working_tree_dir).resolve() / ".commit.lock"
+    working_tree = repo.working_tree_dir
+    if working_tree is None:
+        raise ValueError("Repository has no working tree directory")
+    commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
     async with AsyncFileLock(commit_lock_path):
         await _to_thread(_perform_commit)
 
@@ -943,6 +960,7 @@ async def get_recent_commits(
             else:
                 relative_date = "just now"
 
+            message_str = _ensure_str(commit.message)
             commits.append({
                 "sha": commit.hexsha,
                 "short_sha": commit.hexsha[:8],
@@ -950,8 +968,8 @@ async def get_recent_commits(
                 "email": commit.author.email,
                 "date": commit_time.isoformat(),
                 "relative_date": relative_date,
-                "subject": commit.message.split("\n")[0],
-                "body": commit.message,
+                "subject": message_str.split("\n")[0],
+                "body": message_str,
                 "files_changed": files_changed,
                 "insertions": insertions,
                 "deletions": deletions,
@@ -959,7 +977,8 @@ async def get_recent_commits(
 
         return commits
 
-    return await _to_thread(_get_commits)
+    result: list[dict[str, Any]] = await _to_thread(_get_commits)
+    return result
 
 
 async def get_commit_detail(
@@ -1019,20 +1038,25 @@ async def get_commit_detail(
 
             # Get diff text with size limit
             if diff.diff:
-                decoded_diff = diff.diff.decode("utf-8", errors="replace")
+                diff_bytes = diff.diff
+                if isinstance(diff_bytes, bytes):
+                    decoded_diff = diff_bytes.decode("utf-8", errors="replace")
+                else:
+                    decoded_diff = str(diff_bytes)
                 if len(diff_text) + len(decoded_diff) > max_diff_size:
                     diff_text += "\n\n[... Diff truncated - exceeds size limit ...]\n"
                     break
                 diff_text += decoded_diff
 
         # Parse commit body into message and trailers
-        lines = commit.message.split("\n")
+        message_str = _ensure_str(commit.message)
+        lines = message_str.split("\n")
         subject = lines[0] if lines else ""
 
         # Find where trailers start (Git trailers are at end after blank line)
         # We scan backwards to find the trailer block
-        body_lines = []
-        trailer_lines = []
+        body_lines: list[str] = []
+        trailer_lines: list[str] = []
 
         rest_lines = lines[1:] if len(lines) > 1 else []
         if not rest_lines:
@@ -1110,7 +1134,8 @@ async def get_commit_detail(
             },
         }
 
-    return await _to_thread(_get_detail)
+    result: dict[str, Any] = await _to_thread(_get_detail)
+    return result
 
 
 async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> str | None:
@@ -1160,7 +1185,8 @@ async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> st
 
         return None
 
-    return await _to_thread(_find_commit)
+    result: str | None = await _to_thread(_find_commit)
+    return result
 
 
 async def get_archive_tree(
@@ -1212,13 +1238,17 @@ async def get_archive_tree(
 
         # Get tree object at path
         try:
-            tree = commit.tree / tree_path
+            tree_obj = commit.tree / tree_path
         except KeyError:
             # Path doesn't exist
             return []
 
+        # Ensure we have a tree object (not a blob)
+        if not isinstance(tree_obj, Tree):
+            return []
+
         entries = []
-        for item in tree:
+        for item in tree_obj:
             entry_type = "dir" if item.type == "tree" else "file"
             size = item.size if hasattr(item, "size") else 0
 
@@ -1231,11 +1261,12 @@ async def get_archive_tree(
             })
 
         # Sort: directories first, then files, both alphabetically
-        entries.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
+        entries.sort(key=lambda x: (x["type"] != "dir", str(x["name"]).lower()))
 
         return entries
 
-    return await _to_thread(_get_tree)
+    result: list[dict[str, Any]] = await _to_thread(_get_tree)
+    return result
 
 
 async def get_file_content(
@@ -1292,11 +1323,12 @@ async def get_file_content(
             # Check size before reading
             if obj.size > max_size_bytes:
                 raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
-            return obj.data_stream.read().decode("utf-8", errors="replace")
+            return str(obj.data_stream.read().decode("utf-8", errors="replace"))
         except KeyError:
             return None
 
-    return await _to_thread(_get_content)
+    result: str | None = await _to_thread(_get_content)
+    return result
 
 
 async def get_agent_communication_graph(
@@ -1325,7 +1357,8 @@ async def get_agent_communication_graph(
         for commit in repo.iter_commits(paths=[path_spec], max_count=limit):
             # Parse commit message to extract sender and recipients
             # Format: "mail: Sender -> Recipient1, Recipient2 | Subject"
-            subject = commit.message.split("\n")[0]
+            message_str = _ensure_str(commit.message)
+            subject = message_str.split("\n")[0]
 
             if not subject.startswith("mail: "):
                 continue
@@ -1391,7 +1424,8 @@ async def get_agent_communication_graph(
             "edges": edges,
         }
 
-    return await _to_thread(_analyze_graph)
+    result: dict[str, Any] = await _to_thread(_analyze_graph)
+    return result
 
 
 async def get_timeline_commits(
@@ -1415,7 +1449,8 @@ async def get_timeline_commits(
 
         timeline = []
         for commit in repo.iter_commits(paths=[path_spec], max_count=limit):
-            subject = commit.message.split("\n")[0]
+            message_str = _ensure_str(commit.message)
+            subject = message_str.split("\n")[0]
             commit_time = datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)
 
             # Classify commit type
@@ -1453,11 +1488,15 @@ async def get_timeline_commits(
             })
 
         # Sort by timestamp (oldest first for timeline)
-        timeline.sort(key=lambda x: x["timestamp"])
+        def _get_timestamp(x: dict[str, Any]) -> int:
+            ts = x.get("timestamp", 0)
+            return int(ts) if isinstance(ts, (int, float)) else 0
+        timeline.sort(key=_get_timestamp)
 
         return timeline
 
-    return await _to_thread(_get_timeline)
+    result: list[dict[str, Any]] = await _to_thread(_get_timeline)
+    return result
 
 
 async def get_historical_inbox_snapshot(
@@ -1538,7 +1577,7 @@ async def get_historical_inbox_snapshot(
                 tree = tree / part
 
             # Recursively traverse inbox subdirectories (YYYY/MM/) to find message files
-            def traverse_tree(subtree, depth=0):
+            def traverse_tree(subtree: Any, depth: int = 0) -> None:
                 """Recursively traverse git tree looking for .md files"""
                 if depth > 3:  # Safety limit: inbox/YYYY/MM is 2 levels, add buffer
                     return
@@ -1635,4 +1674,5 @@ async def get_historical_inbox_snapshot(
             "requested_time": timestamp,
         }
 
-    return await _to_thread(_get_snapshot)
+    result: dict[str, Any] = await _to_thread(_get_snapshot)
+    return result

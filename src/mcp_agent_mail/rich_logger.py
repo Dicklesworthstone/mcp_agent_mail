@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,7 +18,7 @@ from typing import Any, Optional
 from rich import box
 from rich.align import Align
 from rich.columns import Columns
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.markup import escape
 from rich.panel import Panel
@@ -276,7 +277,7 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
 def log_tool_call_start(ctx: ToolCallContext) -> None:
     """Log the start of a tool call with full details."""
     # Create the main panel with all information
-    components = []
+    components: list[RenderableType] = []
 
     # Add a rule separator for visual clarity
     components.append(Rule(style="bright_blue"))
@@ -329,7 +330,7 @@ def render_tool_call_panel(ctx: ToolCallContext) -> str:
 
 def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
     """Construct the Rich panel summarizing a completed tool call."""
-    components = []
+    components: list[RenderableType] = []
 
     # Add a rule separator
     if ctx.success:
@@ -385,7 +386,7 @@ def _render_panel_to_text(panel: Panel) -> str:
 
 def log_tool_call_complete(
     tool_name: str,
-    args: tuple,
+    args: tuple[Any, ...],
     kwargs: dict[str, Any],
     result: Any = None,
     error: Optional[Exception] = None,
@@ -413,11 +414,11 @@ def log_tool_call_complete(
 @contextmanager
 def tool_call_logger(
     tool_name: str,
-    args: tuple = (),
+    args: tuple[Any, ...] = (),
     kwargs: dict[str, Any] | None = None,
     project: Optional[str] = None,
     agent: Optional[str] = None,
-):
+) -> Generator[ToolCallContext, None, None]:
     """Context manager for logging a complete tool call lifecycle.
 
     Usage:
@@ -450,7 +451,7 @@ def tool_call_logger(
             log_tool_call_end(ctx)
 
 
-def log_info(message: str, **kwargs) -> None:
+def log_info(message: str, **kwargs: Any) -> None:
     """Log an informational message with Rich formatting."""
     text = Text(f"ℹ️  {message}", style="bold bright_cyan")  # noqa: RUF001
     if kwargs:
@@ -469,7 +470,7 @@ def log_info(message: str, **kwargs) -> None:
         console.print(text)
 
 
-def log_warning(message: str, **kwargs) -> None:
+def log_warning(message: str, **kwargs: Any) -> None:
     """Log a warning message with Rich formatting."""
     text = Text(f"⚠️  {message}", style="bold bright_yellow")
     if kwargs:
@@ -488,7 +489,7 @@ def log_warning(message: str, **kwargs) -> None:
         console.print(text)
 
 
-def log_error(message: str, error: Optional[Exception] = None, **kwargs) -> None:
+def log_error(message: str, error: Optional[Exception] = None, **kwargs: Any) -> None:
     """Log an error message with Rich formatting."""
     text = Text(f"❌ {message}", style="bold bright_red")
     console.print(text)
@@ -511,7 +512,7 @@ def log_error(message: str, error: Optional[Exception] = None, **kwargs) -> None
         console.print(panel)
 
 
-def log_success(message: str, **kwargs) -> None:
+def log_success(message: str, **kwargs: Any) -> None:
     """Log a success message with Rich formatting."""
     text = Text(f"✅ {message}", style="bold bright_green")
     if kwargs:
@@ -609,7 +610,7 @@ def create_data_tree(data: dict[str, Any], root_label: str = "Data") -> Tree:
     """Create a rich tree view for nested data structures."""
     tree = Tree(f"[bold bright_white]{root_label}[/bold bright_white]")
 
-    def add_items(parent, items):
+    def add_items(parent: Tree, items: dict[str, Any] | list[Any]) -> None:
         """Recursively add items to the tree."""
         if isinstance(items, dict):
             for key, value in items.items():
@@ -652,7 +653,7 @@ def log_message_with_metadata(
         body: Optional body content (supports markdown)
         message_type: Type of message ('info', 'success', 'warning', 'error')
     """
-    components = []
+    components: list[RenderableType] = []
 
     # Add message header
     if message_type == "success":
