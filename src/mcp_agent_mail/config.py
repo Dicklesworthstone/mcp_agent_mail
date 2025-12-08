@@ -173,7 +173,6 @@ class Settings:
     webhook_enabled: bool
     webhook_platform: str | None  # Platform to use: claude, gemini, codex, cursor (auto-generates command)
     webhook_command: str | None  # Custom command (overrides webhook_platform if set)
-    webhook_passthrough: bool  # If true, pass stdout/stderr directly to server terminal
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -336,7 +335,6 @@ def get_settings() -> Settings:
         webhook_enabled=_bool(_decouple_config("WEBHOOK_ENABLED", default="false"), default=False),
         webhook_platform=_decouple_config("WEBHOOK_PLATFORM", default="") or None,
         webhook_command=_decouple_config("WEBHOOK_COMMAND", default="") or None,
-        webhook_passthrough=_bool(_decouple_config("WEBHOOK_PASSTHROUGH", default="false"), default=False),
     )
 
 

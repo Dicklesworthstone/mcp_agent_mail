@@ -23,7 +23,6 @@ from typing import Any, Optional, cast
 from urllib.parse import parse_qsl
 import os
 import shlex
-import subprocess
 import sys
 import uuid
 
@@ -487,6 +486,7 @@ WEBHOOK_PLATFORM_COMMANDS: dict[str, str] = {
     "claude": f'cd {{project}} && claude -p "{_WEBHOOK_PROMPT}"',
     "gemini": f'cd {{project}} && gemini --yolo "{_WEBHOOK_PROMPT}"',
     "codex": f'cd {{project}} && codex exec --full-auto "{_WEBHOOK_PROMPT}"',
+    "cursor": f'cd {{project}} && cursor-agent -p -f --approve-mcps "{_WEBHOOK_PROMPT}"',
 }
 
 
@@ -576,21 +576,13 @@ async def _fire_webhook(recipients: list[str], project_key: str, payload: dict[s
                 importance=shlex.quote(str(payload.get("importance", "normal"))),
             )
             logger.info(f"Webhook: executing command for {recipient} (platform={agent_platform or settings.webhook_platform}): {cmd}")
-            if settings.webhook_passthrough:
-                # Passthrough mode: spawn subprocess without capturing output
-                try:
-                    subprocess.Popen(cmd, shell=True)
-                    logger.info(f"Webhook for {recipient} spawned in passthrough mode")
-                except Exception as e:
-                    logger.warning(f"Webhook passthrough failed for {recipient}: {e}")
-            else:
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                # Fire and forget - but log any immediate errors
-                asyncio.create_task(_log_webhook_result(recipient, proc))
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            # Fire and forget - but log any immediate errors
+            asyncio.create_task(_log_webhook_result(recipient, proc))
         except Exception as e:
             logger.warning(f"Webhook command failed for {recipient}: {e}")
 
@@ -604,9 +596,21 @@ async def _log_webhook_result(recipient: str, proc: asyncio.subprocess.Process) 
         else:
             logger.info(f"Webhook for {recipient} completed successfully")
     except asyncio.TimeoutError:
-        logger.info(f"Webhook for {recipient} still running (detached)")
+        logger.info(f"Webhook for {recipient} timed out after 30s, terminating")
+        # Must kill and wait to close pipe file descriptors
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
     except Exception as e:
         logger.warning(f"Webhook result logging failed for {recipient}: {e}")
+        # Clean up on any error to prevent fd leak
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
 
 
 def _project_workspace_path(project: Project) -> Optional[Path]:
