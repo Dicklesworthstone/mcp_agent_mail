@@ -623,6 +623,7 @@ WEBHOOK_PLATFORM_COMMANDS: dict[str, str] = {
     "gemini": f'cd {{project}} && gemini --yolo "{_WEBHOOK_PROMPT}"',
     "codex": f'cd {{project}} && codex exec --full-auto "{_WEBHOOK_PROMPT}"',
     "cursor": f'cd {{project}} && cursor-agent -p -f --approve-mcps "{_WEBHOOK_PROMPT}"',
+    "opencode": f'cd {{project}} && opencode run "{_WEBHOOK_PROMPT}"',
 }
 
 
@@ -718,21 +719,21 @@ async def _fire_webhook(recipients: list[str], project_key: str, payload: dict[s
                 stderr=asyncio.subprocess.PIPE,
             )
             # Fire and forget - but log any immediate errors
-            asyncio.create_task(_log_webhook_result(recipient, proc))
+            asyncio.create_task(_log_webhook_result(recipient, proc, float(settings.webhook_timeout)))
         except Exception as e:
             logger.warning(f"Webhook command failed for {recipient}: {e}")
 
 
-async def _log_webhook_result(recipient: str, proc: asyncio.subprocess.Process) -> None:
+async def _log_webhook_result(recipient: str, proc: asyncio.subprocess.Process, timeout: float = 300.0) -> None:
     """Log webhook subprocess result (fire-and-forget helper)."""
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         if proc.returncode != 0:
             logger.warning(f"Webhook for {recipient} exited with code {proc.returncode}: {stderr.decode()[:500]}")
         else:
             logger.info(f"Webhook for {recipient} completed successfully")
     except asyncio.TimeoutError:
-        logger.info(f"Webhook for {recipient} timed out after 30s, terminating")
+        logger.info(f"Webhook for {recipient} timed out after {timeout}s, terminating")
         # Must kill and wait to close pipe file descriptors
         try:
             proc.kill()
@@ -2150,19 +2151,35 @@ def _infer_platform(program: str, model: str) -> str | None:
     """Infer webhook platform from agent's program and model fields.
 
     Maps common program/model names to their webhook platforms.
+    Program name takes priority over model name since that indicates
+    the actual CLI being used.
     Returns None if no match found.
     """
-    # Check both program and model (some CLIs use generic program names)
-    combined = f"{program} {model}".lower()
+    prog_lower = program.lower()
+    model_lower = model.lower()
 
-    if "claude" in combined:
+    # Check program name first (the CLI being used) - this takes priority
+    if "claude" in prog_lower:
         return "claude"
-    if "gemini" in combined:
+    if "gemini" in prog_lower:
         return "gemini"
-    if "codex" in combined:
+    if "codex" in prog_lower or "openai" in prog_lower:
         return "codex"
-    if "gpt" in combined or "openai" in combined:
+    if "opencode" in prog_lower:
+        return "opencode"
+    if "cursor" in prog_lower:
+        return "cursor"
+
+    # Fall back to model name detection
+    if "claude" in model_lower:
+        return "claude"
+    if "gemini" in model_lower:
+        return "gemini"
+    if "codex" in model_lower:
+        return "codex"
+    if "gpt" in model_lower or "openai" in model_lower:
         return "codex"  # OpenAI models likely use Codex CLI
+
     return None
 
 

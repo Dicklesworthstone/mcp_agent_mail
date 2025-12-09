@@ -68,6 +68,12 @@ class TestInferPlatform:
         assert _infer_platform("", "openai-gpt") == "codex"
         assert _infer_platform("openai", "") == "codex"
 
+    def test_infers_opencode_from_program(self):
+        """Opencode in program name returns 'opencode'."""
+        assert _infer_platform("opencode", "") == "opencode"
+        assert _infer_platform("Opencode", "") == "opencode"
+        assert _infer_platform("opencode-cli", "") == "opencode"
+
     def test_returns_none_for_unknown(self):
         """Unknown program/model returns None."""
         assert _infer_platform("", "") is None
@@ -75,10 +81,18 @@ class TestInferPlatform:
         assert _infer_platform("custom-cli", "custom-model") is None
 
     def test_combined_detection(self):
-        """Platform detected from combined program+model."""
-        # Program takes priority in combined check order
+        """Platform detected from program first, then model."""
+        # Program takes priority over model
         assert _infer_platform("my-claude-wrapper", "custom") == "claude"
         assert _infer_platform("custom", "uses-gemini-pro") == "gemini"
+
+    def test_program_takes_priority_over_model(self):
+        """Program name takes priority over model name for platform detection."""
+        # opencode using claude model should detect as opencode, not claude
+        assert _infer_platform("opencode", "claude-sonnet-4") == "opencode"
+        assert _infer_platform("opencode", "claude-3-opus") == "opencode"
+        # gemini CLI using different model
+        assert _infer_platform("gemini", "some-model") == "gemini"
 
 
 # =============================================================================
@@ -703,7 +717,7 @@ class TestWebhookEdgeCases:
 
     def test_all_supported_platforms_have_commands(self):
         """All supported platforms have corresponding commands."""
-        expected_platforms = ["claude", "gemini", "codex", "cursor"]
+        expected_platforms = ["claude", "gemini", "codex", "cursor", "opencode"]
         for platform in expected_platforms:
             assert platform in WEBHOOK_PLATFORM_COMMANDS, f"Missing command for {platform}"
 
