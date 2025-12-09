@@ -87,10 +87,8 @@ def _git_repo(path: str | Path, search_parent_directories: bool = True) -> Any:
         yield repo
     finally:
         if repo is not None:
-            try:
+            with suppress(Exception):
                 repo.close()
-            except Exception:
-                pass  # Best-effort cleanup
 
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
@@ -610,19 +608,15 @@ def _open_repo_if_available(workspace: Optional[Path]) -> Optional[Repo]:
         root = Path(repo.working_tree_dir or "")
     except Exception:
         # Close repo before returning None to avoid file handle leak
-        try:
+        with suppress(Exception):
             repo.close()
-        except Exception:
-            pass
         return None
     with suppress(Exception):
         workspace.resolve().relative_to(root.resolve())
         return repo
     # Close repo before returning None to avoid file handle leak
-    try:
+    with suppress(Exception):
         repo.close()
-    except Exception:
-        pass
     return None
 
 
@@ -726,7 +720,7 @@ def _validate_iso_timestamp(raw_value: Optional[str], param_name: str = "timesta
             ),
             recoverable=True,
             data={"provided": raw_value, "expected_format": "YYYY-MM-DDTHH:MM:SS+HH:MM"},
-        )
+        ) from None
 
 
 def _validate_program_model(program: str, model: str) -> None:
@@ -2261,10 +2255,8 @@ async def _collect_file_reservation_statuses(
     finally:
         # Cleanup: close repo if we opened one
         if repo is not None:
-            try:
+            with suppress(Exception):
                 repo.close()
-            except Exception:
-                pass
     return statuses
 
 
@@ -6900,21 +6892,15 @@ def build_mcp_server() -> FastMCP:
                     },
                     {
                         "name": "summarize_thread",
-                        "summary": "Extract participants, key points, and action items for a single thread.",
-                        "use_when": "Briefing new agents on long discussions or closing loops.",
-                        "related": ["summarize_threads"],
-                        "expected_frequency": "When threads exceed quick skim length.",
+                        "summary": "Extract participants, key points, and action items for one or more threads.",
+                        "use_when": "Briefing new agents on long discussions, closing loops, or producing digests.",
+                        "related": ["search_messages"],
+                        "expected_frequency": "When threads exceed quick skim length or at cadence checkpoints.",
                         "required_capabilities": ["search", "summarization"],
-                        "usage_examples": [{"hint": "Thread brief", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"}],
-                    },
-                    {
-                        "name": "summarize_threads",
-                        "summary": "Produce a digest across multiple threads with aggregate mentions/actions.",
-                        "use_when": "Daily standups or cross-team sync summaries.",
-                        "related": ["summarize_thread"],
-                        "expected_frequency": "At cadence checkpoints (daily/weekly).",
-                        "required_capabilities": ["search", "summarization"],
-                        "usage_examples": [{"hint": "Digest", "sample": "summarize_threads(project_key='backend', thread_ids=['TKT-123','UX-42'])"}],
+                        "usage_examples": [
+                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"},
+                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99')"},
+                        ],
                     },
                 ],
             },
