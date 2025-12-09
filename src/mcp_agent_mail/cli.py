@@ -33,7 +33,7 @@ from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import build_mcp_server
+from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -296,6 +296,12 @@ def products_search(
     """
     Full-text search over messages for all projects linked to a product.
     """
+    # Sanitize query before executing
+    sanitized_query = _sanitize_fts_query(query)
+    if sanitized_query is None:
+        console.print(f"[yellow]Query '{query}' cannot produce search results.[/]")
+        return
+
     async def _run() -> list[dict]:
         await ensure_schema()
         async with get_session() as session:
@@ -310,22 +316,26 @@ def products_search(
             proj_ids = [int(r[0]) for r in rows.fetchall()]
             if not proj_ids:
                 return []
-            result = await session.execute(
-                text(
-                    """
-                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                           m.thread_id, a.name AS sender_name, m.project_id
-                    FROM fts_messages
-                    JOIN messages m ON fts_messages.rowid = m.id
-                    JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                    ORDER BY bm25(fts_messages) ASC
-                    LIMIT :limit
-                    """
-                ).bindparams(bindparam("proj_ids", expanding=True)),
-                {"proj_ids": proj_ids, "query": query, "limit": limit},
-            )
-            return [dict(row) for row in result.mappings().all()]
+            try:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name, m.project_id
+                        FROM fts_messages
+                        JOIN messages m ON fts_messages.rowid = m.id
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
+                        ORDER BY bm25(fts_messages) ASC
+                        LIMIT :limit
+                        """
+                    ).bindparams(bindparam("proj_ids", expanding=True)),
+                    {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                )
+                return [dict(row) for row in result.mappings().all()]
+            except Exception:
+                # FTS query failed - return empty results
+                return []
     rows = asyncio.run(_run())
     if not rows:
         console.print("[yellow]No results.[/]")
@@ -2564,6 +2574,7 @@ def amctl_env(
     # Determine branch
     branch = ident.get("branch") or ""
     if not branch:
+        repo = None
         try:
             from git import Repo as _Repo
             repo = _Repo(str(p), search_parent_directories=True)
@@ -2573,6 +2584,10 @@ def amctl_env(
                 branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
         except Exception:
             branch = "unknown"
+        finally:
+            if repo is not None:
+                with suppress(Exception):
+                    repo.close()
     # Compute cache key and artifact dir
     settings = get_settings()
     cache_key = f"am-cache-{project_uid}-{agent_name}-{branch}"
@@ -2612,6 +2627,7 @@ def am_run(
     # Always ensure archive structure exists (for tests and local runs)
     asyncio.run(ensure_archive(get_settings(), slug))
     if not branch:
+        repo = None
         try:
             from git import Repo as _Repo
             repo = _Repo(str(p), search_parent_directories=True)
@@ -2621,6 +2637,10 @@ def am_run(
                 branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
         except Exception:
             branch = "unknown"
+        finally:
+            if repo is not None:
+                with suppress(Exception):
+                    repo.close()
     settings = get_settings()
     guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
     worktrees_enabled = bool(settings.worktrees_enabled)
@@ -2880,12 +2900,17 @@ def projects_mark_identity(
     if not uid:
         raise typer.BadParameter("Unable to resolve project_uid for this path.")
     # Determine repo root
+    repo = None
     try:
         from git import Repo as _Repo
         repo = _Repo(str(p), search_parent_directories=True)
         root = Path(repo.working_tree_dir or str(p))
     except Exception:
         root = p
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
     marker_path = root / ".agent-mail-project-id"
     marker_path.write_text(uid + "\n", encoding="utf-8")
     console.print(f"[green]Wrote[/] {marker_path} with project_uid={uid}")
@@ -2962,6 +2987,7 @@ def mail_status(
         return f"{host}/{owner}/{repo}"
 
     normalized_remote: Optional[str] = None
+    repo = None
     try:
         from git import Repo as _Repo  # local import to avoid CLI startup cost
         repo = _Repo(str(p), search_parent_directories=True)
@@ -2976,6 +3002,10 @@ def mail_status(
         normalized_remote = _norm_remote(url)
     except Exception:
         normalized_remote = None
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
 
     # Compute a candidate slug using the same logic as the server helper (summarized)
     from mcp_agent_mail.app import _compute_project_slug as _compute_slug  # type: ignore
