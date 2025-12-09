@@ -487,7 +487,95 @@ start_server_background() {
   else
     nohup uv run python -m mcp_agent_mail.cli serve-http >"$log_file" 2>&1 &
   fi
-  _print "Server starting (logs: ${log_file})"
+  # Export PID so caller can kill it later
+  export _BACKGROUND_SERVER_PID=$!
+  _print "Server starting (PID: ${_BACKGROUND_SERVER_PID}, logs: ${log_file})"
+}
+
+# Stop background server started by start_server_background
+stop_background_server() {
+  if [[ -n "${_BACKGROUND_SERVER_PID:-}" ]]; then
+    if kill -0 "${_BACKGROUND_SERVER_PID}" 2>/dev/null; then
+      _print "Stopping background server (PID: ${_BACKGROUND_SERVER_PID})"
+      kill -TERM "${_BACKGROUND_SERVER_PID}" 2>/dev/null || true
+      # Wait briefly for graceful shutdown
+      local waited=0
+      while kill -0 "${_BACKGROUND_SERVER_PID}" 2>/dev/null && [[ $waited -lt 5 ]]; do
+        sleep 0.5
+        waited=$((waited + 1))
+      done
+      # Force kill if still running
+      if kill -0 "${_BACKGROUND_SERVER_PID}" 2>/dev/null; then
+        kill -9 "${_BACKGROUND_SERVER_PID}" 2>/dev/null || true
+      fi
+    fi
+    unset _BACKGROUND_SERVER_PID
+  fi
+}
+
+# Cross-platform helper to kill processes on a TCP port (works on Linux and macOS)
+# Usage: kill_port_processes <port>
+# Only kills processes owned by current user for safety
+# shellcheck disable=SC2015  # A && B || C pattern is intentional here
+kill_port_processes() {
+  local port="$1"
+  local current_user
+  current_user=$(id -un)
+  local killed=0
+
+  # Try lsof first (available on macOS and most Linux)
+  if command -v lsof >/dev/null 2>&1; then
+    local pids
+    pids=$(lsof -t -i :"${port}" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      for pid in $pids; do
+        local owner
+        owner=$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}') || owner=""
+        if [[ "$owner" == "$current_user" ]]; then
+          # First try SIGTERM for graceful shutdown
+          kill -TERM "$pid" 2>/dev/null && killed=1 || true
+        elif [[ -n "$owner" ]]; then
+          log_warn "Port ${port} in use by PID $pid owned by $owner; skipping"
+        fi
+        # If owner is empty, process likely already exited
+      done
+    fi
+  # Fall back to fuser (typically Linux)
+  elif command -v fuser >/dev/null 2>&1; then
+    local pids
+    pids=$(fuser -n tcp "${port}" 2>/dev/null | sed -E 's/.*: *//' | tr ' ' '\n' | awk 'NF') || pids=""
+    if [[ -n "$pids" ]]; then
+      for pid in $pids; do
+        local owner
+        owner=$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}') || owner=""
+        if [[ "$owner" == "$current_user" ]]; then
+          kill -TERM "$pid" 2>/dev/null && killed=1 || true
+        elif [[ -n "$owner" ]]; then
+          log_warn "Port ${port} in use by PID $pid owned by $owner; skipping"
+        fi
+      done
+    fi
+  fi
+
+  # Give processes time to exit cleanly
+  if [[ $killed -eq 1 ]]; then
+    sleep 0.5
+    # Check if any are still running and force-kill
+    if command -v lsof >/dev/null 2>&1; then
+      local remaining
+      remaining=$(lsof -t -i :"${port}" 2>/dev/null || true)
+      if [[ -n "$remaining" ]]; then
+        for pid in $remaining; do
+          local owner
+          owner=$(ps -o user= -p "$pid" 2>/dev/null | awk '{print $1}') || owner=""
+          if [[ "$owner" == "$current_user" ]]; then
+            kill -9 "$pid" 2>/dev/null || true
+          fi
+        done
+        sleep 0.3
+      fi
+    fi
+  fi
 }
 
 
