@@ -6,6 +6,7 @@ import pytest
 
 from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.db import reset_database_state
+from mcp_agent_mail.storage import clear_repo_cache
 
 
 @pytest.fixture
@@ -24,10 +25,14 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("INLINE_IMAGE_MAX_BYTES", "128")
     clear_settings_cache()
     reset_database_state()
+    # Clear repo cache before test to ensure isolation
+    clear_repo_cache()
     try:
         yield
     finally:
-        # Close any Git Repo objects before cleanup to prevent subprocess warnings
+        # Close all cached Repo objects first (prevents file handle leaks)
+        clear_repo_cache()
+
         # Suppress ResourceWarnings during cleanup since Python 3.14 warns about resources
         # being cleaned up by GC, which is exactly what we want
         import warnings
@@ -38,18 +43,8 @@ def isolated_env(tmp_path, monkeypatch):
 
                 from git import Repo
 
-                # Explicitly close repo at storage_root if it exists
-                storage_root = tmp_path / "storage"
-                if storage_root.exists() and (storage_root / ".git").exists():
-                    try:
-                        repo = Repo(str(storage_root))
-                        repo.close()
-                        del repo
-                    except Exception:
-                        pass
-
-                # Multiple GC passes to ensure full cleanup
-                for _ in range(3):
+                # Multiple GC passes to ensure full cleanup of any non-cached repos
+                for _ in range(2):
                     gc.collect()
                     # Close any Repo instances that might still be open
                     for obj in gc.get_objects():
@@ -58,14 +53,14 @@ def isolated_env(tmp_path, monkeypatch):
                                 obj.close()
 
                 # Give subprocesses time to terminate
-                time.sleep(0.1)
+                time.sleep(0.05)
 
                 # Final GC pass
                 gc.collect()
             except Exception:
                 pass
 
-            # Force another GC to clean up any remaining references (inside warning suppression)
+            # Force another GC to clean up any remaining references
             gc.collect()
 
         clear_settings_cache()
