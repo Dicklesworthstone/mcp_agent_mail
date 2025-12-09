@@ -80,6 +80,12 @@ while [[ $# -gt 0 ]]; do
   shift || true
 done
 
+# Define logging helpers early so they're available for validation
+info() { printf "\033[1;36m[INFO]\033[0m %s\n" "$*"; }
+ok()   { printf "\033[1;32m[ OK ]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
+
 # Validate port if provided
 if [[ -n "${HTTP_PORT_OVERRIDE}" ]]; then
   if ! [[ "${HTTP_PORT_OVERRIDE}" =~ ^[0-9]+$ ]]; then
@@ -91,11 +97,6 @@ if [[ -n "${HTTP_PORT_OVERRIDE}" ]]; then
     exit 1
   fi
 fi
-
-info() { printf "\033[1;36m[INFO]\033[0m %s\n" "$*"; }
-ok()   { printf "\033[1;32m[ OK ]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || return 1; }
 
@@ -275,6 +276,78 @@ ensure_bd_path_ready() {
   persist_bd_path "${binary_path}"
 }
 
+install_am_alias() {
+  # Install 'am' alias to quickly start the MCP Agent Mail server
+  local repo_dir="$1"
+
+  local shell_name=""
+  if [[ -n "${SHELL:-}" ]]; then
+    shell_name=$(basename "${SHELL}")
+  fi
+
+  # Determine target RC file based on shell
+  local rc_file=""
+  if [[ "${shell_name}" == "zsh" ]]; then
+    rc_file="${HOME}/.zshrc"
+  elif [[ "${shell_name}" == "bash" ]]; then
+    rc_file="${HOME}/.bashrc"
+  else
+    # Fallback: try zshrc first (common on macOS), then bashrc
+    if [[ -f "${HOME}/.zshrc" ]]; then
+      rc_file="${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.bashrc" ]]; then
+      rc_file="${HOME}/.bashrc"
+    else
+      warn "Could not determine shell RC file for 'am' alias"
+      return 1
+    fi
+  fi
+
+  local marker="# >>> MCP Agent Mail alias"
+  local end_marker="# <<< MCP Agent Mail alias"
+  local alias_cmd="alias am='cd \"${repo_dir}\" && scripts/run_server_with_token.sh'"
+  local snippet=""
+  printf -v snippet '%s\n%s\n%s\n' "${marker}" "${alias_cmd}" "${end_marker}"
+
+  # Check if marker already exists
+  if [[ -f "${rc_file}" ]] && grep -Fq "${marker}" "${rc_file}"; then
+    # Update existing snippet
+    if rewrite_path_snippet "${rc_file}" "${marker}" "${end_marker}" "${snippet}"; then
+      ok "Updated 'am' alias in ${rc_file}"
+      record_summary "Alias 'am': updated in ${rc_file}"
+      return 0
+    fi
+    warn "Existing 'am' alias in ${rc_file} could not be updated automatically"
+    return 1
+  fi
+
+  # Check if user has a different 'am' alias already
+  if [[ -f "${rc_file}" ]] && grep -q "^alias am=" "${rc_file}"; then
+    warn "An existing 'am' alias was found in ${rc_file}; skipping to avoid conflict"
+    record_summary "Alias 'am': skipped (existing alias found)"
+    return 0
+  fi
+
+  # Append new snippet
+  if ! touch "${rc_file}" >/dev/null 2>&1; then
+    warn "Could not write to ${rc_file}"
+    return 1
+  fi
+
+  {
+    printf '\n%s' "${snippet}"
+  } >> "${rc_file}"
+
+  ok "Added 'am' alias to ${rc_file} (run 'am' to start the server)"
+  record_summary "Alias 'am': added to ${rc_file}"
+
+  # Also define it for the current session
+  # shellcheck disable=SC2139
+  alias am="cd \"${repo_dir}\" && scripts/run_server_with_token.sh" 2>/dev/null || true
+
+  return 0
+}
+
 verify_bd_binary() {
   local binary_path="$1"
   if ! "${binary_path}" version >/dev/null 2>&1; then
@@ -349,23 +422,74 @@ ensure_uv() {
   if need_cmd uv; then ok "uv installed"; record_summary "uv: installed"; else err "uv install failed"; exit 1; fi
 }
 
+update_existing_repo() {
+  # Pull latest changes from origin for an existing repo
+  # This ensures users get bug fixes and updates when re-running the installer
+  local repo_path="$1"
+
+  info "Pulling latest changes from origin/${BRANCH}"
+  if ! (cd "${repo_path}" && git fetch origin "${BRANCH}" --depth 1 2>/dev/null); then
+    warn "Could not fetch from origin; continuing with existing code"
+    return 0
+  fi
+
+  # Check if there are updates
+  local local_sha remote_sha
+  local_sha=$(cd "${repo_path}" && git rev-parse HEAD 2>/dev/null || echo "unknown")
+  remote_sha=$(cd "${repo_path}" && git rev-parse "origin/${BRANCH}" 2>/dev/null || echo "unknown")
+
+  if [[ "${local_sha}" == "${remote_sha}" ]]; then
+    ok "Already up to date (${local_sha:0:8})"
+    record_summary "Repo: already up to date"
+    return 0
+  fi
+
+  # Stash any local changes to avoid conflicts
+  local has_changes=0
+  if (cd "${repo_path}" && git diff --quiet 2>/dev/null) && (cd "${repo_path}" && git diff --cached --quiet 2>/dev/null); then
+    has_changes=0
+  else
+    has_changes=1
+    info "Stashing local changes before update"
+    (cd "${repo_path}" && git stash push -m "installer-auto-stash-$(date +%Y%m%d%H%M%S)" 2>/dev/null) || true
+  fi
+
+  # Reset to origin/BRANCH to get latest code
+  if (cd "${repo_path}" && git reset --hard "origin/${BRANCH}" 2>/dev/null); then
+    ok "Updated to latest (${local_sha:0:8} → ${remote_sha:0:8})"
+    record_summary "Repo: updated ${local_sha:0:8} → ${remote_sha:0:8}"
+  else
+    warn "Could not update repo; continuing with existing code"
+    record_summary "Repo: update failed, using existing"
+  fi
+
+  # Restore stashed changes if any
+  if [[ "${has_changes}" -eq 1 ]]; then
+    if (cd "${repo_path}" && git stash pop 2>/dev/null); then
+      ok "Restored local changes"
+    else
+      warn "Could not restore stashed changes; they're saved in git stash"
+    fi
+  fi
+}
+
 ensure_repo() {
   # Determine target directory
   if [[ -z "${CLONE_DIR}" ]]; then CLONE_DIR="${DEFAULT_CLONE_DIR}"; fi
 
-  # If we're already in the repo (local run), use it
+  # If we're already in the repo (local run), use it and update
   if [[ -f "pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' pyproject.toml 2>/dev/null; then
     REPO_DIR="$PWD"
     ok "Using existing repo at: ${REPO_DIR}"
-    record_summary "Repo: existing at ${REPO_DIR}"
+    update_existing_repo "${REPO_DIR}"
     return 0
   fi
 
-  # If directory exists and looks like the repo, use it
+  # If directory exists and looks like the repo, use it and update
   if [[ -d "${CLONE_DIR}" ]] && [[ -f "${CLONE_DIR}/pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' "${CLONE_DIR}/pyproject.toml" 2>/dev/null; then
     REPO_DIR="${CLONE_DIR}"
     ok "Using existing repo at: ${REPO_DIR}"
-    record_summary "Repo: existing at ${REPO_DIR}"
+    update_existing_repo "${REPO_DIR}"
     return 0
   fi
 
@@ -416,7 +540,9 @@ configure_port() {
   # Set trap to cleanup temp file
   trap "rm -f \"${tmp}\" 2>/dev/null" EXIT INT TERM
 
-  # Set secure umask for all file operations
+  # Set secure umask for .env file operations, save original to restore later
+  local old_umask
+  old_umask=$(umask)
   umask 077
 
   if [[ -f "${env_file}" ]]; then
@@ -427,6 +553,7 @@ configure_port() {
         err "Failed to update HTTP_PORT in .env"
         rm -f "${tmp}" 2>/dev/null
         trap - EXIT INT TERM
+        umask "${old_umask}"
         return 1
       fi
     else
@@ -435,6 +562,7 @@ configure_port() {
         err "Failed to append HTTP_PORT to .env"
         rm -f "${tmp}" 2>/dev/null
         trap - EXIT INT TERM
+        umask "${old_umask}"
         return 1
       fi
     fi
@@ -444,6 +572,7 @@ configure_port() {
       err "Failed to write .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
   else
@@ -452,6 +581,7 @@ configure_port() {
       err "Failed to create .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
 
@@ -459,6 +589,7 @@ configure_port() {
       err "Failed to write .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
   fi
@@ -467,6 +598,7 @@ configure_port() {
   chmod 600 "${env_file}" 2>/dev/null || warn "Could not set .env permissions to 600"
 
   trap - EXIT INT TERM
+  umask "${old_umask}"
   ok "HTTP_PORT set to ${HTTP_PORT_OVERRIDE}"
   record_summary "HTTP port: ${HTTP_PORT_OVERRIDE}"
 }
@@ -526,6 +658,63 @@ ensure_beads() {
 
   err "Beads installer finished but 'bd' was not detected. Ensure its install directory is on PATH or rerun with --skip-beads to handle installation manually."
   exit 1
+}
+
+install_cli_stub() {
+  # Install a helpful "mcp-agent-mail" command that explains this is NOT a CLI tool
+  # This catches agents that mistakenly try to run it as a shell command
+  local stub_dir="${HOME}/.local/bin"
+  local stub_path="${stub_dir}/mcp-agent-mail"
+
+  mkdir -p "${stub_dir}" 2>/dev/null || true
+
+  cat > "${stub_path}" <<'STUB_EOF'
+#!/usr/bin/env bash
+# MCP Agent Mail — Helpful Stub for Confused Agents
+#
+# If you're seeing this, you (or an AI agent) tried to run "mcp-agent-mail"
+# as a CLI command. That's a common mistake!
+
+cat <<'MSG'
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║   🚫  MCP Agent Mail is NOT a CLI tool!                                      ║
+║                                                                              ║
+║   It's an MCP (Model Context Protocol) server that provides tools to your   ║
+║   AI coding agent. You should already have access to these tools as part    ║
+║   of your available MCP tools.                                              ║
+║                                                                              ║
+║   ✅ CORRECT USAGE:                                                          ║
+║      Use the MCP tools directly, for example:                               ║
+║        • mcp__mcp-agent-mail__register_agent                                ║
+║        • mcp__mcp-agent-mail__send_message                                  ║
+║        • mcp__mcp-agent-mail__fetch_inbox                                   ║
+║                                                                              ║
+║   ❌ INCORRECT USAGE:                                                        ║
+║      Running shell commands like:                                           ║
+║        • mcp-agent-mail send --to BlueLake ...                              ║
+║        • mcp-agent-mail --help                                              ║
+║                                                                              ║
+║   📚 For documentation, see:                                                 ║
+║      https://github.com/Dicklesworthstone/mcp_agent_mail                    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+MSG
+exit 1
+STUB_EOF
+
+  chmod +x "${stub_path}" 2>/dev/null || true
+
+  # Also create common aliases/variants agents might try
+  for variant in "mcp_agent_mail" "mcpagentmail" "agentmail" "agent-mail"; do
+    local variant_path="${stub_dir}/${variant}"
+    if [[ ! -f "${variant_path}" ]]; then
+      ln -sf "${stub_path}" "${variant_path}" 2>/dev/null || true
+    fi
+  done
+
+  ok "Installed helpful CLI stub at ${stub_path}"
+  record_summary "CLI stub: installed (catches mistaken CLI usage)"
 }
 
 ensure_bv() {
@@ -608,6 +797,8 @@ main() {
     record_summary "Repo: existing at ${REPO_DIR} (--start-only)"
     ensure_beads
     ensure_bv
+    install_cli_stub
+    install_am_alias "${REPO_DIR}"
     configure_port
     if ! run_integration_and_start; then
       err "Integration failed; aborting."
@@ -622,9 +813,11 @@ main() {
   ensure_uv
   ensure_beads
   ensure_bv
+  install_cli_stub
   ensure_repo
   ensure_python_and_venv
   sync_deps
+  install_am_alias "${REPO_DIR}"
   configure_port
   if ! run_integration_and_start; then
     err "Integration failed; aborting."
@@ -636,12 +829,18 @@ main() {
 
   echo
   ok "All set!"
-  echo "Next runs:"
+  echo "Next runs (open a new terminal or run 'source ~/.zshrc' / 'source ~/.bashrc'):"
+  echo "  am                                    # quick alias to start the server"
+  echo "  # or manually:"
   echo "  cd \"${REPO_DIR}\""
   echo "  source .venv/bin/activate"
   echo "  bash scripts/run_server_with_token.sh"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Handle three execution modes:
+# 1. Direct: ./install.sh → BASH_SOURCE[0] == $0 → run main
+# 2. Sourced: . install.sh → BASH_SOURCE[0] != $0 → skip main
+# 3. Piped: curl ... | bash -s → BASH_SOURCE[0] is unset → run main
+if [[ -z "${BASH_SOURCE[0]:-}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi

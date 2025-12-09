@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, AsyncIterator, Callable, Optional, cast
 from urllib.parse import parse_qsl
 import os
 import shlex
@@ -33,8 +33,8 @@ try:
     from pathspec import PathSpec  # type: ignore[import-not-found]
     from pathspec.patterns.gitwildmatch import GitWildMatchPattern  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency fallback
-    PathSpec = None  # type: ignore[assignment]
-    GitWildMatchPattern = None  # type: ignore[assignment]
+    PathSpec = None  # type: ignore[misc,assignment]
+    GitWildMatchPattern = None  # type: ignore[misc,assignment]
 from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
@@ -58,6 +58,7 @@ from .models import (
 from .storage import (
     ProjectArchive,
     archive_write_lock,
+    clear_repo_cache,
     collect_lock_status,
     ensure_archive,
     heal_archive_locks,
@@ -70,6 +71,28 @@ from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_a
 import contextlib
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _git_repo(path: str | Path, search_parent_directories: bool = True) -> Any:
+    """Context manager for GitPython Repo that ensures proper cleanup.
+
+    GitPython's Repo object opens file handles for index, config, and other files.
+    Without explicit cleanup, these accumulate and cause "too many open files" errors
+    under heavy load. This context manager ensures repo.close() is always called.
+
+    Usage:
+        with _git_repo("/path/to/project") as repo:
+            branch = repo.active_branch.name
+    """
+    repo = None
+    try:
+        repo = Repo(path, search_parent_directories=search_parent_directories)
+        yield repo
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
 
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
@@ -168,7 +191,7 @@ def _instrument_tool(
     complexity: str = "medium",
     agent_arg: Optional[str] = None,
     project_arg: Optional[str] = None,
-):
+) -> Callable[[Any], Any]:
     meta = {
         "cluster": cluster,
         "capabilities": sorted(capabilities or {cluster}),
@@ -178,11 +201,11 @@ def _instrument_tool(
     }
     _register_tool(tool_name, meta)
 
-    def decorator(func):
+    def decorator(func: Any) -> Any:
         signature = inspect.signature(func)
 
         @wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             start_time = time.perf_counter()
 
             metrics = TOOL_METRICS[tool_name]
@@ -237,14 +260,120 @@ def _instrument_tool(
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
-            except Exception as exc:
+            except ValueError as exc:
+                # Invalid argument value
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
                 wrapped_exc = ToolExecutionError(
-                    "UNHANDLED_EXCEPTION",
-                    "Server encountered an unexpected error while executing tool.",
-                    recoverable=False,
-                    data={"tool": tool_name, "original_error": type(exc).__name__},
+                    "INVALID_ARGUMENT",
+                    f"Invalid argument value: {exc}. Check that all parameters have valid values.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TypeError as exc:
+                # Wrong argument type
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_msg = str(exc)
+                # Try to extract helpful info from TypeError
+                hint = ""
+                if "got an unexpected keyword argument" in error_msg:
+                    hint = " Check parameter names for typos."
+                elif "missing" in error_msg and "required" in error_msg:
+                    hint = " Ensure all required parameters are provided."
+                elif "NoneType" in error_msg:
+                    hint = " A required value was None/null."
+                wrapped_exc = ToolExecutionError(
+                    "TYPE_ERROR",
+                    f"Argument type mismatch: {exc}.{hint}",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except KeyError as exc:
+                # Missing key/field
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "MISSING_FIELD",
+                    f"Missing required field: {exc}. Ensure all required parameters are provided.",
+                    recoverable=True,
+                    data={"tool": tool_name, "missing_field": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TimeoutError as exc:
+                # Timeout (database lock, network, etc.)
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "TIMEOUT",
+                    f"Operation timed out: {exc}. The server may be under heavy load. Try again in a moment.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except OSError as exc:
+                # Handle file descriptor exhaustion (EMFILE) with cache cleanup
+                import errno
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                if exc.errno == errno.EMFILE:
+                    # Clear repo cache to free file handles and allow recovery
+                    cleared = clear_repo_cache()
+                    wrapped_exc = ToolExecutionError(
+                        "RESOURCE_EXHAUSTED",
+                        f"Too many open files. Freed {cleared} cached repos. Retry the operation.",
+                        recoverable=True,
+                        data={"tool": tool_name, "freed_repos": cleared, "error_detail": str(exc)},
+                    )
+                else:
+                    wrapped_exc = ToolExecutionError(
+                        "OS_ERROR",
+                        f"OS error: {exc}",
+                        recoverable=False,
+                        data={"tool": tool_name, "errno": exc.errno, "error_detail": str(exc)},
+                    )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except Exception as exc:
+                # Catch-all for unexpected errors - provide helpful categorization
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_type = type(exc).__name__
+                error_msg = str(exc)
+
+                # Try to categorize common error patterns
+                if "database" in error_msg.lower() or "sqlite" in error_msg.lower():
+                    error_category = "DATABASE_ERROR"
+                    friendly_msg = "A database error occurred. This may be a transient issue - try again."
+                    recoverable = True
+                elif "lock" in error_msg.lower() or "busy" in error_msg.lower():
+                    error_category = "RESOURCE_BUSY"
+                    friendly_msg = "Resource is temporarily busy. Wait a moment and try again."
+                    recoverable = True
+                elif "permission" in error_msg.lower() or "access" in error_msg.lower():
+                    error_category = "PERMISSION_ERROR"
+                    friendly_msg = f"Access denied: {error_msg}"
+                    recoverable = False
+                elif "connection" in error_msg.lower() or "network" in error_msg.lower():
+                    error_category = "CONNECTION_ERROR"
+                    friendly_msg = "Connection error occurred. Check network and try again."
+                    recoverable = True
+                else:
+                    error_category = "UNHANDLED_EXCEPTION"
+                    friendly_msg = f"Unexpected error ({error_type}): {error_msg}"
+                    recoverable = False
+
+                wrapped_exc = ToolExecutionError(
+                    error_category,
+                    friendly_msg,
+                    recoverable=recoverable,
+                    data={"tool": tool_name, "original_error": error_type, "error_detail": error_msg},
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
@@ -327,9 +456,9 @@ def _capabilities_for(agent: Optional[str], project: Optional[str]) -> list[str]
     return sorted(caps)
 
 
-def _lifespan_factory(settings: Settings):
+def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[None]]:
     @asynccontextmanager
-    async def lifespan(app: FastMCP):
+    async def lifespan(app: FastMCP) -> AsyncIterator[None]:
         init_engine(settings)
         heal_summary = await heal_archive_locks(settings)
         if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed"):
@@ -344,22 +473,29 @@ def _lifespan_factory(settings: Settings):
         await ensure_schema(settings)
         yield
 
-    return lifespan
+    return lifespan  # type: ignore[return-value]
 
 
 def _iso(dt: Any) -> str:
     """Return ISO-8601 in UTC from datetime or best-effort from string.
 
     Accepts datetime or ISO-like string; falls back to str(dt) if unknown.
+    Naive datetimes (from SQLite) are assumed to be UTC already.
     """
     try:
         if isinstance(dt, str):
             try:
                 parsed = datetime.fromisoformat(dt)
+                # Handle naive parsed datetimes (assume UTC)
+                if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
                 return parsed.astimezone(timezone.utc).isoformat()
             except Exception:
                 return dt
         if hasattr(dt, "astimezone"):
+            # Handle naive datetimes from SQLite (assume UTC)
+            if getattr(dt, "tzinfo", None) is None or dt.tzinfo.utcoffset(dt) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc).isoformat()  # type: ignore[no-any-return]
         return str(dt)
     except Exception:
@@ -636,10 +772,16 @@ def _open_repo_if_available(workspace: Optional[Path]) -> Optional[Repo]:
     try:
         root = Path(repo.working_tree_dir or "")
     except Exception:
+        # Close repo before returning None to avoid file handle leak
+        with suppress(Exception):
+            repo.close()
         return None
     with suppress(Exception):
         workspace.resolve().relative_to(root.resolve())
         return repo
+    # Close repo before returning None to avoid file handle leak
+    with suppress(Exception):
+        repo.close()
     return None
 
 
@@ -697,6 +839,150 @@ def _parse_iso(raw_value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(s)
     except ValueError:
         return None
+
+
+def _validate_iso_timestamp(raw_value: Optional[str], param_name: str = "timestamp") -> Optional[datetime]:
+    """Parse and validate an ISO-8601 timestamp, raising helpful error on failure.
+
+    Unlike _parse_iso which silently returns None on failure, this function
+    raises a descriptive ToolExecutionError to help agents understand what
+    format is expected.
+
+    Parameters
+    ----------
+    raw_value : Optional[str]
+        The timestamp string to parse.
+    param_name : str
+        The parameter name to include in error messages.
+
+    Returns
+    -------
+    Optional[datetime]
+        Parsed datetime, or None if raw_value was None/empty.
+
+    Raises
+    ------
+    ToolExecutionError
+        If the value is provided but cannot be parsed as ISO-8601.
+    """
+    if raw_value is None:
+        return None
+    s = raw_value.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        raise ToolExecutionError(
+            error_type="INVALID_TIMESTAMP",
+            message=(
+                f"Invalid {param_name} format: '{raw_value}'. "
+                f"Expected ISO-8601 format like '2025-01-15T10:30:00+00:00' or '2025-01-15T10:30:00Z'. "
+                f"Common mistakes: missing timezone (add +00:00 or Z), using slashes instead of dashes, "
+                f"or using 12-hour format without AM/PM."
+            ),
+            recoverable=True,
+            data={"provided": raw_value, "expected_format": "YYYY-MM-DDTHH:MM:SS+HH:MM"},
+        ) from None
+
+
+def _validate_program_model(program: str, model: str) -> None:
+    """Validate that program and model are non-empty strings.
+
+    Raises
+    ------
+    ToolExecutionError
+        If program or model is empty or whitespace-only.
+    """
+    if not program or not program.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_PROGRAM",
+            message=(
+                "program cannot be empty. Provide the name of your AI coding tool "
+                "(e.g., 'claude-code', 'codex-cli', 'cursor', 'cline')."
+            ),
+            recoverable=True,
+            data={"provided": program},
+        )
+    if not model or not model.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_MODEL",
+            message=(
+                "model cannot be empty. Provide the underlying model identifier "
+                "(e.g., 'claude-opus-4.5', 'gpt-4-turbo', 'claude-sonnet-4')."
+            ),
+            recoverable=True,
+            data={"provided": model},
+        )
+
+
+# Patterns that are unsearchable in FTS5 - return None to signal "no results"
+_FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
+
+
+def _sanitize_fts_query(query: str) -> str | None:
+    """Sanitize an FTS5 query string, fixing common issues where possible.
+
+    SQLite FTS5 has specific syntax requirements. This function attempts to
+    fix common mistakes rather than throwing errors. Returns None when the
+    query cannot produce meaningful results (caller should return empty list).
+
+    Fixes applied:
+    - Strips whitespace
+    - Removes leading bare `*` (keeps `term*` prefix patterns)
+    - Converts unsearchable patterns to None (empty results)
+
+    Parameters
+    ----------
+    query : str
+        The FTS5 query string to sanitize.
+
+    Returns
+    -------
+    str | None
+        The sanitized query string, or None if the query cannot produce results.
+        When None is returned, the caller should return an empty result list
+        instead of executing the query.
+    """
+    if not query:
+        return None
+
+    trimmed = query.strip()
+
+    if not trimmed:
+        return None
+
+    # Check for bare patterns that can't match anything meaningful in FTS5
+    if trimmed in _FTS5_UNSEARCHABLE_PATTERNS:
+        return None
+
+    # Bare boolean operators without terms - can't search
+    upper_trimmed = trimmed.upper()
+    if upper_trimmed in {"AND", "OR", "NOT"}:
+        return None
+
+    # FTS5 doesn't support leading wildcards (*foo), only trailing (foo*).
+    # Strip leading "*" regardless of what follows: "*foo" -> "foo", "* bar" -> "bar"
+    if trimmed.startswith("*"):
+        if len(trimmed) == 1:
+            return None
+        # Strip leading "*" (and any following whitespace) and recurse
+        return _sanitize_fts_query(trimmed[1:].lstrip())
+
+    # Fix trailing lone asterisks that aren't part of prefix patterns
+    # e.g., "foo *" -> "foo"
+    if trimmed.endswith(" *"):
+        trimmed = trimmed[:-2].rstrip()
+        if not trimmed:
+            return None
+
+    # Multiple consecutive spaces -> single space
+    while "  " in trimmed:
+        trimmed = trimmed.replace("  ", " ")
+
+    return trimmed if trimmed else None
 
 
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
@@ -856,25 +1142,25 @@ def _compute_project_slug(human_key: str) -> str:
     if mode == "git-remote":
         try:
             # Attempt to use GitPython for robustness across worktrees
-            repo = Repo(human_key, search_parent_directories=True)
-            remote_name = settings.project_identity_remote or "origin"
-            remote_url: str | None = None
-            # Prefer 'git remote get-url' to support multiple urls/rewrite rules
-            try:
-                remote_url = repo.git.remote("get-url", remote_name).strip() or None
-            except Exception:
-                # Fallback: use config if available
+            with _git_repo(human_key) as repo:
+                remote_name = settings.project_identity_remote or "origin"
+                remote_url: str | None = None
+                # Prefer 'git remote get-url' to support multiple urls/rewrite rules
                 try:
-                    remote = next((r for r in repo.remotes if r.name == remote_name), None)
-                    if remote and remote.urls:
-                        remote_url = next(iter(remote.urls), None)
+                    remote_url = repo.git.remote("get-url", remote_name).strip() or None
                 except Exception:
-                    remote_url = None
-            normalized = _norm_remote(remote_url)
-            if normalized:
-                base = normalized.rsplit("/", 1)[-1] or "repo"
-                canonical = normalized  # privacy-safe canonical string
-                return f"{base}-{_short_sha1(canonical)}"
+                    # Fallback: use config if available
+                    try:
+                        remote = next((r for r in repo.remotes if r.name == remote_name), None)
+                        if remote and remote.urls:
+                            remote_url = next(iter(remote.urls), None)
+                    except Exception:
+                        remote_url = None
+                normalized = _norm_remote(remote_url)
+                if normalized:
+                    base = normalized.rsplit("/", 1)[-1] or "repo"
+                    canonical = normalized  # privacy-safe canonical string
+                    return f"{base}-{_short_sha1(canonical)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             # Non-git directory or error; fall through to fallback
             pass
@@ -884,14 +1170,14 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-toplevel
     if mode == "git-toplevel":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            top = repo.git.rev_parse("--show-toplevel").strip()
-            if top:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                top = repo.git.rev_parse("--show-toplevel").strip()
+                if top:
+                    from pathlib import Path as _P
 
-                top_real = str(_P(top).resolve())
-                base = _P(top_real).name or "repo"
-                return f"{base}-{_short_sha1(top_real)}"
+                    top_real = str(_P(top).resolve())
+                    base = _P(top_real).name or "repo"
+                    return f"{base}-{_short_sha1(top_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -899,20 +1185,20 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-common-dir
     if mode == "git-common-dir":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            # Prefer GitPython's common_dir which normalizes worktree paths
-            try:
-                gdir = getattr(repo, "common_dir", None)
-            except Exception:
-                gdir = None
-            if not gdir:
-                gdir = repo.git.rev_parse("--git-common-dir").strip()
-            if gdir:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                # Prefer GitPython's common_dir which normalizes worktree paths
+                try:
+                    gdir = getattr(repo, "common_dir", None)
+                except Exception:
+                    gdir = None
+                if not gdir:
+                    gdir = repo.git.rev_parse("--git-common-dir").strip()
+                if gdir:
+                    from pathlib import Path as _P
 
-                gdir_real = str(_P(gdir).resolve())
-                base = "repo"
-                return f"{base}-{_short_sha1(gdir_real)}"
+                    gdir_real = str(_P(gdir).resolve())
+                    base = "repo"
+                    return f"{base}-{_short_sha1(gdir_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -1019,42 +1305,42 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             return {}
 
     try:
-        repo = Repo(target_path, search_parent_directories=True)
-        repo_root = str(Path(repo.working_tree_dir or "").resolve())
-        try:
-            git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
-        except Exception:
-            git_common_dir = None
-        try:
-            branch = repo.active_branch.name
-        except Exception:
+        with _git_repo(target_path) as repo:
+            repo_root = str(Path(repo.working_tree_dir or "").resolve())
             try:
-                branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
             except Exception:
-                branch = None
-        try:
-            worktree_name = Path(repo.working_tree_dir or "").name or None
-        except Exception:
-            worktree_name = None
-        try:
-            core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
-            core_ignorecase = str(core_ic).strip().lower() == "true"
-        except Exception:
-            core_ignorecase = None
-        remote_name = settings_local.project_identity_remote or "origin"
-        remote_url: Optional[str] = None
-        try:
-            remote_url = repo.git.remote("get-url", remote_name).strip() or None
-        except Exception:
+                git_common_dir = None
             try:
-                r = next((r for r in repo.remotes if r.name == remote_name), None)
-                if r and r.urls:
-                    remote_url = next(iter(r.urls), None)
+                branch = repo.active_branch.name
             except Exception:
-                remote_url = None
-        normalized_remote = _norm_remote(remote_url)
+                try:
+                    branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                except Exception:
+                    branch = None
+            try:
+                worktree_name = Path(repo.working_tree_dir or "").name or None
+            except Exception:
+                worktree_name = None
+            try:
+                core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
+                core_ignorecase = str(core_ic).strip().lower() == "true"
+            except Exception:
+                core_ignorecase = None
+            remote_name = settings_local.project_identity_remote or "origin"
+            remote_url_local: Optional[str] = None
+            try:
+                remote_url_local = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                try:
+                    r = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if r and r.urls:
+                        remote_url_local = next(iter(r.urls), None)
+                except Exception:
+                    remote_url_local = None
+            normalized_remote = _norm_remote(remote_url_local)
     except (InvalidGitRepositoryError, NoSuchPathError, Exception):
-        repo = None
+        pass  # Non-git directory; continue with fallback values
 
     if mode_used == "git-remote" and normalized_remote:
         canonical_path = normalized_remote
@@ -1156,16 +1442,16 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             table = _Table(title="Identity Resolution", show_header=True, header_style="bold white on blue")
             table.add_column("Field", style="bold cyan")
             table.add_column("Value")
-            table.add_row("Mode", payload["identity_mode_used"] or "dir")
-            table.add_row("Slug", payload["slug"])
-            table.add_row("Canonical", payload["canonical_path"])
-            table.add_row("Repo Root", payload["repo_root"] or "")
-            table.add_row("Git Common Dir", payload["git_common_dir"] or "")
-            table.add_row("Branch", payload["branch"] or "")
-            table.add_row("Worktree", payload["worktree_name"] or "")
+            table.add_row("Mode", str(payload["identity_mode_used"] or "dir"))
+            table.add_row("Slug", str(payload["slug"]))
+            table.add_row("Canonical", str(payload["canonical_path"]))
+            table.add_row("Repo Root", str(payload["repo_root"] or ""))
+            table.add_row("Git Common Dir", str(payload["git_common_dir"] or ""))
+            table.add_row("Branch", str(payload["branch"] or ""))
+            table.add_row("Worktree", str(payload["worktree_name"] or ""))
             table.add_row("Ignorecase", str(payload["core_ignorecase"]))
-            table.add_row("Normalized Remote", payload["normalized_remote"] or "")
-            table.add_row("Project UID", payload["project_uid"] or "")
+            table.add_row("Normalized Remote", str(payload["normalized_remote"] or ""))
+            table.add_row("Project UID", str(payload["project_uid"] or ""))
             console.print(table)
     except Exception:
         # Never fail due to logging
@@ -1176,28 +1462,238 @@ async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
     slug = _compute_project_slug(human_key)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))
+        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
         project = result.scalars().first()
         if project:
             return project
         project = Project(slug=slug, human_key=human_key)
         session.add(project)
         await session.commit()
-        await session.refresh(project)
+        await session.refresh(project)  # type: ignore[arg-type]
         return project
 
     # -- Identity inspection resource is registered inside build_mcp_server below
 
 
+# --- Smart lookup helpers with fuzzy matching and suggestions -----------------------------------
+
+
+def _similarity_score(a: str, b: str) -> float:
+    """Compute similarity score between two strings (0.0 to 1.0)."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+async def _find_similar_projects(identifier: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, str, float]]:
+    """Find projects with similar slugs/names. Returns list of (slug, human_key, score)."""
+    slug = slugify(identifier)
+    suggestions: list[tuple[str, str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(select(Project))
+        projects = result.scalars().all()
+        for p in projects:
+            # Check both slug and human_key similarity
+            slug_score = _similarity_score(slug, p.slug)
+            key_score = _similarity_score(identifier, p.human_key) if p.human_key else 0.0
+            best_score = max(slug_score, key_score)
+            if best_score >= min_score:
+                suggestions.append((p.slug, p.human_key, best_score))
+    suggestions.sort(key=lambda x: x[2], reverse=True)
+    return suggestions[:limit]
+
+
+async def _find_similar_agents(project: Project, name: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, float]]:
+    """Find agents with similar names in the project. Returns list of (name, score)."""
+    suggestions: list[tuple[str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(cast(Any, Agent.project_id == project.id))
+        )
+        agents = result.scalars().all()
+        for a in agents:
+            score = _similarity_score(name, a.name)
+            if score >= min_score:
+                suggestions.append((a.name, score))
+    suggestions.sort(key=lambda x: x[1], reverse=True)
+    return suggestions[:limit]
+
+
+async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
+    """List agent names in a project."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)  # type: ignore[call-overload]
+        )
+        return [row[0] for row in result.all()]
+
+
 async def _get_project_by_identifier(identifier: str) -> Project:
+    """Get project by identifier with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not identifier or not identifier.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            "Project identifier cannot be empty. Provide a project path like '/data/projects/myproject' or a slug like 'myproject'.",
+            recoverable=True,
+            data={"parameter": "project_key", "provided": repr(identifier)},
+        )
+
     slug = slugify(identifier)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))
+        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
         project = result.scalars().first()
-        if not project:
-            raise NoResultFound(f"Project '{identifier}' not found.")
-        return project
+        if project:
+            return project
+
+    # Project not found - provide helpful suggestions
+    suggestions = await _find_similar_projects(identifier)
+
+    if suggestions:
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found. Did you mean: {suggestion_text}? "
+            f"Use ensure_project to create a new project, or check spelling.",
+            recoverable=True,
+            data={
+                "identifier": identifier,
+                "slug_searched": slug,
+                "suggestions": [{"slug": s[0], "human_key": s[1], "score": round(s[2], 2)} for s in suggestions],
+            },
+        )
+    else:
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found and no similar projects exist. "
+            f"Use ensure_project to create a new project first. "
+            f"Example: ensure_project(human_key='/path/to/your/project')",
+            recoverable=True,
+            data={"identifier": identifier, "slug_searched": slug},
+        )
+
+
+# --- Common mistake detection helpers --------------------------------------------------------
+
+# Known program names that agents might mistakenly use as agent names
+_KNOWN_PROGRAM_NAMES: frozenset[str] = frozenset({
+    "claude-code", "claude", "codex-cli", "codex", "cursor", "windsurf",
+    "cline", "aider", "copilot", "github-copilot", "gemini-cli", "gemini",
+    "opencode", "vscode", "neovim", "vim", "emacs", "zed", "continue",
+})
+
+# Known model name patterns that agents might mistakenly use as agent names
+_MODEL_NAME_PATTERNS: tuple[str, ...] = (
+    "gpt-", "gpt4", "gpt3", "claude-", "opus", "sonnet", "haiku",
+    "gemini-", "llama", "mistral", "codestral", "o1-", "o3-",
+)
+
+
+def _looks_like_program_name(value: str) -> bool:
+    """Check if value looks like a program name (not a valid agent name)."""
+    v = value.lower().strip()
+    return v in _KNOWN_PROGRAM_NAMES
+
+
+def _looks_like_model_name(value: str) -> bool:
+    """Check if value looks like a model name (not a valid agent name)."""
+    v = value.lower().strip()
+    return any(p in v for p in _MODEL_NAME_PATTERNS)
+
+
+def _looks_like_email(value: str) -> bool:
+    """Check if value looks like an email address."""
+    return "@" in value and "." in value.split("@")[-1]
+
+
+def _looks_like_broadcast(value: str) -> bool:
+    """Check if value looks like a broadcast attempt."""
+    v = value.lower().strip()
+    return v in {"all", "*", "everyone", "broadcast", "@all", "@everyone"}
+
+
+def _looks_like_descriptive_name(value: str) -> bool:
+    """Check if value looks like a descriptive role name instead of adjective+noun."""
+    v = value.lower()
+    # Common suffixes for descriptive agent names
+    descriptive_patterns = (
+        "agent", "bot", "assistant", "helper", "manager", "coordinator",
+        "developer", "engineer", "migrator", "refactorer", "fixer",
+        "harmonizer", "integrator", "optimizer", "analyzer", "worker",
+    )
+    return any(v.endswith(p) for p in descriptive_patterns)
+
+
+def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
+    """
+    Detect common mistakes when agents provide invalid agent names.
+    Returns (mistake_type, helpful_message) or None if no obvious mistake detected.
+    """
+    if _looks_like_program_name(value):
+        return (
+            "PROGRAM_NAME_AS_AGENT",
+            f"'{value}' looks like a program name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'BlueLake' or 'GreenCastle'. "
+            f"Use the 'program' parameter for program names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_model_name(value):
+        return (
+            "MODEL_NAME_AS_AGENT",
+            f"'{value}' looks like a model name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'RedStone' or 'PurpleBear'. "
+            f"Use the 'model' parameter for model names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_email(value):
+        return (
+            "EMAIL_AS_AGENT",
+            f"'{value}' looks like an email address. Agent names are simple identifiers like 'BlueDog', "
+            f"not email addresses. Check the 'to' parameter format."
+        )
+    if _looks_like_broadcast(value):
+        return (
+            "BROADCAST_ATTEMPT",
+            f"'{value}' looks like a broadcast attempt. Agent Mail doesn't support broadcasting to all agents. "
+            f"List specific recipient agent names in the 'to' parameter."
+        )
+    if _looks_like_descriptive_name(value):
+        return (
+            "DESCRIPTIVE_NAME",
+            f"'{value}' looks like a descriptive role name. Agent names must be randomly generated "
+            f"adjective+noun combinations like 'WhiteMountain' or 'BrownCreek', NOT descriptive of the agent's task. "
+            f"Omit the 'name' parameter to auto-generate a valid name."
+        )
+    return None
+
+
+def _detect_suspicious_file_reservation(pattern: str) -> str | None:
+    """
+    Detect suspicious file reservation patterns that might be too broad.
+    Returns a warning message or None if the pattern looks reasonable.
+    """
+    p = pattern.strip()
+
+    # Catch overly broad patterns
+    if p in ("*", "**", "**/*", "**/**", "."):
+        return (
+            f"Pattern '{p}' is too broad and would reserve the entire project. "
+            f"Use more specific patterns like 'src/api/*.py' or 'lib/auth/**'."
+        )
+
+    # Catch absolute paths when relative expected
+    if p.startswith("/") and not p.startswith("//"):
+        return (
+            f"Pattern '{p}' looks like an absolute path. File reservation patterns should be "
+            f"project-relative (e.g., 'src/module.py' not '/full/path/src/module.py')."
+        )
+
+    # Warn about very short patterns that might be unintentionally broad
+    if len(p) <= 2 and "*" in p:
+        return (
+            f"Pattern '{p}' is very short and may match more files than intended. "
+            f"Consider using a more specific pattern."
+        )
+
+    return None
 
 
 # --- Project sibling suggestion helpers -----------------------------------------------------
@@ -1227,7 +1723,7 @@ def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
 
 
 @asynccontextmanager
-async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     try:
         async with archive_write_lock(archive, timeout_seconds=timeout_seconds):
             yield
@@ -1363,14 +1859,14 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
         if len(projects) < 2:
             return
 
-        agents_rows = await session.execute(select(Agent.project_id, Agent.name))
+        agents_rows = await session.execute(select(Agent.project_id, Agent.name))  # type: ignore[call-overload]
         agent_map: dict[int, list[str]] = defaultdict(list)
         for proj_id, name in agents_rows.fetchall():
             agent_map[int(proj_id)].append(name)
 
         existing_rows = (await session.execute(select(ProjectSiblingSuggestion))).scalars().all()
         existing_map: dict[tuple[int, int], ProjectSiblingSuggestion] = {}
-        for suggestion in existing_rows:
+        for suggestion in existing_rows:  # type: ignore[call-overload]
             pair = _canonical_project_pair(suggestion.project_a_id, suggestion.project_b_id)
             existing_map[pair] = suggestion
 
@@ -1390,7 +1886,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                     continue
 
                 pair = _canonical_project_pair(project_a.id, project_b.id)
-                suggestion = existing_map.get(pair)
+                suggestion = existing_map.get(pair)  # type: ignore[assignment]
                 if suggestion is None:
                     to_evaluate.append((project_a, project_b, None))
                 else:
@@ -1415,7 +1911,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
             return
 
         updated = False
-        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:
+        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:  # type: ignore[assignment]
             profile_a = await _build_project_profile(project_a, agent_map.get(project_a.id or -1, []))
             profile_b = await _build_project_profile(project_b, agent_map.get(project_b.id or -1, []))
             score, rationale = await _score_project_pair(project_a, profile_a, project_b, profile_b)
@@ -1482,7 +1978,7 @@ async def get_project_sibling_data() -> dict[int, dict[str, list[dict[str, Any]]
                 entry = {**entry_base, "peer": other}
                 if entry["status"] == "confirmed":
                     bucket["confirmed"].append(entry)
-                elif entry["status"] != "dismissed" and float(entry_base["score"]) >= _PROJECT_SIBLING_MIN_SUGGESTION_SCORE:
+                elif entry["status"] != "dismissed" and float(cast(float, entry_base["score"])) >= _PROJECT_SIBLING_MIN_SUGGESTION_SCORE:
                     bucket["suggested"].append(entry)
 
         return result_map
@@ -1499,30 +1995,30 @@ async def update_project_sibling_status(project_id: int, other_id: int, status: 
         suggestion = (
             await session.execute(
                 select(ProjectSiblingSuggestion).where(
-                    ProjectSiblingSuggestion.project_a_id == pair[0],
-                    ProjectSiblingSuggestion.project_b_id == pair[1],
+                    ProjectSiblingSuggestion.project_a_id == pair[0],  # type: ignore[arg-type]
+                    ProjectSiblingSuggestion.project_b_id == pair[1],  # type: ignore[arg-type]
                 )
             )
         ).scalars().first()
 
         if suggestion is None:
-            # Create a baseline suggestion via refresh for this specific pair
-            project_a_obj = await session.get(Project, pair[0])
+            # Create a baseline suggestion via refresh for this specific pair  # type: ignore[arg-type]
+            project_a_obj = await session.get(Project, pair[0])  # type: ignore[arg-type]
             project_b_obj = await session.get(Project, pair[1])
             projects = [proj for proj in (project_a_obj, project_b_obj) if proj is not None]
             if len(projects) != 2:
                 raise NoResultFound("Project pair not found")
             project_map = {proj.id: proj for proj in projects if proj.id is not None}
             agents_rows = await session.execute(
-                select(Agent.project_id, Agent.name).where(
-                    or_(Agent.project_id == pair[0], Agent.project_id == pair[1])
+                select(Agent.project_id, Agent.name).where(  # type: ignore[call-overload]
+                    or_(Agent.project_id == pair[0], cast(Any, Agent.project_id) == pair[1])  # type: ignore[arg-type]
                 )
             )
             agent_map: dict[int, list[str]] = defaultdict(list)
             for proj_id, name in agents_rows.fetchall():
                 agent_map[int(proj_id)].append(name)
-            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))
-            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))
+            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))  # type: ignore[call-overload]
+            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))  # type: ignore[arg-type]
             score, rationale = await _score_project_pair(project_map[pair[0]], profile_a, project_map[pair[1]], profile_b)
             suggestion = ProjectSiblingSuggestion(
                 project_a_id=pair[0],
@@ -1576,14 +2072,14 @@ async def _agent_name_exists(project: Project, name: str) -> bool:
         raise ValueError("Project must have an id before querying agents.")
     async with get_session() as session:
         result = await session.execute(
-            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
+            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[call-overload]
         )
         return result.first() is not None
 
 
 async def _generate_unique_agent_name(
     project: Project,
-    settings: Settings,
+    settings: Settings,  # type: ignore[arg-type]
     name_hint: Optional[str] = None,
 ) -> str:
     archive = await ensure_archive(settings, project.slug)
@@ -1699,11 +2195,23 @@ async def _get_or_create_agent(
                 desired_name = sanitized
             else:
                 if mode == "strict":
-                    raise ValueError(
+                    # Check for common mistakes and provide specific guidance
+                    mistake = _detect_agent_name_mistake(sanitized)
+                    if mistake:
+                        raise ToolExecutionError(
+                            mistake[0],
+                            mistake[1],
+                            recoverable=True,
+                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
+                        )
+                    raise ToolExecutionError(
+                        "INVALID_AGENT_NAME",
                         f"Invalid agent name format: '{sanitized}'. "
                         f"Agent names MUST be randomly generated adjective+noun combinations "
                         f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name."
+                        f"Omit the 'name' parameter to auto-generate a valid name.",
+                        recoverable=True,
+                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
                     )
                 # coerce -> ignore invalid provided name and auto-generate
                 desired_name = await _generate_unique_agent_name(project, settings, None)
@@ -1711,14 +2219,14 @@ async def _get_or_create_agent(
     async with get_session() as session:
         # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if agent:
             agent.program = program
             agent.model = model
             agent.task_description = task_description
-            agent.last_active_ts = datetime.now(timezone.utc)
+            agent.last_active_ts = datetime.now(timezone.utc)  # type: ignore[arg-type]
             if platform:
                 agent.platform = platform.lower()
             session.add(agent)
@@ -1743,18 +2251,71 @@ async def _get_or_create_agent(
 
 
 async def _get_agent(project: Project, name: str) -> Agent:
+    """Get agent by name with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not name or not name.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            f"Agent name cannot be empty. Provide a valid agent name for project '{project.human_key}'.",
+            recoverable=True,
+            data={"parameter": "agent_name", "provided": repr(name), "project": project.slug},
+        )
+
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
-        if not agent:
-            raise NoResultFound(
-                f"Agent '{name}' not registered for project '{project.human_key}'. "
-                f"Tip: Use resource://agents/{project.slug} to discover registered agents."
-            )
-        return agent
+        if agent:
+            return agent
+
+    # Agent not found - provide helpful suggestions
+    suggestions = await _find_similar_agents(project, name)
+    available_agents = await _list_project_agents(project)
+
+    if suggestions:
+        # Found similar names - probably a typo
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. Did you mean: {suggestion_text}? "
+            f"Agent names are case-insensitive but must match exactly.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "suggestions": [{"name": s[0], "score": round(s[1], 2)} for s in suggestions],
+                "available_agents": available_agents,
+            },
+        )
+    elif available_agents:
+        # No similar names but project has agents
+        agents_list = ", ".join([f"'{a}'" for a in available_agents[:5]])
+        more_text = f" and {len(available_agents) - 5} more" if len(available_agents) > 5 else ""
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. "
+            f"Available agents: {agents_list}{more_text}. "
+            f"Use register_agent to create a new agent identity.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "available_agents": available_agents,
+            },
+        )
+    else:
+        # Project has no agents
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found. Project '{project.human_key}' has no registered agents yet. "
+            f"Use register_agent to create an agent identity first. "
+            f"Example: register_agent(project_key='{project.slug}', program='claude-code', model='opus-4', name='{name}')",
+            recoverable=True,
+            data={"agent_name": name, "project": project.slug, "available_agents": []},
+        )
 
 
 async def _create_message(
@@ -1840,117 +2401,123 @@ async def _collect_file_reservation_statuses(
     async with get_session() as session:
         stmt = (
             select(FileReservation, Agent)
-            .join(Agent, FileReservation.agent_id == Agent.id)
-            .where(FileReservation.project_id == project.id)
-            .order_by(asc(FileReservation.created_ts))
+            .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+            .where(FileReservation.project_id == project.id)  # type: ignore[arg-type]
+            .order_by(asc(FileReservation.created_ts))  # type: ignore[arg-type]
         )
         if not include_released:
             stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
         result = await session.execute(stmt)
-        rows = result.all()
-        if not rows:
-            return []
+        rows = result.all()  # type: ignore[arg-type]
+        if not rows:  # type: ignore[arg-type]
+            return []  # type: ignore[arg-type]
         agent_ids = [agent.id for _, agent in rows if agent.id is not None]
         send_map: dict[int, Optional[datetime]] = {}
         ack_map: dict[int, Optional[datetime]] = {}
         read_map: dict[int, Optional[datetime]] = {}
         if agent_ids:
             send_result = await session.execute(
-                select(Message.sender_id, func.max(Message.created_ts))
+                select(Message.sender_id, func.max(Message.created_ts))  # type: ignore[call-overload]
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, Message.sender_id).in_(agent_ids),
                 )
                 .group_by(Message.sender_id)
             )
-            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}
+            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}  # type: ignore[call-overload]
             ack_result = await session.execute(
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))  # type: ignore[call-overload]
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.ack_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)
-            )
+                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
+            )  # type: ignore[arg-type]
             ack_map = {row[0]: _ensure_utc(row[1]) for row in ack_result}
-            read_result = await session.execute(
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))
+            read_result = await session.execute(  # type: ignore[arg-type]
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))  # type: ignore[call-overload]
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.read_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)
-            )
+                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
+            )  # type: ignore[arg-type]
             read_map = {row[0]: _ensure_utc(row[1]) for row in read_result}
-
+  # type: ignore[arg-type]
     workspace = _project_workspace_path(project)
     repo = _open_repo_if_available(workspace) if workspace is not None else None
 
     statuses: list[FileReservationStatus] = []
-    for reservation, agent in rows:
-        agent_id = agent.id or -1
-        agent_last_active = _ensure_utc(agent.last_active_ts)
-        last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
+    try:
+        for reservation, agent in rows:
+            agent_id = agent.id or -1
+            agent_last_active = _ensure_utc(agent.last_active_ts)
+            last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
 
-        matches: list[Path] = []
-        fs_activity: Optional[datetime] = None
-        git_activity: Optional[datetime] = None
+            matches: list[Path] = []
+            fs_activity: Optional[datetime] = None
+            git_activity: Optional[datetime] = None
 
-        if workspace is not None:
-            matches = _collect_matching_paths(workspace, reservation.path_pattern)
-            if matches:
-                fs_activity = _latest_filesystem_activity(matches)
-                git_activity = _latest_git_activity(repo, matches)
+            if workspace is not None:
+                matches = _collect_matching_paths(workspace, reservation.path_pattern)
+                if matches:
+                    fs_activity = _latest_filesystem_activity(matches)
+                    git_activity = _latest_git_activity(repo, matches)
 
-        agent_inactive = (
-            agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
-        )
-        recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
-        recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
-        recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
-
-        stale = bool(
-            reservation.released_ts is None
-            and agent_inactive
-            and not (recent_mail or recent_fs or recent_git)
-        )
-        reasons: list[str] = []
-        if agent_inactive:
-            reasons.append(f"agent_inactive>{inactivity_seconds}s")
-        else:
-            reasons.append("agent_recently_active")
-        if recent_mail:
-            reasons.append("mail_activity_recent")
-        else:
-            reasons.append(f"no_recent_mail_activity>{activity_grace}s")
-        if matches:
-            if recent_fs:
-                reasons.append("filesystem_activity_recent")
-            else:
-                reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
-            if recent_git:
-                reasons.append("git_activity_recent")
-            else:
-                reasons.append(f"no_recent_git_activity>{activity_grace}s")
-        else:
-            reasons.append("path_pattern_unmatched")
-
-        statuses.append(
-            FileReservationStatus(
-                reservation=reservation,
-                agent=agent,
-                stale=stale,
-                stale_reasons=reasons,
-                last_agent_activity=agent_last_active,
-                last_mail_activity=last_mail,
-                last_fs_activity=fs_activity,
-                last_git_activity=git_activity,
+            agent_inactive = (
+                agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
             )
-        )
+            recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
+            recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
+            recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
+
+            stale = bool(
+                reservation.released_ts is None
+                and agent_inactive
+                and not (recent_mail or recent_fs or recent_git)
+            )
+            reasons: list[str] = []
+            if agent_inactive:
+                reasons.append(f"agent_inactive>{inactivity_seconds}s")
+            else:
+                reasons.append("agent_recently_active")
+            if recent_mail:
+                reasons.append("mail_activity_recent")
+            else:
+                reasons.append(f"no_recent_mail_activity>{activity_grace}s")
+            if matches:
+                if recent_fs:
+                    reasons.append("filesystem_activity_recent")
+                else:
+                    reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
+                if recent_git:
+                    reasons.append("git_activity_recent")
+                else:
+                    reasons.append(f"no_recent_git_activity>{activity_grace}s")
+            else:
+                reasons.append("path_pattern_unmatched")
+
+            statuses.append(
+                FileReservationStatus(
+                    reservation=reservation,
+                    agent=agent,
+                    stale=stale,
+                    stale_reasons=reasons,
+                    last_agent_activity=agent_last_active,
+                    last_mail_activity=last_mail,
+                    last_fs_activity=fs_activity,
+                    last_git_activity=git_activity,
+                )
+            )
+    finally:
+        # Cleanup: close repo if we opened one
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
     return statuses
 
 
@@ -1969,16 +2536,16 @@ async def _expire_stale_file_reservations(project_id: int) -> list[FileReservati
         await session.execute(
             update(FileReservation)
             .where(
-                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.released_ts).is_(None),
-                FileReservation.expires_ts < now,
+                FileReservation.expires_ts < now,  # type: ignore[arg-type]
             )
             .values(released_ts=now)
         )
         await session.commit()
-
+  # type: ignore[arg-type]
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
-    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
+    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]  # type: ignore[arg-type]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
     if not stale_ids:
         return []
@@ -1987,14 +2554,14 @@ async def _expire_stale_file_reservations(project_id: int) -> list[FileReservati
         await session.execute(
             update(FileReservation)
             .where(
-                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.id).in_(stale_ids),
                 cast(Any, FileReservation.released_ts).is_(None),
             )
             .values(released_ts=now)
         )
         await session.commit()
-
+  # type: ignore[arg-type]
     for status in stale_statuses:
         status.reservation.released_ts = now
     return stale_statuses
@@ -2010,7 +2577,7 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     # Git wildmatch semantics; treat inputs as repo-root relative forward-slash paths
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
-    if PathSpec and GitWildMatchPattern:
+    if PathSpec is not None and GitWildMatchPattern is not None:
         spec = PathSpec.from_lines("gitwildmatch", [existing.path_pattern])
         return spec.match_file(_normalize(candidate_path))
     # Fallback to conservative fnmatch if pathspec not available
@@ -2024,7 +2591,7 @@ def _patterns_overlap(a: str, b: str) -> bool:
     # Overlap if any file could be matched by both patterns (approximate by cross-matching)
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
-    if PathSpec and GitWildMatchPattern:
+    if PathSpec is not None and GitWildMatchPattern is not None:
         a_spec = PathSpec.from_lines("gitwildmatch", [a])
         b_spec = PathSpec.from_lines("gitwildmatch", [b])
         # Heuristic: check direct cross-matches on normalized patterns
@@ -2056,21 +2623,21 @@ async def _list_inbox(
     await ensure_schema()
     async with get_session() as session:
         stmt = (
-            select(Message, MessageRecipient.kind, sender_alias.name)
+            select(Message, MessageRecipient.kind, sender_alias.name)  # type: ignore[call-overload]
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-            .join(sender_alias, Message.sender_id == sender_alias.id)
+            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
             .where(
-                Message.project_id == project.id,
+                cast(Any, Message.project_id) == project.id,
                 MessageRecipient.agent_id == agent.id,
             )
-            .order_by(desc(Message.created_ts))
-            .limit(limit)
-        )
+            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
+            .limit(limit)  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]
         if urgent_only:
-            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
-        if since_ts:
+            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))  # type: ignore[arg-type]
+        if since_ts:  # type: ignore[arg-type]
             since_dt = _parse_iso(since_ts)
-            if since_dt:
+            if since_dt:  # type: ignore[arg-type]
                 stmt = stmt.where(Message.created_ts > since_dt)
         result = await session.execute(stmt)
         rows = result.all()
@@ -2078,7 +2645,7 @@ async def _list_inbox(
     for message, recipient_kind, sender_name in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
         payload["from"] = sender_name
-        payload["kind"] = recipient_kind
+        payload["kind"] = recipient_kind  # type: ignore[arg-type]
         messages.append(payload)
     return messages
 
@@ -2098,30 +2665,30 @@ async def _list_outbox(
     async with get_session() as session:
         stmt = (
             select(Message)
-            .where(Message.project_id == project.id, Message.sender_id == agent.id)
-            .order_by(desc(Message.created_ts))
+            .where(Message.project_id == project.id, Message.sender_id == agent.id)  # type: ignore[arg-type]
+            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
             .limit(limit)
         )
         if since_ts:
             since_dt = _parse_iso(since_ts)
             if since_dt:
-                stmt = stmt.where(Message.created_ts > since_dt)
-        result = await session.execute(stmt)
+                stmt = stmt.where(Message.created_ts > since_dt)  # type: ignore[arg-type]
+        result = await session.execute(stmt)  # type: ignore[arg-type]
         message_rows = result.scalars().all()
 
         # For each message, collect recipients grouped by kind
         for msg in message_rows:
             recs = await session.execute(
-                select(MessageRecipient.kind, Agent.name)
+                select(MessageRecipient.kind, Agent.name)  # type: ignore[call-overload]
                 .join(Agent, MessageRecipient.agent_id == Agent.id)
                 .where(MessageRecipient.message_id == msg.id)
             )
             to_list: list[str] = []
             cc_list: list[str] = []
             bcc_list: list[str] = []
-            for kind, name in recs.all():
-                if kind == "to":
-                    to_list.append(name)
+            for kind, name in recs.all():  # type: ignore[call-overload]
+                if kind == "to":  # type: ignore[arg-type]
+                    to_list.append(name)  # type: ignore[arg-type]
                 elif kind == "cc":
                     cc_list.append(name)
                 elif kind == "bcc":
@@ -2135,7 +2702,7 @@ async def _list_outbox(
     return messages
 
 
-def _canonical_relpath_for_message(project: Project, message: Message, archive) -> str | None:
+def _canonical_relpath_for_message(project: Project, message: Message, archive: ProjectArchive) -> str | None:
     """Resolve the canonical repo-relative path for a message markdown file.
 
     Supports both legacy filenames ("<id>.md") and the new descriptive pattern
@@ -2178,7 +2745,7 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
     if not relpath:
         return None
 
-    def _lookup():
+    def _lookup() -> dict[str, Any] | None:
         try:
             commit = next(archive.repo.iter_commits(paths=[relpath], max_count=1))
         except StopIteration:
@@ -2204,7 +2771,7 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
                 diffs = parent.diff(commit, paths=[relpath], create_patch=True)
                 for d in diffs:
                     try:
-                        patch = d.diff.decode("utf-8", "ignore")
+                        patch = d.diff.decode("utf-8", "ignore")  # type: ignore[union-attr]
                     except Exception:
                         patch = ""
                     for line in patch.splitlines():
@@ -2327,16 +2894,16 @@ async def _compute_thread_summary(
         criteria.append(Message.id == message_id)
     async with get_session() as session:
         stmt = (
-            select(Message, sender_alias.name)
-            .join(sender_alias, Message.sender_id == sender_alias.id)
-            .where(Message.project_id == project.id, or_(*criteria))
-            .order_by(asc(Message.created_ts))
+            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
+            .order_by(asc(cast(Any, Message.created_ts)))
         )
         if per_thread_limit:
             stmt = stmt.limit(per_thread_limit)
         result = await session.execute(stmt)
         rows = result.all()
-    summary = _summarize_messages(rows)
+    summary = _summarize_messages(rows)  # type: ignore[arg-type]
 
     if llm_mode and get_settings().llm.enabled:
         try:
@@ -2389,7 +2956,7 @@ async def _get_message(project: Project, message_id: int) -> Message:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Message).where(Message.project_id == project.id, Message.id == message_id)
+            select(Message).where(Message.project_id == project.id, Message.id == message_id)  # type: ignore[arg-type]
         )
         message = result.scalars().first()
         if not message:
@@ -2403,7 +2970,7 @@ async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)
+            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if not agent:
@@ -2422,10 +2989,7 @@ async def _update_recipient_timestamp(
     async with get_session() as session:
         # Read current value first
         result_sel = await session.execute(
-            select(MessageRecipient).where(
-                MessageRecipient.message_id == message_id,
-                MessageRecipient.agent_id == agent.id,
-            )
+            select(MessageRecipient).where(cast(Any, MessageRecipient.message_id == message_id), cast(Any, MessageRecipient.agent_id == agent.id))  # type: ignore[arg-type]
         )
         rec = result_sel.scalars().first()
         if not rec:
@@ -2437,7 +3001,7 @@ async def _update_recipient_timestamp(
         # Set only if null
         stmt = (
             update(MessageRecipient)
-            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)
+            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)  # type: ignore[arg-type]
             .values({field: now})
         )
         await session.execute(stmt)
@@ -2455,7 +3019,7 @@ def build_mcp_server() -> FastMCP:
         "Provide message routing, coordination tooling, and project context to cooperating agents."
     )
 
-    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
+    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)  # type: ignore[arg-type]
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -2530,12 +3094,12 @@ def build_mcp_server() -> FastMCP:
 
                 async with get_session() as session:
                     rows = await session.execute(
-                        select(FileReservation, Agent.name)
-                        .join(Agent, FileReservation.agent_id == Agent.id)
+                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                         .where(
-                            FileReservation.project_id == project.id,
+                            cast(Any, FileReservation.project_id) == project.id,
                             cast(Any, FileReservation.released_ts).is_(None),
-                            FileReservation.expires_ts > now_ts,
+                            cast(Any, FileReservation.expires_ts) > now_ts,
                         )
                     )
                     active_file_reservations = rows.all()
@@ -2848,6 +3412,7 @@ def build_mcp_server() -> FastMCP:
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
+        _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
         if settings.tools_log_enabled:
             try:
@@ -2990,6 +3555,7 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
         unique_name = await _generate_unique_agent_name(project, settings, name_hint)
         ap = (attachments_policy or "auto").lower()
@@ -3131,6 +3697,37 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+
+        # Normalize 'to' parameter - accept single string and convert to list
+        if isinstance(to, str):
+            to = [to]
+        if not isinstance(to, list):
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                f"'to' must be a list of agent names (e.g., ['BlueLake']) or a single agent name string. "
+                f"Received: {type(to).__name__}",
+                recoverable=True,
+                data={"argument": "to", "received_type": type(to).__name__},
+            )
+
+        # Check for common recipient mistakes and provide helpful guidance
+        for recipient in to:
+            if not isinstance(recipient, str):
+                raise ToolExecutionError(
+                    "INVALID_ARGUMENT",
+                    f"Each recipient in 'to' must be a string (agent name). Got: {type(recipient).__name__}",
+                    recoverable=True,
+                    data={"argument": "to", "invalid_item": repr(recipient)},
+                )
+            mistake = _detect_agent_name_mistake(recipient)
+            if mistake:
+                raise ToolExecutionError(
+                    mistake[0],
+                    f"Invalid recipient '{recipient}': {mistake[1]}",
+                    recoverable=True,
+                    data={"recipient": recipient, "hint": "Use agent names like 'BlueLake', not program/model names"},
+                )
+
         # Normalize cc/bcc inputs and validate types for friendlier UX
         if isinstance(cc, str):
             cc = [cc]
@@ -3168,6 +3765,27 @@ def build_mcp_server() -> FastMCP:
                 recoverable=True,
                 data={"argument": "bcc"},
             )
+
+        # Self-send detection: warn if sender is sending to themselves
+        sender_lower = sender_name.lower().strip()
+        all_recipients = (to or []) + (cc or []) + (bcc or [])
+        self_send_matches = [r for r in all_recipients if r.lower().strip() == sender_lower]
+        if self_send_matches:
+            await ctx.info(
+                f"[note] You ({sender_name}) are sending a message to yourself. "
+                f"This is allowed but usually not intended. To communicate with other agents, "
+                f"use their agent names (e.g., 'BlueLake'). To discover agents, "
+                f"use resource://agents/{project_key}."
+            )
+
+        # Subject length warning: warn if subject is too long (will be truncated in DB)
+        if len(subject) > 200:
+            await ctx.info(
+                f"[warn] Subject is {len(subject)} characters (max recommended: 80, truncated at 200). "
+                f"Long subjects may be truncated in search results. Consider moving details to the message body."
+            )
+            subject = subject[:200]
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -3207,12 +3825,12 @@ def build_mcp_server() -> FastMCP:
                         pass
                     async with get_session() as s:
                         stmt = (
-                            select(Message, sender_alias.name)
-                            .join(sender_alias, Message.sender_id == sender_alias.id)
-                            .where(Message.project_id == project.id, or_(*criteria))
+                            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
                             .limit(500)
                         )
-                        thread_rows = list((await s.execute(stmt)).all())
+                        thread_rows = list((await s.execute(stmt)).all())  # type: ignore[arg-type]
                     # collect participants (sender names and recipients)
                     participants: set[str] = {n for _m, n in thread_rows}
                     auto_ok_names.update(participants)
@@ -3224,9 +3842,9 @@ def build_mcp_server() -> FastMCP:
             try:
                 async with get_session() as s2:
                     file_reservation_rows = await s2.execute(
-                        select(FileReservation, Agent.name)
-                        .join(Agent, FileReservation.agent_id == Agent.id)
-                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), FileReservation.expires_ts > now_utc)
+                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > now_utc)
                     )
                     name_to_file_reservations: dict[str, list[str]] = {}
                     for c, nm in file_reservation_rows.all():
@@ -3294,12 +3912,12 @@ def build_mcp_server() -> FastMCP:
                     try:
                         link = await s3.execute(
                             select(AgentLink)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.b_project_id == project.id,
-                                AgentLink.b_agent_id == rec.id,
-                                AgentLink.status == "approved",
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.b_project_id) == project.id,
+                                cast(Any, AgentLink.b_agent_id) == rec.id,
+                                cast(Any, AgentLink.status == "approved"),
                             )
                             .limit(1)
                         )
@@ -3356,12 +3974,12 @@ def build_mcp_server() -> FastMCP:
                                     # After auto-approval, link should exist; double-check
                                     link = await s3b.execute(
                                         select(AgentLink)
-                                        .where(
-                                            AgentLink.a_project_id == project.id,
-                                            AgentLink.a_agent_id == sender.id,
-                                            AgentLink.b_project_id == project.id,
-                                            AgentLink.b_agent_id == rec.id,
-                                            AgentLink.status == "approved",
+                                        .where(  # type: ignore[arg-type]
+                                            cast(Any, AgentLink.a_project_id) == project.id,
+                                            cast(Any, AgentLink.a_agent_id) == sender.id,
+                                            cast(Any, AgentLink.b_project_id) == project.id,
+                                            cast(Any, AgentLink.b_agent_id) == rec.id,
+                                            cast(Any, AgentLink.status == "approved"),
                                         )
                                         .limit(1)
                                     )
@@ -3446,10 +4064,10 @@ def build_mcp_server() -> FastMCP:
 
         async with get_session() as sx:
             # Preload local agent names (normalized -> canonical stored name)
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
             local_lookup: dict[str, str] = {}
-            for row in existing.fetchall():
-                canonical_name = (row[0] or "").strip()
+            for row in existing.fetchall():  # type: ignore[assignment]
+                canonical_name = (row[0] or "").strip()  # type: ignore[index]
                 if not canonical_name:
                     continue
                 sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
@@ -3558,27 +4176,27 @@ def build_mcp_server() -> FastMCP:
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Project.id == target_project_override.id,
-                                func.lower(Agent.name) == lookup_value,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Project.id == target_project_override.id),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                func.lower(Agent.name) == lookup_value,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
@@ -3687,14 +4305,14 @@ def build_mcp_server() -> FastMCP:
                                             lookup_value = (nm or "").strip().lower()
                                             rows = await scheck.execute(
                                                 select(AgentLink, Project, Agent)
-                                                .join(Project, Project.id == AgentLink.b_project_id)
-                                                .join(Agent, Agent.id == AgentLink.b_agent_id)
-                                                .where(
-                                                    AgentLink.a_project_id == project.id,
-                                                    AgentLink.a_agent_id == sender.id,
-                                                    AgentLink.status == "approved",
-                                                    Project.id == tproj.id,
-                                                    func.lower(Agent.name) == lookup_value,
+                                                .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                                                .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                                                .where(  # type: ignore[arg-type]
+                                                    cast(Any, AgentLink.a_project_id) == project.id,
+                                                    cast(Any, AgentLink.a_agent_id) == sender.id,
+                                                    cast(Any, AgentLink.status == "approved"),
+                                                    cast(Any, Project.id == tproj.id),
+                                                    cast(Any, func.lower(Agent.name) == lookup_value),
                                                 )
                                                 .limit(1)
                                             )
@@ -3955,7 +4573,7 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
 
         async with get_session() as sx:
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
             local_names = {row[0] for row in existing.fetchall()}
 
             class _ContactBlocked(Exception):
@@ -3986,27 +4604,27 @@ def build_mcp_server() -> FastMCP:
                     if target_project_override is not None and target_name_override:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Project.id == target_project_override.id,
-                                Agent.name == target_name_override,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Project.id == target_project_override.id),
+                                cast(Any, Agent.name == target_name_override),
                             )
                             .limit(1)
                         )
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Agent.name == nm,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Agent.name == nm),
                             )
                             .limit(1)
                         )
@@ -4178,8 +4796,12 @@ def build_mcp_server() -> FastMCP:
                 target_name = to_agent
         try:
             b = await _get_agent(target_project, target_name)
-        except NoResultFound:
-            if register_if_missing and validate_agent_name_format(target_name):
+        except (NoResultFound, ToolExecutionError) as exc:
+            # Check if this is a NOT_FOUND error we can handle with register_if_missing
+            is_not_found = isinstance(exc, NoResultFound) or (
+                isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
+            )
+            if is_not_found and register_if_missing and validate_agent_name_format(target_name):
                 # Create the missing target identity using provided metadata (best effort)
                 b = await _get_or_create_agent(
                     target_project,
@@ -4191,16 +4813,21 @@ def build_mcp_server() -> FastMCP:
                 )
             else:
                 raise
+        # Warn on TTL auto-correction
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds))
         async with get_session() as s:
             # upsert link
             existing = await s.execute(
                 select(AgentLink).where(
-                    AgentLink.a_project_id == project.id,
-                    AgentLink.a_agent_id == a.id,
-                    AgentLink.b_project_id == target_project.id,
-                    AgentLink.b_agent_id == b.id,
+                    cast(Any, AgentLink.a_project_id) == project.id,
+                    cast(Any, AgentLink.a_agent_id) == a.id,
+                    cast(Any, AgentLink.b_project_id) == target_project.id,
+                    cast(Any, AgentLink.b_agent_id) == b.id,
                 )
             )
             link = existing.scalars().first()
@@ -4268,16 +4895,21 @@ def build_mcp_server() -> FastMCP:
         a_project = project if not from_project else await _get_project_by_identifier(from_project)
         a = await _get_agent(a_project, from_agent)
         b = await _get_agent(project, to_agent)
+        # Warn on TTL auto-correction
+        if accept and ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
         updated = 0
         async with get_session() as s:
             existing = await s.execute(
                 select(AgentLink).where(
-                    AgentLink.a_project_id == a_project.id,
-                    AgentLink.a_agent_id == a.id,
-                    AgentLink.b_project_id == project.id,
-                    AgentLink.b_agent_id == b.id,
+                    cast(Any, AgentLink.a_project_id) == a_project.id,
+                    cast(Any, AgentLink.a_agent_id) == a.id,
+                    cast(Any, AgentLink.b_project_id) == project.id,
+                    cast(Any, AgentLink.b_agent_id) == b.id,
                 )
             )
             link = existing.scalars().first()
@@ -4320,9 +4952,9 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as s:
             rows = await s.execute(
-                select(AgentLink, Agent.name)
-                .join(Agent, Agent.id == AgentLink.b_agent_id)
-                .where(AgentLink.a_project_id == project.id, AgentLink.a_agent_id == agent.id)
+                cast(Any, select(AgentLink, Agent.name))  # type: ignore[call-overload]
+                .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                .where(cast(Any, AgentLink.a_project_id) == project.id, cast(Any, AgentLink.a_agent_id) == agent.id)
             )
             for link, name in rows.all():
                 out.append({
@@ -4403,6 +5035,21 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate limit parameter bounds
+        if limit < 1:
+            raise ToolExecutionError(
+                error_type="INVALID_LIMIT",
+                message=f"limit must be at least 1, got {limit}. Use a positive integer.",
+                recoverable=True,
+                data={"provided": limit, "min": 1, "max": 1000},
+            )
+        if limit > 1000:
+            await ctx.info(f"[warn] limit={limit} is very large; capping at 1000 to prevent performance issues.")
+            limit = 1000
+
+        # Validate since_ts format upfront with helpful error message
+        _validate_iso_timestamp(since_ts, "since_ts")
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -4565,8 +5212,8 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console
-                    JSON = _rj.JSON
+                    Console = _rc.Console  # type: ignore[misc]
+                    JSON = _rj.JSON  # type: ignore[misc]
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -4596,6 +5243,7 @@ def build_mcp_server() -> FastMCP:
         Macro helper that boots a project session: ensure project, register agent,
         optionally file_reservation paths, and fetch the latest inbox snapshot.
         """
+        _validate_program_model(program, model)
         settings = get_settings()
         project = await _ensure_project(human_key)
         agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
@@ -4664,6 +5312,7 @@ def build_mcp_server() -> FastMCP:
         settings = get_settings()
         project = await _get_project_by_identifier(project_key)
         if register_if_missing:
+            _validate_program_model(program, model)
             agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
         else:
             if not agent_name:
@@ -4789,14 +5438,14 @@ def build_mcp_server() -> FastMCP:
                 # If requester missing and exactly one agent exists in project, assume that one
                 if not real_requester and project.id is not None:
                     async with get_session() as s:
-                        rows = await s.execute(select(Agent.name).where(Agent.project_id == project.id))
+                        rows = await s.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
                         names = [str(row[0]).strip() for row in rows.fetchall() if (row and row[0])]
                     if len(names) == 1:
                         real_requester = names[0]
                 # If target missing and exactly two agents exist, infer the other
                 if not real_target and project.id is not None:
                     async with get_session() as s2:
-                        rows2 = await s2.execute(select(Agent.name).where(Agent.project_id == project.id))
+                        rows2 = await s2.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
                         names2 = [str(row[0]).strip() for row in rows2.fetchall() if (row and row[0])]
                     if real_requester and len(names2) == 2 and real_requester in names2:
                         real_target = next((n for n in names2 if n != real_requester), real_target)
@@ -4954,24 +5603,43 @@ def build_mcp_server() -> FastMCP:
                 pass
         if project.id is None:
             raise ValueError("Project must have an id before searching messages.")
+
+        # Sanitize the FTS query - returns None if query can't produce results
+        sanitized_query = _sanitize_fts_query(query)
+        if sanitized_query is None:
+            await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+            try:
+                from fastmcp.tools.tool import ToolResult  # type: ignore
+                return ToolResult(structured_content={"result": []})
+            except Exception:
+                return []
+
         await ensure_schema()
-        async with get_session() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                           m.thread_id, a.name AS sender_name
-                    FROM fts_messages
-                    JOIN messages m ON fts_messages.rowid = m.id
-                    JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id = :project_id AND fts_messages MATCH :query
-                    ORDER BY bm25(fts_messages) ASC
-                    LIMIT :limit
-                    """
-                ),
-                {"project_id": project.id, "query": query, "limit": limit},
-            )
-            rows = result.mappings().all()
+        rows: list[Any] = []
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name
+                        FROM fts_messages
+                        JOIN messages m ON fts_messages.rowid = m.id
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id = :project_id AND fts_messages MATCH :query
+                        ORDER BY bm25(fts_messages) ASC
+                        LIMIT :limit
+                        """
+                    ),
+                    {"project_id": project.id, "query": sanitized_query, "limit": limit},
+                )
+                rows = list(result.mappings().all())
+        except Exception as fts_err:
+            # FTS query syntax error - return empty results instead of crashing
+            logger.warning("FTS query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+            await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
+            rows = []
+
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
         if get_settings().tools_log_enabled:
             try:
@@ -5010,81 +5678,65 @@ def build_mcp_server() -> FastMCP:
         include_examples: bool = False,
         llm_mode: bool = True,
         llm_model: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """
-        Extract participants, key points, and action items for a thread.
-
-        Notes
-        -----
-        - If `thread_id` is not an id present on any message, it is treated as a string key
-        - If `thread_id` is a message id, messages where `id == thread_id` are also included
-        - `include_examples` returns up to 3 sample messages for quick preview
-
-        Suggested use
-        -------------
-        - Call after a long discussion to inform a summarizing or planning agent.
-        - Use `key_points` to seed a TODO list and `action_items` to assign work.
-
-        Returns
-        -------
-        dict
-            { thread_id, summary: {participants[], key_points[], action_items[], total_messages}, examples[] }
-
-        Example
-        -------
-        ```json
-        {"jsonrpc":"2.0","id":"11","method":"tools/call","params":{"name":"summarize_thread","arguments":{
-          "project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true
-        }}}
-        ```
-        """
-        project = await _get_project_by_identifier(project_key)
-        summary, examples, total_messages = await _compute_thread_summary(
-            project,
-            thread_id,
-            include_examples,
-            llm_mode,
-            llm_model,
-                )
-        await ctx.info(
-            f"Summarized thread '{thread_id}' for project '{project.human_key}' with {total_messages} messages"
-        )
-        return {"thread_id": thread_id, "summary": summary, "examples": examples}
-
-    @mcp.tool(name="summarize_threads")
-    @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
-    async def summarize_threads(
-        ctx: Context,
-        project_key: str,
-        thread_ids: list[str],
-        llm_mode: bool = True,
-        llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
     ) -> dict[str, Any]:
         """
-        Produce a digest across multiple threads including top mentions and action items.
+        Extract participants, key points, and action items for one or more threads.
+
+        Single-thread mode (thread_id is a single ID):
+        - Returns detailed summary with optional example messages
+        - Response: { thread_id, summary: {participants[], key_points[], action_items[]}, examples[] }
+
+        Multi-thread mode (thread_id is comma-separated IDs like "TKT-1,TKT-2,TKT-3"):
+        - Returns aggregate digest across all threads
+        - Response: { threads: [{thread_id, summary}], aggregate: {top_mentions[], key_points[], action_items[]} }
 
         Parameters
         ----------
         project_key : str
             Project identifier.
-        thread_ids : list[str]
-            Collection of thread keys or seed message ids.
+        thread_id : str
+            Single thread ID for detailed summary, OR comma-separated IDs for aggregate digest.
+        include_examples : bool
+            If true (single-thread mode only), include up to 3 sample messages.
         llm_mode : bool
-            If true and LLM is enabled, refine the digest with the LLM for clarity.
+            If true and LLM is enabled, refine the summary with AI.
         llm_model : Optional[str]
             Override model name for the LLM call.
         per_thread_limit : int
-            Max messages to consider per thread.
+            Max messages to consider per thread (multi-thread mode).
 
-        Returns
-        -------
-        dict
-            {
-              threads: [{thread_id, summary}],
-              aggregate: { top_mentions[], action_items[], key_points[] }
-            }
+        Examples
+        --------
+        Single thread:
+        ```json
+        {"thread_id": "TKT-123", "include_examples": true}
+        ```
+
+        Multiple threads:
+        ```json
+        {"thread_id": "TKT-1,TKT-2,TKT-3"}
+        ```
         """
+        # Detect multi-thread mode by checking for comma-separated IDs
+        thread_ids = [t.strip() for t in thread_id.split(",") if t.strip()]
+
+        if len(thread_ids) == 1:
+            # Single-thread mode: detailed summary with examples
+            project = await _get_project_by_identifier(project_key)
+            summary, examples, total_messages = await _compute_thread_summary(
+                project,
+                thread_ids[0],
+                include_examples,
+                llm_mode,
+                llm_model,
+            )
+            await ctx.info(
+                f"Summarized thread '{thread_ids[0]}' for project '{project.human_key}' with {total_messages} messages"
+            )
+            return {"thread_id": thread_ids[0], "summary": summary, "examples": examples}
+
+        # Multi-thread mode: aggregate digest
         project = await _get_project_by_identifier(project_key)
         if project.id is None:
             raise ValueError("Project must have an id before summarizing threads.")
@@ -5102,18 +5754,18 @@ def build_mcp_server() -> FastMCP:
                     seed_id = int(tid)
                 except ValueError:
                     seed_id = None
-                criteria = [Message.thread_id == tid]
+                criteria = [cast(Any, Message.thread_id) == tid]
                 if seed_id is not None:
-                    criteria.append(Message.id == seed_id)
+                    criteria.append(cast(Any, Message.id) == seed_id)
                 stmt = (
-                    select(Message, sender_alias.name)
-                    .join(sender_alias, Message.sender_id == sender_alias.id)
+                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
                     .where(Message.project_id == project.id, or_(*criteria))
-                    .order_by(asc(Message.created_ts))
+                    .order_by(asc(cast(Any, Message.created_ts)))
                     .limit(per_thread_limit)
                 )
                 rows = (await session.execute(stmt)).all()
-                summary = _summarize_messages(rows)
+                summary = _summarize_messages(rows)  # type: ignore[arg-type]
                 # accumulate
                 for m in summary.get("mentions", []):
                     name = str(m.get("name", "")).strip()
@@ -5183,7 +5835,7 @@ def build_mcp_server() -> FastMCP:
                                 revised_threads.append(item)
                         thread_summaries = revised_threads
             except Exception as e:
-                await ctx.debug(f"summarize_threads.llm_skipped: {e}")
+                await ctx.debug(f"summarize_thread.llm_skipped: {e}")
 
         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
         return {"threads": thread_summaries, "aggregate": aggregate}
@@ -5298,9 +5950,28 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate paths is not empty
+        if not paths:
+            raise ToolExecutionError(
+                error_type="EMPTY_PATHS",
+                message=(
+                    "paths list cannot be empty. Provide at least one file path or glob pattern "
+                    "to reserve (e.g., ['src/api/*.py', 'config/settings.yaml'])."
+                ),
+                recoverable=True,
+                data={"provided": paths},
+            )
+
+        # Warn on very short TTL (but still allow it for testing scenarios)
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below recommended minimum (60s). "
+                f"Very short TTLs may cause unexpected expiry during processing."
+            )
+
         project = await _get_project_by_identifier(project_key)
         settings = get_settings()
-        if get_settings().tools_log_enabled:
+        if settings.tools_log_enabled:
             try:
                 import importlib as _imp
                 _rc = _imp.import_module("rich.console")
@@ -5323,18 +5994,19 @@ def build_mcp_server() -> FastMCP:
             extra = f" ({summary})" if summary else ""
             await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
         project_id = project.id
-        # Lightweight validation: warn on ultra-broad patterns
-        broad = [p for p in paths if p.strip() in {"*", "**/*", "**", "/**/*"}]
-        if broad:
-            await ctx.info(f"[warn] Reservation pattern(s) extremely broad: {', '.join(broad)} — consider narrowing to repo-root relative paths (e.g., 'app/api/*.py').")
+        # Validate path patterns and warn on suspicious patterns
+        for pattern in paths:
+            warning = _detect_suspicious_file_reservation(pattern)
+            if warning:
+                await ctx.info(f"[warn] {warning}")
         async with get_session() as session:
             existing_rows = await session.execute(
-                select(FileReservation, Agent.name)
-                .join(Agent, FileReservation.agent_id == Agent.id)
+                cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                 .where(
-                    FileReservation.project_id == project_id,
+                    cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    FileReservation.expires_ts > datetime.now(timezone.utc),
+                    cast(Any, FileReservation.expires_ts) > datetime.now(timezone.utc),
                 )
             )
             existing_reservations = existing_rows.all()
@@ -5363,18 +6035,18 @@ def build_mcp_server() -> FastMCP:
                 ctx_branch: Optional[str] = None
                 ctx_worktree: Optional[str] = None
                 try:
-                    repo = Repo(project.human_key, search_parent_directories=True)
-                    try:
-                        ctx_branch = repo.active_branch.name
-                    except Exception:
+                    with _git_repo(project.human_key) as repo:
                         try:
-                            ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            ctx_branch = repo.active_branch.name
                         except Exception:
-                            ctx_branch = None
-                    try:
-                        ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                    except Exception:
-                        ctx_worktree = None
+                            try:
+                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            except Exception:
+                                ctx_branch = None
+                        try:
+                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                        except Exception:
+                            ctx_worktree = None
                 except Exception:
                     pass
                 file_reservation_payload = {
@@ -5389,7 +6061,7 @@ def build_mcp_server() -> FastMCP:
                     "branch": ctx_branch,
                     "worktree": ctx_worktree,
                 }
-                await write_file_reservation_record(archive, file_reservation_payload)
+                await write_file_reservation_record(archive, file_reservation_payload)  # type: ignore[arg-type]
                 granted.append(
                     {
                         "id": file_reservation.id,
@@ -5399,7 +6071,7 @@ def build_mcp_server() -> FastMCP:
                         "expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
-                existing_reservations.append((file_reservation, agent.name))
+                existing_reservations.append((file_reservation, agent.name))  # type: ignore[attr-defined]
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
@@ -5471,8 +6143,8 @@ def build_mcp_server() -> FastMCP:
                 stmt = (
                     update(FileReservation)
                     .where(
-                        FileReservation.project_id == project.id,
-                        FileReservation.agent_id == agent.id,
+                        cast(Any, FileReservation.project_id) == project.id,
+                        cast(Any, FileReservation.agent_id) == agent.id,
                         cast(Any, FileReservation.released_ts).is_(None),
                     )
                     .values(released_ts=now)
@@ -5483,7 +6155,7 @@ def build_mcp_server() -> FastMCP:
                     stmt = stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
                 result = await session.execute(stmt)
                 await session.commit()
-            affected = int(result.rowcount or 0)
+            affected = int(result.rowcount or 0)  # type: ignore[attr-defined]
             await ctx.info(f"Released {affected} file_reservations for '{agent.name}'.")
             return {"released": affected, "released_at": _iso(now)}
         except Exception as exc:
@@ -5492,8 +6164,8 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console
-                    JSON = _rj.JSON
+                    Console = _rc.Console  # type: ignore[misc]
+                    JSON = _rj.JSON  # type: ignore[misc]
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -5531,10 +6203,10 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as session:
             result = await session.execute(
                 select(FileReservation, Agent)
-                .join(Agent, FileReservation.agent_id == Agent.id)
+                .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                 .where(
-                    FileReservation.id == file_reservation_id,
-                    FileReservation.project_id == project.id,
+                    cast(Any, FileReservation.id) == file_reservation_id,
+                    cast(Any, FileReservation.project_id) == project.id,
                 )
             )
             row = result.first()
@@ -5580,7 +6252,7 @@ def build_mcp_server() -> FastMCP:
             await session.execute(
                 update(FileReservation)
                 .where(
-                    FileReservation.id == file_reservation_id,
+                    cast(Any, FileReservation.id) == file_reservation_id,
                     cast(Any, FileReservation.released_ts).is_(None),
                 )
                 .values(released_ts=now)
@@ -5725,11 +6397,11 @@ def build_mcp_server() -> FastMCP:
             stmt = (
                 select(FileReservation)
                 .where(
-                    FileReservation.project_id == project.id,
-                    FileReservation.agent_id == agent.id,
+                    cast(Any, FileReservation.project_id) == project.id,
+                    cast(Any, FileReservation.agent_id) == agent.id,
                     cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .order_by(asc(FileReservation.expires_ts))
+                .order_by(asc(cast(Any, FileReservation.expires_ts)))
             )
             if file_reservation_ids:
                 stmt = stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
@@ -5781,159 +6453,152 @@ def build_mcp_server() -> FastMCP:
         return {"renewed": len(updated), "file_reservations": updated}
 
     # --- Build slots (coarse concurrency control) --------------------------------------------
+    # Only registered when WORKTREES_ENABLED=1 to reduce token overhead for single-worktree setups
 
-    def _safe_component(value: str) -> str:
-        # Keep it simple and dependency-free: replace common problematic filesystem chars
-        safe = value.strip()
-        for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
-            safe = safe.replace(ch, "_")
-        return safe or "unknown"
+    if settings.worktrees_enabled:
+        def _safe_component(value: str) -> str:
+            # Keep it simple and dependency-free: replace common problematic filesystem chars
+            safe = value.strip()
+            for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+                safe = safe.replace(ch, "_")
+            return safe or "unknown"
 
-    def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
-        safe = _safe_component(slot)
-        return archive.root / "build_slots" / safe
+        def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
+            safe = _safe_component(slot)
+            return archive.root / "build_slots" / safe
 
-    def _compute_branch(path: str) -> Optional[str]:
-        try:
-            repo = Repo(path, search_parent_directories=True)
+        def _compute_branch(path: str) -> Optional[str]:
             try:
-                return repo.active_branch.name
-            except Exception:
-                return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
-        except Exception:
-            return None
-
-    def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        if not slot_path.exists():
-            return results
-        for f in slot_path.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                exp = data.get("expires_ts")
-                if exp:
+                with _git_repo(path) as repo:
                     try:
-                        if datetime.fromisoformat(exp) <= now:
-                            continue
+                        return repo.active_branch.name  # type: ignore[no-any-return]
                     except Exception:
-                        pass
-                results.append(data)
+                        return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
             except Exception:
-                continue
-        return results
+                return None
 
-    @mcp.tool(name="acquire_build_slot")
-    @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def acquire_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-        ttl_seconds: int = 3600,
-        exclusive: bool = True,
-    ) -> dict[str, Any]:
-        """
-        Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"granted": None, "conflicts": [], "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
-        active = _read_active_slots(slot_path, now)
-
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-
-        conflicts: list[dict[str, Any]] = []
-        if exclusive:
-            for entry in active:
-                if entry.get("agent") == agent_name and entry.get("branch") == branch:
+        def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            if not slot_path.exists():
+                return results
+            for f in slot_path.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    exp = data.get("expires_ts")
+                    if exp:
+                        try:
+                            if datetime.fromisoformat(exp) <= now:
+                                continue
+                        except Exception:
+                            pass
+                    results.append(data)
+                except Exception:
                     continue
-                if entry.get("exclusive", True):
-                    conflicts.append(entry)
-        payload = {
-            "slot": slot,
-            "agent": agent_name,
-            "branch": branch,
-            "exclusive": exclusive,
-            "acquired_ts": _iso(now),
-            "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
-        }
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
-        if conflicts:
-            await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
-        return {"granted": payload, "conflicts": conflicts}
+            return results
 
-    @mcp.tool(name="renew_build_slot")
-    @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def renew_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-        extend_seconds: int = 1800,
-    ) -> dict[str, Any]:
-        """
-        Extend expiry for an existing build slot lease. No-op if missing.
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"renewed": False, "expires_ts": None, "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-        try:
-            current = json.loads(lease_path.read_text(encoding="utf-8"))
-        except Exception:
-            current = {}
-        new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
-        current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
-        return {"renewed": True, "expires_ts": new_exp}
+        @mcp.tool(name="acquire_build_slot")
+        @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def acquire_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            ttl_seconds: int = 3600,
+            exclusive: bool = True,
+        ) -> dict[str, Any]:
+            """
+            Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
+            active = _read_active_slots(slot_path, now)
 
-    @mcp.tool(name="release_build_slot")
-    @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def release_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-    ) -> dict[str, Any]:
-        """
-        Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"released": False, "released_at": _iso(datetime.now(timezone.utc)), "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-        released = False
-        try:
-            data = {}
-            if lease_path.exists():
-                data = json.loads(lease_path.read_text(encoding="utf-8"))
-            data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
-            await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
-            released = True
-        except Exception:
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+
+            conflicts: list[dict[str, Any]] = []
+            if exclusive:
+                for entry in active:
+                    if entry.get("agent") == agent_name and entry.get("branch") == branch:
+                        continue
+                    if entry.get("exclusive", True):
+                        conflicts.append(entry)
+            payload = {
+                "slot": slot,
+                "agent": agent_name,
+                "branch": branch,
+                "exclusive": exclusive,
+                "acquired_ts": _iso(now),
+                "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
+            }
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
+            if conflicts:
+                await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
+            return {"granted": payload, "conflicts": conflicts}
+
+        @mcp.tool(name="renew_build_slot")
+        @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def renew_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            extend_seconds: int = 1800,
+        ) -> dict[str, Any]:
+            """
+            Extend expiry for an existing build slot lease. No-op if missing.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+            try:
+                current = json.loads(lease_path.read_text(encoding="utf-8"))
+            except Exception:
+                current = {}
+            new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
+            current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
+            return {"renewed": True, "expires_ts": new_exp}
+
+        @mcp.tool(name="release_build_slot")
+        @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def release_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+        ) -> dict[str, Any]:
+            """
+            Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
             released = False
-        return {"released": released, "released_at": _iso(now)}
+            try:
+                data = {}
+                if lease_path.exists():
+                    data = json.loads(lease_path.read_text(encoding="utf-8"))
+                data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
+                await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
+                released = True
+            except Exception:
+                released = False
+            return {"released": released, "released_at": _iso(now)}
 
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
@@ -5976,11 +6641,11 @@ def build_mcp_server() -> FastMCP:
 
     # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
 
-    async def _get_product_by_key(session, key: str) -> Optional[Product]:
+    async def _get_product_by_key(session, key: str) -> Optional[Product]:  # type: ignore[no-untyped-def]
         # Key may match product_uid or name (case-sensitive by default)
-        stmt = select(Product).where((Product.product_uid == key) | (Product.name == key))
+        stmt = select(Product).where(cast(Any, (Product.product_uid == key) | (Product.name == key)))
         res = await session.execute(stmt)
-        return res.scalars().first()
+        return res.scalars().first()  # type: ignore[no-any-return]
 
     if settings.worktrees_enabled:
         @mcp.tool(name="ensure_product")
@@ -6020,7 +6685,7 @@ def build_mcp_server() -> FastMCP:
                     await session.refresh(prod)
             return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
     else:
-        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
+        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:  # type: ignore[misc]
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -6046,13 +6711,13 @@ def build_mcp_server() -> FastMCP:
                 # Link if missing
                 existing = await session.execute(
                     select(ProductProjectLink).where(
-                        ProductProjectLink.product_id == cast(Any, prod.id),
-                        ProductProjectLink.project_id == cast(Any, project.id),
+                        cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id),
+                        cast(Any, ProductProjectLink.project_id) == cast(Any, project.id),
                     )
                 )
                 link = existing.scalars().first()
                 if link is None:
-                    link = ProductProjectLink(product_id=int(prod.id), project_id=int(project.id))
+                    link = ProductProjectLink(product_id=int(cast(int, prod.id)), project_id=int(project.id))
                     session.add(link)
                     await session.commit()
                     await session.refresh(link)
@@ -6062,7 +6727,7 @@ def build_mcp_server() -> FastMCP:
                     "linked": True,
                 }
     else:
-        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:
+        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:  # type: ignore[misc]
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -6072,7 +6737,7 @@ def build_mcp_server() -> FastMCP:
             Inspect product and list linked projects.
             """
             # Safe runner that works even if an event loop is already running
-            def _run_coro_sync(coro):
+            def _run_coro_sync(coro):  # type: ignore[no-untyped-def]
                 try:
                     asyncio.get_running_loop()
                     # Run in a separate thread to avoid nested loop issues
@@ -6081,7 +6746,7 @@ def build_mcp_server() -> FastMCP:
                 import threading  # type: ignore
                 import queue  # type: ignore
                 q: "queue.Queue[tuple[bool, Any]]" = queue.Queue()
-                def _runner():
+                def _runner():  # type: ignore[no-untyped-def]
                     try:
                         q.put((True, asyncio.run(coro)))
                     except Exception as e:
@@ -6099,8 +6764,8 @@ def build_mcp_server() -> FastMCP:
                     if prod is None:
                         raise ToolExecutionError("NOT_FOUND", f"Product '{key}' not found.", recoverable=True)
                     proj_rows = await session.execute(
-                        select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-                            ProductProjectLink.product_id == cast(Any, prod.id)
+                        select(Project).join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id).where(
+                            cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id)
                         )
                     )
                     projects = [
@@ -6115,7 +6780,7 @@ def build_mcp_server() -> FastMCP:
                         "projects": projects,
                     }
             # Run async in a synchronous resource
-            return _run_coro_sync(_load())
+            return _run_coro_sync(_load())  # type: ignore[no-any-return]
 
     if settings.worktrees_enabled:
         @mcp.tool(name="search_messages_product")
@@ -6129,34 +6794,49 @@ def build_mcp_server() -> FastMCP:
             """
             Full-text search across all projects linked to a product.
             """
+            # Sanitize the FTS query first
+            sanitized_query = _sanitize_fts_query(query)
+            if sanitized_query is None:
+                await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+                try:
+                    from fastmcp.tools.tool import ToolResult  # type: ignore
+                    return ToolResult(structured_content={"result": []})
+                except Exception:
+                    return []
+
             await ensure_schema()
+            rows: list[Any] = []
             async with get_session() as session:
                 prod = await _get_product_by_key(session, product_key.strip())
                 if prod is None:
                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
                 proj_ids_rows = await session.execute(
-                    select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
+                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
                 )
                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
                 if not proj_ids:
                     return []
                 # FTS search limited to projects in proj_ids
-                result = await session.execute(
-                    text(
-                        """
-                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name, m.project_id
-                        FROM fts_messages
-                        JOIN messages m ON fts_messages.rowid = m.id
-                        JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                        ORDER BY bm25(fts_messages) ASC
-                        LIMIT :limit
-                        """
-                    ).bindparams(bindparam("proj_ids", expanding=True)),
-                    {"proj_ids": proj_ids, "query": query, "limit": limit},
-                )
-                rows = result.mappings().all()
+                try:
+                    result = await session.execute(
+                        text(
+                            """
+                            SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                   m.thread_id, a.name AS sender_name, m.project_id
+                            FROM fts_messages
+                            JOIN messages m ON fts_messages.rowid = m.id
+                            JOIN agents a ON m.sender_id = a.id
+                            WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
+                            ORDER BY bm25(fts_messages) ASC
+                            LIMIT :limit
+                            """
+                        ).bindparams(bindparam("proj_ids", expanding=True)),
+                        {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                    )
+                    rows = list(result.mappings().all())
+                except Exception as fts_err:
+                    logger.warning("FTS product query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+                    rows = []
             items = [
                 {
                     "id": row["id"],
@@ -6176,7 +6856,7 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 return items
     else:
-        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:
+        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:  # type: ignore[misc]
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -6201,8 +6881,8 @@ def build_mcp_server() -> FastMCP:
                 if prod is None:
                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
                 proj_rows = await session.execute(
-                    select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-                        ProductProjectLink.product_id == cast(Any, prod.id)
+                    select(Project).join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id).where(
+                        cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id)
                     )
                 )
                 projects: list[Project] = list(proj_rows.scalars().all())
@@ -6224,7 +6904,7 @@ def build_mcp_server() -> FastMCP:
             messages.sort(key=_dt_key, reverse=True)
             return messages[: max(0, int(limit))]
     else:
-        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:
+        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:  # type: ignore[misc]
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -6257,21 +6937,21 @@ def build_mcp_server() -> FastMCP:
                 if prod is None:
                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
                 proj_ids_rows = await session.execute(
-                    select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
+                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
                 )
                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
                 if not proj_ids:
                     return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
                 stmt = (
-                    select(Message, sender_alias.name)
-                    .join(sender_alias, Message.sender_id == sender_alias.id)
-                    .where(cast(Any, Message.project_id).in_(proj_ids), or_(*criteria))
-                    .order_by(asc(Message.created_ts))
+                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                    .where(cast(Any, Message.project_id).in_(proj_ids), or_(*cast(Any, criteria)))
+                    .order_by(asc(cast(Any, Message.created_ts)))
                 )
                 if per_thread_limit:
                     stmt = stmt.limit(per_thread_limit)
                 rows = (await session.execute(stmt)).all()
-            summary = _summarize_messages(rows)
+            summary = _summarize_messages(rows)  # type: ignore[arg-type]
 
             # Optional LLM refinement (same as project-level)
             if llm_mode and get_settings().llm.enabled:
@@ -6319,7 +6999,7 @@ def build_mcp_server() -> FastMCP:
             await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
             return {"thread_id": thread_id, "summary": summary, "examples": examples}
     else:
-        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:
+        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:  # type: ignore[misc]
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
     if settings.worktrees_enabled:
         @mcp.resource("resource://identity/{project}", mime_type="application/json")
@@ -6526,21 +7206,15 @@ def build_mcp_server() -> FastMCP:
                     },
                     {
                         "name": "summarize_thread",
-                        "summary": "Extract participants, key points, and action items for a single thread.",
-                        "use_when": "Briefing new agents on long discussions or closing loops.",
-                        "related": ["summarize_threads"],
-                        "expected_frequency": "When threads exceed quick skim length.",
+                        "summary": "Extract participants, key points, and action items for one or more threads.",
+                        "use_when": "Briefing new agents on long discussions, closing loops, or producing digests.",
+                        "related": ["search_messages"],
+                        "expected_frequency": "When threads exceed quick skim length or at cadence checkpoints.",
                         "required_capabilities": ["search", "summarization"],
-                        "usage_examples": [{"hint": "Thread brief", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"}],
-                    },
-                    {
-                        "name": "summarize_threads",
-                        "summary": "Produce a digest across multiple threads with aggregate mentions/actions.",
-                        "use_when": "Daily standups or cross-team sync summaries.",
-                        "related": ["summarize_thread"],
-                        "expected_frequency": "At cadence checkpoints (daily/weekly).",
-                        "required_capabilities": ["search", "summarization"],
-                        "usage_examples": [{"hint": "Digest", "sample": "summarize_threads(project_key='backend', thread_ids=['TKT-123','UX-42'])"}],
+                        "usage_examples": [
+                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"},
+                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99')"},
+                        ],
                     },
                 ],
             },
@@ -6743,8 +7417,8 @@ def build_mcp_server() -> FastMCP:
             try:
                 from urllib.parse import parse_qs
                 parsed = parse_qs(qs, keep_blank_values=False)
-                agent = agent or (parsed.get("agent") or [None])[0]
-                project = project or (parsed.get("project") or [None])[0]
+                agent = agent or (parsed.get("agent") or [None])[0]  # type: ignore[list-item]
+                project = project or (parsed.get("project") or [None])[0]  # type: ignore[list-item]
             except Exception:
                 pass
         try:
@@ -6803,7 +7477,7 @@ def build_mcp_server() -> FastMCP:
         import fnmatch as _fnmatch
         ignore_patterns = set(getattr(settings, "retention_ignore_project_patterns", []) or [])
         async with get_session() as session:
-            result = await session.execute(select(Project).order_by(asc(Project.created_at)))
+            result = await session.execute(select(Project).order_by(asc(cast(Any, Project.created_at))))
             projects = result.scalars().all()
             def _is_ignored(name: str) -> bool:
                 return any(_fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
@@ -6839,7 +7513,7 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(slug)
         await ensure_schema()
         async with get_session() as session:
-            result = await session.execute(select(Agent).where(Agent.project_id == project.id))
+            result = await session.execute(select(Agent).where(cast(Any, Agent.project_id == project.id)))
             agents = result.scalars().all()
         return {
             **_project_to_dict(project),
@@ -6901,16 +7575,16 @@ def build_mcp_server() -> FastMCP:
         async with get_session() as session:
             # Get all agents in the project
             result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id).order_by(desc(Agent.last_active_ts))
+                select(Agent).where(cast(Any, Agent.project_id == project.id)).order_by(desc(cast(Any, Agent.last_active_ts)))
             )
             agents = result.scalars().all()
 
             # Get unread message counts for all agents in one query
             unread_counts_stmt = (
-                select(
+                cast(Any, select(  # type: ignore[call-overload]
                     MessageRecipient.agent_id,
-                    func.count(MessageRecipient.message_id).label("unread_count")
-                )
+                    func.count(cast(Any, MessageRecipient.message_id)).label("unread_count")  # type: ignore[arg-type]
+                ))
                 .where(
                     cast(Any, MessageRecipient.read_ts).is_(None),
                     cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents])
@@ -7051,7 +7725,7 @@ def build_mcp_server() -> FastMCP:
         if project is None:
             # Try to infer project by message id when unique
             async with get_session() as s_auto:
-                rows = await s_auto.execute(select(Project, Message).join(Message, Message.project_id == Project.id).where(cast(Any, Message.id) == int(message_id)).limit(2))
+                rows = await s_auto.execute(select(Project, Message).join(Message, cast(Any, Message.project_id) == Project.id).where(cast(Any, Message.id) == int(message_id)).limit(2))
                 data = rows.all()
             if len(data) == 1:
                 project_obj = data[0][0]
@@ -7132,7 +7806,7 @@ def build_mcp_server() -> FastMCP:
                 if msg_id is not None:
                     rows = await s_auto.execute(
                         select(Project)
-                        .join(Message, Message.project_id == Project.id)
+                        .join(Message, cast(Any, Message.project_id) == Project.id)
                         .where(cast(Any, Message.id) == msg_id)
                         .limit(2)
                     )
@@ -7140,8 +7814,8 @@ def build_mcp_server() -> FastMCP:
                 else:
                     rows = await s_auto.execute(
                         select(Project)
-                        .join(Message, Message.project_id == Project.id)
-                        .where(Message.thread_id == thread_id)
+                        .join(Message, cast(Any, Message.project_id) == Project.id)
+                        .where(cast(Any, Message.thread_id == thread_id))
                         .limit(2)
                     )
                     projects = [row[0] for row in rows.all()]
@@ -7165,13 +7839,13 @@ def build_mcp_server() -> FastMCP:
             criteria.append(Message.id == message_id)
         async with get_session() as session:
             stmt = (
-                select(Message, sender_alias.name)
-                .join(sender_alias, Message.sender_id == sender_alias.id)
-                .where(Message.project_id == project_obj.id, or_(*criteria))
-                .order_by(asc(Message.created_ts))
+                cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .where(cast(Any, Message.project_id == project_obj.id), or_(*cast(Any, criteria)))
+                .order_by(asc(cast(Any, Message.created_ts)))
             )
             result = await session.execute(stmt)
-            rows = result.all()
+            rows = result.all()  # type: ignore[assignment]
         messages = []
         for message, sender_name in rows:
             payload = _message_to_dict(message, include_body=include_bodies)
@@ -7254,7 +7928,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7318,7 +7992,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7338,8 +8012,8 @@ def build_mcp_server() -> FastMCP:
 
             for item in items:
                 result = await session.execute(
-                    select(MessageRecipient.read_ts).where(
-                        MessageRecipient.message_id == item["id"], MessageRecipient.agent_id == agent_obj.id
+                    cast(Any, select(MessageRecipient.read_ts)).where(  # type: ignore[call-overload]
+                        cast(Any, MessageRecipient.message_id == item["id"]), cast(Any, MessageRecipient.agent_id == agent_obj.id)
                     )
                 )
                 read_ts = result.scalar_one_or_none()
@@ -7380,7 +8054,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7398,15 +8072,15 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                select(Message, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_obj.id,
-                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
                     cast(Any, Message.ack_required).is_(True),
                     cast(Any, MessageRecipient.ack_ts).is_(None),
                 )
-                .order_by(desc(Message.created_ts))
+                .order_by(desc(cast(Any, Message.created_ts)))  # type: ignore[arg-type]
                 .limit(limit)
             )
             for msg, kind in rows.all():
@@ -7458,7 +8132,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7478,15 +8152,15 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                select(Message, MessageRecipient.kind, MessageRecipient.read_ts)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                cast(Any, select(Message, MessageRecipient.kind, MessageRecipient.read_ts))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_obj.id,
-                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
                     cast(Any, Message.ack_required).is_(True),
                     cast(Any, MessageRecipient.ack_ts).is_(None),
                 )
-                .order_by(asc(Message.created_ts))
+                .order_by(asc(cast(Any, Message.created_ts)))
                 .limit(limit * 5)
             )
             for msg, kind, read_ts in rows.all():
@@ -7541,7 +8215,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7560,15 +8234,15 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                select(Message, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_obj.id,
-                    MessageRecipient.agent_id == agent_obj.id,
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
                     cast(Any, Message.ack_required).is_(True),
                     cast(Any, MessageRecipient.ack_ts).is_(None),
                 )
-                .order_by(asc(Message.created_ts))
+                .order_by(asc(cast(Any, Message.created_ts)))
                 .limit(limit * 5)
             )
             for msg, kind in rows.all():
@@ -7612,7 +8286,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )
@@ -7678,7 +8352,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as s_auto:
                 rows = await s_auto.execute(
                     select(Project)
-                    .join(Agent, Agent.project_id == Project.id)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
                     .where(func.lower(Agent.name) == agent.lower())
                     .limit(2)
                 )

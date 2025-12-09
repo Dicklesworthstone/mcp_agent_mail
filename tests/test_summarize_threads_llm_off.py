@@ -23,35 +23,34 @@ async def test_summarize_threads_without_llm_path(isolated_env, monkeypatch):
             "register_agent",
             {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"},
         )
-        # Create thread messages
-        m1 = await client.call_tool(
+        # Create messages in two threads to trigger multi-thread mode
+        await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
                 "sender_name": "BlueLake",
                 "to": ["BlueLake"],
-                "subject": "T1",
+                "subject": "Thread 1 msg",
                 "body_md": "- TODO one",
                 "thread_id": "T-1",
             },
         )
-        _ = m1.data
-        m2 = await client.call_tool(
+        await client.call_tool(
             "send_message",
             {
                 "project_key": "Backend",
                 "sender_name": "BlueLake",
                 "to": ["BlueLake"],
-                "subject": "T2",
+                "subject": "Thread 2 msg",
                 "body_md": "- ACTION go",
-                "thread_id": "T-1",
+                "thread_id": "T-2",
             },
         )
-        _ = m2.data
 
+        # Use comma-separated thread_id for multi-thread mode
         res = await client.call_tool(
-            "summarize_threads",
-            {"project_key": "Backend", "thread_ids": ["T-1"], "llm_mode": False},
+            "summarize_thread",
+            {"project_key": "Backend", "thread_id": "T-1,T-2", "llm_mode": False},
         )
         data = res.data
         assert data.get("threads") and data.get("aggregate") is not None

@@ -7,7 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from decouple import Config as DecoupleConfig, RepositoryEmpty, RepositoryEnv  # type: ignore[attr-defined]
+from decouple import (  # type: ignore[import-untyped,attr-defined]
+    Config as DecoupleConfig,
+    RepositoryEmpty,
+    RepositoryEnv,
+)
 
 _DOTENV_PATH: Final[Path] = Path(".env")
 # Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
@@ -15,7 +19,7 @@ try:
     _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
 except FileNotFoundError:
     # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
-    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
+    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type,misc]
 
 
 @dataclass(slots=True, frozen=True)
@@ -231,7 +235,7 @@ def get_settings() -> Settings:
         rbac_default_role=_decouple_config("HTTP_RBAC_DEFAULT_ROLE", default="reader"),
         rbac_readonly_tools=_csv(
             "HTTP_RBAC_READONLY_TOOLS",
-            default="health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads",
+            default="health_check,fetch_inbox,whois,search_messages,summarize_thread",
         ),
         allow_localhost_unauthenticated=_bool(_decouple_config("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", default="true"), default=True),
     )

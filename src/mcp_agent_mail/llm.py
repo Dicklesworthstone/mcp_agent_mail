@@ -12,12 +12,12 @@ import contextlib
 import os
 import socket
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import litellm
 import structlog
-from decouple import Config as DecoupleConfig, RepositoryEnv
+from decouple import Config as DecoupleConfig, RepositoryEnv  # type: ignore[import-untyped]
 from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
@@ -75,7 +75,7 @@ def _setup_callbacks() -> None:
             pass
 
     if _on_success not in _existing_callbacks():
-        callbacks: list[Callable[..., Any]] = [*_existing_callbacks(), _on_success]
+        callbacks: list[Any] = [*_existing_callbacks(), _on_success]
         # Attribute exists on modern LiteLLM; fall back safely if absent
         with contextlib.suppress(Exception):
             litellm.success_callback = callbacks
@@ -187,10 +187,10 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         {"role": "user", "content": user},
     ]
 
-    def _call_router(router: Any):
+    def _call_router(router: Any) -> Any:
         return router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
-    def _call_direct():
+    def _call_direct() -> Any:
         return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp: Any

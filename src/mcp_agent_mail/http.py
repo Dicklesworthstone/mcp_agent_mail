@@ -10,6 +10,7 @@ import importlib
 import json
 import logging
 import re
+from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -69,7 +70,7 @@ def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
         segment = token.split(".", 1)[0]
         padded = segment + "=" * (-len(segment) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
     except Exception:
         return None
 
@@ -93,7 +94,7 @@ def _configure_logging(settings: Settings) -> None:
     else:
         processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
     structlog.configure(
-        processors=processors,
+        processors=processors,  # type: ignore[arg-type]
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.log_level.upper(), logging.INFO)),
         cache_logger_on_first_use=True,
     )
@@ -127,7 +128,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
         self._allow_localhost = allow_localhost
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
@@ -298,7 +299,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
         # Allow CORS preflight and health endpoints
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
@@ -389,8 +390,8 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 maybe_claims = getattr(request.state, "jwt_claims", None)
                 if isinstance(maybe_claims, dict):
                     sub = maybe_claims.get("sub")
-                if isinstance(sub, str) and sub:
-                    identity = f"sub:{sub}"
+                    if isinstance(sub, str) and sub:
+                        identity = f"sub:{sub}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
@@ -406,7 +407,7 @@ async def readiness_check() -> None:
         await session.execute(text("SELECT 1"))
 
 
-def build_http_app(settings: Settings, server=None) -> FastAPI:
+def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[no-untyped-def]
     # Configure logging once
     _configure_logging(settings)
     if server is None:
@@ -770,7 +771,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def lifespan_context(app: FastAPI):
+    async def lifespan_context(app: FastAPI):  # type: ignore[no-untyped-def]
         # Ensure the mounted MCP app initializes its internal task group
         async with mcp_http_app.lifespan(mcp_http_app):
             await _startup()
@@ -787,7 +788,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         import time as _time
 
         class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
                 start = _time.time()
                 response = await call_next(request)
                 dur_ms = int((_time.time() - start) * 1000)
@@ -898,7 +899,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     from mcp.server.streamable_http import StreamableHTTPServerTransport
 
     class StatelessMCPASGIApp:
-        def __init__(self, mcp_server) -> None:
+        def __init__(self, mcp_server) -> None:  # type: ignore[no-untyped-def]
             self._server = mcp_server
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -968,11 +969,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     @fastapi_app.post(base_no_slash)
     async def _base_passthrough(request: Request) -> JSONResponse:
         # Re-dispatch to mounted stateless app by calling it directly
-        response_body = {}
+        response_body: dict[str, Any] = {}
         status_code = 200
         headers: dict[str, str] = {}
 
-        async def _send(message: dict) -> None:
+        async def _send(message: MutableMapping[str, Any]) -> None:
             nonlocal response_body, status_code, headers
             if message.get("type") == "http.response.start":
                 status_code = int(message.get("status", 200))
@@ -1082,7 +1083,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             css_sanitizer=_css_sanitizer,
         )
 
-        async def _render(name: str, **ctx) -> HTMLResponse:
+        async def _render(name: str, **ctx: Any) -> HTMLResponse:
             tpl = env.get_template(name)
             html = await tpl.render_async(**ctx)
             return HTMLResponse(html)
@@ -1796,7 +1797,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0
+                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
 
                     return JSONResponse({
                         "success": True,
@@ -1859,7 +1860,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0
+                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
 
                     return JSONResponse({
                         "success": True,
@@ -2314,7 +2315,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     # Insert recipients (optimized: bulk SELECT + bulk INSERT instead of N+1 queries)
                     # Build SQL with proper parameter expansion for IN clause
                     placeholders = ", ".join([f":name_{i}" for i in range(len(recipients))])
-                    params = {"pid": project_id}
+                    params: dict[str, Any] = {"pid": project_id}
                     params.update({f"name_{i}": name for i, name in enumerate(recipients)})
 
                     # Single query to get all valid recipient IDs
@@ -2445,6 +2446,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             repo_root = P(storage_root)
             if (repo_root / ".git").exists():
+                repo = None
                 try:
                     repo = GitRepo(str(repo_root))
                     # Use efficient commit counting with limit to prevent DoS
@@ -2467,7 +2469,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     import asyncio as _asyncio
                     import subprocess as _subprocess
                     try:
-                        def _run_du():
+                        def _run_du():  # type: ignore[no-untyped-def]
                             return _subprocess.run(
                                 ["du", "-sh", str(repo_root)],
                                 capture_output=True,
@@ -2488,6 +2490,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_count = 0
                     repo_size = "Unknown"
                     last_commit_time = "Unknown"
+                finally:
+                    if repo is not None:
+                        repo.close()
             else:
                 total_commits = "0"
                 project_count = 0
@@ -2524,9 +2529,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("archive_activity.html", commits=[])
 
             repo = GitRepo(str(repo_root))
-            commits = await get_recent_commits(repo, limit=limit)
-
-            return await _render("archive_activity.html", commits=commits)
+            try:
+                commits = await get_recent_commits(repo, limit=limit)
+                return await _render("archive_activity.html", commits=commits)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
@@ -2539,6 +2546,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
 
+            repo = None
             try:
                 repo = GitRepo(str(repo_root))
                 commit = await get_commit_detail(repo, sha)
@@ -2549,6 +2557,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception:
                 # Don't leak error details
                 return await _render("error.html", message="Commit not found")
+            finally:
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
@@ -2586,9 +2597,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            commits = await get_timeline_commits(repo, project, limit=100)
-
-            return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            try:
+                commits = await get_timeline_commits(repo, project, limit=100)
+                return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -2665,9 +2678,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            graph = await get_agent_communication_graph(repo, project, limit=200)
-
-            return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            try:
+                graph = await get_agent_communication_graph(repo, project, limit=200)
+                return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
