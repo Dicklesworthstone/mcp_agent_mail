@@ -701,6 +701,10 @@ main() {
   echo "  bash scripts/run_server_with_token.sh"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# Handle three execution modes:
+# 1. Direct: ./install.sh → BASH_SOURCE[0] == $0 → run main
+# 2. Sourced: . install.sh → BASH_SOURCE[0] != $0 → skip main
+# 3. Piped: curl ... | bash -s → BASH_SOURCE[0] is unset → run main
+if [[ -z "${BASH_SOURCE[0]:-}" ]] || [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main "$@"
 fi
