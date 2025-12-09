@@ -80,6 +80,12 @@ while [[ $# -gt 0 ]]; do
   shift || true
 done
 
+# Define logging helpers early so they're available for validation
+info() { printf "\033[1;36m[INFO]\033[0m %s\n" "$*"; }
+ok()   { printf "\033[1;32m[ OK ]\033[0m %s\n" "$*"; }
+warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
+err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
+
 # Validate port if provided
 if [[ -n "${HTTP_PORT_OVERRIDE}" ]]; then
   if ! [[ "${HTTP_PORT_OVERRIDE}" =~ ^[0-9]+$ ]]; then
@@ -91,11 +97,6 @@ if [[ -n "${HTTP_PORT_OVERRIDE}" ]]; then
     exit 1
   fi
 fi
-
-info() { printf "\033[1;36m[INFO]\033[0m %s\n" "$*"; }
-ok()   { printf "\033[1;32m[ OK ]\033[0m %s\n" "$*"; }
-warn() { printf "\033[1;33m[WARN]\033[0m %s\n" "$*"; }
-err()  { printf "\033[1;31m[ERR ]\033[0m %s\n" "$*"; }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || return 1; }
 
