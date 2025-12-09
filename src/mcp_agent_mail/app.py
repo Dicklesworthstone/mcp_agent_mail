@@ -55,6 +55,7 @@ from .models import (
 from .storage import (
     ProjectArchive,
     archive_write_lock,
+    clear_repo_cache,
     collect_lock_status,
     ensure_archive,
     heal_archive_locks,
@@ -311,6 +312,29 @@ def _instrument_tool(
                     recoverable=True,
                     data={"tool": tool_name, "error_detail": str(exc)},
                 )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except OSError as exc:
+                # Handle file descriptor exhaustion (EMFILE) with cache cleanup
+                import errno
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                if exc.errno == errno.EMFILE:
+                    # Clear repo cache to free file handles and allow recovery
+                    cleared = clear_repo_cache()
+                    wrapped_exc = ToolExecutionError(
+                        "RESOURCE_EXHAUSTED",
+                        f"Too many open files. Freed {cleared} cached repos. Retry the operation.",
+                        recoverable=True,
+                        data={"tool": tool_name, "freed_repos": cleared, "error_detail": str(exc)},
+                    )
+                else:
+                    wrapped_exc = ToolExecutionError(
+                        "OS_ERROR",
+                        f"OS error: {exc}",
+                        recoverable=False,
+                        data={"tool": tool_name, "errno": exc.errno, "error_detail": str(exc)},
+                    )
                 error = wrapped_exc
                 raise wrapped_exc from exc
             except Exception as exc:
@@ -751,6 +775,74 @@ def _validate_program_model(program: str, model: str) -> None:
             recoverable=True,
             data={"provided": model},
         )
+
+
+# Patterns that are unsearchable in FTS5 - return None to signal "no results"
+_FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
+
+
+def _sanitize_fts_query(query: str) -> str | None:
+    """Sanitize an FTS5 query string, fixing common issues where possible.
+
+    SQLite FTS5 has specific syntax requirements. This function attempts to
+    fix common mistakes rather than throwing errors. Returns None when the
+    query cannot produce meaningful results (caller should return empty list).
+
+    Fixes applied:
+    - Strips whitespace
+    - Removes leading bare `*` (keeps `term*` prefix patterns)
+    - Converts unsearchable patterns to None (empty results)
+
+    Parameters
+    ----------
+    query : str
+        The FTS5 query string to sanitize.
+
+    Returns
+    -------
+    str | None
+        The sanitized query string, or None if the query cannot produce results.
+        When None is returned, the caller should return an empty result list
+        instead of executing the query.
+    """
+    if not query:
+        return None
+
+    trimmed = query.strip()
+
+    if not trimmed:
+        return None
+
+    # Check for bare patterns that can't match anything meaningful in FTS5
+    if trimmed in _FTS5_UNSEARCHABLE_PATTERNS:
+        return None
+
+    # Bare boolean operators without terms - can't search
+    upper_trimmed = trimmed.upper()
+    if upper_trimmed in {"AND", "OR", "NOT"}:
+        return None
+
+    # Fix leading bare asterisk: "* foo bar" -> "foo bar"
+    # But keep valid prefix patterns like "auth*"
+    if trimmed.startswith("*"):
+        if len(trimmed) == 1:
+            return None
+        if trimmed[1].isspace():
+            # Strip leading "* " and recurse
+            return _sanitize_fts_query(trimmed[1:].lstrip())
+
+    # Fix trailing lone asterisks that aren't part of prefix patterns
+    # e.g., "foo *" -> "foo"
+    if trimmed.endswith(" *"):
+        trimmed = trimmed[:-2].rstrip()
+        if not trimmed:
+            return None
+
+    # Multiple consecutive spaces -> single space
+    while "  " in trimmed:
+        trimmed = trimmed.replace("  ", " ")
+
+    return trimmed if trimmed else None
 
 
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
@@ -5323,24 +5415,43 @@ def build_mcp_server() -> FastMCP:
                 pass
         if project.id is None:
             raise ValueError("Project must have an id before searching messages.")
+
+        # Sanitize the FTS query - returns None if query can't produce results
+        sanitized_query = _sanitize_fts_query(query)
+        if sanitized_query is None:
+            await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+            try:
+                from fastmcp.tools.tool import ToolResult  # type: ignore
+                return ToolResult(structured_content={"result": []})
+            except Exception:
+                return []
+
         await ensure_schema()
-        async with get_session() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                           m.thread_id, a.name AS sender_name
-                    FROM fts_messages
-                    JOIN messages m ON fts_messages.rowid = m.id
-                    JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id = :project_id AND fts_messages MATCH :query
-                    ORDER BY bm25(fts_messages) ASC
-                    LIMIT :limit
-                    """
-                ),
-                {"project_id": project.id, "query": query, "limit": limit},
-            )
-            rows = result.mappings().all()
+        rows: list[Any] = []
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name
+                        FROM fts_messages
+                        JOIN messages m ON fts_messages.rowid = m.id
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id = :project_id AND fts_messages MATCH :query
+                        ORDER BY bm25(fts_messages) ASC
+                        LIMIT :limit
+                        """
+                    ),
+                    {"project_id": project.id, "query": sanitized_query, "limit": limit},
+                )
+                rows = list(result.mappings().all())
+        except Exception as fts_err:
+            # FTS query syntax error - return empty results instead of crashing
+            logger.warning("FTS query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+            await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
+            rows = []
+
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
         if get_settings().tools_log_enabled:
             try:
@@ -6495,7 +6606,18 @@ def build_mcp_server() -> FastMCP:
             """
             Full-text search across all projects linked to a product.
             """
+            # Sanitize the FTS query first
+            sanitized_query = _sanitize_fts_query(query)
+            if sanitized_query is None:
+                await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+                try:
+                    from fastmcp.tools.tool import ToolResult  # type: ignore
+                    return ToolResult(structured_content={"result": []})
+                except Exception:
+                    return []
+
             await ensure_schema()
+            rows: list[Any] = []
             async with get_session() as session:
                 prod = await _get_product_by_key(session, product_key.strip())
                 if prod is None:
@@ -6507,22 +6629,26 @@ def build_mcp_server() -> FastMCP:
                 if not proj_ids:
                     return []
                 # FTS search limited to projects in proj_ids
-                result = await session.execute(
-                    text(
-                        """
-                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name, m.project_id
-                        FROM fts_messages
-                        JOIN messages m ON fts_messages.rowid = m.id
-                        JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                        ORDER BY bm25(fts_messages) ASC
-                        LIMIT :limit
-                        """
-                    ).bindparams(bindparam("proj_ids", expanding=True)),
-                    {"proj_ids": proj_ids, "query": query, "limit": limit},
-                )
-                rows = result.mappings().all()
+                try:
+                    result = await session.execute(
+                        text(
+                            """
+                            SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                   m.thread_id, a.name AS sender_name, m.project_id
+                            FROM fts_messages
+                            JOIN messages m ON fts_messages.rowid = m.id
+                            JOIN agents a ON m.sender_id = a.id
+                            WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
+                            ORDER BY bm25(fts_messages) ASC
+                            LIMIT :limit
+                            """
+                        ).bindparams(bindparam("proj_ids", expanding=True)),
+                        {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                    )
+                    rows = list(result.mappings().all())
+                except Exception as fts_err:
+                    logger.warning("FTS product query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+                    rows = []
             items = [
                 {
                     "id": row["id"],

@@ -47,9 +47,115 @@ class ProjectArchive:
 _PROCESS_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _PROCESS_LOCK_OWNERS: dict[tuple[int, str], int] = {}
 
-# Cache for Repo objects to prevent file handle leaks
-# Key: resolved repo root path string, Value: Repo object
-_REPO_CACHE: dict[str, Repo] = {}
+
+class _LRURepoCache:
+    """LRU cache for Git Repo objects with size limit.
+
+    This prevents file descriptor leaks by:
+    1. Limiting the number of cached repos (default: 8)
+    2. Evicting oldest repos when at capacity (they will be GC'd when no longer referenced)
+
+    IMPORTANT: Evicted repos are NOT closed immediately because they may still be in use
+    by other coroutines. They will be closed when garbage collected or when clear() is called.
+    """
+
+    def __init__(self, maxsize: int = 8) -> None:
+        self._maxsize = max(1, maxsize)
+        self._cache: dict[str, Repo] = {}
+        self._order: list[str] = []  # LRU order: oldest first
+        self._evicted: list[Repo] = []  # Evicted repos pending close
+
+    def peek(self, key: str) -> Repo | None:
+        """Check if key exists and return value WITHOUT updating LRU order.
+
+        Safe to call without holding the external lock for a fast-path check.
+        """
+        return self._cache.get(key)
+
+    def get(self, key: str) -> Repo | None:
+        """Get a repo from cache, updating LRU order.
+
+        Should only be called while holding the external lock.
+        """
+        if key in self._cache:
+            # Move to end (most recently used)
+            self._order.remove(key)
+            self._order.append(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: str, repo: Repo) -> None:
+        """Add a repo to cache, evicting oldest if at capacity.
+
+        Should only be called while holding the external lock.
+        Evicted repos are added to a pending list for later cleanup.
+        """
+        if key in self._cache:
+            # Already exists, just update LRU order
+            self._order.remove(key)
+            self._order.append(key)
+            return
+
+        # Evict oldest entries if at capacity
+        while len(self._cache) >= self._maxsize and self._order:
+            oldest_key = self._order.pop(0)
+            old_repo = self._cache.pop(oldest_key, None)
+            if old_repo is not None:
+                # Don't close immediately - repo may still be in use by another coroutine
+                # Add to evicted list for later cleanup
+                self._evicted.append(old_repo)
+
+        self._cache[key] = repo
+        self._order.append(key)
+
+        # Opportunistically try to close evicted repos that are no longer referenced
+        self._cleanup_evicted()
+
+    def _cleanup_evicted(self) -> int:
+        """Try to close evicted repos that have only one reference (ours).
+
+        Returns count of repos closed.
+        """
+        import sys
+        still_in_use: list[Repo] = []
+        closed = 0
+        for repo in self._evicted:
+            # If refcount is 2 (our list + the getrefcount call), it's safe to close
+            # In practice, we use 3 as threshold to be safe (list + local var + getrefcount)
+            if sys.getrefcount(repo) <= 3:
+                with contextlib.suppress(Exception):
+                    repo.close()
+                    closed += 1
+            else:
+                still_in_use.append(repo)
+        self._evicted = still_in_use
+        return closed
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def clear(self) -> int:
+        """Close all cached repos and clear the cache. Returns count closed."""
+        count = 0
+        for repo in self._cache.values():
+            with contextlib.suppress(Exception):
+                repo.close()
+                count += 1
+        self._cache.clear()
+        self._order.clear()
+        return count
+
+    def values(self) -> list[Repo]:
+        """Return list of cached repos (for iteration)."""
+        return list(self._cache.values())
+
+
+# LRU cache for Repo objects with automatic cleanup
+# Limits to 8 concurrent repos to prevent file handle exhaustion
+_REPO_CACHE: _LRURepoCache = _LRURepoCache(maxsize=8)
 _REPO_CACHE_LOCK: asyncio.Lock | None = None
 
 
@@ -67,13 +173,7 @@ def clear_repo_cache() -> int:
     Returns the number of repos that were closed.
     Should be called during shutdown or between tests.
     """
-    count = 0
-    for repo in _REPO_CACHE.values():
-        with contextlib.suppress(Exception):
-            repo.close()
-            count += 1
-    _REPO_CACHE.clear()
-    return count
+    return _REPO_CACHE.clear()
 
 
 class AsyncFileLock:
@@ -427,20 +527,22 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
     cache_key = str(root.resolve())
 
-    # Fast path: check cache without lock
-    if cache_key in _REPO_CACHE:
-        return _REPO_CACHE[cache_key]
+    # Fast path: check cache without lock (also updates LRU order)
+    cached = _REPO_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
     # Slow path: acquire lock and check/create
     async with _get_repo_cache_lock():
         # Double-check after acquiring lock
-        if cache_key in _REPO_CACHE:
-            return _REPO_CACHE[cache_key]
+        cached = _REPO_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
         git_dir = root / ".git"
         if git_dir.exists():
             repo = Repo(str(root))
-            _REPO_CACHE[cache_key] = repo
+            _REPO_CACHE.put(cache_key, repo)
             return repo
 
         repo_result = await _to_thread(Repo.init, str(root))
@@ -457,7 +559,7 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
         if not attributes_path.exists():
             await _write_text(attributes_path, "*.json text\n*.md text\n")
         await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
-        _REPO_CACHE[cache_key] = repo
+        _REPO_CACHE.put(cache_key, repo)
         return repo
 
 
