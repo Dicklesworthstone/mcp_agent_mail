@@ -68,6 +68,30 @@ import contextlib
 
 logger = logging.getLogger(__name__)
 
+
+@contextlib.contextmanager
+def _git_repo(path: str | Path, search_parent_directories: bool = True) -> Any:
+    """Context manager for GitPython Repo that ensures proper cleanup.
+
+    GitPython's Repo object opens file handles for index, config, and other files.
+    Without explicit cleanup, these accumulate and cause "too many open files" errors
+    under heavy load. This context manager ensures repo.close() is always called.
+
+    Usage:
+        with _git_repo("/path/to/project") as repo:
+            branch = repo.active_branch.name
+    """
+    repo = None
+    try:
+        repo = Repo(path, search_parent_directories=search_parent_directories)
+        yield repo
+    finally:
+        if repo is not None:
+            try:
+                repo.close()
+            except Exception:
+                pass  # Best-effort cleanup
+
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
 TOOL_METADATA: dict[str, dict[str, Any]] = {}
@@ -804,25 +828,25 @@ def _compute_project_slug(human_key: str) -> str:
     if mode == "git-remote":
         try:
             # Attempt to use GitPython for robustness across worktrees
-            repo = Repo(human_key, search_parent_directories=True)
-            remote_name = settings.project_identity_remote or "origin"
-            remote_url: str | None = None
-            # Prefer 'git remote get-url' to support multiple urls/rewrite rules
-            try:
-                remote_url = repo.git.remote("get-url", remote_name).strip() or None
-            except Exception:
-                # Fallback: use config if available
+            with _git_repo(human_key) as repo:
+                remote_name = settings.project_identity_remote or "origin"
+                remote_url: str | None = None
+                # Prefer 'git remote get-url' to support multiple urls/rewrite rules
                 try:
-                    remote = next((r for r in repo.remotes if r.name == remote_name), None)
-                    if remote and remote.urls:
-                        remote_url = next(iter(remote.urls), None)
+                    remote_url = repo.git.remote("get-url", remote_name).strip() or None
                 except Exception:
-                    remote_url = None
-            normalized = _norm_remote(remote_url)
-            if normalized:
-                base = normalized.rsplit("/", 1)[-1] or "repo"
-                canonical = normalized  # privacy-safe canonical string
-                return f"{base}-{_short_sha1(canonical)}"
+                    # Fallback: use config if available
+                    try:
+                        remote = next((r for r in repo.remotes if r.name == remote_name), None)
+                        if remote and remote.urls:
+                            remote_url = next(iter(remote.urls), None)
+                    except Exception:
+                        remote_url = None
+                normalized = _norm_remote(remote_url)
+                if normalized:
+                    base = normalized.rsplit("/", 1)[-1] or "repo"
+                    canonical = normalized  # privacy-safe canonical string
+                    return f"{base}-{_short_sha1(canonical)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             # Non-git directory or error; fall through to fallback
             pass
@@ -832,14 +856,14 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-toplevel
     if mode == "git-toplevel":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            top = repo.git.rev_parse("--show-toplevel").strip()
-            if top:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                top = repo.git.rev_parse("--show-toplevel").strip()
+                if top:
+                    from pathlib import Path as _P
 
-                top_real = str(_P(top).resolve())
-                base = _P(top_real).name or "repo"
-                return f"{base}-{_short_sha1(top_real)}"
+                    top_real = str(_P(top).resolve())
+                    base = _P(top_real).name or "repo"
+                    return f"{base}-{_short_sha1(top_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -847,20 +871,20 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-common-dir
     if mode == "git-common-dir":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            # Prefer GitPython's common_dir which normalizes worktree paths
-            try:
-                gdir = getattr(repo, "common_dir", None)
-            except Exception:
-                gdir = None
-            if not gdir:
-                gdir = repo.git.rev_parse("--git-common-dir").strip()
-            if gdir:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                # Prefer GitPython's common_dir which normalizes worktree paths
+                try:
+                    gdir = getattr(repo, "common_dir", None)
+                except Exception:
+                    gdir = None
+                if not gdir:
+                    gdir = repo.git.rev_parse("--git-common-dir").strip()
+                if gdir:
+                    from pathlib import Path as _P
 
-                gdir_real = str(_P(gdir).resolve())
-                base = "repo"
-                return f"{base}-{_short_sha1(gdir_real)}"
+                    gdir_real = str(_P(gdir).resolve())
+                    base = "repo"
+                    return f"{base}-{_short_sha1(gdir_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -967,42 +991,42 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             return {}
 
     try:
-        repo = Repo(target_path, search_parent_directories=True)
-        repo_root = str(Path(repo.working_tree_dir or "").resolve())
-        try:
-            git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
-        except Exception:
-            git_common_dir = None
-        try:
-            branch = repo.active_branch.name
-        except Exception:
+        with _git_repo(target_path) as repo:
+            repo_root = str(Path(repo.working_tree_dir or "").resolve())
             try:
-                branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
             except Exception:
-                branch = None
-        try:
-            worktree_name = Path(repo.working_tree_dir or "").name or None
-        except Exception:
-            worktree_name = None
-        try:
-            core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
-            core_ignorecase = str(core_ic).strip().lower() == "true"
-        except Exception:
-            core_ignorecase = None
-        remote_name = settings_local.project_identity_remote or "origin"
-        remote_url: Optional[str] = None
-        try:
-            remote_url = repo.git.remote("get-url", remote_name).strip() or None
-        except Exception:
+                git_common_dir = None
             try:
-                r = next((r for r in repo.remotes if r.name == remote_name), None)
-                if r and r.urls:
-                    remote_url = next(iter(r.urls), None)
+                branch = repo.active_branch.name
             except Exception:
-                remote_url = None
-        normalized_remote = _norm_remote(remote_url)
+                try:
+                    branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                except Exception:
+                    branch = None
+            try:
+                worktree_name = Path(repo.working_tree_dir or "").name or None
+            except Exception:
+                worktree_name = None
+            try:
+                core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
+                core_ignorecase = str(core_ic).strip().lower() == "true"
+            except Exception:
+                core_ignorecase = None
+            remote_name = settings_local.project_identity_remote or "origin"
+            remote_url_local: Optional[str] = None
+            try:
+                remote_url_local = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                try:
+                    r = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if r and r.urls:
+                        remote_url_local = next(iter(r.urls), None)
+                except Exception:
+                    remote_url_local = None
+            normalized_remote = _norm_remote(remote_url_local)
     except (InvalidGitRepositoryError, NoSuchPathError, Exception):
-        repo = None
+        pass  # Non-git directory; continue with fallback values
 
     if mode_used == "git-remote" and normalized_remote:
         canonical_path = normalized_remote
@@ -1183,7 +1207,7 @@ async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
     """List agent names in a project."""
     async with get_session() as session:
         result = await session.execute(
-            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)
+            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)  # type: ignore[call-overload]
         )
         return [row[0] for row in result.all()]
 
@@ -2146,6 +2170,12 @@ async def _collect_file_reservation_statuses(
                 last_git_activity=git_activity,
             )
         )
+    # Cleanup: close repo if we opened one
+    if repo is not None:
+        try:
+            repo.close()
+        except Exception:
+            pass
     return statuses
 
 
@@ -5585,18 +5615,18 @@ def build_mcp_server() -> FastMCP:
                 ctx_branch: Optional[str] = None
                 ctx_worktree: Optional[str] = None
                 try:
-                    repo = Repo(project.human_key, search_parent_directories=True)
-                    try:
-                        ctx_branch = repo.active_branch.name
-                    except Exception:
+                    with _git_repo(project.human_key) as repo:
                         try:
-                            ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            ctx_branch = repo.active_branch.name
                         except Exception:
-                            ctx_branch = None
-                    try:
-                        ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                    except Exception:
-                        ctx_worktree = None
+                            try:
+                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            except Exception:
+                                ctx_branch = None
+                        try:
+                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                        except Exception:
+                            ctx_worktree = None
                 except Exception:
                     pass
                 file_reservation_payload = {
@@ -6017,11 +6047,11 @@ def build_mcp_server() -> FastMCP:
 
     def _compute_branch(path: str) -> Optional[str]:
         try:
-            repo = Repo(path, search_parent_directories=True)
-            try:
-                return repo.active_branch.name
-            except Exception:
-                return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
+            with _git_repo(path) as repo:
+                try:
+                    return repo.active_branch.name  # type: ignore[no-any-return]
+                except Exception:
+                    return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
         except Exception:
             return None
 

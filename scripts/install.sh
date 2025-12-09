@@ -528,6 +528,63 @@ ensure_beads() {
   exit 1
 }
 
+install_cli_stub() {
+  # Install a helpful "mcp-agent-mail" command that explains this is NOT a CLI tool
+  # This catches agents that mistakenly try to run it as a shell command
+  local stub_dir="${HOME}/.local/bin"
+  local stub_path="${stub_dir}/mcp-agent-mail"
+
+  mkdir -p "${stub_dir}" 2>/dev/null || true
+
+  cat > "${stub_path}" <<'STUB_EOF'
+#!/usr/bin/env bash
+# MCP Agent Mail — Helpful Stub for Confused Agents
+#
+# If you're seeing this, you (or an AI agent) tried to run "mcp-agent-mail"
+# as a CLI command. That's a common mistake!
+
+cat <<'MSG'
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║   🚫  MCP Agent Mail is NOT a CLI tool!                                      ║
+║                                                                              ║
+║   It's an MCP (Model Context Protocol) server that provides tools to your   ║
+║   AI coding agent. You should already have access to these tools as part    ║
+║   of your available MCP tools.                                              ║
+║                                                                              ║
+║   ✅ CORRECT USAGE:                                                          ║
+║      Use the MCP tools directly, for example:                               ║
+║        • mcp__mcp-agent-mail__register_agent                                ║
+║        • mcp__mcp-agent-mail__send_message                                  ║
+║        • mcp__mcp-agent-mail__fetch_inbox                                   ║
+║                                                                              ║
+║   ❌ INCORRECT USAGE:                                                        ║
+║      Running shell commands like:                                           ║
+║        • mcp-agent-mail send --to BlueLake ...                              ║
+║        • mcp-agent-mail --help                                              ║
+║                                                                              ║
+║   📚 For documentation, see:                                                 ║
+║      https://github.com/Dicklesworthstone/mcp_agent_mail                    ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+MSG
+exit 1
+STUB_EOF
+
+  chmod +x "${stub_path}" 2>/dev/null || true
+
+  # Also create common aliases/variants agents might try
+  for variant in "mcp_agent_mail" "mcpagentmail" "agentmail" "agent-mail"; do
+    local variant_path="${stub_dir}/${variant}"
+    if [[ ! -f "${variant_path}" ]]; then
+      ln -sf "${stub_path}" "${variant_path}" 2>/dev/null || true
+    fi
+  done
+
+  ok "Installed helpful CLI stub at ${stub_path}"
+  record_summary "CLI stub: installed (catches mistaken CLI usage)"
+}
+
 ensure_bv() {
   if [[ "${SKIP_BV}" -eq 1 ]]; then
     warn "--skip-bv specified; not installing Beads Viewer"
@@ -608,6 +665,7 @@ main() {
     record_summary "Repo: existing at ${REPO_DIR} (--start-only)"
     ensure_beads
     ensure_bv
+    install_cli_stub
     configure_port
     if ! run_integration_and_start; then
       err "Integration failed; aborting."
@@ -622,6 +680,7 @@ main() {
   ensure_uv
   ensure_beads
   ensure_bv
+  install_cli_stub
   ensure_repo
   ensure_python_and_venv
   sync_deps
