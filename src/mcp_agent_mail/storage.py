@@ -736,91 +736,100 @@ async def _convert_markdown_images(
 
 async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str = "auto") -> tuple[dict[str, object], str | None]:
     data = await _to_thread(path.read_bytes)
-    pil = await _to_thread(Image.open, path)
-    img = pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")
-    width, height = img.size
-    buffer_path = archive.attachments_dir
-    await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
-    digest = hashlib.sha1(data).hexdigest()
-    target_dir = buffer_path / digest[:2]
-    await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
-    target_path = target_dir / f"{digest}.webp"
-    # Optionally store original alongside (in originals/)
-    original_rel: str | None = None
-    if archive.settings.storage.keep_original_images:
-        originals_dir = archive.root / "attachments" / "originals" / digest[:2]
-        await _to_thread(originals_dir.mkdir, parents=True, exist_ok=True)
-        orig_ext = path.suffix.lower().lstrip(".") or "bin"
-        orig_path = originals_dir / f"{digest}.{orig_ext}"
-        if not orig_path.exists():
-            await _to_thread(orig_path.write_bytes, data)
-        original_rel = orig_path.relative_to(archive.repo_root).as_posix()
-    if not target_path.exists():
-        await _save_webp(img, target_path)
-    new_bytes = await _to_thread(target_path.read_bytes)
-    rel_path = target_path.relative_to(archive.repo_root).as_posix()
-    # Update per-attachment manifest with metadata
+
+    # Open image and convert, properly closing the original to prevent file handle leaks
+    def _open_and_convert(p: Path) -> Image.Image:
+        with Image.open(p) as pil:
+            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")  # type: ignore[no-any-return]
+
+    img = await _to_thread(_open_and_convert, path)
     try:
-        manifest_dir = archive.root / "attachments" / "_manifests"
-        await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
-        manifest_path = manifest_dir / f"{digest}.json"
-        manifest_payload = {
-            "sha1": digest,
-            "webp_path": rel_path,
-            "bytes_webp": len(new_bytes),
-            "width": width,
-            "height": height,
-            "original_path": original_rel,
-            "bytes_original": len(data),
-            "original_ext": path.suffix.lower(),
-        }
-        await _write_json(manifest_path, manifest_payload)
-        await _append_attachment_audit(
-            archive,
-            digest,
-            {
-                "event": "stored",
-                "ts": datetime.now(timezone.utc).isoformat(),
+        width, height = img.size
+        buffer_path = archive.attachments_dir
+        await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
+        digest = hashlib.sha1(data).hexdigest()
+        target_dir = buffer_path / digest[:2]
+        await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+        target_path = target_dir / f"{digest}.webp"
+        # Optionally store original alongside (in originals/)
+        original_rel: str | None = None
+        if archive.settings.storage.keep_original_images:
+            originals_dir = archive.root / "attachments" / "originals" / digest[:2]
+            await _to_thread(originals_dir.mkdir, parents=True, exist_ok=True)
+            orig_ext = path.suffix.lower().lstrip(".") or "bin"
+            orig_path = originals_dir / f"{digest}.{orig_ext}"
+            if not orig_path.exists():
+                await _to_thread(orig_path.write_bytes, data)
+            original_rel = orig_path.relative_to(archive.repo_root).as_posix()
+        if not target_path.exists():
+            await _save_webp(img, target_path)
+        new_bytes = await _to_thread(target_path.read_bytes)
+        rel_path = target_path.relative_to(archive.repo_root).as_posix()
+        # Update per-attachment manifest with metadata
+        try:
+            manifest_dir = archive.root / "attachments" / "_manifests"
+            await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
+            manifest_path = manifest_dir / f"{digest}.json"
+            manifest_payload = {
+                "sha1": digest,
                 "webp_path": rel_path,
                 "bytes_webp": len(new_bytes),
+                "width": width,
+                "height": height,
                 "original_path": original_rel,
                 "bytes_original": len(data),
-                "ext": path.suffix.lower(),
-            },
-        )
-    except Exception:
-        pass
+                "original_ext": path.suffix.lower(),
+            }
+            await _write_json(manifest_path, manifest_payload)
+            await _append_attachment_audit(
+                archive,
+                digest,
+                {
+                    "event": "stored",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "webp_path": rel_path,
+                    "bytes_webp": len(new_bytes),
+                    "original_path": original_rel,
+                    "bytes_original": len(data),
+                    "ext": path.suffix.lower(),
+                },
+            )
+        except Exception:
+            pass
 
-    should_inline = False
-    if embed_policy == "inline":
-        should_inline = True
-    elif embed_policy == "file":
         should_inline = False
-    else:
-        should_inline = len(new_bytes) <= archive.settings.storage.inline_image_max_bytes
-    if should_inline:
-        encoded = base64.b64encode(new_bytes).decode("ascii")
-        return {
-            "type": "inline",
+        if embed_policy == "inline":
+            should_inline = True
+        elif embed_policy == "file":
+            should_inline = False
+        else:
+            should_inline = len(new_bytes) <= archive.settings.storage.inline_image_max_bytes
+        if should_inline:
+            encoded = base64.b64encode(new_bytes).decode("ascii")
+            return {
+                "type": "inline",
+                "media_type": "image/webp",
+                "bytes": len(new_bytes),
+                "width": width,
+                "height": height,
+                "sha1": digest,
+                "data_base64": encoded,
+            }, rel_path
+        meta: dict[str, object] = {
+            "type": "file",
             "media_type": "image/webp",
             "bytes": len(new_bytes),
+            "path": rel_path,
             "width": width,
             "height": height,
             "sha1": digest,
-            "data_base64": encoded,
-        }, rel_path
-    meta: dict[str, object] = {
-        "type": "file",
-        "media_type": "image/webp",
-        "bytes": len(new_bytes),
-        "path": rel_path,
-        "width": width,
-        "height": height,
-        "sha1": digest,
-    }
-    if original_rel:
-        meta["original_path"] = original_rel
-    return meta, rel_path
+        }
+        if original_rel:
+            meta["original_path"] = original_rel
+        return meta, rel_path
+    finally:
+        # Close the converted image to prevent file handle leaks
+        img.close()
 
 
 async def _save_webp(img: Image.Image, path: Path) -> None:

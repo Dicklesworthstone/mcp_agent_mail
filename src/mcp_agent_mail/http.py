@@ -2446,6 +2446,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
 
             repo_root = P(storage_root)
             if (repo_root / ".git").exists():
+                repo = None
                 try:
                     repo = GitRepo(str(repo_root))
                     # Use efficient commit counting with limit to prevent DoS
@@ -2489,6 +2490,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     project_count = 0
                     repo_size = "Unknown"
                     last_commit_time = "Unknown"
+                finally:
+                    if repo is not None:
+                        repo.close()
             else:
                 total_commits = "0"
                 project_count = 0
@@ -2525,9 +2529,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 return await _render("archive_activity.html", commits=[])
 
             repo = GitRepo(str(repo_root))
-            commits = await get_recent_commits(repo, limit=limit)
-
-            return await _render("archive_activity.html", commits=commits)
+            try:
+                commits = await get_recent_commits(repo, limit=limit)
+                return await _render("archive_activity.html", commits=commits)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
@@ -2540,6 +2546,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
 
+            repo = None
             try:
                 repo = GitRepo(str(repo_root))
                 commit = await get_commit_detail(repo, sha)
@@ -2550,6 +2557,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             except Exception:
                 # Don't leak error details
                 return await _render("error.html", message="Commit not found")
+            finally:
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
@@ -2587,9 +2597,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            commits = await get_timeline_commits(repo, project, limit=100)
-
-            return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            try:
+                commits = await get_timeline_commits(repo, project, limit=100)
+                return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -2666,9 +2678,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            graph = await get_agent_communication_graph(repo, project, limit=200)
-
-            return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            try:
+                graph = await get_agent_communication_graph(repo, project, limit=200)
+                return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
