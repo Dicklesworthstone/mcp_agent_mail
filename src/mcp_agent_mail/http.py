@@ -390,8 +390,8 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 maybe_claims = getattr(request.state, "jwt_claims", None)
                 if isinstance(maybe_claims, dict):
                     sub = maybe_claims.get("sub")
-                if isinstance(sub, str) and sub:
-                    identity = f"sub:{sub}"
+                    if isinstance(sub, str) and sub:
+                        identity = f"sub:{sub}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
