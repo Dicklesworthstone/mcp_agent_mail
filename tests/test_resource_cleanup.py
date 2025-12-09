@@ -37,10 +37,9 @@ def test_git_repo_context_manager_normal_operation(tmp_path: Path):
         close_called = True
         return original_close(self)
 
-    with patch.object(Repo, 'close', tracked_close):
-        with _git_repo(repo_path) as repo:
-            assert repo is not None
-            assert repo.working_tree_dir is not None
+    with patch.object(Repo, 'close', tracked_close), _git_repo(repo_path) as repo:
+        assert repo is not None
+        assert repo.working_tree_dir is not None
 
     assert close_called, "repo.close() should have been called"
 
@@ -59,11 +58,9 @@ def test_git_repo_context_manager_closes_on_exception(tmp_path: Path):
         close_called = True
         return original_close(self)
 
-    with patch.object(Repo, 'close', tracked_close):
-        with pytest.raises(ValueError, match="test exception"):
-            with _git_repo(repo_path) as repo:
-                assert repo is not None
-                raise ValueError("test exception")
+    with patch.object(Repo, 'close', tracked_close), pytest.raises(ValueError, match="test exception"), _git_repo(repo_path) as repo:
+        assert repo is not None
+        raise ValueError("test exception")
 
     assert close_called, "repo.close() should be called even on exception"
 
@@ -73,10 +70,10 @@ def test_git_repo_context_manager_handles_invalid_repo(tmp_path: Path):
     non_repo_path = tmp_path / "not_a_repo"
     non_repo_path.mkdir()
 
-    # Should raise an exception when trying to open non-repo
-    with pytest.raises(Exception):
-        with _git_repo(non_repo_path, search_parent_directories=False) as repo:
-            pass
+    # Should raise InvalidGitRepositoryError when trying to open non-repo
+    from git.exc import InvalidGitRepositoryError
+    with pytest.raises(InvalidGitRepositoryError), _git_repo(non_repo_path, search_parent_directories=False):
+        pass
 
 
 def test_open_repo_if_available_returns_none_for_non_repo(tmp_path: Path):
@@ -153,12 +150,11 @@ def test_open_repo_if_available_closes_on_working_tree_exception(tmp_path: Path)
         return original_close(self)
 
     # Mock working_tree_dir to raise an exception
-    with patch.object(Repo, 'close', tracked_close):
-        with patch.object(
-            Repo, 'working_tree_dir',
-            property(lambda self: (_ for _ in ()).throw(OSError("mocked error")))
-        ):
-            result = _open_repo_if_available(repo_path)
+    with patch.object(Repo, 'close', tracked_close), patch.object(
+        Repo, 'working_tree_dir',
+        property(lambda self: (_ for _ in ()).throw(OSError("mocked error")))
+    ):
+        result = _open_repo_if_available(repo_path)
 
     # The function should return None when working_tree_dir raises
     assert result is None, "Should return None when working_tree_dir fails"

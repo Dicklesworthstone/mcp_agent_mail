@@ -83,7 +83,7 @@ def test_cli_stub_ignores_arguments(cli_stub_script: Path):
 
     for args in test_cases:
         result = subprocess.run(
-            [str(cli_stub_script)] + args,
+            [str(cli_stub_script), *args],
             capture_output=True,
             text=True,
         )

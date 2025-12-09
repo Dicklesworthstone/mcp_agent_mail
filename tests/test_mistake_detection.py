@@ -10,8 +10,6 @@ These tests verify that the mistake detection helpers correctly identify:
 """
 from __future__ import annotations
 
-import pytest
-
 from mcp_agent_mail.app import (
     _detect_agent_name_mistake,
     _detect_suspicious_file_reservation,

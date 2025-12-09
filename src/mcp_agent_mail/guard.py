@@ -401,7 +401,7 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
         # Prefer core.hooksPath if configured
         hooks_path = _git(repo, "config", "--get", "core.hooksPath")
         if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")):
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
                 resolved = Path(hooks_path)
             else:
                 # Resolve relative to repo root
@@ -485,7 +485,7 @@ async def install_prepush_guard(settings: Settings, project_slug: str, repo_path
     def _resolve_hooks_dir(repo: Path) -> Path:
         hooks_path = _git(repo, "config", "--get", "core.hooksPath")
         if hooks_path:
-            if hooks_path.startswith("/") or ((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/"))):
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
                 resolved = Path(hooks_path)
             else:
                 root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
@@ -596,10 +596,7 @@ async def uninstall_guard(repo_path: Path) -> bool:
             except Exception:
                 content = ""
             # Remove our chain-runner files (leave other hooks intact)
-            if "mcp-agent-mail chain-runner" in content:
-                await asyncio.to_thread(hook_path.unlink)
-                removed = True
-            elif any(s in content for s in SENTINELS):
+            if "mcp-agent-mail chain-runner" in content or any(s in content for s in SENTINELS):
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
     return removed
