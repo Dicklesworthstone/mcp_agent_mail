@@ -895,11 +895,22 @@ def _get_database_stats() -> dict[str, int]:
                 }
 
         # Try to get stats, but don't fail startup if DB isn't ready
+        # Use asyncio.run() which is the recommended approach for Python 3.10+
+        # and handles event loop creation/cleanup properly
         try:
-            loop = asyncio.get_event_loop()
-            return loop.run_until_complete(fetch_stats())
+            # Check if we're already inside an event loop
+            asyncio.get_running_loop()
+            # If we get here, we're in an async context - this shouldn't happen
+            # during startup but handle it gracefully by returning zeros
+            return {
+                "projects": 0,
+                "agents": 0,
+                "messages": 0,
+                "file_reservations": 0,
+                "contact_links": 0,
+            }
         except RuntimeError:
-            # No event loop, create one
+            # No running event loop - safe to use asyncio.run()
             return asyncio.run(fetch_stats())
 
     except Exception:
