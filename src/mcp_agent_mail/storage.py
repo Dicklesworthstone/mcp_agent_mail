@@ -47,6 +47,34 @@ class ProjectArchive:
 _PROCESS_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _PROCESS_LOCK_OWNERS: dict[tuple[int, str], int] = {}
 
+# Cache for Repo objects to prevent file handle leaks
+# Key: resolved repo root path string, Value: Repo object
+_REPO_CACHE: dict[str, Repo] = {}
+_REPO_CACHE_LOCK: asyncio.Lock | None = None
+
+
+def _get_repo_cache_lock() -> asyncio.Lock:
+    """Get or create the repo cache lock (must be called from async context)."""
+    global _REPO_CACHE_LOCK
+    if _REPO_CACHE_LOCK is None:
+        _REPO_CACHE_LOCK = asyncio.Lock()
+    return _REPO_CACHE_LOCK
+
+
+def clear_repo_cache() -> int:
+    """Close all cached Repo objects and clear the cache.
+
+    Returns the number of repos that were closed.
+    Should be called during shutdown or between tests.
+    """
+    count = 0
+    for repo in _REPO_CACHE.values():
+        with contextlib.suppress(Exception):
+            repo.close()
+            count += 1
+    _REPO_CACHE.clear()
+    return count
+
 
 class AsyncFileLock:
     """Async-friendly wrapper around SoftFileLock with metadata tracking."""
@@ -396,25 +424,41 @@ async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
 
 
 async def _ensure_repo(root: Path, settings: Settings) -> Repo:
-    git_dir = root / ".git"
-    if git_dir.exists():
-        return Repo(str(root))
+    """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
+    cache_key = str(root.resolve())
 
-    repo_result = await _to_thread(Repo.init, str(root))
-    repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
-    # Ensure deterministic, non-interactive commits (disable GPG signing)
-    try:
-        def _configure_repo() -> None:
-            with repo.config_writer() as cw:
-                cw.set_value("commit", "gpgsign", "false")
-        await _to_thread(_configure_repo)
-    except Exception:
-        pass
-    attributes_path = root / ".gitattributes"
-    if not attributes_path.exists():
-        await _write_text(attributes_path, "*.json text\n*.md text\n")
-    await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
-    return repo
+    # Fast path: check cache without lock
+    if cache_key in _REPO_CACHE:
+        return _REPO_CACHE[cache_key]
+
+    # Slow path: acquire lock and check/create
+    async with _get_repo_cache_lock():
+        # Double-check after acquiring lock
+        if cache_key in _REPO_CACHE:
+            return _REPO_CACHE[cache_key]
+
+        git_dir = root / ".git"
+        if git_dir.exists():
+            repo = Repo(str(root))
+            _REPO_CACHE[cache_key] = repo
+            return repo
+
+        repo_result = await _to_thread(Repo.init, str(root))
+        repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
+        # Ensure deterministic, non-interactive commits (disable GPG signing)
+        try:
+            def _configure_repo() -> None:
+                with repo.config_writer() as cw:
+                    cw.set_value("commit", "gpgsign", "false")
+            await _to_thread(_configure_repo)
+        except Exception:
+            pass
+        attributes_path = root / ".gitattributes"
+        if not attributes_path.exists():
+            await _write_text(attributes_path, "*.json text\n*.md text\n")
+        await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
+        _REPO_CACHE[cache_key] = repo
+        return repo
 
 
 async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object]) -> None:
