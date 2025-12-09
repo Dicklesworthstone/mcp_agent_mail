@@ -609,10 +609,20 @@ def _open_repo_if_available(workspace: Optional[Path]) -> Optional[Repo]:
     try:
         root = Path(repo.working_tree_dir or "")
     except Exception:
+        # Close repo before returning None to avoid file handle leak
+        try:
+            repo.close()
+        except Exception:
+            pass
         return None
     with suppress(Exception):
         workspace.resolve().relative_to(root.resolve())
         return repo
+    # Close repo before returning None to avoid file handle leak
+    try:
+        repo.close()
+    except Exception:
+        pass
     return None
 
 
@@ -2110,72 +2120,74 @@ async def _collect_file_reservation_statuses(
     repo = _open_repo_if_available(workspace) if workspace is not None else None
 
     statuses: list[FileReservationStatus] = []
-    for reservation, agent in rows:
-        agent_id = agent.id or -1
-        agent_last_active = _ensure_utc(agent.last_active_ts)
-        last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
+    try:
+        for reservation, agent in rows:
+            agent_id = agent.id or -1
+            agent_last_active = _ensure_utc(agent.last_active_ts)
+            last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
 
-        matches: list[Path] = []
-        fs_activity: Optional[datetime] = None
-        git_activity: Optional[datetime] = None
+            matches: list[Path] = []
+            fs_activity: Optional[datetime] = None
+            git_activity: Optional[datetime] = None
 
-        if workspace is not None:
-            matches = _collect_matching_paths(workspace, reservation.path_pattern)
-            if matches:
-                fs_activity = _latest_filesystem_activity(matches)
-                git_activity = _latest_git_activity(repo, matches)
+            if workspace is not None:
+                matches = _collect_matching_paths(workspace, reservation.path_pattern)
+                if matches:
+                    fs_activity = _latest_filesystem_activity(matches)
+                    git_activity = _latest_git_activity(repo, matches)
 
-        agent_inactive = (
-            agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
-        )
-        recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
-        recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
-        recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
-
-        stale = bool(
-            reservation.released_ts is None
-            and agent_inactive
-            and not (recent_mail or recent_fs or recent_git)
-        )
-        reasons: list[str] = []
-        if agent_inactive:
-            reasons.append(f"agent_inactive>{inactivity_seconds}s")
-        else:
-            reasons.append("agent_recently_active")
-        if recent_mail:
-            reasons.append("mail_activity_recent")
-        else:
-            reasons.append(f"no_recent_mail_activity>{activity_grace}s")
-        if matches:
-            if recent_fs:
-                reasons.append("filesystem_activity_recent")
-            else:
-                reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
-            if recent_git:
-                reasons.append("git_activity_recent")
-            else:
-                reasons.append(f"no_recent_git_activity>{activity_grace}s")
-        else:
-            reasons.append("path_pattern_unmatched")
-
-        statuses.append(
-            FileReservationStatus(
-                reservation=reservation,
-                agent=agent,
-                stale=stale,
-                stale_reasons=reasons,
-                last_agent_activity=agent_last_active,
-                last_mail_activity=last_mail,
-                last_fs_activity=fs_activity,
-                last_git_activity=git_activity,
+            agent_inactive = (
+                agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
             )
-        )
-    # Cleanup: close repo if we opened one
-    if repo is not None:
-        try:
-            repo.close()
-        except Exception:
-            pass
+            recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
+            recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
+            recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
+
+            stale = bool(
+                reservation.released_ts is None
+                and agent_inactive
+                and not (recent_mail or recent_fs or recent_git)
+            )
+            reasons: list[str] = []
+            if agent_inactive:
+                reasons.append(f"agent_inactive>{inactivity_seconds}s")
+            else:
+                reasons.append("agent_recently_active")
+            if recent_mail:
+                reasons.append("mail_activity_recent")
+            else:
+                reasons.append(f"no_recent_mail_activity>{activity_grace}s")
+            if matches:
+                if recent_fs:
+                    reasons.append("filesystem_activity_recent")
+                else:
+                    reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
+                if recent_git:
+                    reasons.append("git_activity_recent")
+                else:
+                    reasons.append(f"no_recent_git_activity>{activity_grace}s")
+            else:
+                reasons.append("path_pattern_unmatched")
+
+            statuses.append(
+                FileReservationStatus(
+                    reservation=reservation,
+                    agent=agent,
+                    stale=stale,
+                    stale_reasons=reasons,
+                    last_agent_activity=agent_last_active,
+                    last_mail_activity=last_mail,
+                    last_fs_activity=fs_activity,
+                    last_git_activity=git_activity,
+                )
+            )
+    finally:
+        # Cleanup: close repo if we opened one
+        if repo is not None:
+            try:
+                repo.close()
+            except Exception:
+                pass
     return statuses
 
 
