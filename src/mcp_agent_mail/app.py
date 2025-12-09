@@ -729,6 +729,36 @@ def _validate_iso_timestamp(raw_value: Optional[str], param_name: str = "timesta
         )
 
 
+def _validate_program_model(program: str, model: str) -> None:
+    """Validate that program and model are non-empty strings.
+
+    Raises
+    ------
+    ToolExecutionError
+        If program or model is empty or whitespace-only.
+    """
+    if not program or not program.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_PROGRAM",
+            message=(
+                "program cannot be empty. Provide the name of your AI coding tool "
+                "(e.g., 'claude-code', 'codex-cli', 'cursor', 'cline')."
+            ),
+            recoverable=True,
+            data={"provided": program},
+        )
+    if not model or not model.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_MODEL",
+            message=(
+                "model cannot be empty. Provide the underlying model identifier "
+                "(e.g., 'claude-opus-4.5', 'gpt-4-turbo', 'claude-sonnet-4')."
+            ),
+            recoverable=True,
+            data={"provided": model},
+        )
+
+
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
     """Render a compact JSON error panel if Rich is available and tools logging is enabled."""
     try:
@@ -3124,27 +3154,7 @@ def build_mcp_server() -> FastMCP:
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
-        # Validate program and model are not empty
-        if not program or not program.strip():
-            raise ToolExecutionError(
-                error_type="EMPTY_PROGRAM",
-                message=(
-                    "program cannot be empty. Provide the name of your AI coding tool "
-                    "(e.g., 'claude-code', 'codex-cli', 'cursor', 'cline')."
-                ),
-                recoverable=True,
-                data={"provided": program},
-            )
-        if not model or not model.strip():
-            raise ToolExecutionError(
-                error_type="EMPTY_MODEL",
-                message=(
-                    "model cannot be empty. Provide the underlying model identifier "
-                    "(e.g., 'claude-opus-4.5', 'gpt-4-turbo', 'claude-sonnet-4')."
-                ),
-                recoverable=True,
-                data={"provided": model},
-            )
+        _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
         if settings.tools_log_enabled:
             try:
@@ -3287,6 +3297,7 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
         unique_name = await _generate_unique_agent_name(project, settings, name_hint)
         ap = (attachments_policy or "auto").lower()
@@ -4960,6 +4971,7 @@ def build_mcp_server() -> FastMCP:
         Macro helper that boots a project session: ensure project, register agent,
         optionally file_reservation paths, and fetch the latest inbox snapshot.
         """
+        _validate_program_model(program, model)
         settings = get_settings()
         project = await _ensure_project(human_key)
         agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
@@ -5028,6 +5040,7 @@ def build_mcp_server() -> FastMCP:
         settings = get_settings()
         project = await _get_project_by_identifier(project_key)
         if register_if_missing:
+            _validate_program_model(program, model)
             agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
         else:
             if not agent_name:
@@ -6165,159 +6178,152 @@ def build_mcp_server() -> FastMCP:
         return {"renewed": len(updated), "file_reservations": updated}
 
     # --- Build slots (coarse concurrency control) --------------------------------------------
+    # Only registered when WORKTREES_ENABLED=1 to reduce token overhead for single-worktree setups
 
-    def _safe_component(value: str) -> str:
-        # Keep it simple and dependency-free: replace common problematic filesystem chars
-        safe = value.strip()
-        for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
-            safe = safe.replace(ch, "_")
-        return safe or "unknown"
+    if settings.worktrees_enabled:
+        def _safe_component(value: str) -> str:
+            # Keep it simple and dependency-free: replace common problematic filesystem chars
+            safe = value.strip()
+            for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+                safe = safe.replace(ch, "_")
+            return safe or "unknown"
 
-    def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
-        safe = _safe_component(slot)
-        return archive.root / "build_slots" / safe
+        def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
+            safe = _safe_component(slot)
+            return archive.root / "build_slots" / safe
 
-    def _compute_branch(path: str) -> Optional[str]:
-        try:
-            with _git_repo(path) as repo:
-                try:
-                    return repo.active_branch.name  # type: ignore[no-any-return]
-                except Exception:
-                    return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
-        except Exception:
-            return None
-
-    def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        if not slot_path.exists():
-            return results
-        for f in slot_path.glob("*.json"):
+        def _compute_branch(path: str) -> Optional[str]:
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                exp = data.get("expires_ts")
-                if exp:
+                with _git_repo(path) as repo:
                     try:
-                        if datetime.fromisoformat(exp) <= now:
-                            continue
+                        return repo.active_branch.name  # type: ignore[no-any-return]
                     except Exception:
-                        pass
-                results.append(data)
+                        return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
             except Exception:
-                continue
-        return results
+                return None
 
-    @mcp.tool(name="acquire_build_slot")
-    @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def acquire_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-        ttl_seconds: int = 3600,
-        exclusive: bool = True,
-    ) -> dict[str, Any]:
-        """
-        Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"granted": None, "conflicts": [], "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
-        active = _read_active_slots(slot_path, now)
-
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-
-        conflicts: list[dict[str, Any]] = []
-        if exclusive:
-            for entry in active:
-                if entry.get("agent") == agent_name and entry.get("branch") == branch:
+        def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            if not slot_path.exists():
+                return results
+            for f in slot_path.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    exp = data.get("expires_ts")
+                    if exp:
+                        try:
+                            if datetime.fromisoformat(exp) <= now:
+                                continue
+                        except Exception:
+                            pass
+                    results.append(data)
+                except Exception:
                     continue
-                if entry.get("exclusive", True):
-                    conflicts.append(entry)
-        payload = {
-            "slot": slot,
-            "agent": agent_name,
-            "branch": branch,
-            "exclusive": exclusive,
-            "acquired_ts": _iso(now),
-            "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
-        }
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
-        if conflicts:
-            await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
-        return {"granted": payload, "conflicts": conflicts}
+            return results
 
-    @mcp.tool(name="renew_build_slot")
-    @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def renew_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-        extend_seconds: int = 1800,
-    ) -> dict[str, Any]:
-        """
-        Extend expiry for an existing build slot lease. No-op if missing.
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"renewed": False, "expires_ts": None, "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-        try:
-            current = json.loads(lease_path.read_text(encoding="utf-8"))
-        except Exception:
-            current = {}
-        new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
-        current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
-        with contextlib.suppress(Exception):
-            await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
-        return {"renewed": True, "expires_ts": new_exp}
+        @mcp.tool(name="acquire_build_slot")
+        @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def acquire_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            ttl_seconds: int = 3600,
+            exclusive: bool = True,
+        ) -> dict[str, Any]:
+            """
+            Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
+            active = _read_active_slots(slot_path, now)
 
-    @mcp.tool(name="release_build_slot")
-    @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-    async def release_build_slot(
-        ctx: Context,
-        project_key: str,
-        agent_name: str,
-        slot: str,
-    ) -> dict[str, Any]:
-        """
-        Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
-        """
-        if not settings.worktrees_enabled:
-            await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-            return {"released": False, "released_at": _iso(datetime.now(timezone.utc)), "disabled": True}
-        project = await _get_project_by_identifier(project_key)
-        archive = await ensure_archive(settings, project.slug)
-        now = datetime.now(timezone.utc)
-        slot_path = _slot_dir(archive, slot)
-        branch = _compute_branch(project.human_key)
-        holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-        lease_path = slot_path / f"{holder_id}.json"
-        released = False
-        try:
-            data = {}
-            if lease_path.exists():
-                data = json.loads(lease_path.read_text(encoding="utf-8"))
-            data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
-            await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
-            released = True
-        except Exception:
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+
+            conflicts: list[dict[str, Any]] = []
+            if exclusive:
+                for entry in active:
+                    if entry.get("agent") == agent_name and entry.get("branch") == branch:
+                        continue
+                    if entry.get("exclusive", True):
+                        conflicts.append(entry)
+            payload = {
+                "slot": slot,
+                "agent": agent_name,
+                "branch": branch,
+                "exclusive": exclusive,
+                "acquired_ts": _iso(now),
+                "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
+            }
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
+            if conflicts:
+                await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
+            return {"granted": payload, "conflicts": conflicts}
+
+        @mcp.tool(name="renew_build_slot")
+        @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def renew_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            extend_seconds: int = 1800,
+        ) -> dict[str, Any]:
+            """
+            Extend expiry for an existing build slot lease. No-op if missing.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+            try:
+                current = json.loads(lease_path.read_text(encoding="utf-8"))
+            except Exception:
+                current = {}
+            new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
+            current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
+            return {"renewed": True, "expires_ts": new_exp}
+
+        @mcp.tool(name="release_build_slot")
+        @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def release_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+        ) -> dict[str, Any]:
+            """
+            Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
             released = False
-        return {"released": released, "released_at": _iso(now)}
+            try:
+                data = {}
+                if lease_path.exists():
+                    data = json.loads(lease_path.read_text(encoding="utf-8"))
+                data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
+                await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
+                released = True
+            except Exception:
+                released = False
+            return {"released": released, "released_at": _iso(now)}
 
     @mcp.resource("resource://config/environment", mime_type="application/json")
     def environment_resource() -> dict[str, Any]:
