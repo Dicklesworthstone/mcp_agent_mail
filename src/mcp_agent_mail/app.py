@@ -5536,7 +5536,7 @@ def build_mcp_server() -> FastMCP:
                                 revised_threads.append(item)
                         thread_summaries = revised_threads
             except Exception as e:
-                await ctx.debug(f"summarize_threads.llm_skipped: {e}")
+                await ctx.debug(f"summarize_thread.llm_skipped: {e}")
 
         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
         return {"threads": thread_summaries, "aggregate": aggregate}

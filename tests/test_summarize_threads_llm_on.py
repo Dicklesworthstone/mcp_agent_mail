@@ -29,7 +29,7 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
 
     async def _fake_complete(*_a, **_k):  # type: ignore[unused-argument]
         return _StubOut(
-            '{"threads": [{"thread_id": "T-1", "key_points": ["refined"], "actions": ["do"]}], "aggregate": {"top_mentions": [], "key_points": ["K"], "action_items": ["A"]}}'
+            '{"threads": [{"thread_id": "T-1", "key_points": ["refined"], "actions": ["do"]}, {"thread_id": "T-2", "key_points": ["also refined"], "actions": ["act"]}], "aggregate": {"top_mentions": [], "key_points": ["K"], "action_items": ["A"]}}'
         )
 
     monkeypatch.setattr(app_mod, "complete_system_user", _fake_complete)
@@ -41,23 +41,24 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
             "register_agent",
             {"project_key": "Backend", "program": "x", "model": "y", "name": "BlueLake"},
         )
-        # Seed a thread
-        for i in range(2):
+        # Seed two threads to trigger multi-thread mode
+        for tid in ("T-1", "T-2"):
             await client.call_tool(
                 "send_message",
                 {
                     "project_key": "Backend",
                     "sender_name": "BlueLake",
                     "to": ["BlueLake"],
-                    "subject": f"S{i}",
+                    "subject": f"Msg in {tid}",
                     "body_md": "body",
-                    "thread_id": "T-1",
+                    "thread_id": tid,
                 },
             )
 
+        # Use comma-separated thread_id for multi-thread mode
         res = await client.call_tool(
-            "summarize_threads",
-            {"project_key": "Backend", "thread_ids": ["T-1"], "llm_mode": True, "per_thread_limit": 5},
+            "summarize_thread",
+            {"project_key": "Backend", "thread_id": "T-1,T-2", "llm_mode": True, "per_thread_limit": 5},
         )
         payload = res.data
         assert payload.get("threads")

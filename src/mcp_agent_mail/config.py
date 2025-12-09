@@ -227,7 +227,7 @@ def get_settings() -> Settings:
         rbac_default_role=_decouple_config("HTTP_RBAC_DEFAULT_ROLE", default="reader"),
         rbac_readonly_tools=_csv(
             "HTTP_RBAC_READONLY_TOOLS",
-            default="health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads",
+            default="health_check,fetch_inbox,whois,search_messages,summarize_thread",
         ),
         allow_localhost_unauthenticated=_bool(_decouple_config("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", default="true"), default=True),
     )
