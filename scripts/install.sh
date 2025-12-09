@@ -422,23 +422,74 @@ ensure_uv() {
   if need_cmd uv; then ok "uv installed"; record_summary "uv: installed"; else err "uv install failed"; exit 1; fi
 }
 
+update_existing_repo() {
+  # Pull latest changes from origin for an existing repo
+  # This ensures users get bug fixes and updates when re-running the installer
+  local repo_path="$1"
+
+  info "Pulling latest changes from origin/${BRANCH}"
+  if ! (cd "${repo_path}" && git fetch origin "${BRANCH}" --depth 1 2>/dev/null); then
+    warn "Could not fetch from origin; continuing with existing code"
+    return 0
+  fi
+
+  # Check if there are updates
+  local local_sha remote_sha
+  local_sha=$(cd "${repo_path}" && git rev-parse HEAD 2>/dev/null || echo "unknown")
+  remote_sha=$(cd "${repo_path}" && git rev-parse "origin/${BRANCH}" 2>/dev/null || echo "unknown")
+
+  if [[ "${local_sha}" == "${remote_sha}" ]]; then
+    ok "Already up to date (${local_sha:0:8})"
+    record_summary "Repo: already up to date"
+    return 0
+  fi
+
+  # Stash any local changes to avoid conflicts
+  local has_changes=0
+  if (cd "${repo_path}" && git diff --quiet 2>/dev/null) && (cd "${repo_path}" && git diff --cached --quiet 2>/dev/null); then
+    has_changes=0
+  else
+    has_changes=1
+    info "Stashing local changes before update"
+    (cd "${repo_path}" && git stash push -m "installer-auto-stash-$(date +%Y%m%d%H%M%S)" 2>/dev/null) || true
+  fi
+
+  # Reset to origin/BRANCH to get latest code
+  if (cd "${repo_path}" && git reset --hard "origin/${BRANCH}" 2>/dev/null); then
+    ok "Updated to latest (${local_sha:0:8} → ${remote_sha:0:8})"
+    record_summary "Repo: updated ${local_sha:0:8} → ${remote_sha:0:8}"
+  else
+    warn "Could not update repo; continuing with existing code"
+    record_summary "Repo: update failed, using existing"
+  fi
+
+  # Restore stashed changes if any
+  if [[ "${has_changes}" -eq 1 ]]; then
+    if (cd "${repo_path}" && git stash pop 2>/dev/null); then
+      ok "Restored local changes"
+    else
+      warn "Could not restore stashed changes; they're saved in git stash"
+    fi
+  fi
+}
+
 ensure_repo() {
   # Determine target directory
   if [[ -z "${CLONE_DIR}" ]]; then CLONE_DIR="${DEFAULT_CLONE_DIR}"; fi
 
-  # If we're already in the repo (local run), use it
+  # If we're already in the repo (local run), use it and update
   if [[ -f "pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' pyproject.toml 2>/dev/null; then
     REPO_DIR="$PWD"
     ok "Using existing repo at: ${REPO_DIR}"
-    record_summary "Repo: existing at ${REPO_DIR}"
+    update_existing_repo "${REPO_DIR}"
     return 0
   fi
 
-  # If directory exists and looks like the repo, use it
+  # If directory exists and looks like the repo, use it and update
   if [[ -d "${CLONE_DIR}" ]] && [[ -f "${CLONE_DIR}/pyproject.toml" ]] && grep -q '^name\s*=\s*"mcp-agent-mail"' "${CLONE_DIR}/pyproject.toml" 2>/dev/null; then
     REPO_DIR="${CLONE_DIR}"
     ok "Using existing repo at: ${REPO_DIR}"
-    record_summary "Repo: existing at ${REPO_DIR}"
+    update_existing_repo "${REPO_DIR}"
     return 0
   fi
 
