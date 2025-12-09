@@ -79,7 +79,8 @@ class _LRURepoCache:
         """
         if key in self._cache:
             # Move to end (most recently used)
-            self._order.remove(key)
+            with contextlib.suppress(ValueError):
+                self._order.remove(key)
             self._order.append(key)
             return self._cache[key]
         return None
@@ -92,7 +93,8 @@ class _LRURepoCache:
         """
         if key in self._cache:
             # Already exists, just update LRU order
-            self._order.remove(key)
+            with contextlib.suppress(ValueError):
+                self._order.remove(key)
             self._order.append(key)
             return
 
@@ -138,14 +140,21 @@ class _LRURepoCache:
         return len(self._cache)
 
     def clear(self) -> int:
-        """Close all cached repos and clear the cache. Returns count closed."""
+        """Close all cached and evicted repos and clear the cache. Returns count closed."""
         count = 0
+        # Close cached repos
         for repo in self._cache.values():
             with contextlib.suppress(Exception):
                 repo.close()
                 count += 1
         self._cache.clear()
         self._order.clear()
+        # Also close any evicted repos still in pending list
+        for repo in self._evicted:
+            with contextlib.suppress(Exception):
+                repo.close()
+                count += 1
+        self._evicted.clear()
         return count
 
     def values(self) -> list[Repo]:
@@ -527,14 +536,14 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
     cache_key = str(root.resolve())
 
-    # Fast path: check cache without lock (also updates LRU order)
-    cached = _REPO_CACHE.get(cache_key)
+    # Fast path: check cache without lock using peek() which doesn't modify LRU order
+    cached = _REPO_CACHE.peek(cache_key)
     if cached is not None:
         return cached
 
     # Slow path: acquire lock and check/create
     async with _get_repo_cache_lock():
-        # Double-check after acquiring lock
+        # Double-check after acquiring lock, use get() to update LRU order
         cached = _REPO_CACHE.get(cache_key)
         if cached is not None:
             return cached
