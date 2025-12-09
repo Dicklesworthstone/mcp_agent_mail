@@ -64,6 +64,7 @@ What this does:
 - Runs the auto-detect integration to wire up supported agent tools
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
 - Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
+- Adds an `am` shell alias to your `.zshrc` or `.bashrc` for quick server startup (just type `am` in a new terminal!)
 - Installs/updates, verifies, and wires the Beads `bd` CLI into your PATH via its official curl installer so the task planner is ready out of the box (pass `--skip-beads` to opt out or install manually)
 - Installs/updates the Beads Viewer `bv` TUI for interactive task browsing and AI-friendly robot commands (pass `--skip-bv` to opt out)
 - Prints a short on-exit summary of each setup step so you immediately know what changed

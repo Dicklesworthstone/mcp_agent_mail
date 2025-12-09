@@ -275,6 +275,78 @@ ensure_bd_path_ready() {
   persist_bd_path "${binary_path}"
 }
 
+install_am_alias() {
+  # Install 'am' alias to quickly start the MCP Agent Mail server
+  local repo_dir="$1"
+
+  local shell_name=""
+  if [[ -n "${SHELL:-}" ]]; then
+    shell_name=$(basename "${SHELL}")
+  fi
+
+  # Determine target RC file based on shell
+  local rc_file=""
+  if [[ "${shell_name}" == "zsh" ]]; then
+    rc_file="${HOME}/.zshrc"
+  elif [[ "${shell_name}" == "bash" ]]; then
+    rc_file="${HOME}/.bashrc"
+  else
+    # Fallback: try zshrc first (common on macOS), then bashrc
+    if [[ -f "${HOME}/.zshrc" ]]; then
+      rc_file="${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.bashrc" ]]; then
+      rc_file="${HOME}/.bashrc"
+    else
+      warn "Could not determine shell RC file for 'am' alias"
+      return 1
+    fi
+  fi
+
+  local marker="# >>> MCP Agent Mail alias"
+  local end_marker="# <<< MCP Agent Mail alias"
+  local alias_cmd="alias am='cd \"${repo_dir}\" && scripts/run_server_with_token.sh'"
+  local snippet=""
+  printf -v snippet '%s\n%s\n%s\n' "${marker}" "${alias_cmd}" "${end_marker}"
+
+  # Check if marker already exists
+  if [[ -f "${rc_file}" ]] && grep -Fq "${marker}" "${rc_file}"; then
+    # Update existing snippet
+    if rewrite_path_snippet "${rc_file}" "${marker}" "${end_marker}" "${snippet}"; then
+      ok "Updated 'am' alias in ${rc_file}"
+      record_summary "Alias 'am': updated in ${rc_file}"
+      return 0
+    fi
+    warn "Existing 'am' alias in ${rc_file} could not be updated automatically"
+    return 1
+  fi
+
+  # Check if user has a different 'am' alias already
+  if [[ -f "${rc_file}" ]] && grep -q "^alias am=" "${rc_file}"; then
+    warn "An existing 'am' alias was found in ${rc_file}; skipping to avoid conflict"
+    record_summary "Alias 'am': skipped (existing alias found)"
+    return 0
+  fi
+
+  # Append new snippet
+  if ! touch "${rc_file}" >/dev/null 2>&1; then
+    warn "Could not write to ${rc_file}"
+    return 1
+  fi
+
+  {
+    printf '\n%s' "${snippet}"
+  } >> "${rc_file}"
+
+  ok "Added 'am' alias to ${rc_file} (run 'am' to start the server)"
+  record_summary "Alias 'am': added to ${rc_file}"
+
+  # Also define it for the current session
+  # shellcheck disable=SC2139
+  alias am="cd \"${repo_dir}\" && scripts/run_server_with_token.sh" 2>/dev/null || true
+
+  return 0
+}
+
 verify_bd_binary() {
   local binary_path="$1"
   if ! "${binary_path}" version >/dev/null 2>&1; then
@@ -666,6 +738,7 @@ main() {
     ensure_beads
     ensure_bv
     install_cli_stub
+    install_am_alias "${REPO_DIR}"
     configure_port
     if ! run_integration_and_start; then
       err "Integration failed; aborting."
@@ -684,6 +757,7 @@ main() {
   ensure_repo
   ensure_python_and_venv
   sync_deps
+  install_am_alias "${REPO_DIR}"
   configure_port
   if ! run_integration_and_start; then
     err "Integration failed; aborting."
@@ -695,7 +769,9 @@ main() {
 
   echo
   ok "All set!"
-  echo "Next runs:"
+  echo "Next runs (open a new terminal or run 'source ~/.zshrc' / 'source ~/.bashrc'):"
+  echo "  am                                    # quick alias to start the server"
+  echo "  # or manually:"
   echo "  cd \"${REPO_DIR}\""
   echo "  source .venv/bin/activate"
   echo "  bash scripts/run_server_with_token.sh"
