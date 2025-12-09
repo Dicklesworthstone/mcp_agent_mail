@@ -682,6 +682,53 @@ def _parse_iso(raw_value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _validate_iso_timestamp(raw_value: Optional[str], param_name: str = "timestamp") -> Optional[datetime]:
+    """Parse and validate an ISO-8601 timestamp, raising helpful error on failure.
+
+    Unlike _parse_iso which silently returns None on failure, this function
+    raises a descriptive ToolExecutionError to help agents understand what
+    format is expected.
+
+    Parameters
+    ----------
+    raw_value : Optional[str]
+        The timestamp string to parse.
+    param_name : str
+        The parameter name to include in error messages.
+
+    Returns
+    -------
+    Optional[datetime]
+        Parsed datetime, or None if raw_value was None/empty.
+
+    Raises
+    ------
+    ToolExecutionError
+        If the value is provided but cannot be parsed as ISO-8601.
+    """
+    if raw_value is None:
+        return None
+    s = raw_value.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        raise ToolExecutionError(
+            error_type="INVALID_TIMESTAMP",
+            message=(
+                f"Invalid {param_name} format: '{raw_value}'. "
+                f"Expected ISO-8601 format like '2025-01-15T10:30:00+00:00' or '2025-01-15T10:30:00Z'. "
+                f"Common mistakes: missing timezone (add +00:00 or Z), using slashes instead of dashes, "
+                f"or using 12-hour format without AM/PM."
+            ),
+            recoverable=True,
+            data={"provided": raw_value, "expected_format": "YYYY-MM-DDTHH:MM:SS+HH:MM"},
+        )
+
+
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
     """Render a compact JSON error panel if Rich is available and tools logging is enabled."""
     try:
@@ -3077,6 +3124,27 @@ def build_mcp_server() -> FastMCP:
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
+        # Validate program and model are not empty
+        if not program or not program.strip():
+            raise ToolExecutionError(
+                error_type="EMPTY_PROGRAM",
+                message=(
+                    "program cannot be empty. Provide the name of your AI coding tool "
+                    "(e.g., 'claude-code', 'codex-cli', 'cursor', 'cline')."
+                ),
+                recoverable=True,
+                data={"provided": program},
+            )
+        if not model or not model.strip():
+            raise ToolExecutionError(
+                error_type="EMPTY_MODEL",
+                message=(
+                    "model cannot be empty. Provide the underlying model identifier "
+                    "(e.g., 'claude-opus-4.5', 'gpt-4-turbo', 'claude-sonnet-4')."
+                ),
+                recoverable=True,
+                data={"provided": model},
+            )
         project = await _get_project_by_identifier(project_key)
         if settings.tools_log_enabled:
             try:
@@ -3440,6 +3508,14 @@ def build_mcp_server() -> FastMCP:
                 f"use their agent names (e.g., 'BlueLake'). To discover agents, "
                 f"use resource://agents/{project_key}."
             )
+
+        # Subject length warning: warn if subject is too long (will be truncated in DB)
+        if len(subject) > 200:
+            await ctx.info(
+                f"[warn] Subject is {len(subject)} characters (max recommended: 80, truncated at 200). "
+                f"Long subjects may be truncated in search results. Consider moving details to the message body."
+            )
+            subject = subject[:200]
 
         if get_settings().tools_log_enabled:
             try:
@@ -4454,6 +4530,11 @@ def build_mcp_server() -> FastMCP:
                 )
             else:
                 raise
+        # Warn on TTL auto-correction
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds))
         async with get_session() as s:
@@ -4531,6 +4612,11 @@ def build_mcp_server() -> FastMCP:
         a_project = project if not from_project else await _get_project_by_identifier(from_project)
         a = await _get_agent(a_project, from_agent)
         b = await _get_agent(project, to_agent)
+        # Warn on TTL auto-correction
+        if accept and ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
         now = datetime.now(timezone.utc)
         exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
         updated = 0
@@ -4666,6 +4752,21 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate limit parameter bounds
+        if limit < 1:
+            raise ToolExecutionError(
+                error_type="INVALID_LIMIT",
+                message=f"limit must be at least 1, got {limit}. Use a positive integer.",
+                recoverable=True,
+                data={"provided": limit, "min": 1, "max": 1000},
+            )
+        if limit > 1000:
+            await ctx.info(f"[warn] limit={limit} is very large; capping at 1000 to prevent performance issues.")
+            limit = 1000
+
+        # Validate since_ts format upfront with helpful error message
+        _validate_iso_timestamp(since_ts, "since_ts")
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -5561,6 +5662,25 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate paths is not empty
+        if not paths:
+            raise ToolExecutionError(
+                error_type="EMPTY_PATHS",
+                message=(
+                    "paths list cannot be empty. Provide at least one file path or glob pattern "
+                    "to reserve (e.g., ['src/api/*.py', 'config/settings.yaml'])."
+                ),
+                recoverable=True,
+                data={"provided": paths},
+            )
+
+        # Warn on very short TTL (but still allow it for testing scenarios)
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below recommended minimum (60s). "
+                f"Very short TTLs may cause unexpected expiry during processing."
+            )
+
         project = await _get_project_by_identifier(project_key)
         settings = get_settings()
         if get_settings().tools_log_enabled:
