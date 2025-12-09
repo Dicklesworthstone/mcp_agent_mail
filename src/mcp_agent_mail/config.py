@@ -7,7 +7,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from decouple import Config as DecoupleConfig, RepositoryEmpty, RepositoryEnv  # type: ignore[import-untyped,attr-defined]
+from decouple import (  # type: ignore[import-untyped,attr-defined]
+    Config as DecoupleConfig,
+    RepositoryEmpty,
+    RepositoryEnv,
+)
 
 _DOTENV_PATH: Final[Path] = Path(".env")
 # Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
