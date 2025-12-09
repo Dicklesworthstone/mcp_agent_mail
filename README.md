@@ -54,7 +54,7 @@ Result: you invest 1–2 hours of human supervision, but dozens of agent-hours e
 ### One-line installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --yes
 ```
 
 What this does:
@@ -76,7 +76,7 @@ Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--sk
 
 ```bash
 # Install with custom port
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
 
 # Or use the CLI command after installation
 uv run python -m mcp_agent_mail.cli config set-port 9000
@@ -1771,7 +1771,7 @@ If port 8765 is already in use (e.g., by Cursor's Python extension), you can cha
 **Option 1: During installation**
 ```bash
 # One-liner with custom port
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
 
 # Or with local script
 ./scripts/install.sh --port 9000 --yes
