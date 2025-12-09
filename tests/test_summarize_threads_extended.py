@@ -8,6 +8,11 @@ from mcp_agent_mail.app import build_mcp_server
 
 @pytest.mark.asyncio
 async def test_summarize_threads_non_llm_mode_and_limit(isolated_env):
+    """Test multi-thread summarization using comma-separated thread IDs.
+
+    The summarize_thread tool supports multi-thread mode when thread_id is
+    comma-separated (e.g., "T1,T2"). This test verifies that behavior.
+    """
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/backend"})
@@ -29,9 +34,10 @@ async def test_summarize_threads_non_llm_mode_and_limit(isolated_env):
                         "thread_id": tid,
                     },
                 )
+        # Use summarize_thread with comma-separated thread IDs for multi-thread mode
         res = await client.call_tool(
-            "summarize_threads",
-            {"project_key": "Backend", "thread_ids": ["T1", "T2"], "llm_mode": False, "per_thread_limit": 2},
+            "summarize_thread",
+            {"project_key": "Backend", "thread_id": "T1,T2", "llm_mode": False, "per_thread_limit": 2},
         )
         data = res.data
         assert isinstance(data.get("threads"), list)
