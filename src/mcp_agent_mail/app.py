@@ -5387,81 +5387,65 @@ def build_mcp_server() -> FastMCP:
         include_examples: bool = False,
         llm_mode: bool = True,
         llm_model: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """
-        Extract participants, key points, and action items for a thread.
-
-        Notes
-        -----
-        - If `thread_id` is not an id present on any message, it is treated as a string key
-        - If `thread_id` is a message id, messages where `id == thread_id` are also included
-        - `include_examples` returns up to 3 sample messages for quick preview
-
-        Suggested use
-        -------------
-        - Call after a long discussion to inform a summarizing or planning agent.
-        - Use `key_points` to seed a TODO list and `action_items` to assign work.
-
-        Returns
-        -------
-        dict
-            { thread_id, summary: {participants[], key_points[], action_items[], total_messages}, examples[] }
-
-        Example
-        -------
-        ```json
-        {"jsonrpc":"2.0","id":"11","method":"tools/call","params":{"name":"summarize_thread","arguments":{
-          "project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true
-        }}}
-        ```
-        """
-        project = await _get_project_by_identifier(project_key)
-        summary, examples, total_messages = await _compute_thread_summary(
-            project,
-            thread_id,
-            include_examples,
-            llm_mode,
-            llm_model,
-                )
-        await ctx.info(
-            f"Summarized thread '{thread_id}' for project '{project.human_key}' with {total_messages} messages"
-        )
-        return {"thread_id": thread_id, "summary": summary, "examples": examples}
-
-    @mcp.tool(name="summarize_threads")
-    @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
-    async def summarize_threads(
-        ctx: Context,
-        project_key: str,
-        thread_ids: list[str],
-        llm_mode: bool = True,
-        llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
     ) -> dict[str, Any]:
         """
-        Produce a digest across multiple threads including top mentions and action items.
+        Extract participants, key points, and action items for one or more threads.
+
+        Single-thread mode (thread_id is a single ID):
+        - Returns detailed summary with optional example messages
+        - Response: { thread_id, summary: {participants[], key_points[], action_items[]}, examples[] }
+
+        Multi-thread mode (thread_id is comma-separated IDs like "TKT-1,TKT-2,TKT-3"):
+        - Returns aggregate digest across all threads
+        - Response: { threads: [{thread_id, summary}], aggregate: {top_mentions[], key_points[], action_items[]} }
 
         Parameters
         ----------
         project_key : str
             Project identifier.
-        thread_ids : list[str]
-            Collection of thread keys or seed message ids.
+        thread_id : str
+            Single thread ID for detailed summary, OR comma-separated IDs for aggregate digest.
+        include_examples : bool
+            If true (single-thread mode only), include up to 3 sample messages.
         llm_mode : bool
-            If true and LLM is enabled, refine the digest with the LLM for clarity.
+            If true and LLM is enabled, refine the summary with AI.
         llm_model : Optional[str]
             Override model name for the LLM call.
         per_thread_limit : int
-            Max messages to consider per thread.
+            Max messages to consider per thread (multi-thread mode).
 
-        Returns
-        -------
-        dict
-            {
-              threads: [{thread_id, summary}],
-              aggregate: { top_mentions[], action_items[], key_points[] }
-            }
+        Examples
+        --------
+        Single thread:
+        ```json
+        {"thread_id": "TKT-123", "include_examples": true}
+        ```
+
+        Multiple threads:
+        ```json
+        {"thread_id": "TKT-1,TKT-2,TKT-3"}
+        ```
         """
+        # Detect multi-thread mode by checking for comma-separated IDs
+        thread_ids = [t.strip() for t in thread_id.split(",") if t.strip()]
+
+        if len(thread_ids) == 1:
+            # Single-thread mode: detailed summary with examples
+            project = await _get_project_by_identifier(project_key)
+            summary, examples, total_messages = await _compute_thread_summary(
+                project,
+                thread_ids[0],
+                include_examples,
+                llm_mode,
+                llm_model,
+            )
+            await ctx.info(
+                f"Summarized thread '{thread_ids[0]}' for project '{project.human_key}' with {total_messages} messages"
+            )
+            return {"thread_id": thread_ids[0], "summary": summary, "examples": examples}
+
+        # Multi-thread mode: aggregate digest
         project = await _get_project_by_identifier(project_key)
         if project.id is None:
             raise ValueError("Project must have an id before summarizing threads.")
