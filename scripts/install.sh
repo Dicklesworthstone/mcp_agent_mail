@@ -488,7 +488,9 @@ configure_port() {
   # Set trap to cleanup temp file
   trap "rm -f \"${tmp}\" 2>/dev/null" EXIT INT TERM
 
-  # Set secure umask for all file operations
+  # Set secure umask for .env file operations, save original to restore later
+  local old_umask
+  old_umask=$(umask)
   umask 077
 
   if [[ -f "${env_file}" ]]; then
@@ -499,6 +501,7 @@ configure_port() {
         err "Failed to update HTTP_PORT in .env"
         rm -f "${tmp}" 2>/dev/null
         trap - EXIT INT TERM
+        umask "${old_umask}"
         return 1
       fi
     else
@@ -507,6 +510,7 @@ configure_port() {
         err "Failed to append HTTP_PORT to .env"
         rm -f "${tmp}" 2>/dev/null
         trap - EXIT INT TERM
+        umask "${old_umask}"
         return 1
       fi
     fi
@@ -516,6 +520,7 @@ configure_port() {
       err "Failed to write .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
   else
@@ -524,6 +529,7 @@ configure_port() {
       err "Failed to create .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
 
@@ -531,6 +537,7 @@ configure_port() {
       err "Failed to write .env file"
       rm -f "${tmp}" 2>/dev/null
       trap - EXIT INT TERM
+      umask "${old_umask}"
       return 1
     fi
   fi
@@ -539,6 +546,7 @@ configure_port() {
   chmod 600 "${env_file}" 2>/dev/null || warn "Could not set .env permissions to 600"
 
   trap - EXIT INT TERM
+  umask "${old_umask}"
   ok "HTTP_PORT set to ${HTTP_PORT_OVERRIDE}"
   record_summary "HTTP port: ${HTTP_PORT_OVERRIDE}"
 }
