@@ -5672,7 +5672,7 @@ def build_mcp_server() -> FastMCP:
 
         project = await _get_project_by_identifier(project_key)
         settings = get_settings()
-        if get_settings().tools_log_enabled:
+        if settings.tools_log_enabled:
             try:
                 import importlib as _imp
                 _rc = _imp.import_module("rich.console")
