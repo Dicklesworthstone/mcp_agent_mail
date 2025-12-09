@@ -822,14 +822,13 @@ def _sanitize_fts_query(query: str) -> str | None:
     if upper_trimmed in {"AND", "OR", "NOT"}:
         return None
 
-    # Fix leading bare asterisk: "* foo bar" -> "foo bar"
-    # But keep valid prefix patterns like "auth*"
+    # FTS5 doesn't support leading wildcards (*foo), only trailing (foo*).
+    # Strip leading "*" regardless of what follows: "*foo" -> "foo", "* bar" -> "bar"
     if trimmed.startswith("*"):
         if len(trimmed) == 1:
             return None
-        if trimmed[1].isspace():
-            # Strip leading "* " and recurse
-            return _sanitize_fts_query(trimmed[1:].lstrip())
+        # Strip leading "*" (and any following whitespace) and recurse
+        return _sanitize_fts_query(trimmed[1:].lstrip())
 
     # Fix trailing lone asterisks that aren't part of prefix patterns
     # e.g., "foo *" -> "foo"
