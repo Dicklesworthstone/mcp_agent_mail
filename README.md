@@ -73,6 +73,21 @@ Prefer a specific location or options? Add flags like `--dir <path>`, `--project
 
 Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--skip-bv` to bypass automatic installation.
 
+### Starting the server in the future
+
+After installation, you can start the MCP Agent Mail server from **anywhere** by simply typing:
+
+```bash
+am
+```
+
+That's it! The `am` alias (added to your `.zshrc` or `.bashrc` during installation) automatically:
+1. Changes to the MCP Agent Mail directory
+2. Runs the server startup script (which uses `uv run` to handle the virtual environment)
+3. Loads your saved bearer token from `.env` and starts the HTTP server
+
+**Note:** If you just ran the installer, open a new terminal or run `source ~/.zshrc` (or `source ~/.bashrc`) to load the alias.
+
 **Port conflicts?** Use `--port` to specify a different port (default: 8765):
 
 ```bash
