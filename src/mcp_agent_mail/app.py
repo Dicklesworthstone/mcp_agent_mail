@@ -39,6 +39,7 @@ from sqlalchemy.orm import aliased
 from . import rich_logger
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
+from .fts_helpers import get_db_type, sanitize_fts_query, build_search_query_sql
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
 from .models import (
@@ -777,26 +778,16 @@ def _validate_program_model(program: str, model: str) -> None:
         )
 
 
-# Patterns that are unsearchable in FTS5 - return None to signal "no results"
-_FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
+def _sanitize_fts_query_for_db(query: str) -> str | None:
+    """Sanitize an FTS query string for the current database type.
 
-
-def _sanitize_fts_query(query: str) -> str | None:
-    """Sanitize an FTS5 query string, fixing common issues where possible.
-
-    SQLite FTS5 has specific syntax requirements. This function attempts to
-    fix common mistakes rather than throwing errors. Returns None when the
-    query cannot produce meaningful results (caller should return empty list).
-
-    Fixes applied:
-    - Strips whitespace
-    - Removes leading bare `*` (keeps `term*` prefix patterns)
-    - Converts unsearchable patterns to None (empty results)
+    Delegates to fts_helpers.sanitize_fts_query() which handles both
+    SQLite FTS5 and PostgreSQL tsquery syntax.
 
     Parameters
     ----------
     query : str
-        The FTS5 query string to sanitize.
+        The FTS query string to sanitize.
 
     Returns
     -------
@@ -805,43 +796,8 @@ def _sanitize_fts_query(query: str) -> str | None:
         When None is returned, the caller should return an empty result list
         instead of executing the query.
     """
-    if not query:
-        return None
-
-    trimmed = query.strip()
-
-    if not trimmed:
-        return None
-
-    # Check for bare patterns that can't match anything meaningful in FTS5
-    if trimmed in _FTS5_UNSEARCHABLE_PATTERNS:
-        return None
-
-    # Bare boolean operators without terms - can't search
-    upper_trimmed = trimmed.upper()
-    if upper_trimmed in {"AND", "OR", "NOT"}:
-        return None
-
-    # FTS5 doesn't support leading wildcards (*foo), only trailing (foo*).
-    # Strip leading "*" regardless of what follows: "*foo" -> "foo", "* bar" -> "bar"
-    if trimmed.startswith("*"):
-        if len(trimmed) == 1:
-            return None
-        # Strip leading "*" (and any following whitespace) and recurse
-        return _sanitize_fts_query(trimmed[1:].lstrip())
-
-    # Fix trailing lone asterisks that aren't part of prefix patterns
-    # e.g., "foo *" -> "foo"
-    if trimmed.endswith(" *"):
-        trimmed = trimmed[:-2].rstrip()
-        if not trimmed:
-            return None
-
-    # Multiple consecutive spaces -> single space
-    while "  " in trimmed:
-        trimmed = trimmed.replace("  ", " ")
-
-    return trimmed if trimmed else None
+    db_type = get_db_type(get_settings().database.url)
+    return sanitize_fts_query(query, db_type)
 
 
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
@@ -5416,7 +5372,7 @@ def build_mcp_server() -> FastMCP:
             raise ValueError("Project must have an id before searching messages.")
 
         # Sanitize the FTS query - returns None if query can't produce results
-        sanitized_query = _sanitize_fts_query(query)
+        sanitized_query = _sanitize_fts_query_for_db(query)
         if sanitized_query is None:
             await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
             try:
@@ -5428,21 +5384,20 @@ def build_mcp_server() -> FastMCP:
         await ensure_schema()
         rows: list[Any] = []
         try:
+            # Use database-agnostic search SQL
+            db_type = get_db_type(get_settings().database.url)
+            search_sql = build_search_query_sql(
+                db_type,
+                table_alias="m",
+                project_filter="project_id = :project_id",
+                include_snippet=False,
+                order_by="relevance",
+                limit=limit,
+            )
             async with get_session() as session:
                 result = await session.execute(
-                    text(
-                        """
-                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name
-                        FROM fts_messages
-                        JOIN messages m ON fts_messages.rowid = m.id
-                        JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id = :project_id AND fts_messages MATCH :query
-                        ORDER BY bm25(fts_messages) ASC
-                        LIMIT :limit
-                        """
-                    ),
-                    {"project_id": project.id, "query": sanitized_query, "limit": limit},
+                    text(search_sql),
+                    {"project_id": project.id, "query": sanitized_query},
                 )
                 rows = list(result.mappings().all())
         except Exception as fts_err:
@@ -6606,7 +6561,7 @@ def build_mcp_server() -> FastMCP:
             Full-text search across all projects linked to a product.
             """
             # Sanitize the FTS query first
-            sanitized_query = _sanitize_fts_query(query)
+            sanitized_query = _sanitize_fts_query_for_db(query)
             if sanitized_query is None:
                 await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
                 try:
@@ -6627,22 +6582,27 @@ def build_mcp_server() -> FastMCP:
                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
                 if not proj_ids:
                     return []
-                # FTS search limited to projects in proj_ids
+                # FTS search limited to projects in proj_ids (multi-project filter)
                 try:
+                    db_type = get_db_type(get_settings().database.url)
+                    # Build database-agnostic search SQL with multi-project filter
+                    search_sql = build_search_query_sql(
+                        db_type,
+                        table_alias="m",
+                        project_filter="project_id IN :proj_ids",
+                        include_snippet=False,
+                        order_by="relevance",
+                        limit=limit,
+                    )
+                    # Add project_id to SELECT for the result mapping
+                    # Insert it after sender_name in the SELECT clause
+                    search_sql = search_sql.replace(
+                        "a.name AS sender_name",
+                        "a.name AS sender_name, m.project_id"
+                    )
                     result = await session.execute(
-                        text(
-                            """
-                            SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                                   m.thread_id, a.name AS sender_name, m.project_id
-                            FROM fts_messages
-                            JOIN messages m ON fts_messages.rowid = m.id
-                            JOIN agents a ON m.sender_id = a.id
-                            WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                            ORDER BY bm25(fts_messages) ASC
-                            LIMIT :limit
-                            """
-                        ).bindparams(bindparam("proj_ids", expanding=True)),
-                        {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                        text(search_sql).bindparams(bindparam("proj_ids", expanding=True)),
+                        {"proj_ids": proj_ids, "query": sanitized_query},
                     )
                     rows = list(result.mappings().all())
                 except Exception as fts_err:
