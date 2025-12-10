@@ -1055,7 +1055,6 @@ source = { editable = "." }
 dependencies = [
     { name = "aiolimiter" },
     { name = "aiosqlite" },
-    { name = "asyncpg" },
     { name = "attrs" },
     { name = "authlib" },
     { name = "bleach" },
@@ -1097,6 +1096,9 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+postgres = [
+    { name = "asyncpg" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1109,7 +1111,7 @@ dev = [
 requires-dist = [
     { name = "aiolimiter", specifier = ">=1.1.0" },
     { name = "aiosqlite", specifier = ">=0.20.0" },
-    { name = "asyncpg", specifier = ">=0.30.0" },
+    { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.30.0" },
     { name = "attrs", specifier = ">=24.2.0" },
     { name = "authlib", specifier = ">=1.5.2,<1.6" },
     { name = "bleach", specifier = ">=6.1.0" },
@@ -1147,7 +1149,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.15.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["postgres", "dev"]
 
 [package.metadata.requires-dev]
 dev = [
