@@ -234,7 +234,13 @@ def _bridge_provider_env() -> None:
     Also map common synonyms to LiteLLM's canonical env names, e.g. GEMINI_API_KEY -> GOOGLE_API_KEY,
     GROK_API_KEY -> XAI_API_KEY.
     """
-    cfg = DecoupleConfig(RepositoryEnv(".env"))
+    from decouple import RepositoryEmpty  # type: ignore[import-untyped]
+
+    # Gracefully handle missing .env file (e.g., in CI/tests)
+    try:
+        cfg = DecoupleConfig(RepositoryEnv(".env"))
+    except FileNotFoundError:
+        cfg = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
 
     def _get_from_any(*keys: str) -> str:
         for k in keys:
