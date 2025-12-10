@@ -22,9 +22,9 @@ COPY third_party_docs third_party_docs
 COPY project_idea_and_guide.md project_idea_and_guide.md
 COPY AGENTS.md ./
 
-# Create virtualenv and install dependencies
+# Create virtualenv and install dependencies including postgres extras (asyncpg)
 # The virtualenv is created at /opt/mcp-agent-mail/.venv to match runtime path
-RUN uv sync --frozen --no-editable
+RUN uv sync --frozen --no-editable --extra postgres
 
 # Runtime stage: Use slim image with runtime dependencies
 FROM python:3.14-slim-bookworm AS runtime
