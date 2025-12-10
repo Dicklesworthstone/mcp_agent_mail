@@ -127,8 +127,15 @@ async def _get_agent_record(project: Project, agent_name: str) -> Agent:
 
 
 def _iso(dt: Optional[datetime]) -> str:
+    """Return ISO-8601 in UTC from datetime.
+
+    Naive datetimes (from SQLite) are assumed to be UTC already.
+    """
     if dt is None:
         return ""
+    # Handle naive datetimes from SQLite (assume UTC)
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
 
 
