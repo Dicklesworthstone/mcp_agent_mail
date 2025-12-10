@@ -35,7 +35,6 @@ dependencies = [
   "python-decouple>=3.8",
   "sqlmodel>=0.0.16",
   "sqlalchemy[asyncio]>=2.0.35",
-  "asyncpg>=0.30.0",
   "aiosqlite>=0.20.0",
   "httpx[http2]>=0.27.2",
   "aiolimiter>=1.1.0",
@@ -59,6 +58,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+postgres = [
+  "asyncpg>=0.30.0",
+]
 dev = [
   "ruff>=0.5.7",
   "mypy>=1.11.1",
