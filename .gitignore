@@ -222,3 +222,17 @@ out/
 # Cryptographic signing keys (Ed25519 key pairs for bundle signing)
 signing-*.key
 signing-*.pub
+
+# Local agent configuration directories (per-user, not project config)
+.claude/
+.codex/
+.cursor/
+.gemini/
+
+# Backup files
+*.backup
+AGENTS.md.backup
+
+# SQLite WAL/SHM temp files (test databases)
+test.sqlite3-shm
+test.sqlite3-wal
