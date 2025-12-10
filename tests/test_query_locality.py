@@ -420,10 +420,21 @@ def test_query_plan_dbstat_locality(sample_db: Path) -> None:
     Note: Small test databases may have poor locality due to schema objects
     (indexes, FTS tables) interspersed with data. Production exports should
     run VACUUM to optimize locality.
+
+    Note: The dbstat virtual table is an optional compile-time extension
+    that may not be available in all SQLite builds (e.g., some CI environments).
     """
     conn = sqlite3.connect(sample_db)
 
     try:
+        # Check if dbstat extension is available (optional compile-time extension)
+        try:
+            conn.execute("SELECT * FROM dbstat LIMIT 1")
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                pytest.skip("dbstat extension not available in this SQLite build")
+            raise
+
         # Check that messages table has measurable locality
         cursor = conn.execute("""
             SELECT name, COUNT(*) as page_count,

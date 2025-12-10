@@ -46,7 +46,8 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     # Install the guard and run it with AGENT_NAME set to Blue
     hook_path = await install_guard(settings, "backend", repo_dir)
     assert hook_path.exists()
-    env = {"AGENT_NAME": "Blue", **{}}
+    # WORKTREES_ENABLED=1 is required for the guard to actually run (not exit early)
+    env = {"AGENT_NAME": "Blue", "WORKTREES_ENABLED": "1"}
     proc_hook = await asyncio.create_subprocess_exec(
         str(hook_path),
         cwd=str(repo_dir),
