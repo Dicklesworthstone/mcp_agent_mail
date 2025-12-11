@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlmodel import SQLModel
 
 from .config import DatabaseSettings, Settings, get_settings
+from .fts_helpers import get_db_type
 
 T = TypeVar("T")
 
@@ -235,6 +236,22 @@ def reset_database_state() -> None:
 
 
 def _setup_fts(connection: Any) -> None:
+    """Set up full-text search indexes and triggers.
+
+    Dispatches to database-specific implementation based on DATABASE_URL.
+    """
+    db_type = get_db_type(get_settings().database.url)
+    if db_type == "sqlite":
+        _setup_fts_sqlite(connection)
+    else:
+        _setup_fts_postgresql(connection)
+
+    # Additional performance indexes for common access patterns (work on both databases)
+    _setup_common_indexes(connection)
+
+
+def _setup_fts_sqlite(connection: Any) -> None:
+    """Set up SQLite FTS5 virtual table and triggers."""
     connection.exec_driver_sql(
         "CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(message_id UNINDEXED, subject, body)"
     )
@@ -268,7 +285,77 @@ def _setup_fts(connection: Any) -> None:
         END;
         """
     )
-    # Additional performance indexes for common access patterns
+
+
+def _setup_fts_postgresql(connection: Any) -> None:
+    """Set up PostgreSQL tsvector column, GIN index, and triggers.
+
+    PostgreSQL FTS uses a tsvector column on the messages table with a GIN index
+    for fast searching. A trigger automatically updates the search_vector on
+    INSERT and UPDATE.
+    """
+    # Add search_vector column if it doesn't exist
+    # PostgreSQL doesn't have IF NOT EXISTS for ADD COLUMN, so we check first
+    connection.exec_driver_sql(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'messages' AND column_name = 'search_vector'
+            ) THEN
+                ALTER TABLE messages ADD COLUMN search_vector tsvector;
+            END IF;
+        END $$;
+        """
+    )
+
+    # Create GIN index for fast full-text search
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_search_vector ON messages USING GIN(search_vector)"
+    )
+
+    # Create or replace the trigger function
+    # Uses setweight to give subject higher relevance than body
+    connection.exec_driver_sql(
+        """
+        CREATE OR REPLACE FUNCTION messages_search_vector_update() RETURNS trigger AS $$
+        BEGIN
+            NEW.search_vector :=
+                setweight(to_tsvector('english', COALESCE(NEW.subject, '')), 'A') ||
+                setweight(to_tsvector('english', COALESCE(NEW.body_md, '')), 'B');
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+    )
+
+    # Create trigger (drop first to ensure it's updated)
+    connection.exec_driver_sql(
+        "DROP TRIGGER IF EXISTS messages_search_vector_trigger ON messages"
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TRIGGER messages_search_vector_trigger
+        BEFORE INSERT OR UPDATE ON messages
+        FOR EACH ROW EXECUTE FUNCTION messages_search_vector_update();
+        """
+    )
+
+    # Backfill existing rows that don't have search_vector populated
+    connection.exec_driver_sql(
+        """
+        UPDATE messages
+        SET search_vector =
+            setweight(to_tsvector('english', COALESCE(subject, '')), 'A') ||
+            setweight(to_tsvector('english', COALESCE(body_md, '')), 'B')
+        WHERE search_vector IS NULL;
+        """
+    )
+
+
+def _setup_common_indexes(connection: Any) -> None:
+    """Set up performance indexes that work on both SQLite and PostgreSQL."""
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_messages_created_ts ON messages(created_ts)"
     )

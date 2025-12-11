@@ -10,13 +10,23 @@ from sqlalchemy.types import JSON
 from sqlmodel import Field, SQLModel
 
 
+def _utcnow_naive() -> datetime:
+    """Return current UTC time as a timezone-naive datetime.
+
+    PostgreSQL TIMESTAMP WITHOUT TIME ZONE columns require naive datetimes.
+    asyncpg strictly enforces this - mixing aware and naive datetimes causes
+    'can't subtract offset-naive and offset-aware datetimes' errors.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class Project(SQLModel, table=True):
     __tablename__ = "projects"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     slug: str = Field(index=True, unique=True, max_length=255)
     human_key: str = Field(max_length=255, index=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=_utcnow_naive)
 
 class Product(SQLModel, table=True):
     """Logical grouping across multiple repositories for product-wide inbox/search and threads."""
@@ -27,7 +37,7 @@ class Product(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     product_uid: str = Field(index=True, max_length=64)
     name: str = Field(index=True, max_length=255)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=_utcnow_naive)
 
 class ProductProjectLink(SQLModel, table=True):
     """Associates a Project with a Product (many-to-many via link table)."""
@@ -38,7 +48,7 @@ class ProductProjectLink(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     product_id: int = Field(foreign_key="products.id", index=True)
     project_id: int = Field(foreign_key="projects.id", index=True)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=_utcnow_naive)
 
 
 class Agent(SQLModel, table=True):
@@ -51,8 +61,8 @@ class Agent(SQLModel, table=True):
     program: str = Field(max_length=128)
     model: str = Field(max_length=128)
     task_description: str = Field(default="", max_length=2048)
-    inception_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    last_active_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    inception_ts: datetime = Field(default_factory=_utcnow_naive)
+    last_active_ts: datetime = Field(default_factory=_utcnow_naive)
     attachments_policy: str = Field(default="auto", max_length=16)
     contact_policy: str = Field(default="auto", max_length=16)  # open | auto | contacts_only | block_all
 
@@ -78,7 +88,7 @@ class Message(SQLModel, table=True):
     body_md: str
     importance: str = Field(default="normal", max_length=16)
     ack_required: bool = Field(default=False)
-    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
     attachments: list[dict[str, Any]] = Field(
         default_factory=list,
         sa_column=Column(JSON, nullable=False, server_default="[]"),
@@ -94,7 +104,7 @@ class FileReservation(SQLModel, table=True):
     path_pattern: str = Field(max_length=512)
     exclusive: bool = Field(default=True)
     reason: str = Field(default="", max_length=512)
-    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
     expires_ts: datetime
     released_ts: Optional[datetime] = None
 
@@ -115,8 +125,8 @@ class AgentLink(SQLModel, table=True):
     b_agent_id: int = Field(foreign_key="agents.id", index=True)
     status: str = Field(default="pending", max_length=16)  # pending | approved | blocked
     reason: str = Field(default="", max_length=512)
-    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
+    updated_ts: datetime = Field(default_factory=_utcnow_naive)
     expires_ts: Optional[datetime] = None
 
 
@@ -132,7 +142,7 @@ class ProjectSiblingSuggestion(SQLModel, table=True):
     score: float = Field(default=0.0)
     status: str = Field(default="suggested", max_length=16)  # suggested | confirmed | dismissed
     rationale: str = Field(default="", max_length=4096)
-    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    evaluated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
+    evaluated_ts: datetime = Field(default_factory=_utcnow_naive)
     confirmed_ts: Optional[datetime] = Field(default=None)
     dismissed_ts: Optional[datetime] = Field(default=None)

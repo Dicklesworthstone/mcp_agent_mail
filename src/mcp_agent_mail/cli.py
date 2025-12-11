@@ -33,9 +33,10 @@ from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query, build_mcp_server
+from .app import build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session
+from .fts_helpers import build_search_query_sql, get_db_type, sanitize_fts_query
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import Agent, FileReservation, Message, MessageRecipient, Product, ProductProjectLink, Project
@@ -303,8 +304,9 @@ def products_search(
     """
     Full-text search over messages for all projects linked to a product.
     """
-    # Sanitize query before executing
-    sanitized_query = _sanitize_fts_query(query)
+    # Sanitize query before executing (database-agnostic)
+    db_type = get_db_type(get_settings().database.url)
+    sanitized_query = sanitize_fts_query(query, db_type)
     if sanitized_query is None:
         console.print(f"[yellow]Query '{query}' cannot produce search results.[/]")
         return
@@ -324,20 +326,23 @@ def products_search(
             if not proj_ids:
                 return []
             try:
+                # Use database-agnostic search SQL
+                search_sql = build_search_query_sql(
+                    db_type,
+                    table_alias="m",
+                    project_filter="project_id IN :proj_ids",
+                    include_snippet=False,
+                    order_by="relevance",
+                    limit=limit,
+                )
+                # Add project_id to SELECT for the result mapping
+                search_sql = search_sql.replace(
+                    "a.name AS sender_name",
+                    "a.name AS sender_name, m.project_id"
+                )
                 result = await session.execute(
-                    text(
-                        """
-                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name, m.project_id
-                        FROM fts_messages
-                        JOIN messages m ON fts_messages.rowid = m.id
-                        JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                        ORDER BY bm25(fts_messages) ASC
-                        LIMIT :limit
-                        """
-                    ).bindparams(bindparam("proj_ids", expanding=True)),
-                    {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                    text(search_sql).bindparams(bindparam("proj_ids", expanding=True)),
+                    {"proj_ids": proj_ids, "query": sanitized_query},
                 )
                 return [dict(row) for row in result.mappings().all()]
             except Exception:

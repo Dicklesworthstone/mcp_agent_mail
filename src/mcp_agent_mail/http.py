@@ -35,6 +35,7 @@ from .app import (
 )
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
+from .fts_helpers import get_db_type
 from .storage import (
     archive_write_lock,
     collect_lock_status,
@@ -50,6 +51,68 @@ from .storage import (
     write_agent_profile,
     write_file_reservation_record,
 )
+
+
+def _build_web_search_fts_sql(
+    db_type: str,
+    snippet_length: int = 18,
+    order: str = "relevance",
+    weights: tuple[float, float, float] = (0.0, 1.0, 1.0),
+    limit: int = 10000,
+) -> str:
+    """Build FTS search SQL for the web interface with snippets and hit counting.
+
+    This generates database-specific SQL for the web search endpoints that need
+    snippet extraction and hit counting for display.
+
+    Args:
+        db_type: "sqlite" or "postgresql"
+        snippet_length: Max words in snippet
+        order: "relevance" or "time"
+        weights: BM25 weights for SQLite (ignored for PostgreSQL)
+        limit: Max results
+
+    Returns:
+        SQL query string with :pid and :q parameters.
+    """
+    if db_type == "sqlite":
+        # SQLite FTS5 with snippet and hit counting
+        snippet_expr = f"snippet(fts_messages, 2, '<mark>', '</mark>', '…', {snippet_length})"
+        # Calculate hits by counting <mark> tags in snippet
+        hits_expr = f"(length({snippet_expr}) - length(replace({snippet_expr}, '<mark>', ''))) / 6"
+        order_expr = (
+            "ORDER BY m.created_ts DESC"
+            if order == "time"
+            else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]})"
+        )
+        return (
+            f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
+            f"{snippet_expr} AS body_snippet, {hits_expr} AS hits "
+            f"FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid "
+            f"JOIN agents s ON s.id = m.sender_id "
+            f"WHERE m.project_id = :pid AND fts_messages MATCH :q "
+            f"{order_expr} LIMIT {limit}"
+        )
+    else:
+        # PostgreSQL with ts_headline for snippets
+        # Use ts_rank for relevance; hit counting via string replacement
+        snippet_expr = (
+            f"ts_headline('english', m.body_md, websearch_to_tsquery('english', :q), "
+            f"'StartSel=<mark>, StopSel=</mark>, MaxWords={snippet_length}, MinWords=5, ShortWord=3')"
+        )
+        hits_expr = f"(length({snippet_expr}) - length(replace({snippet_expr}, '<mark>', ''))) / 6"
+        order_expr = (
+            "ORDER BY m.created_ts DESC"
+            if order == "time"
+            else "ORDER BY ts_rank(m.search_vector, websearch_to_tsquery('english', :q)) DESC"
+        )
+        return (
+            f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
+            f"{snippet_expr} AS body_snippet, {hits_expr} AS hits "
+            f"FROM messages m JOIN agents s ON s.id = m.sender_id "
+            f"WHERE m.project_id = :pid AND m.search_vector @@ websearch_to_tsquery('english', :q) "
+            f"{order_expr} LIMIT {limit}"
+        )
 
 
 async def _project_slug_from_id(pid: int | None) -> str | None:
@@ -1352,21 +1415,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 agents = [{"id": r[0], "name": r[1], "program": r[2], "model": r[3]} for r in agents_q.fetchall()]
                 matched_messages: list[dict] = []
                 if q and q.strip():
-                    # Prefer FTS5 when available (fts_messages maintained by triggers)
+                    # Use database-agnostic FTS search
                     fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
                     weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
-                    fts_sql = (
-                        "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet, "
-                        "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18), '<mark>', ''))) / 6 AS hits "
-                        "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
-                        "WHERE m.project_id = :pid AND fts_messages MATCH :q "
-                        + (
-                            "ORDER BY m.created_ts DESC "
-                            if (order or "relevance") == "time"
-                            else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]}) "
-                        )
-                        + "LIMIT 10000"
+                    db_type = get_db_type(get_settings().database.url)
+                    fts_sql = _build_web_search_fts_sql(
+                        db_type,
+                        snippet_length=18,
+                        order=order or "relevance",
+                        weights=weights,
+                        limit=10000,
                     )
                     try:
                         search = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q})
@@ -1993,21 +2051,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 pid = int(prow[0])
                 fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
                 weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
-                fts_sql = (
-                    "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet, "
-                    "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22), '<mark>', ''))) / 6 AS hits "
-                    "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
-                    "WHERE m.project_id = :pid AND fts_messages MATCH :q "
-                    + (
-                        "ORDER BY m.created_ts DESC "
-                        if (order or "relevance") == "time"
-                        else f"ORDER BY bm25(fts_messages, {weights[0]}, {weights[1]}, {weights[2]}) "
-                    )
-                    + "LIMIT :lim"
+                db_type = get_db_type(get_settings().database.url)
+                fts_sql = _build_web_search_fts_sql(
+                    db_type,
+                    snippet_length=22,
+                    order=order or "relevance",
+                    weights=weights,
+                    limit=limit,
                 )
                 try:
-                    rows = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q, "lim": limit})
+                    rows = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q})
                     results = [
                         {
                             "id": r[0],
