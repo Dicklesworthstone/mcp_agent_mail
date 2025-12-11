@@ -323,6 +323,7 @@
                          @click.stop
                          @change="toggleMessageSelection(msg.id)"
                          :checked="selectedMessages.includes(msg.id)"
+                         :aria-label="`Select message from ${msg.sender}`"
                          class="mt-1 w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500 transition-all duration-200 cursor-pointer opacity-0 group-hover:opacity-100"
                          :class="selectedMessages.includes(msg.id) ? 'opacity-100' : ''">
 

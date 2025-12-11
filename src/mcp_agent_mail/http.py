@@ -17,6 +17,7 @@ from typing import Any, cast
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
@@ -1023,6 +1024,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             enable_async=True,
             auto_reload=True,  # Reload templates when source file changes
         )
+        # Mount static CSS files
+        static_path = templates_root / "css"
+        fastapi_app.mount("/static/css", StaticFiles(directory=str(static_path)), name="static")
+        
+        # Add url_for function to Jinja2 globals for template rendering
+        def url_for(name: str, **path_params: Any) -> str:
+            if name == "static":
+                filename = path_params.get("filename", "")
+                return f"/static/{filename}"
+            return "#"
+        
+        env.globals["url_for"] = url_for
         # HTML sanitizer (allow safe images and limited CSS)
         _css_sanitizer = (
             CSSSanitizer(
