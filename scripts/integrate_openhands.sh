@@ -31,7 +31,12 @@ if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
 AGENT_SETTINGS="${HOME}/.openhands/agent_settings.json"
 if [[ ! -f "${AGENT_SETTINGS}" ]]; then
-  log_err "OpenHands agent settings not found at ${AGENT_SETTINGS}. Launch OpenHands once to generate it."
+  log_err "OpenHands agent settings not found at ${AGENT_SETTINGS}."
+  if command -v openhands >/dev/null 2>&1; then
+    log_warn "Run 'openhands' once to initialize settings, then re-run this integration script."
+  else
+    log_warn "Install and launch the OpenHands CLI to initialize settings, then re-run this integration script."
+  fi
   exit 1
 fi
 
@@ -69,7 +74,9 @@ PY
 )
   fi
   log_ok "Generated bearer token."
+  update_env_var HTTP_BEARER_TOKEN "${_TOKEN}"
 fi
+export HTTP_BEARER_TOKEN="${_TOKEN}"
 
 # Prepare MCP config entry
 AUTH_HEADER_LINE="\"Authorization\": \"Bearer ${_TOKEN}\""
@@ -174,23 +181,26 @@ PY
 )"
 
   _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${AGENT_NAME:-${USER:-openhands}}") || { log_err "Failed to escape agent name"; exit 1; }
+  _AGENT_NAME_RAW="${AGENT_NAME:-}"
   _MODEL_ESCAPED=$(json_escape_string "${_OH_MODEL:-unknown}") || { log_err "Failed to escape model"; exit 1; }
-
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Ensured project on server"
-  else
-    log_warn "Failed to ensure project (server may be starting)"
+  _NAME_FIELD=""
+  if [[ -n "${_AGENT_NAME_RAW}" ]]; then
+    _AGENT_ESCAPED=$(json_escape_string "${_AGENT_NAME_RAW}") || { log_err "Failed to escape agent name"; exit 1; }
+    _NAME_FIELD=",\"name\":${_AGENT_ESCAPED}"
   fi
 
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"openhands\",\"model\":${_MODEL_ESCAPED},\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
-      "${_URL}" >/dev/null 2>&1; then
+  _ensure_payload="{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}"
+  if _ensure_output=$(curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" -d "${_ensure_payload}" "${_URL}" 2>&1); then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project (server may be starting): ${_ensure_output}"
+  fi
+
+  _register_payload="{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"openhands\",\"model\":${_MODEL_ESCAPED}${_NAME_FIELD},\"task_description\":\"setup\"}}}"
+  if _register_output=$(curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" -d "${_register_payload}" "${_URL}" 2>&1); then
     log_ok "Registered agent on server"
   else
-    log_warn "Failed to register agent (server may be starting)"
+    log_warn "Failed to register agent (server may be starting or name invalid): ${_register_output}"
   fi
 fi
 
