@@ -28,6 +28,8 @@ def _stage_file(repo_path: Path, rel_path: str, content: str = "x") -> None:
 def _run_precommit(script_path: Path, repo_path: Path, agent_name: str) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["AGENT_NAME"] = agent_name
+    # WORKTREES_ENABLED=1 is required for the guard to actually run (not exit early)
+    env["WORKTREES_ENABLED"] = "1"
     return subprocess.run(["python", str(script_path)], cwd=str(repo_path), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 

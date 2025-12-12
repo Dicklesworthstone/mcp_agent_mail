@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, AsyncIterator, Callable, Optional, cast
 from urllib.parse import parse_qsl
 import uuid
 
@@ -30,8 +30,8 @@ try:
     from pathspec import PathSpec  # type: ignore[import-not-found]
     from pathspec.patterns.gitwildmatch import GitWildMatchPattern  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency fallback
-    PathSpec = None  # type: ignore[assignment]
-    GitWildMatchPattern = None  # type: ignore[assignment]
+    PathSpec = None  # type: ignore[misc,assignment]
+    GitWildMatchPattern = None  # type: ignore[misc,assignment]
 from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
@@ -55,6 +55,7 @@ from .models import (
 from .storage import (
     ProjectArchive,
     archive_write_lock,
+    clear_repo_cache,
     collect_lock_status,
     ensure_archive,
     heal_archive_locks,
@@ -67,6 +68,28 @@ from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_a
 import contextlib
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _git_repo(path: str | Path, search_parent_directories: bool = True) -> Any:
+    """Context manager for GitPython Repo that ensures proper cleanup.
+
+    GitPython's Repo object opens file handles for index, config, and other files.
+    Without explicit cleanup, these accumulate and cause "too many open files" errors
+    under heavy load. This context manager ensures repo.close() is always called.
+
+    Usage:
+        with _git_repo("/path/to/project") as repo:
+            branch = repo.active_branch.name
+    """
+    repo = None
+    try:
+        repo = Repo(path, search_parent_directories=search_parent_directories)
+        yield repo
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
 
 TOOL_METRICS: defaultdict[str, dict[str, int]] = defaultdict(lambda: {"calls": 0, "errors": 0})
 TOOL_CLUSTER_MAP: dict[str, str] = {}
@@ -165,7 +188,7 @@ def _instrument_tool(
     complexity: str = "medium",
     agent_arg: Optional[str] = None,
     project_arg: Optional[str] = None,
-):
+) -> Callable[[Any], Any]:
     meta = {
         "cluster": cluster,
         "capabilities": sorted(capabilities or {cluster}),
@@ -175,11 +198,11 @@ def _instrument_tool(
     }
     _register_tool(tool_name, meta)
 
-    def decorator(func):
+    def decorator(func: Any) -> Any:
         signature = inspect.signature(func)
 
         @wraps(func)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             start_time = time.perf_counter()
 
             metrics = TOOL_METRICS[tool_name]
@@ -234,14 +257,120 @@ def _instrument_tool(
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
-            except Exception as exc:
+            except ValueError as exc:
+                # Invalid argument value
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
                 wrapped_exc = ToolExecutionError(
-                    "UNHANDLED_EXCEPTION",
-                    "Server encountered an unexpected error while executing tool.",
-                    recoverable=False,
-                    data={"tool": tool_name, "original_error": type(exc).__name__},
+                    "INVALID_ARGUMENT",
+                    f"Invalid argument value: {exc}. Check that all parameters have valid values.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TypeError as exc:
+                # Wrong argument type
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_msg = str(exc)
+                # Try to extract helpful info from TypeError
+                hint = ""
+                if "got an unexpected keyword argument" in error_msg:
+                    hint = " Check parameter names for typos."
+                elif "missing" in error_msg and "required" in error_msg:
+                    hint = " Ensure all required parameters are provided."
+                elif "NoneType" in error_msg:
+                    hint = " A required value was None/null."
+                wrapped_exc = ToolExecutionError(
+                    "TYPE_ERROR",
+                    f"Argument type mismatch: {exc}.{hint}",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except KeyError as exc:
+                # Missing key/field
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "MISSING_FIELD",
+                    f"Missing required field: {exc}. Ensure all required parameters are provided.",
+                    recoverable=True,
+                    data={"tool": tool_name, "missing_field": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except TimeoutError as exc:
+                # Timeout (database lock, network, etc.)
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "TIMEOUT",
+                    f"Operation timed out: {exc}. The server may be under heavy load. Try again in a moment.",
+                    recoverable=True,
+                    data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except OSError as exc:
+                # Handle file descriptor exhaustion (EMFILE) with cache cleanup
+                import errno
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                if exc.errno == errno.EMFILE:
+                    # Clear repo cache to free file handles and allow recovery
+                    cleared = clear_repo_cache()
+                    wrapped_exc = ToolExecutionError(
+                        "RESOURCE_EXHAUSTED",
+                        f"Too many open files. Freed {cleared} cached repos. Retry the operation.",
+                        recoverable=True,
+                        data={"tool": tool_name, "freed_repos": cleared, "error_detail": str(exc)},
+                    )
+                else:
+                    wrapped_exc = ToolExecutionError(
+                        "OS_ERROR",
+                        f"OS error: {exc}",
+                        recoverable=False,
+                        data={"tool": tool_name, "errno": exc.errno, "error_detail": str(exc)},
+                    )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except Exception as exc:
+                # Catch-all for unexpected errors - provide helpful categorization
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                error_type = type(exc).__name__
+                error_msg = str(exc)
+
+                # Try to categorize common error patterns
+                if "database" in error_msg.lower() or "sqlite" in error_msg.lower():
+                    error_category = "DATABASE_ERROR"
+                    friendly_msg = "A database error occurred. This may be a transient issue - try again."
+                    recoverable = True
+                elif "lock" in error_msg.lower() or "busy" in error_msg.lower():
+                    error_category = "RESOURCE_BUSY"
+                    friendly_msg = "Resource is temporarily busy. Wait a moment and try again."
+                    recoverable = True
+                elif "permission" in error_msg.lower() or "access" in error_msg.lower():
+                    error_category = "PERMISSION_ERROR"
+                    friendly_msg = f"Access denied: {error_msg}"
+                    recoverable = False
+                elif "connection" in error_msg.lower() or "network" in error_msg.lower():
+                    error_category = "CONNECTION_ERROR"
+                    friendly_msg = "Connection error occurred. Check network and try again."
+                    recoverable = True
+                else:
+                    error_category = "UNHANDLED_EXCEPTION"
+                    friendly_msg = f"Unexpected error ({error_type}): {error_msg}"
+                    recoverable = False
+
+                wrapped_exc = ToolExecutionError(
+                    error_category,
+                    friendly_msg,
+                    recoverable=recoverable,
+                    data={"tool": tool_name, "original_error": error_type, "error_detail": error_msg},
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
@@ -324,9 +453,9 @@ def _capabilities_for(agent: Optional[str], project: Optional[str]) -> list[str]
     return sorted(caps)
 
 
-def _lifespan_factory(settings: Settings):
+def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[None]]:
     @asynccontextmanager
-    async def lifespan(app: FastMCP):
+    async def lifespan(app: FastMCP) -> AsyncIterator[None]:
         init_engine(settings)
         heal_summary = await heal_archive_locks(settings)
         if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed"):
@@ -341,22 +470,29 @@ def _lifespan_factory(settings: Settings):
         await ensure_schema(settings)
         yield
 
-    return lifespan
+    return lifespan  # type: ignore[return-value]
 
 
 def _iso(dt: Any) -> str:
     """Return ISO-8601 in UTC from datetime or best-effort from string.
 
     Accepts datetime or ISO-like string; falls back to str(dt) if unknown.
+    Naive datetimes (from SQLite) are assumed to be UTC already.
     """
     try:
         if isinstance(dt, str):
             try:
                 parsed = datetime.fromisoformat(dt)
+                # Handle naive parsed datetimes (assume UTC)
+                if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
                 return parsed.astimezone(timezone.utc).isoformat()
             except Exception:
                 return dt
         if hasattr(dt, "astimezone"):
+            # Handle naive datetimes from SQLite (assume UTC)
+            if getattr(dt, "tzinfo", None) is None or dt.tzinfo.utcoffset(dt) is None:
+                dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc).isoformat()  # type: ignore[no-any-return]
         return str(dt)
     except Exception:
@@ -495,10 +631,16 @@ def _open_repo_if_available(workspace: Optional[Path]) -> Optional[Repo]:
     try:
         root = Path(repo.working_tree_dir or "")
     except Exception:
+        # Close repo before returning None to avoid file handle leak
+        with suppress(Exception):
+            repo.close()
         return None
     with suppress(Exception):
         workspace.resolve().relative_to(root.resolve())
         return repo
+    # Close repo before returning None to avoid file handle leak
+    with suppress(Exception):
+        repo.close()
     return None
 
 
@@ -556,6 +698,150 @@ def _parse_iso(raw_value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(s)
     except ValueError:
         return None
+
+
+def _validate_iso_timestamp(raw_value: Optional[str], param_name: str = "timestamp") -> Optional[datetime]:
+    """Parse and validate an ISO-8601 timestamp, raising helpful error on failure.
+
+    Unlike _parse_iso which silently returns None on failure, this function
+    raises a descriptive ToolExecutionError to help agents understand what
+    format is expected.
+
+    Parameters
+    ----------
+    raw_value : Optional[str]
+        The timestamp string to parse.
+    param_name : str
+        The parameter name to include in error messages.
+
+    Returns
+    -------
+    Optional[datetime]
+        Parsed datetime, or None if raw_value was None/empty.
+
+    Raises
+    ------
+    ToolExecutionError
+        If the value is provided but cannot be parsed as ISO-8601.
+    """
+    if raw_value is None:
+        return None
+    s = raw_value.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        raise ToolExecutionError(
+            error_type="INVALID_TIMESTAMP",
+            message=(
+                f"Invalid {param_name} format: '{raw_value}'. "
+                f"Expected ISO-8601 format like '2025-01-15T10:30:00+00:00' or '2025-01-15T10:30:00Z'. "
+                f"Common mistakes: missing timezone (add +00:00 or Z), using slashes instead of dashes, "
+                f"or using 12-hour format without AM/PM."
+            ),
+            recoverable=True,
+            data={"provided": raw_value, "expected_format": "YYYY-MM-DDTHH:MM:SS+HH:MM"},
+        ) from None
+
+
+def _validate_program_model(program: str, model: str) -> None:
+    """Validate that program and model are non-empty strings.
+
+    Raises
+    ------
+    ToolExecutionError
+        If program or model is empty or whitespace-only.
+    """
+    if not program or not program.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_PROGRAM",
+            message=(
+                "program cannot be empty. Provide the name of your AI coding tool "
+                "(e.g., 'claude-code', 'codex-cli', 'cursor', 'cline')."
+            ),
+            recoverable=True,
+            data={"provided": program},
+        )
+    if not model or not model.strip():
+        raise ToolExecutionError(
+            error_type="EMPTY_MODEL",
+            message=(
+                "model cannot be empty. Provide the underlying model identifier "
+                "(e.g., 'claude-opus-4.5', 'gpt-4-turbo', 'claude-sonnet-4')."
+            ),
+            recoverable=True,
+            data={"provided": model},
+        )
+
+
+# Patterns that are unsearchable in FTS5 - return None to signal "no results"
+_FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
+
+
+def _sanitize_fts_query(query: str) -> str | None:
+    """Sanitize an FTS5 query string, fixing common issues where possible.
+
+    SQLite FTS5 has specific syntax requirements. This function attempts to
+    fix common mistakes rather than throwing errors. Returns None when the
+    query cannot produce meaningful results (caller should return empty list).
+
+    Fixes applied:
+    - Strips whitespace
+    - Removes leading bare `*` (keeps `term*` prefix patterns)
+    - Converts unsearchable patterns to None (empty results)
+
+    Parameters
+    ----------
+    query : str
+        The FTS5 query string to sanitize.
+
+    Returns
+    -------
+    str | None
+        The sanitized query string, or None if the query cannot produce results.
+        When None is returned, the caller should return an empty result list
+        instead of executing the query.
+    """
+    if not query:
+        return None
+
+    trimmed = query.strip()
+
+    if not trimmed:
+        return None
+
+    # Check for bare patterns that can't match anything meaningful in FTS5
+    if trimmed in _FTS5_UNSEARCHABLE_PATTERNS:
+        return None
+
+    # Bare boolean operators without terms - can't search
+    upper_trimmed = trimmed.upper()
+    if upper_trimmed in {"AND", "OR", "NOT"}:
+        return None
+
+    # FTS5 doesn't support leading wildcards (*foo), only trailing (foo*).
+    # Strip leading "*" regardless of what follows: "*foo" -> "foo", "* bar" -> "bar"
+    if trimmed.startswith("*"):
+        if len(trimmed) == 1:
+            return None
+        # Strip leading "*" (and any following whitespace) and recurse
+        return _sanitize_fts_query(trimmed[1:].lstrip())
+
+    # Fix trailing lone asterisks that aren't part of prefix patterns
+    # e.g., "foo *" -> "foo"
+    if trimmed.endswith(" *"):
+        trimmed = trimmed[:-2].rstrip()
+        if not trimmed:
+            return None
+
+    # Multiple consecutive spaces -> single space
+    while "  " in trimmed:
+        trimmed = trimmed.replace("  ", " ")
+
+    return trimmed if trimmed else None
 
 
 def _rich_error_panel(title: str, payload: dict[str, Any]) -> None:
@@ -714,25 +1000,25 @@ def _compute_project_slug(human_key: str) -> str:
     if mode == "git-remote":
         try:
             # Attempt to use GitPython for robustness across worktrees
-            repo = Repo(human_key, search_parent_directories=True)
-            remote_name = settings.project_identity_remote or "origin"
-            remote_url: str | None = None
-            # Prefer 'git remote get-url' to support multiple urls/rewrite rules
-            try:
-                remote_url = repo.git.remote("get-url", remote_name).strip() or None
-            except Exception:
-                # Fallback: use config if available
+            with _git_repo(human_key) as repo:
+                remote_name = settings.project_identity_remote or "origin"
+                remote_url: str | None = None
+                # Prefer 'git remote get-url' to support multiple urls/rewrite rules
                 try:
-                    remote = next((r for r in repo.remotes if r.name == remote_name), None)
-                    if remote and remote.urls:
-                        remote_url = next(iter(remote.urls), None)
+                    remote_url = repo.git.remote("get-url", remote_name).strip() or None
                 except Exception:
-                    remote_url = None
-            normalized = _norm_remote(remote_url)
-            if normalized:
-                base = normalized.rsplit("/", 1)[-1] or "repo"
-                canonical = normalized  # privacy-safe canonical string
-                return f"{base}-{_short_sha1(canonical)}"
+                    # Fallback: use config if available
+                    try:
+                        remote = next((r for r in repo.remotes if r.name == remote_name), None)
+                        if remote and remote.urls:
+                            remote_url = next(iter(remote.urls), None)
+                    except Exception:
+                        remote_url = None
+                normalized = _norm_remote(remote_url)
+                if normalized:
+                    base = normalized.rsplit("/", 1)[-1] or "repo"
+                    canonical = normalized  # privacy-safe canonical string
+                    return f"{base}-{_short_sha1(canonical)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             # Non-git directory or error; fall through to fallback
             pass
@@ -742,14 +1028,14 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-toplevel
     if mode == "git-toplevel":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            top = repo.git.rev_parse("--show-toplevel").strip()
-            if top:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                top = repo.git.rev_parse("--show-toplevel").strip()
+                if top:
+                    from pathlib import Path as _P
 
-                top_real = str(_P(top).resolve())
-                base = _P(top_real).name or "repo"
-                return f"{base}-{_short_sha1(top_real)}"
+                    top_real = str(_P(top).resolve())
+                    base = _P(top_real).name or "repo"
+                    return f"{base}-{_short_sha1(top_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -757,20 +1043,20 @@ def _compute_project_slug(human_key: str) -> str:
     # Mode: git-common-dir
     if mode == "git-common-dir":
         try:
-            repo = Repo(human_key, search_parent_directories=True)
-            # Prefer GitPython's common_dir which normalizes worktree paths
-            try:
-                gdir = getattr(repo, "common_dir", None)
-            except Exception:
-                gdir = None
-            if not gdir:
-                gdir = repo.git.rev_parse("--git-common-dir").strip()
-            if gdir:
-                from pathlib import Path as _P
+            with _git_repo(human_key) as repo:
+                # Prefer GitPython's common_dir which normalizes worktree paths
+                try:
+                    gdir = getattr(repo, "common_dir", None)
+                except Exception:
+                    gdir = None
+                if not gdir:
+                    gdir = repo.git.rev_parse("--git-common-dir").strip()
+                if gdir:
+                    from pathlib import Path as _P
 
-                gdir_real = str(_P(gdir).resolve())
-                base = "repo"
-                return f"{base}-{_short_sha1(gdir_real)}"
+                    gdir_real = str(_P(gdir).resolve())
+                    base = "repo"
+                    return f"{base}-{_short_sha1(gdir_real)}"
         except (InvalidGitRepositoryError, NoSuchPathError, Exception):
             return slugify(human_key)
         return slugify(human_key)
@@ -877,42 +1163,42 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             return {}
 
     try:
-        repo = Repo(target_path, search_parent_directories=True)
-        repo_root = str(Path(repo.working_tree_dir or "").resolve())
-        try:
-            git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
-        except Exception:
-            git_common_dir = None
-        try:
-            branch = repo.active_branch.name
-        except Exception:
+        with _git_repo(target_path) as repo:
+            repo_root = str(Path(repo.working_tree_dir or "").resolve())
             try:
-                branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                git_common_dir = repo.git.rev_parse("--git-common-dir").strip()
             except Exception:
-                branch = None
-        try:
-            worktree_name = Path(repo.working_tree_dir or "").name or None
-        except Exception:
-            worktree_name = None
-        try:
-            core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
-            core_ignorecase = str(core_ic).strip().lower() == "true"
-        except Exception:
-            core_ignorecase = None
-        remote_name = settings_local.project_identity_remote or "origin"
-        remote_url: Optional[str] = None
-        try:
-            remote_url = repo.git.remote("get-url", remote_name).strip() or None
-        except Exception:
+                git_common_dir = None
             try:
-                r = next((r for r in repo.remotes if r.name == remote_name), None)
-                if r and r.urls:
-                    remote_url = next(iter(r.urls), None)
+                branch = repo.active_branch.name
             except Exception:
-                remote_url = None
-        normalized_remote = _norm_remote(remote_url)
+                try:
+                    branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                except Exception:
+                    branch = None
+            try:
+                worktree_name = Path(repo.working_tree_dir or "").name or None
+            except Exception:
+                worktree_name = None
+            try:
+                core_ic = repo.config_reader().get_value("core", "ignorecase", "false")
+                core_ignorecase = str(core_ic).strip().lower() == "true"
+            except Exception:
+                core_ignorecase = None
+            remote_name = settings_local.project_identity_remote or "origin"
+            remote_url_local: Optional[str] = None
+            try:
+                remote_url_local = repo.git.remote("get-url", remote_name).strip() or None
+            except Exception:
+                try:
+                    r = next((r for r in repo.remotes if r.name == remote_name), None)
+                    if r and r.urls:
+                        remote_url_local = next(iter(r.urls), None)
+                except Exception:
+                    remote_url_local = None
+            normalized_remote = _norm_remote(remote_url_local)
     except (InvalidGitRepositoryError, NoSuchPathError, Exception):
-        repo = None
+        pass  # Non-git directory; continue with fallback values
 
     if mode_used == "git-remote" and normalized_remote:
         canonical_path = normalized_remote
@@ -1014,16 +1300,16 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             table = _Table(title="Identity Resolution", show_header=True, header_style="bold white on blue")
             table.add_column("Field", style="bold cyan")
             table.add_column("Value")
-            table.add_row("Mode", payload["identity_mode_used"] or "dir")
-            table.add_row("Slug", payload["slug"])
-            table.add_row("Canonical", payload["canonical_path"])
-            table.add_row("Repo Root", payload["repo_root"] or "")
-            table.add_row("Git Common Dir", payload["git_common_dir"] or "")
-            table.add_row("Branch", payload["branch"] or "")
-            table.add_row("Worktree", payload["worktree_name"] or "")
+            table.add_row("Mode", str(payload["identity_mode_used"] or "dir"))
+            table.add_row("Slug", str(payload["slug"]))
+            table.add_row("Canonical", str(payload["canonical_path"]))
+            table.add_row("Repo Root", str(payload["repo_root"] or ""))
+            table.add_row("Git Common Dir", str(payload["git_common_dir"] or ""))
+            table.add_row("Branch", str(payload["branch"] or ""))
+            table.add_row("Worktree", str(payload["worktree_name"] or ""))
             table.add_row("Ignorecase", str(payload["core_ignorecase"]))
-            table.add_row("Normalized Remote", payload["normalized_remote"] or "")
-            table.add_row("Project UID", payload["project_uid"] or "")
+            table.add_row("Normalized Remote", str(payload["normalized_remote"] or ""))
+            table.add_row("Project UID", str(payload["project_uid"] or ""))
             console.print(table)
     except Exception:
         # Never fail due to logging
@@ -1034,28 +1320,238 @@ async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
     slug = _compute_project_slug(human_key)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))
+        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
         project = result.scalars().first()
         if project:
             return project
         project = Project(slug=slug, human_key=human_key)
         session.add(project)
         await session.commit()
-        await session.refresh(project)
+        await session.refresh(project)  # type: ignore[arg-type]
         return project
 
     # -- Identity inspection resource is registered inside build_mcp_server below
 
 
+# --- Smart lookup helpers with fuzzy matching and suggestions -----------------------------------
+
+
+def _similarity_score(a: str, b: str) -> float:
+    """Compute similarity score between two strings (0.0 to 1.0)."""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+async def _find_similar_projects(identifier: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, str, float]]:
+    """Find projects with similar slugs/names. Returns list of (slug, human_key, score)."""
+    slug = slugify(identifier)
+    suggestions: list[tuple[str, str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(select(Project))
+        projects = result.scalars().all()
+        for p in projects:
+            # Check both slug and human_key similarity
+            slug_score = _similarity_score(slug, p.slug)
+            key_score = _similarity_score(identifier, p.human_key) if p.human_key else 0.0
+            best_score = max(slug_score, key_score)
+            if best_score >= min_score:
+                suggestions.append((p.slug, p.human_key, best_score))
+    suggestions.sort(key=lambda x: x[2], reverse=True)
+    return suggestions[:limit]
+
+
+async def _find_similar_agents(project: Project, name: str, limit: int = 5, min_score: float = 0.4) -> list[tuple[str, float]]:
+    """Find agents with similar names in the project. Returns list of (name, score)."""
+    suggestions: list[tuple[str, float]] = []
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(cast(Any, Agent.project_id == project.id))
+        )
+        agents = result.scalars().all()
+        for a in agents:
+            score = _similarity_score(name, a.name)
+            if score >= min_score:
+                suggestions.append((a.name, score))
+    suggestions.sort(key=lambda x: x[1], reverse=True)
+    return suggestions[:limit]
+
+
+async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
+    """List agent names in a project."""
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)  # type: ignore[call-overload]
+        )
+        return [row[0] for row in result.all()]
+
+
 async def _get_project_by_identifier(identifier: str) -> Project:
+    """Get project by identifier with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not identifier or not identifier.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            "Project identifier cannot be empty. Provide a project path like '/data/projects/myproject' or a slug like 'myproject'.",
+            recoverable=True,
+            data={"parameter": "project_key", "provided": repr(identifier)},
+        )
+
     slug = slugify(identifier)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))
+        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
         project = result.scalars().first()
-        if not project:
-            raise NoResultFound(f"Project '{identifier}' not found.")
-        return project
+        if project:
+            return project
+
+    # Project not found - provide helpful suggestions
+    suggestions = await _find_similar_projects(identifier)
+
+    if suggestions:
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found. Did you mean: {suggestion_text}? "
+            f"Use ensure_project to create a new project, or check spelling.",
+            recoverable=True,
+            data={
+                "identifier": identifier,
+                "slug_searched": slug,
+                "suggestions": [{"slug": s[0], "human_key": s[1], "score": round(s[2], 2)} for s in suggestions],
+            },
+        )
+    else:
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Project '{identifier}' not found and no similar projects exist. "
+            f"Use ensure_project to create a new project first. "
+            f"Example: ensure_project(human_key='/path/to/your/project')",
+            recoverable=True,
+            data={"identifier": identifier, "slug_searched": slug},
+        )
+
+
+# --- Common mistake detection helpers --------------------------------------------------------
+
+# Known program names that agents might mistakenly use as agent names
+_KNOWN_PROGRAM_NAMES: frozenset[str] = frozenset({
+    "claude-code", "claude", "codex-cli", "codex", "cursor", "windsurf",
+    "cline", "aider", "copilot", "github-copilot", "gemini-cli", "gemini",
+    "opencode", "vscode", "neovim", "vim", "emacs", "zed", "continue",
+})
+
+# Known model name patterns that agents might mistakenly use as agent names
+_MODEL_NAME_PATTERNS: tuple[str, ...] = (
+    "gpt-", "gpt4", "gpt3", "claude-", "opus", "sonnet", "haiku",
+    "gemini-", "llama", "mistral", "codestral", "o1-", "o3-",
+)
+
+
+def _looks_like_program_name(value: str) -> bool:
+    """Check if value looks like a program name (not a valid agent name)."""
+    v = value.lower().strip()
+    return v in _KNOWN_PROGRAM_NAMES
+
+
+def _looks_like_model_name(value: str) -> bool:
+    """Check if value looks like a model name (not a valid agent name)."""
+    v = value.lower().strip()
+    return any(p in v for p in _MODEL_NAME_PATTERNS)
+
+
+def _looks_like_email(value: str) -> bool:
+    """Check if value looks like an email address."""
+    return "@" in value and "." in value.split("@")[-1]
+
+
+def _looks_like_broadcast(value: str) -> bool:
+    """Check if value looks like a broadcast attempt."""
+    v = value.lower().strip()
+    return v in {"all", "*", "everyone", "broadcast", "@all", "@everyone"}
+
+
+def _looks_like_descriptive_name(value: str) -> bool:
+    """Check if value looks like a descriptive role name instead of adjective+noun."""
+    v = value.lower()
+    # Common suffixes for descriptive agent names
+    descriptive_patterns = (
+        "agent", "bot", "assistant", "helper", "manager", "coordinator",
+        "developer", "engineer", "migrator", "refactorer", "fixer",
+        "harmonizer", "integrator", "optimizer", "analyzer", "worker",
+    )
+    return any(v.endswith(p) for p in descriptive_patterns)
+
+
+def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
+    """
+    Detect common mistakes when agents provide invalid agent names.
+    Returns (mistake_type, helpful_message) or None if no obvious mistake detected.
+    """
+    if _looks_like_program_name(value):
+        return (
+            "PROGRAM_NAME_AS_AGENT",
+            f"'{value}' looks like a program name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'BlueLake' or 'GreenCastle'. "
+            f"Use the 'program' parameter for program names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_model_name(value):
+        return (
+            "MODEL_NAME_AS_AGENT",
+            f"'{value}' looks like a model name, not an agent name. "
+            f"Agent names must be adjective+noun combinations like 'RedStone' or 'PurpleBear'. "
+            f"Use the 'model' parameter for model names, and omit 'name' to auto-generate a valid agent name."
+        )
+    if _looks_like_email(value):
+        return (
+            "EMAIL_AS_AGENT",
+            f"'{value}' looks like an email address. Agent names are simple identifiers like 'BlueDog', "
+            f"not email addresses. Check the 'to' parameter format."
+        )
+    if _looks_like_broadcast(value):
+        return (
+            "BROADCAST_ATTEMPT",
+            f"'{value}' looks like a broadcast attempt. Agent Mail doesn't support broadcasting to all agents. "
+            f"List specific recipient agent names in the 'to' parameter."
+        )
+    if _looks_like_descriptive_name(value):
+        return (
+            "DESCRIPTIVE_NAME",
+            f"'{value}' looks like a descriptive role name. Agent names must be randomly generated "
+            f"adjective+noun combinations like 'WhiteMountain' or 'BrownCreek', NOT descriptive of the agent's task. "
+            f"Omit the 'name' parameter to auto-generate a valid name."
+        )
+    return None
+
+
+def _detect_suspicious_file_reservation(pattern: str) -> str | None:
+    """
+    Detect suspicious file reservation patterns that might be too broad.
+    Returns a warning message or None if the pattern looks reasonable.
+    """
+    p = pattern.strip()
+
+    # Catch overly broad patterns
+    if p in ("*", "**", "**/*", "**/**", "."):
+        return (
+            f"Pattern '{p}' is too broad and would reserve the entire project. "
+            f"Use more specific patterns like 'src/api/*.py' or 'lib/auth/**'."
+        )
+
+    # Catch absolute paths when relative expected
+    if p.startswith("/") and not p.startswith("//"):
+        return (
+            f"Pattern '{p}' looks like an absolute path. File reservation patterns should be "
+            f"project-relative (e.g., 'src/module.py' not '/full/path/src/module.py')."
+        )
+
+    # Warn about very short patterns that might be unintentionally broad
+    if len(p) <= 2 and "*" in p:
+        return (
+            f"Pattern '{p}' is very short and may match more files than intended. "
+            f"Consider using a more specific pattern."
+        )
+
+    return None
 
 
 # --- Project sibling suggestion helpers -----------------------------------------------------
@@ -1085,7 +1581,7 @@ def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
 
 
 @asynccontextmanager
-async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     try:
         async with archive_write_lock(archive, timeout_seconds=timeout_seconds):
             yield
@@ -1221,14 +1717,14 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
         if len(projects) < 2:
             return
 
-        agents_rows = await session.execute(select(Agent.project_id, Agent.name))
+        agents_rows = await session.execute(select(Agent.project_id, Agent.name))  # type: ignore[call-overload]
         agent_map: dict[int, list[str]] = defaultdict(list)
         for proj_id, name in agents_rows.fetchall():
             agent_map[int(proj_id)].append(name)
 
         existing_rows = (await session.execute(select(ProjectSiblingSuggestion))).scalars().all()
         existing_map: dict[tuple[int, int], ProjectSiblingSuggestion] = {}
-        for suggestion in existing_rows:
+        for suggestion in existing_rows:  # type: ignore[call-overload]
             pair = _canonical_project_pair(suggestion.project_a_id, suggestion.project_b_id)
             existing_map[pair] = suggestion
 
@@ -1248,7 +1744,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                     continue
 
                 pair = _canonical_project_pair(project_a.id, project_b.id)
-                suggestion = existing_map.get(pair)
+                suggestion = existing_map.get(pair)  # type: ignore[assignment]
                 if suggestion is None:
                     to_evaluate.append((project_a, project_b, None))
                 else:
@@ -1273,7 +1769,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
             return
 
         updated = False
-        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:
+        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:  # type: ignore[assignment]
             profile_a = await _build_project_profile(project_a, agent_map.get(project_a.id or -1, []))
             profile_b = await _build_project_profile(project_b, agent_map.get(project_b.id or -1, []))
             score, rationale = await _score_project_pair(project_a, profile_a, project_b, profile_b)
@@ -1340,7 +1836,7 @@ async def get_project_sibling_data() -> dict[int, dict[str, list[dict[str, Any]]
                 entry = {**entry_base, "peer": other}
                 if entry["status"] == "confirmed":
                     bucket["confirmed"].append(entry)
-                elif entry["status"] != "dismissed" and float(entry_base["score"]) >= _PROJECT_SIBLING_MIN_SUGGESTION_SCORE:
+                elif entry["status"] != "dismissed" and float(cast(float, entry_base["score"])) >= _PROJECT_SIBLING_MIN_SUGGESTION_SCORE:
                     bucket["suggested"].append(entry)
 
         return result_map
@@ -1357,30 +1853,30 @@ async def update_project_sibling_status(project_id: int, other_id: int, status: 
         suggestion = (
             await session.execute(
                 select(ProjectSiblingSuggestion).where(
-                    ProjectSiblingSuggestion.project_a_id == pair[0],
-                    ProjectSiblingSuggestion.project_b_id == pair[1],
+                    ProjectSiblingSuggestion.project_a_id == pair[0],  # type: ignore[arg-type]
+                    ProjectSiblingSuggestion.project_b_id == pair[1],  # type: ignore[arg-type]
                 )
             )
         ).scalars().first()
 
         if suggestion is None:
-            # Create a baseline suggestion via refresh for this specific pair
-            project_a_obj = await session.get(Project, pair[0])
+            # Create a baseline suggestion via refresh for this specific pair  # type: ignore[arg-type]
+            project_a_obj = await session.get(Project, pair[0])  # type: ignore[arg-type]
             project_b_obj = await session.get(Project, pair[1])
             projects = [proj for proj in (project_a_obj, project_b_obj) if proj is not None]
             if len(projects) != 2:
                 raise NoResultFound("Project pair not found")
             project_map = {proj.id: proj for proj in projects if proj.id is not None}
             agents_rows = await session.execute(
-                select(Agent.project_id, Agent.name).where(
-                    or_(Agent.project_id == pair[0], Agent.project_id == pair[1])
+                select(Agent.project_id, Agent.name).where(  # type: ignore[call-overload]
+                    or_(Agent.project_id == pair[0], cast(Any, Agent.project_id) == pair[1])  # type: ignore[arg-type]
                 )
             )
             agent_map: dict[int, list[str]] = defaultdict(list)
             for proj_id, name in agents_rows.fetchall():
                 agent_map[int(proj_id)].append(name)
-            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))
-            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))
+            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))  # type: ignore[call-overload]
+            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))  # type: ignore[arg-type]
             score, rationale = await _score_project_pair(project_map[pair[0]], profile_a, project_map[pair[1]], profile_b)
             suggestion = ProjectSiblingSuggestion(
                 project_a_id=pair[0],
@@ -1434,14 +1930,14 @@ async def _agent_name_exists(project: Project, name: str) -> bool:
         raise ValueError("Project must have an id before querying agents.")
     async with get_session() as session:
         result = await session.execute(
-            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
+            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[call-overload]
         )
         return result.first() is not None
 
 
 async def _generate_unique_agent_name(
     project: Project,
-    settings: Settings,
+    settings: Settings,  # type: ignore[arg-type]
     name_hint: Optional[str] = None,
 ) -> str:
     archive = await ensure_archive(settings, project.slug)
@@ -1532,11 +2028,23 @@ async def _get_or_create_agent(
                 desired_name = sanitized
             else:
                 if mode == "strict":
-                    raise ValueError(
+                    # Check for common mistakes and provide specific guidance
+                    mistake = _detect_agent_name_mistake(sanitized)
+                    if mistake:
+                        raise ToolExecutionError(
+                            mistake[0],
+                            mistake[1],
+                            recoverable=True,
+                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
+                        )
+                    raise ToolExecutionError(
+                        "INVALID_AGENT_NAME",
                         f"Invalid agent name format: '{sanitized}'. "
                         f"Agent names MUST be randomly generated adjective+noun combinations "
                         f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name."
+                        f"Omit the 'name' parameter to auto-generate a valid name.",
+                        recoverable=True,
+                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
                     )
                 # coerce -> ignore invalid provided name and auto-generate
                 desired_name = await _generate_unique_agent_name(project, settings, None)
@@ -1544,14 +2052,14 @@ async def _get_or_create_agent(
     async with get_session() as session:
         # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if agent:
             agent.program = program
             agent.model = model
             agent.task_description = task_description
-            agent.last_active_ts = datetime.now(timezone.utc)
+            agent.last_active_ts = datetime.now(timezone.utc)  # type: ignore[arg-type]
             session.add(agent)
             await session.commit()
             await session.refresh(agent)
@@ -1573,18 +2081,71 @@ async def _get_or_create_agent(
 
 
 async def _get_agent(project: Project, name: str) -> Agent:
+    """Get agent by name with helpful error messages and suggestions."""
     await ensure_schema()
+
+    # Validate input
+    if not name or not name.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            f"Agent name cannot be empty. Provide a valid agent name for project '{project.human_key}'.",
+            recoverable=True,
+            data={"parameter": "agent_name", "provided": repr(name), "project": project.slug},
+        )
+
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
-        if not agent:
-            raise NoResultFound(
-                f"Agent '{name}' not registered for project '{project.human_key}'. "
-                f"Tip: Use resource://agents/{project.slug} to discover registered agents."
-            )
-        return agent
+        if agent:
+            return agent
+
+    # Agent not found - provide helpful suggestions
+    suggestions = await _find_similar_agents(project, name)
+    available_agents = await _list_project_agents(project)
+
+    if suggestions:
+        # Found similar names - probably a typo
+        suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. Did you mean: {suggestion_text}? "
+            f"Agent names are case-insensitive but must match exactly.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "suggestions": [{"name": s[0], "score": round(s[1], 2)} for s in suggestions],
+                "available_agents": available_agents,
+            },
+        )
+    elif available_agents:
+        # No similar names but project has agents
+        agents_list = ", ".join([f"'{a}'" for a in available_agents[:5]])
+        more_text = f" and {len(available_agents) - 5} more" if len(available_agents) > 5 else ""
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found in project '{project.human_key}'. "
+            f"Available agents: {agents_list}{more_text}. "
+            f"Use register_agent to create a new agent identity.",
+            recoverable=True,
+            data={
+                "agent_name": name,
+                "project": project.slug,
+                "available_agents": available_agents,
+            },
+        )
+    else:
+        # Project has no agents
+        raise ToolExecutionError(
+            "NOT_FOUND",
+            f"Agent '{name}' not found. Project '{project.human_key}' has no registered agents yet. "
+            f"Use register_agent to create an agent identity first. "
+            f"Example: register_agent(project_key='{project.slug}', program='claude-code', model='opus-4', name='{name}')",
+            recoverable=True,
+            data={"agent_name": name, "project": project.slug, "available_agents": []},
+        )
 
 
 async def _create_message(
@@ -1670,117 +2231,123 @@ async def _collect_file_reservation_statuses(
     async with get_session() as session:
         stmt = (
             select(FileReservation, Agent)
-            .join(Agent, FileReservation.agent_id == Agent.id)
-            .where(FileReservation.project_id == project.id)
-            .order_by(asc(FileReservation.created_ts))
+            .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+            .where(FileReservation.project_id == project.id)  # type: ignore[arg-type]
+            .order_by(asc(FileReservation.created_ts))  # type: ignore[arg-type]
         )
         if not include_released:
             stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
         result = await session.execute(stmt)
-        rows = result.all()
-        if not rows:
-            return []
+        rows = result.all()  # type: ignore[arg-type]
+        if not rows:  # type: ignore[arg-type]
+            return []  # type: ignore[arg-type]
         agent_ids = [agent.id for _, agent in rows if agent.id is not None]
         send_map: dict[int, Optional[datetime]] = {}
         ack_map: dict[int, Optional[datetime]] = {}
         read_map: dict[int, Optional[datetime]] = {}
         if agent_ids:
             send_result = await session.execute(
-                select(Message.sender_id, func.max(Message.created_ts))
+                select(Message.sender_id, func.max(Message.created_ts))  # type: ignore[call-overload]
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, Message.sender_id).in_(agent_ids),
                 )
                 .group_by(Message.sender_id)
             )
-            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}
+            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}  # type: ignore[call-overload]
             ack_result = await session.execute(
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))  # type: ignore[call-overload]
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.ack_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)
-            )
+                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
+            )  # type: ignore[arg-type]
             ack_map = {row[0]: _ensure_utc(row[1]) for row in ack_result}
-            read_result = await session.execute(
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))
+            read_result = await session.execute(  # type: ignore[arg-type]
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))  # type: ignore[call-overload]
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
-                    Message.project_id == project.id,
+                    cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.read_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)
-            )
+                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
+            )  # type: ignore[arg-type]
             read_map = {row[0]: _ensure_utc(row[1]) for row in read_result}
-
+  # type: ignore[arg-type]
     workspace = _project_workspace_path(project)
     repo = _open_repo_if_available(workspace) if workspace is not None else None
 
     statuses: list[FileReservationStatus] = []
-    for reservation, agent in rows:
-        agent_id = agent.id or -1
-        agent_last_active = _ensure_utc(agent.last_active_ts)
-        last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
+    try:
+        for reservation, agent in rows:
+            agent_id = agent.id or -1
+            agent_last_active = _ensure_utc(agent.last_active_ts)
+            last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
 
-        matches: list[Path] = []
-        fs_activity: Optional[datetime] = None
-        git_activity: Optional[datetime] = None
+            matches: list[Path] = []
+            fs_activity: Optional[datetime] = None
+            git_activity: Optional[datetime] = None
 
-        if workspace is not None:
-            matches = _collect_matching_paths(workspace, reservation.path_pattern)
-            if matches:
-                fs_activity = _latest_filesystem_activity(matches)
-                git_activity = _latest_git_activity(repo, matches)
+            if workspace is not None:
+                matches = _collect_matching_paths(workspace, reservation.path_pattern)
+                if matches:
+                    fs_activity = _latest_filesystem_activity(matches)
+                    git_activity = _latest_git_activity(repo, matches)
 
-        agent_inactive = (
-            agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
-        )
-        recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
-        recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
-        recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
-
-        stale = bool(
-            reservation.released_ts is None
-            and agent_inactive
-            and not (recent_mail or recent_fs or recent_git)
-        )
-        reasons: list[str] = []
-        if agent_inactive:
-            reasons.append(f"agent_inactive>{inactivity_seconds}s")
-        else:
-            reasons.append("agent_recently_active")
-        if recent_mail:
-            reasons.append("mail_activity_recent")
-        else:
-            reasons.append(f"no_recent_mail_activity>{activity_grace}s")
-        if matches:
-            if recent_fs:
-                reasons.append("filesystem_activity_recent")
-            else:
-                reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
-            if recent_git:
-                reasons.append("git_activity_recent")
-            else:
-                reasons.append(f"no_recent_git_activity>{activity_grace}s")
-        else:
-            reasons.append("path_pattern_unmatched")
-
-        statuses.append(
-            FileReservationStatus(
-                reservation=reservation,
-                agent=agent,
-                stale=stale,
-                stale_reasons=reasons,
-                last_agent_activity=agent_last_active,
-                last_mail_activity=last_mail,
-                last_fs_activity=fs_activity,
-                last_git_activity=git_activity,
+            agent_inactive = (
+                agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
             )
-        )
+            recent_mail = last_mail is not None and (moment - last_mail).total_seconds() <= activity_grace
+            recent_fs = fs_activity is not None and (moment - fs_activity).total_seconds() <= activity_grace
+            recent_git = git_activity is not None and (moment - git_activity).total_seconds() <= activity_grace
+
+            stale = bool(
+                reservation.released_ts is None
+                and agent_inactive
+                and not (recent_mail or recent_fs or recent_git)
+            )
+            reasons: list[str] = []
+            if agent_inactive:
+                reasons.append(f"agent_inactive>{inactivity_seconds}s")
+            else:
+                reasons.append("agent_recently_active")
+            if recent_mail:
+                reasons.append("mail_activity_recent")
+            else:
+                reasons.append(f"no_recent_mail_activity>{activity_grace}s")
+            if matches:
+                if recent_fs:
+                    reasons.append("filesystem_activity_recent")
+                else:
+                    reasons.append(f"no_recent_filesystem_activity>{activity_grace}s")
+                if recent_git:
+                    reasons.append("git_activity_recent")
+                else:
+                    reasons.append(f"no_recent_git_activity>{activity_grace}s")
+            else:
+                reasons.append("path_pattern_unmatched")
+
+            statuses.append(
+                FileReservationStatus(
+                    reservation=reservation,
+                    agent=agent,
+                    stale=stale,
+                    stale_reasons=reasons,
+                    last_agent_activity=agent_last_active,
+                    last_mail_activity=last_mail,
+                    last_fs_activity=fs_activity,
+                    last_git_activity=git_activity,
+                )
+            )
+    finally:
+        # Cleanup: close repo if we opened one
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
     return statuses
 
 
@@ -1799,16 +2366,16 @@ async def _expire_stale_file_reservations(project_id: int) -> list[FileReservati
         await session.execute(
             update(FileReservation)
             .where(
-                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.released_ts).is_(None),
-                FileReservation.expires_ts < now,
+                FileReservation.expires_ts < now,  # type: ignore[arg-type]
             )
             .values(released_ts=now)
         )
         await session.commit()
-
+  # type: ignore[arg-type]
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
-    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
+    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]  # type: ignore[arg-type]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
     if not stale_ids:
         return []
@@ -1817,14 +2384,14 @@ async def _expire_stale_file_reservations(project_id: int) -> list[FileReservati
         await session.execute(
             update(FileReservation)
             .where(
-                FileReservation.project_id == project_id,
+                cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.id).in_(stale_ids),
                 cast(Any, FileReservation.released_ts).is_(None),
             )
             .values(released_ts=now)
         )
         await session.commit()
-
+  # type: ignore[arg-type]
     for status in stale_statuses:
         status.reservation.released_ts = now
     return stale_statuses
@@ -1840,7 +2407,7 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     # Git wildmatch semantics; treat inputs as repo-root relative forward-slash paths
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
-    if PathSpec and GitWildMatchPattern:
+    if PathSpec is not None and GitWildMatchPattern is not None:
         spec = PathSpec.from_lines("gitwildmatch", [existing.path_pattern])
         return spec.match_file(_normalize(candidate_path))
     # Fallback to conservative fnmatch if pathspec not available
@@ -1854,7 +2421,7 @@ def _patterns_overlap(a: str, b: str) -> bool:
     # Overlap if any file could be matched by both patterns (approximate by cross-matching)
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
-    if PathSpec and GitWildMatchPattern:
+    if PathSpec is not None and GitWildMatchPattern is not None:
         a_spec = PathSpec.from_lines("gitwildmatch", [a])
         b_spec = PathSpec.from_lines("gitwildmatch", [b])
         # Heuristic: check direct cross-matches on normalized patterns
@@ -1886,21 +2453,21 @@ async def _list_inbox(
     await ensure_schema()
     async with get_session() as session:
         stmt = (
-            select(Message, MessageRecipient.kind, sender_alias.name)
+            select(Message, MessageRecipient.kind, sender_alias.name)  # type: ignore[call-overload]
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-            .join(sender_alias, Message.sender_id == sender_alias.id)
+            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
             .where(
-                Message.project_id == project.id,
+                cast(Any, Message.project_id) == project.id,
                 MessageRecipient.agent_id == agent.id,
             )
-            .order_by(desc(Message.created_ts))
-            .limit(limit)
-        )
+            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
+            .limit(limit)  # type: ignore[arg-type]
+        )  # type: ignore[arg-type]
         if urgent_only:
-            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
-        if since_ts:
+            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))  # type: ignore[arg-type]
+        if since_ts:  # type: ignore[arg-type]
             since_dt = _parse_iso(since_ts)
-            if since_dt:
+            if since_dt:  # type: ignore[arg-type]
                 stmt = stmt.where(Message.created_ts > since_dt)
         result = await session.execute(stmt)
         rows = result.all()
@@ -1908,7 +2475,7 @@ async def _list_inbox(
     for message, recipient_kind, sender_name in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
         payload["from"] = sender_name
-        payload["kind"] = recipient_kind
+        payload["kind"] = recipient_kind  # type: ignore[arg-type]
         messages.append(payload)
     return messages
 
@@ -1928,30 +2495,30 @@ async def _list_outbox(
     async with get_session() as session:
         stmt = (
             select(Message)
-            .where(Message.project_id == project.id, Message.sender_id == agent.id)
-            .order_by(desc(Message.created_ts))
+            .where(Message.project_id == project.id, Message.sender_id == agent.id)  # type: ignore[arg-type]
+            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
             .limit(limit)
         )
         if since_ts:
             since_dt = _parse_iso(since_ts)
             if since_dt:
-                stmt = stmt.where(Message.created_ts > since_dt)
-        result = await session.execute(stmt)
+                stmt = stmt.where(Message.created_ts > since_dt)  # type: ignore[arg-type]
+        result = await session.execute(stmt)  # type: ignore[arg-type]
         message_rows = result.scalars().all()
 
         # For each message, collect recipients grouped by kind
         for msg in message_rows:
             recs = await session.execute(
-                select(MessageRecipient.kind, Agent.name)
+                select(MessageRecipient.kind, Agent.name)  # type: ignore[call-overload]
                 .join(Agent, MessageRecipient.agent_id == Agent.id)
                 .where(MessageRecipient.message_id == msg.id)
             )
             to_list: list[str] = []
             cc_list: list[str] = []
             bcc_list: list[str] = []
-            for kind, name in recs.all():
-                if kind == "to":
-                    to_list.append(name)
+            for kind, name in recs.all():  # type: ignore[call-overload]
+                if kind == "to":  # type: ignore[arg-type]
+                    to_list.append(name)  # type: ignore[arg-type]
                 elif kind == "cc":
                     cc_list.append(name)
                 elif kind == "bcc":
@@ -1965,7 +2532,7 @@ async def _list_outbox(
     return messages
 
 
-def _canonical_relpath_for_message(project: Project, message: Message, archive) -> str | None:
+def _canonical_relpath_for_message(project: Project, message: Message, archive: ProjectArchive) -> str | None:
     """Resolve the canonical repo-relative path for a message markdown file.
 
     Supports both legacy filenames ("<id>.md") and the new descriptive pattern
@@ -2008,7 +2575,7 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
     if not relpath:
         return None
 
-    def _lookup():
+    def _lookup() -> dict[str, Any] | None:
         try:
             commit = next(archive.repo.iter_commits(paths=[relpath], max_count=1))
         except StopIteration:
@@ -2034,7 +2601,7 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
                 diffs = parent.diff(commit, paths=[relpath], create_patch=True)
                 for d in diffs:
                     try:
-                        patch = d.diff.decode("utf-8", "ignore")
+                        patch = d.diff.decode("utf-8", "ignore")  # type: ignore[union-attr]
                     except Exception:
                         patch = ""
                     for line in patch.splitlines():
@@ -2157,16 +2724,16 @@ async def _compute_thread_summary(
         criteria.append(Message.id == message_id)
     async with get_session() as session:
         stmt = (
-            select(Message, sender_alias.name)
-            .join(sender_alias, Message.sender_id == sender_alias.id)
-            .where(Message.project_id == project.id, or_(*criteria))
-            .order_by(asc(Message.created_ts))
+            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
+            .order_by(asc(cast(Any, Message.created_ts)))
         )
         if per_thread_limit:
             stmt = stmt.limit(per_thread_limit)
         result = await session.execute(stmt)
         rows = result.all()
-    summary = _summarize_messages(rows)
+    summary = _summarize_messages(rows)  # type: ignore[arg-type]
 
     if llm_mode and get_settings().llm.enabled:
         try:
@@ -2219,7 +2786,7 @@ async def _get_message(project: Project, message_id: int) -> Message:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Message).where(Message.project_id == project.id, Message.id == message_id)
+            select(Message).where(Message.project_id == project.id, Message.id == message_id)  # type: ignore[arg-type]
         )
         message = result.scalars().first()
         if not message:
@@ -2233,7 +2800,7 @@ async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)
+            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if not agent:
@@ -2252,10 +2819,7 @@ async def _update_recipient_timestamp(
     async with get_session() as session:
         # Read current value first
         result_sel = await session.execute(
-            select(MessageRecipient).where(
-                MessageRecipient.message_id == message_id,
-                MessageRecipient.agent_id == agent.id,
-            )
+            select(MessageRecipient).where(cast(Any, MessageRecipient.message_id == message_id), cast(Any, MessageRecipient.agent_id == agent.id))  # type: ignore[arg-type]
         )
         rec = result_sel.scalars().first()
         if not rec:
@@ -2267,7 +2831,7 @@ async def _update_recipient_timestamp(
         # Set only if null
         stmt = (
             update(MessageRecipient)
-            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)
+            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)  # type: ignore[arg-type]
             .values({field: now})
         )
         await session.execute(stmt)
@@ -2285,7 +2849,7 @@ def build_mcp_server() -> FastMCP:
         "Provide message routing, coordination tooling, and project context to cooperating agents."
     )
 
-    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
+    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)  # type: ignore[arg-type]
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -2360,12 +2924,12 @@ def build_mcp_server() -> FastMCP:
 
                 async with get_session() as session:
                     rows = await session.execute(
-                        select(FileReservation, Agent.name)
-                        .join(Agent, FileReservation.agent_id == Agent.id)
+                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                         .where(
-                            FileReservation.project_id == project.id,
+                            cast(Any, FileReservation.project_id) == project.id,
                             cast(Any, FileReservation.released_ts).is_(None),
-                            FileReservation.expires_ts > now_ts,
+                            cast(Any, FileReservation.expires_ts) > now_ts,
                         )
                     )
                     active_file_reservations = rows.all()
@@ -2673,6 +3237,7 @@ def build_mcp_server() -> FastMCP:
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
+        _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
         if settings.tools_log_enabled:
             try:
@@ -2760,82 +3325,83 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"whois for '{agent_name}' in '{project.human_key}' returned {len(recent)} commits")
         return profile
 
-# DISABLED:     @mcp.tool(name="create_agent_identity")
-# DISABLED:     @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name_hint", project_arg="project_key")
-# DISABLED:     async def create_agent_identity(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         program: str,
-# DISABLED:         model: str,
-# DISABLED:         name_hint: Optional[str] = None,
-# DISABLED:         task_description: str = "",
-# DISABLED:         attachments_policy: str = "auto",
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Create a new, unique agent identity and persist its profile to Git.
-# DISABLED: 
-# DISABLED:         How this differs from `register_agent`
-# DISABLED:         --------------------------------------
-# DISABLED:         - Always creates a new identity with a fresh unique name (never updates an existing one).
-# DISABLED:         - `name_hint`, if provided, MUST be a valid adjective+noun combination and must be available,
-# DISABLED:           otherwise an error is raised. Without a hint, a random adjective+noun name is generated.
-# DISABLED: 
-# DISABLED:         CRITICAL: Agent Naming Rules
-# DISABLED:         -----------------------------
-# DISABLED:         - Agent names MUST be randomly generated adjective+noun combinations
-# DISABLED:         - Examples: "GreenCastle", "BlueLake", "RedStone", "PurpleBear"
-# DISABLED:         - Names should be unique, easy to remember, and NOT descriptive
-# DISABLED:         - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
-# DISABLED:         - Best practice: Omit `name_hint` to auto-generate a valid name (RECOMMENDED)
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Spawning a brand new worker agent that should not overwrite an existing profile.
-# DISABLED:         - Temporary task-specific identities (e.g., short-lived refactor assistants).
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { id, name, program, model, task_description, inception_ts, last_active_ts, project_id }
-# DISABLED: 
-# DISABLED:         Examples
-# DISABLED:         --------
-# DISABLED:         Auto-generate name (RECOMMENDED):
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"c2","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
-# DISABLED:           "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1"
-# DISABLED:         }}}
-# DISABLED:         ```
-# DISABLED: 
-# DISABLED:         With valid name hint:
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
-# DISABLED:           "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
-# DISABLED:           "task_description":"DB migration spike"
-# DISABLED:         }}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         unique_name = await _generate_unique_agent_name(project, settings, name_hint)
-# DISABLED:         ap = (attachments_policy or "auto").lower()
-# DISABLED:         if ap not in {"auto", "inline", "file"}:
-# DISABLED:             ap = "auto"
-# DISABLED:         agent = await _create_agent_record(project, unique_name, program, model, task_description)
-# DISABLED:         # Update attachments policy immediately
-# DISABLED:         async with get_session() as session:
-# DISABLED:             db_agent = await session.get(Agent, agent.id)
-# DISABLED:             if db_agent:
-# DISABLED:                 db_agent.attachments_policy = ap
-# DISABLED:                 session.add(db_agent)
-# DISABLED:                 await session.commit()
-# DISABLED:                 await session.refresh(db_agent)
-# DISABLED:                 agent = db_agent
-# DISABLED:         archive = await ensure_archive(settings, project.slug)
-# DISABLED:         async with _archive_write_lock(archive):
-# DISABLED:             await write_agent_profile(archive, _agent_to_dict(agent))
-# DISABLED:         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
-# DISABLED:         return _agent_to_dict(agent)
-# DISABLED: 
+    @mcp.tool(name="create_agent_identity")
+    @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name_hint", project_arg="project_key")
+    async def create_agent_identity(
+        ctx: Context,
+        project_key: str,
+        program: str,
+        model: str,
+        name_hint: Optional[str] = None,
+        task_description: str = "",
+        attachments_policy: str = "auto",
+    ) -> dict[str, Any]:
+        """
+        Create a new, unique agent identity and persist its profile to Git.
+
+        How this differs from `register_agent`
+        --------------------------------------
+        - Always creates a new identity with a fresh unique name (never updates an existing one).
+        - `name_hint`, if provided, MUST be a valid adjective+noun combination and must be available,
+          otherwise an error is raised. Without a hint, a random adjective+noun name is generated.
+
+        CRITICAL: Agent Naming Rules
+        -----------------------------
+        - Agent names MUST be randomly generated adjective+noun combinations
+        - Examples: "GreenCastle", "BlueLake", "RedStone", "PurpleBear"
+        - Names should be unique, easy to remember, and NOT descriptive
+        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
+        - Best practice: Omit `name_hint` to auto-generate a valid name (RECOMMENDED)
+
+        When to use
+        -----------
+        - Spawning a brand new worker agent that should not overwrite an existing profile.
+        - Temporary task-specific identities (e.g., short-lived refactor assistants).
+
+        Returns
+        -------
+        dict
+            { id, name, program, model, task_description, inception_ts, last_active_ts, project_id }
+
+        Examples
+        --------
+        Auto-generate name (RECOMMENDED):
+        ```json
+        {"jsonrpc":"2.0","id":"c2","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1"
+        }}}
+        ```
+
+        With valid name hint:
+        ```json
+        {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
+          "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
+          "task_description":"DB migration spike"
+        }}}
+        ```
+        """
+        _validate_program_model(program, model)
+        project = await _get_project_by_identifier(project_key)
+        unique_name = await _generate_unique_agent_name(project, settings, name_hint)
+        ap = (attachments_policy or "auto").lower()
+        if ap not in {"auto", "inline", "file"}:
+            ap = "auto"
+        agent = await _create_agent_record(project, unique_name, program, model, task_description)
+        # Update attachments policy immediately
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.attachments_policy = ap
+                session.add(db_agent)
+                await session.commit()
+                await session.refresh(db_agent)
+                agent = db_agent
+        archive = await ensure_archive(settings, project.slug)
+        async with _archive_write_lock(archive):
+            await write_agent_profile(archive, _agent_to_dict(agent))
+        await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
+        return _agent_to_dict(agent)
+
     @mcp.tool(name="send_message")
     @_instrument_tool(
         "send_message",
@@ -2956,6 +3522,37 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+
+        # Normalize 'to' parameter - accept single string and convert to list
+        if isinstance(to, str):
+            to = [to]
+        if not isinstance(to, list):
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                f"'to' must be a list of agent names (e.g., ['BlueLake']) or a single agent name string. "
+                f"Received: {type(to).__name__}",
+                recoverable=True,
+                data={"argument": "to", "received_type": type(to).__name__},
+            )
+
+        # Check for common recipient mistakes and provide helpful guidance
+        for recipient in to:
+            if not isinstance(recipient, str):
+                raise ToolExecutionError(
+                    "INVALID_ARGUMENT",
+                    f"Each recipient in 'to' must be a string (agent name). Got: {type(recipient).__name__}",
+                    recoverable=True,
+                    data={"argument": "to", "invalid_item": repr(recipient)},
+                )
+            mistake = _detect_agent_name_mistake(recipient)
+            if mistake:
+                raise ToolExecutionError(
+                    mistake[0],
+                    f"Invalid recipient '{recipient}': {mistake[1]}",
+                    recoverable=True,
+                    data={"recipient": recipient, "hint": "Use agent names like 'BlueLake', not program/model names"},
+                )
+
         # Normalize cc/bcc inputs and validate types for friendlier UX
         if isinstance(cc, str):
             cc = [cc]
@@ -2993,6 +3590,27 @@ def build_mcp_server() -> FastMCP:
                 recoverable=True,
                 data={"argument": "bcc"},
             )
+
+        # Self-send detection: warn if sender is sending to themselves
+        sender_lower = sender_name.lower().strip()
+        all_recipients = (to or []) + (cc or []) + (bcc or [])
+        self_send_matches = [r for r in all_recipients if r.lower().strip() == sender_lower]
+        if self_send_matches:
+            await ctx.info(
+                f"[note] You ({sender_name}) are sending a message to yourself. "
+                f"This is allowed but usually not intended. To communicate with other agents, "
+                f"use their agent names (e.g., 'BlueLake'). To discover agents, "
+                f"use resource://agents/{project_key}."
+            )
+
+        # Subject length warning: warn if subject is too long (will be truncated in DB)
+        if len(subject) > 200:
+            await ctx.info(
+                f"[warn] Subject is {len(subject)} characters (max recommended: 80, truncated at 200). "
+                f"Long subjects may be truncated in search results. Consider moving details to the message body."
+            )
+            subject = subject[:200]
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -3032,12 +3650,12 @@ def build_mcp_server() -> FastMCP:
                         pass
                     async with get_session() as s:
                         stmt = (
-                            select(Message, sender_alias.name)
-                            .join(sender_alias, Message.sender_id == sender_alias.id)
-                            .where(Message.project_id == project.id, or_(*criteria))
+                            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
                             .limit(500)
                         )
-                        thread_rows = list((await s.execute(stmt)).all())
+                        thread_rows = list((await s.execute(stmt)).all())  # type: ignore[arg-type]
                     # collect participants (sender names and recipients)
                     participants: set[str] = {n for _m, n in thread_rows}
                     auto_ok_names.update(participants)
@@ -3049,9 +3667,9 @@ def build_mcp_server() -> FastMCP:
             try:
                 async with get_session() as s2:
                     file_reservation_rows = await s2.execute(
-                        select(FileReservation, Agent.name)
-                        .join(Agent, FileReservation.agent_id == Agent.id)
-                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), FileReservation.expires_ts > now_utc)
+                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > now_utc)
                     )
                     name_to_file_reservations: dict[str, list[str]] = {}
                     for c, nm in file_reservation_rows.all():
@@ -3119,12 +3737,12 @@ def build_mcp_server() -> FastMCP:
                     try:
                         link = await s3.execute(
                             select(AgentLink)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.b_project_id == project.id,
-                                AgentLink.b_agent_id == rec.id,
-                                AgentLink.status == "approved",
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.b_project_id) == project.id,
+                                cast(Any, AgentLink.b_agent_id) == rec.id,
+                                cast(Any, AgentLink.status == "approved"),
                             )
                             .limit(1)
                         )
@@ -3181,12 +3799,12 @@ def build_mcp_server() -> FastMCP:
                                     # After auto-approval, link should exist; double-check
                                     link = await s3b.execute(
                                         select(AgentLink)
-                                        .where(
-                                            AgentLink.a_project_id == project.id,
-                                            AgentLink.a_agent_id == sender.id,
-                                            AgentLink.b_project_id == project.id,
-                                            AgentLink.b_agent_id == rec.id,
-                                            AgentLink.status == "approved",
+                                        .where(  # type: ignore[arg-type]
+                                            cast(Any, AgentLink.a_project_id) == project.id,
+                                            cast(Any, AgentLink.a_agent_id) == sender.id,
+                                            cast(Any, AgentLink.b_project_id) == project.id,
+                                            cast(Any, AgentLink.b_agent_id) == rec.id,
+                                            cast(Any, AgentLink.status == "approved"),
                                         )
                                         .limit(1)
                                     )
@@ -3271,10 +3889,10 @@ def build_mcp_server() -> FastMCP:
 
         async with get_session() as sx:
             # Preload local agent names (normalized -> canonical stored name)
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
             local_lookup: dict[str, str] = {}
-            for row in existing.fetchall():
-                canonical_name = (row[0] or "").strip()
+            for row in existing.fetchall():  # type: ignore[assignment]
+                canonical_name = (row[0] or "").strip()  # type: ignore[index]
                 if not canonical_name:
                     continue
                 sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
@@ -3383,27 +4001,27 @@ def build_mcp_server() -> FastMCP:
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Project.id == target_project_override.id,
-                                func.lower(Agent.name) == lookup_value,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Project.id == target_project_override.id),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                func.lower(Agent.name) == lookup_value,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
@@ -3512,14 +4130,14 @@ def build_mcp_server() -> FastMCP:
                                             lookup_value = (nm or "").strip().lower()
                                             rows = await scheck.execute(
                                                 select(AgentLink, Project, Agent)
-                                                .join(Project, Project.id == AgentLink.b_project_id)
-                                                .join(Agent, Agent.id == AgentLink.b_agent_id)
-                                                .where(
-                                                    AgentLink.a_project_id == project.id,
-                                                    AgentLink.a_agent_id == sender.id,
-                                                    AgentLink.status == "approved",
-                                                    Project.id == tproj.id,
-                                                    func.lower(Agent.name) == lookup_value,
+                                                .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                                                .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                                                .where(  # type: ignore[arg-type]
+                                                    cast(Any, AgentLink.a_project_id) == project.id,
+                                                    cast(Any, AgentLink.a_agent_id) == sender.id,
+                                                    cast(Any, AgentLink.status == "approved"),
+                                                    cast(Any, Project.id == tproj.id),
+                                                    cast(Any, func.lower(Agent.name) == lookup_value),
                                                 )
                                                 .limit(1)
                                             )
@@ -3774,7 +4392,7 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
 
         async with get_session() as sx:
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
             local_names = {row[0] for row in existing.fetchall()}
 
             class _ContactBlocked(Exception):
@@ -3805,27 +4423,27 @@ def build_mcp_server() -> FastMCP:
                     if target_project_override is not None and target_name_override:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Project.id == target_project_override.id,
-                                Agent.name == target_name_override,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Project.id == target_project_override.id),
+                                cast(Any, Agent.name == target_name_override),
                             )
                             .limit(1)
                         )
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, Agent.id == AgentLink.b_agent_id)
-                            .where(
-                                AgentLink.a_project_id == project.id,
-                                AgentLink.a_agent_id == sender.id,
-                                AgentLink.status == "approved",
-                                Agent.name == nm,
+                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                            .where(  # type: ignore[arg-type]
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, Agent.name == nm),
                             )
                             .limit(1)
                         )
@@ -3924,250 +4542,264 @@ def build_mcp_server() -> FastMCP:
                 primary_payload.setdefault("attachments", attachments)
         return primary_payload
 
-# DISABLED:     @mcp.tool(name="request_contact")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "request_contact",
-# DISABLED:         cluster=CLUSTER_CONTACT,
-# DISABLED:         capabilities={"contact"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="from_agent",
-# DISABLED:     )
-# DISABLED:     async def request_contact(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         from_agent: str,
-# DISABLED:         to_agent: str,
-# DISABLED:         to_project: Optional[str] = None,
-# DISABLED:         reason: str = "",
-# DISABLED:         ttl_seconds: int = 7 * 24 * 3600,
-# DISABLED:         # Optional quality-of-life flags; ignored by clients that don't pass them
-# DISABLED:         register_if_missing: bool = True,
-# DISABLED:         program: Optional[str] = None,
-# DISABLED:         model: Optional[str] = None,
-# DISABLED:         task_description: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """Request contact approval to message another agent.
-# DISABLED: 
-# DISABLED:         Creates (or refreshes) a pending AgentLink and sends a small ack_required intro message.
-# DISABLED: 
-# DISABLED:         Discovery
-# DISABLED:         ---------
-# DISABLED:         To discover available agent names, use: resource://agents/{project_key}
-# DISABLED:         Agent names are NOT the same as program names or user names.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         project_key : str
-# DISABLED:             Project slug or human key.
-# DISABLED:         from_agent : str
-# DISABLED:             Your agent name (must be registered in the project).
-# DISABLED:         to_agent : str
-# DISABLED:             Target agent name (use resource://agents/{project_key} to discover names).
-# DISABLED:         to_project : Optional[str]
-# DISABLED:             Target project if different from your project (cross-project coordination).
-# DISABLED:         reason : str
-# DISABLED:             Optional explanation for the contact request.
-# DISABLED:         ttl_seconds : int
-# DISABLED:             Time to live for the contact approval request (default: 7 days).
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         settings = get_settings()
-# DISABLED:         a = await _get_agent(project, from_agent)
-# DISABLED:         # Allow explicit external addressing in to_agent as project:<slug>#<Name>
-# DISABLED:         target_project = project
-# DISABLED:         target_name = to_agent
-# DISABLED:         if to_project:
-# DISABLED:             target_project = await _get_project_by_identifier(to_project)
-# DISABLED:         elif to_agent.startswith("project:") and "#" in to_agent:
-# DISABLED:             try:
-# DISABLED:                 _, rest = to_agent.split(":", 1)
-# DISABLED:                 slug_part, agent_part = rest.split("#", 1)
-# DISABLED:                 target_project = await _get_project_by_identifier(slug_part)
-# DISABLED:                 target_name = agent_part.strip()
-# DISABLED:             except Exception:
-# DISABLED:                 target_project = project
-# DISABLED:                 target_name = to_agent
-# DISABLED:         try:
-# DISABLED:             b = await _get_agent(target_project, target_name)
-# DISABLED:         except NoResultFound:
-# DISABLED:             if register_if_missing and validate_agent_name_format(target_name):
-# DISABLED:                 # Create the missing target identity using provided metadata (best effort)
-# DISABLED:                 b = await _get_or_create_agent(
-# DISABLED:                     target_project,
-# DISABLED:                     target_name,
-# DISABLED:                     program or "unknown",
-# DISABLED:                     model or "unknown",
-# DISABLED:                     task_description or "",
-# DISABLED:                     settings,
-# DISABLED:                 )
-# DISABLED:             else:
-# DISABLED:                 raise
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         exp = now + timedelta(seconds=max(60, ttl_seconds))
-# DISABLED:         async with get_session() as s:
-# DISABLED:             # upsert link
-# DISABLED:             existing = await s.execute(
-# DISABLED:                 select(AgentLink).where(
-# DISABLED:                     AgentLink.a_project_id == project.id,
-# DISABLED:                     AgentLink.a_agent_id == a.id,
-# DISABLED:                     AgentLink.b_project_id == target_project.id,
-# DISABLED:                     AgentLink.b_agent_id == b.id,
-# DISABLED:                 )
-# DISABLED:             )
-# DISABLED:             link = existing.scalars().first()
-# DISABLED:             if link:
-# DISABLED:                 link.status = "pending"
-# DISABLED:                 link.reason = reason
-# DISABLED:                 link.updated_ts = now
-# DISABLED:                 link.expires_ts = exp
-# DISABLED:                 s.add(link)
-# DISABLED:             else:
-# DISABLED:                 link = AgentLink(
-# DISABLED:                     a_project_id=project.id or 0,
-# DISABLED:                     a_agent_id=a.id or 0,
-# DISABLED:                     b_project_id=target_project.id or 0,
-# DISABLED:                     b_agent_id=b.id or 0,
-# DISABLED:                     status="pending",
-# DISABLED:                     reason=reason,
-# DISABLED:                     created_ts=now,
-# DISABLED:                     updated_ts=now,
-# DISABLED:                     expires_ts=exp,
-# DISABLED:                 )
-# DISABLED:                 s.add(link)
-# DISABLED:             await s.commit()
-# DISABLED:         # Send an intro message with ack_required
-# DISABLED:         subject = f"Contact request from {a.name}"
-# DISABLED:         body = reason or f"{a.name} requests permission to contact {b.name}."
-# DISABLED:         await _deliver_message(
-# DISABLED:             ctx,
-# DISABLED:             "request_contact",
-# DISABLED:             target_project,
-# DISABLED:             a,
-# DISABLED:             [b.name],
-# DISABLED:             [],
-# DISABLED:             [],
-# DISABLED:             subject,
-# DISABLED:             body,
-# DISABLED:             None,
-# DISABLED:             None,
-# DISABLED:             importance="normal",
-# DISABLED:             ack_required=True,
-# DISABLED:             thread_id=None,
-# DISABLED:         )
-# DISABLED:         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="respond_contact")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "respond_contact",
-# DISABLED:         cluster=CLUSTER_CONTACT,
-# DISABLED:         capabilities={"contact"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="to_agent",
-# DISABLED:     )
-# DISABLED:     async def respond_contact(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         to_agent: str,
-# DISABLED:         from_agent: str,
-# DISABLED:         accept: bool,
-# DISABLED:         ttl_seconds: int = 30 * 24 * 3600,
-# DISABLED:         from_project: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """Approve or deny a contact request."""
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         # Resolve remote requestor project if provided
-# DISABLED:         a_project = project if not from_project else await _get_project_by_identifier(from_project)
-# DISABLED:         a = await _get_agent(a_project, from_agent)
-# DISABLED:         b = await _get_agent(project, to_agent)
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
-# DISABLED:         updated = 0
-# DISABLED:         async with get_session() as s:
-# DISABLED:             existing = await s.execute(
-# DISABLED:                 select(AgentLink).where(
-# DISABLED:                     AgentLink.a_project_id == a_project.id,
-# DISABLED:                     AgentLink.a_agent_id == a.id,
-# DISABLED:                     AgentLink.b_project_id == project.id,
-# DISABLED:                     AgentLink.b_agent_id == b.id,
-# DISABLED:                 )
-# DISABLED:             )
-# DISABLED:             link = existing.scalars().first()
-# DISABLED:             if link:
-# DISABLED:                 link.status = "approved" if accept else "blocked"
-# DISABLED:                 link.updated_ts = now
-# DISABLED:                 link.expires_ts = exp
-# DISABLED:                 s.add(link)
-# DISABLED:                 updated = 1
-# DISABLED:             else:
-# DISABLED:                 if accept:
-# DISABLED:                     s.add(AgentLink(
-# DISABLED:                         a_project_id=project.id or 0,
-# DISABLED:                         a_agent_id=a.id or 0,
-# DISABLED:                         b_project_id=project.id or 0,
-# DISABLED:                         b_agent_id=b.id or 0,
-# DISABLED:                         status="approved",
-# DISABLED:                         reason="",
-# DISABLED:                         created_ts=now,
-# DISABLED:                         updated_ts=now,
-# DISABLED:                         expires_ts=exp,
-# DISABLED:                     ))
-# DISABLED:                     updated = 1
-# DISABLED:             await s.commit()
-# DISABLED:         await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
-# DISABLED:         return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="list_contacts")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "list_contacts",
-# DISABLED:         cluster=CLUSTER_CONTACT,
-# DISABLED:         capabilities={"contact", "audit"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
-# DISABLED:         """List contact links for an agent in a project."""
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         agent = await _get_agent(project, agent_name)
-# DISABLED:         out: list[dict[str, Any]] = []
-# DISABLED:         async with get_session() as s:
-# DISABLED:             rows = await s.execute(
-# DISABLED:                 select(AgentLink, Agent.name)
-# DISABLED:                 .join(Agent, Agent.id == AgentLink.b_agent_id)
-# DISABLED:                 .where(AgentLink.a_project_id == project.id, AgentLink.a_agent_id == agent.id)
-# DISABLED:             )
-# DISABLED:             for link, name in rows.all():
-# DISABLED:                 out.append({
-# DISABLED:                     "to": name,
-# DISABLED:                     "status": link.status,
-# DISABLED:                     "reason": link.reason,
-# DISABLED:                     "updated_ts": _iso(link.updated_ts),
-# DISABLED:                     "expires_ts": _iso(link.expires_ts) if link.expires_ts else None,
-# DISABLED:                 })
-# DISABLED:         return out
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="set_contact_policy")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "set_contact_policy",
-# DISABLED:         cluster=CLUSTER_CONTACT,
-# DISABLED:         capabilities={"contact", "configure"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
-# DISABLED:         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         agent = await _get_agent(project, agent_name)
-# DISABLED:         pol = (policy or "auto").lower()
-# DISABLED:         if pol not in {"open", "auto", "contacts_only", "block_all"}:
-# DISABLED:             pol = "auto"
-# DISABLED:         async with get_session() as s:
-# DISABLED:             db_agent = await s.get(Agent, agent.id)
-# DISABLED:             if db_agent:
-# DISABLED:                 db_agent.contact_policy = pol
-# DISABLED:                 s.add(db_agent)
-# DISABLED:                 await s.commit()
-# DISABLED:         return {"agent": agent.name, "policy": pol}
-# DISABLED: 
+    @mcp.tool(name="request_contact")
+    @_instrument_tool(
+        "request_contact",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact"},
+        project_arg="project_key",
+        agent_arg="from_agent",
+    )
+    async def request_contact(
+        ctx: Context,
+        project_key: str,
+        from_agent: str,
+        to_agent: str,
+        to_project: Optional[str] = None,
+        reason: str = "",
+        ttl_seconds: int = 7 * 24 * 3600,
+        # Optional quality-of-life flags; ignored by clients that don't pass them
+        register_if_missing: bool = True,
+        program: Optional[str] = None,
+        model: Optional[str] = None,
+        task_description: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Request contact approval to message another agent.
+
+        Creates (or refreshes) a pending AgentLink and sends a small ack_required intro message.
+
+        Discovery
+        ---------
+        To discover available agent names, use: resource://agents/{project_key}
+        Agent names are NOT the same as program names or user names.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key.
+        from_agent : str
+            Your agent name (must be registered in the project).
+        to_agent : str
+            Target agent name (use resource://agents/{project_key} to discover names).
+        to_project : Optional[str]
+            Target project if different from your project (cross-project coordination).
+        reason : str
+            Optional explanation for the contact request.
+        ttl_seconds : int
+            Time to live for the contact approval request (default: 7 days).
+        """
+        project = await _get_project_by_identifier(project_key)
+        settings = get_settings()
+        a = await _get_agent(project, from_agent)
+        # Allow explicit external addressing in to_agent as project:<slug>#<Name>
+        target_project = project
+        target_name = to_agent
+        if to_project:
+            target_project = await _get_project_by_identifier(to_project)
+        elif to_agent.startswith("project:") and "#" in to_agent:
+            try:
+                _, rest = to_agent.split(":", 1)
+                slug_part, agent_part = rest.split("#", 1)
+                target_project = await _get_project_by_identifier(slug_part)
+                target_name = agent_part.strip()
+            except Exception:
+                target_project = project
+                target_name = to_agent
+        try:
+            b = await _get_agent(target_project, target_name)
+        except (NoResultFound, ToolExecutionError) as exc:
+            # Check if this is a NOT_FOUND error we can handle with register_if_missing
+            is_not_found = isinstance(exc, NoResultFound) or (
+                isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
+            )
+            if is_not_found and register_if_missing and validate_agent_name_format(target_name):
+                # Create the missing target identity using provided metadata (best effort)
+                b = await _get_or_create_agent(
+                    target_project,
+                    target_name,
+                    program or "unknown",
+                    model or "unknown",
+                    task_description or "",
+                    settings,
+                )
+            else:
+                raise
+        # Warn on TTL auto-correction
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(seconds=max(60, ttl_seconds))
+        async with get_session() as s:
+            # upsert link
+            existing = await s.execute(
+                select(AgentLink).where(
+                    cast(Any, AgentLink.a_project_id) == project.id,
+                    cast(Any, AgentLink.a_agent_id) == a.id,
+                    cast(Any, AgentLink.b_project_id) == target_project.id,
+                    cast(Any, AgentLink.b_agent_id) == b.id,
+                )
+            )
+            link = existing.scalars().first()
+            if link:
+                link.status = "pending"
+                link.reason = reason
+                link.updated_ts = now
+                link.expires_ts = exp
+                s.add(link)
+            else:
+                link = AgentLink(
+                    a_project_id=project.id or 0,
+                    a_agent_id=a.id or 0,
+                    b_project_id=target_project.id or 0,
+                    b_agent_id=b.id or 0,
+                    status="pending",
+                    reason=reason,
+                    created_ts=now,
+                    updated_ts=now,
+                    expires_ts=exp,
+                )
+                s.add(link)
+            await s.commit()
+        # Send an intro message with ack_required
+        subject = f"Contact request from {a.name}"
+        body = reason or f"{a.name} requests permission to contact {b.name}."
+        await _deliver_message(
+            ctx,
+            "request_contact",
+            target_project,
+            a,
+            [b.name],
+            [],
+            [],
+            subject,
+            body,
+            None,
+            None,
+            importance="normal",
+            ack_required=True,
+            thread_id=None,
+        )
+        return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
+
+    @mcp.tool(name="respond_contact")
+    @_instrument_tool(
+        "respond_contact",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact"},
+        project_arg="project_key",
+        agent_arg="to_agent",
+    )
+    async def respond_contact(
+        ctx: Context,
+        project_key: str,
+        to_agent: str,
+        from_agent: str,
+        accept: bool,
+        ttl_seconds: int = 30 * 24 * 3600,
+        from_project: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Approve or deny a contact request."""
+        project = await _get_project_by_identifier(project_key)
+        # Resolve remote requestor project if provided
+        a_project = project if not from_project else await _get_project_by_identifier(from_project)
+        a = await _get_agent(a_project, from_agent)
+        b = await _get_agent(project, to_agent)
+        # Warn on TTL auto-correction
+        if accept and ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+            )
+        now = datetime.now(timezone.utc)
+        exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
+        updated = 0
+        async with get_session() as s:
+            existing = await s.execute(
+                select(AgentLink).where(
+                    cast(Any, AgentLink.a_project_id) == a_project.id,
+                    cast(Any, AgentLink.a_agent_id) == a.id,
+                    cast(Any, AgentLink.b_project_id) == project.id,
+                    cast(Any, AgentLink.b_agent_id) == b.id,
+                )
+            )
+            link = existing.scalars().first()
+            if link:
+                link.status = "approved" if accept else "blocked"
+                link.updated_ts = now
+                link.expires_ts = exp
+                s.add(link)
+                updated = 1
+            else:
+                if accept:
+                    s.add(AgentLink(
+                        a_project_id=project.id or 0,
+                        a_agent_id=a.id or 0,
+                        b_project_id=project.id or 0,
+                        b_agent_id=b.id or 0,
+                        status="approved",
+                        reason="",
+                        created_ts=now,
+                        updated_ts=now,
+                        expires_ts=exp,
+                    ))
+                    updated = 1
+            await s.commit()
+        await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
+        return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
+
+    @mcp.tool(name="list_contacts")
+    @_instrument_tool(
+        "list_contacts",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact", "audit"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
+        """List contact links for an agent in a project."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        out: list[dict[str, Any]] = []
+        async with get_session() as s:
+            rows = await s.execute(
+                cast(Any, select(AgentLink, Agent.name))  # type: ignore[call-overload]
+                .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                .where(cast(Any, AgentLink.a_project_id) == project.id, cast(Any, AgentLink.a_agent_id) == agent.id)
+            )
+            for link, name in rows.all():
+                out.append({
+                    "to": name,
+                    "status": link.status,
+                    "reason": link.reason,
+                    "updated_ts": _iso(link.updated_ts),
+                    "expires_ts": _iso(link.expires_ts) if link.expires_ts else None,
+                })
+        return out
+
+    @mcp.tool(name="set_contact_policy")
+    @_instrument_tool(
+        "set_contact_policy",
+        cluster=CLUSTER_CONTACT,
+        capabilities={"contact", "configure"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
+        """Set contact policy for an agent: open | auto | contacts_only | block_all."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        pol = (policy or "auto").lower()
+        if pol not in {"open", "auto", "contacts_only", "block_all"}:
+            pol = "auto"
+        async with get_session() as s:
+            db_agent = await s.get(Agent, agent.id)
+            if db_agent:
+                db_agent.contact_policy = pol
+                s.add(db_agent)
+                await s.commit()
+        return {"agent": agent.name, "policy": pol}
+
     @mcp.tool(name="fetch_inbox")
     @_instrument_tool(
         "fetch_inbox",
@@ -4214,6 +4846,21 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate limit parameter bounds
+        if limit < 1:
+            raise ToolExecutionError(
+                error_type="INVALID_LIMIT",
+                message=f"limit must be at least 1, got {limit}. Use a positive integer.",
+                recoverable=True,
+                data={"provided": limit, "min": 1, "max": 1000},
+            )
+        if limit > 1000:
+            await ctx.info(f"[warn] limit={limit} is very large; capping at 1000 to prevent performance issues.")
+            limit = 1000
+
+        # Validate since_ts format upfront with helpful error message
+        _validate_iso_timestamp(since_ts, "since_ts")
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -4234,75 +4881,75 @@ def build_mcp_server() -> FastMCP:
             _rich_error_panel("fetch_inbox", {"error": str(exc)})
             raise
 
-# DISABLED:     @mcp.tool(name="mark_message_read")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "mark_message_read",
-# DISABLED:         cluster=CLUSTER_MESSAGING,
-# DISABLED:         capabilities={"messaging", "read"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def mark_message_read(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         message_id: int,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Mark a specific message as read for the given agent.
-# DISABLED: 
-# DISABLED:         Notes
-# DISABLED:         -----
-# DISABLED:         - Read receipts are per-recipient; this only affects the specified agent.
-# DISABLED:         - This does not send an acknowledgement; use `acknowledge_message` for that.
-# DISABLED:         - Safe to call multiple times; later calls return the original timestamp.
-# DISABLED: 
-# DISABLED:         Idempotency
-# DISABLED:         -----------
-# DISABLED:         - If `mark_message_read` has already been called earlier for the same (agent, message),
-# DISABLED:           the original timestamp is returned and no error is raised.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { message_id, read: bool, read_at: iso8601 | null }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"8","method":"tools/call","params":{"name":"mark_message_read","arguments":{
-# DISABLED:           "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
-# DISABLED:         }}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         if get_settings().tools_log_enabled:
-# DISABLED:             try:
-# DISABLED:                 import importlib as _imp
-# DISABLED:                 _rc = _imp.import_module("rich.console")
-# DISABLED:                 _rp = _imp.import_module("rich.panel")
-# DISABLED:                 Console = _rc.Console
-# DISABLED:                 Panel = _rp.Panel
-# DISABLED:                 Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: mark_message_read", border_style="green"))
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         try:
-# DISABLED:             project = await _get_project_by_identifier(project_key)
-# DISABLED:             agent = await _get_agent(project, agent_name)
-# DISABLED:             await _get_message(project, message_id)
-# DISABLED:             read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
-# DISABLED:             await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
-# DISABLED:             return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
-# DISABLED:         except Exception as exc:
-# DISABLED:             if get_settings().tools_log_enabled:
-# DISABLED:                 try:
-# DISABLED:                     from rich.console import Console  # type: ignore
-# DISABLED:                     from rich.json import JSON  # type: ignore
-# DISABLED: 
-# DISABLED:                     Console().print(JSON.from_data({"error": str(exc)}))
-# DISABLED:                 except Exception:
-# DISABLED:                     pass
-# DISABLED:             raise
-# DISABLED: 
+    @mcp.tool(name="mark_message_read")
+    @_instrument_tool(
+        "mark_message_read",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "read"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def mark_message_read(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        message_id: int,
+    ) -> dict[str, Any]:
+        """
+        Mark a specific message as read for the given agent.
+
+        Notes
+        -----
+        - Read receipts are per-recipient; this only affects the specified agent.
+        - This does not send an acknowledgement; use `acknowledge_message` for that.
+        - Safe to call multiple times; later calls return the original timestamp.
+
+        Idempotency
+        -----------
+        - If `mark_message_read` has already been called earlier for the same (agent, message),
+          the original timestamp is returned and no error is raised.
+
+        Returns
+        -------
+        dict
+            { message_id, read: bool, read_at: iso8601 | null }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"8","method":"tools/call","params":{"name":"mark_message_read","arguments":{
+          "project_key":"/abs/path/backend","agent_name":"BlueLake","message_id":1234
+        }}}
+        ```
+        """
+        if get_settings().tools_log_enabled:
+            try:
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
+                Console().print(Panel.fit(f"project={project_key}\nagent={agent_name}\nmessage_id={message_id}", title="tool: mark_message_read", border_style="green"))
+            except Exception:
+                pass
+        try:
+            project = await _get_project_by_identifier(project_key)
+            agent = await _get_agent(project, agent_name)
+            await _get_message(project, message_id)
+            read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
+            await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
+            return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
+        except Exception as exc:
+            if get_settings().tools_log_enabled:
+                try:
+                    from rich.console import Console  # type: ignore
+                    from rich.json import JSON  # type: ignore
+
+                    Console().print(JSON.from_data({"error": str(exc)}))
+                except Exception:
+                    pass
+            raise
+
     @mcp.tool(name="acknowledge_message")
     @_instrument_tool(
         "acknowledge_message",
@@ -4376,328 +5023,330 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console
-                    JSON = _rj.JSON
+                    Console = _rc.Console  # type: ignore[misc]
+                    JSON = _rj.JSON  # type: ignore[misc]
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
             raise
 
-# DISABLED:     @mcp.tool(name="macro_start_session")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "macro_start_session",
-# DISABLED:         cluster=CLUSTER_MACROS,
-# DISABLED:         capabilities={"workflow", "messaging", "file_reservations", "identity"},
-# DISABLED:         project_arg="human_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def macro_start_session(
-# DISABLED:         ctx: Context,
-# DISABLED:         human_key: str,
-# DISABLED:         program: str,
-# DISABLED:         model: str,
-# DISABLED:         task_description: str = "",
-# DISABLED:         agent_name: Optional[str] = None,
-# DISABLED:         file_reservation_paths: Optional[list[str]] = None,
-# DISABLED:         file_reservation_reason: str = "macro-session",
-# DISABLED:         file_reservation_ttl_seconds: int = 3600,
-# DISABLED:         inbox_limit: int = 10,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Macro helper that boots a project session: ensure project, register agent,
-# DISABLED:         optionally file_reservation paths, and fetch the latest inbox snapshot.
-# DISABLED:         """
-# DISABLED:         settings = get_settings()
-# DISABLED:         project = await _ensure_project(human_key)
-# DISABLED:         agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
-# DISABLED: 
-# DISABLED:         file_reservations_result: Optional[dict[str, Any]] = None
-# DISABLED:         if file_reservation_paths:
-# DISABLED:             # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
-# DISABLED:             from fastmcp.tools.tool import FunctionTool
-# DISABLED:             _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
-# DISABLED:             _file_reservation_run = await _file_reservation_tool.run({
-# DISABLED:                 "project_key": project.human_key,
-# DISABLED:                 "agent_name": agent.name,
-# DISABLED:                 "paths": file_reservation_paths,
-# DISABLED:                 "ttl_seconds": file_reservation_ttl_seconds,
-# DISABLED:                 "exclusive": True,
-# DISABLED:                 "reason": file_reservation_reason,
-# DISABLED:             })
-# DISABLED:             file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
-# DISABLED: 
-# DISABLED:         inbox_items = await _list_inbox(
-# DISABLED:             project,
-# DISABLED:             agent,
-# DISABLED:             inbox_limit,
-# DISABLED:             urgent_only=False,
-# DISABLED:             include_bodies=False,
-# DISABLED:             since_ts=None,
-# DISABLED:         )
-# DISABLED:         await ctx.info(
-# DISABLED:             f"macro_start_session prepared agent '{agent.name}' on project '{project.human_key}' "
-# DISABLED:             f"(file_reservations={len(file_reservations_result['granted']) if file_reservations_result else 0})."
-# DISABLED:         )
-# DISABLED:         return {
-# DISABLED:             "project": _project_to_dict(project),
-# DISABLED:             "agent": _agent_to_dict(agent),
-# DISABLED:             "file_reservations": file_reservations_result or {"granted": [], "conflicts": []},
-# DISABLED:             "inbox": inbox_items,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="macro_prepare_thread")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "macro_prepare_thread",
-# DISABLED:         cluster=CLUSTER_MACROS,
-# DISABLED:         capabilities={"workflow", "messaging", "summarization"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def macro_prepare_thread(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         thread_id: str,
-# DISABLED:         program: str,
-# DISABLED:         model: str,
-# DISABLED:         agent_name: Optional[str] = None,
-# DISABLED:         task_description: str = "",
-# DISABLED:         register_if_missing: bool = True,
-# DISABLED:         include_examples: bool = True,
-# DISABLED:         inbox_limit: int = 10,
-# DISABLED:         include_inbox_bodies: bool = False,
-# DISABLED:         llm_mode: bool = True,
-# DISABLED:         llm_model: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Macro helper that aligns an agent with an existing thread by ensuring registration,
-# DISABLED:         summarising the thread, and fetching recent inbox context.
-# DISABLED:         """
-# DISABLED:         settings = get_settings()
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         if register_if_missing:
-# DISABLED:             agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
-# DISABLED:         else:
-# DISABLED:             if not agent_name:
-# DISABLED:                 raise ValueError("agent_name is required when register_if_missing is False.")
-# DISABLED:             agent = await _get_agent(project, agent_name)
-# DISABLED: 
-# DISABLED:         inbox_items = await _list_inbox(
-# DISABLED:             project,
-# DISABLED:             agent,
-# DISABLED:             inbox_limit,
-# DISABLED:             urgent_only=False,
-# DISABLED:             include_bodies=include_inbox_bodies,
-# DISABLED:             since_ts=None,
-# DISABLED:         )
-# DISABLED:         summary, examples, total_messages = await _compute_thread_summary(
-# DISABLED:             project,
-# DISABLED:             thread_id,
-# DISABLED:             include_examples,
-# DISABLED:             llm_mode,
-# DISABLED:             llm_model,
-# DISABLED:         )
-# DISABLED:         await ctx.info(
-# DISABLED:             f"macro_prepare_thread prepared agent '{agent.name}' for thread '{thread_id}' "
-# DISABLED:             f"on project '{project.human_key}' (messages={total_messages})."
-# DISABLED:         )
-# DISABLED:         return {
-# DISABLED:             "project": _project_to_dict(project),
-# DISABLED:             "agent": _agent_to_dict(agent),
-# DISABLED:             "thread": {"thread_id": thread_id, "summary": summary, "examples": examples, "total_messages": total_messages},
-# DISABLED:             "inbox": inbox_items,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="macro_file_reservation_cycle")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "macro_file_reservation_cycle",
-# DISABLED:         cluster=CLUSTER_MACROS,
-# DISABLED:         capabilities={"workflow", "file_reservations", "repository"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def macro_file_reservation_cycle(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         paths: list[str],
-# DISABLED:         ttl_seconds: int = 3600,
-# DISABLED:         exclusive: bool = True,
-# DISABLED:         reason: str = "macro-file_reservation",
-# DISABLED:         auto_release: bool = False,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """Reserve a set of file paths and optionally release them at the end of the workflow."""
-# DISABLED: 
-# DISABLED:         # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
-# DISABLED:         from fastmcp.tools.tool import FunctionTool
-# DISABLED:         file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
-# DISABLED:         file_reservations_tool_result = await file_reservations_tool.run({
-# DISABLED:             "project_key": project_key,
-# DISABLED:             "agent_name": agent_name,
-# DISABLED:             "paths": paths,
-# DISABLED:             "ttl_seconds": ttl_seconds,
-# DISABLED:             "exclusive": exclusive,
-# DISABLED:             "reason": reason,
-# DISABLED:         })
-# DISABLED:         file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
-# DISABLED: 
-# DISABLED:         release_result = None
-# DISABLED:         if auto_release:
-# DISABLED:             release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
-# DISABLED:             release_tool_result = await release_tool.run({
-# DISABLED:                 "project_key": project_key,
-# DISABLED:                 "agent_name": agent_name,
-# DISABLED:                 "paths": paths,
-# DISABLED:             })
-# DISABLED:             release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
-# DISABLED: 
-# DISABLED:         await ctx.info(
-# DISABLED:             f"macro_file_reservation_cycle issued {len(file_reservations_result['granted'])} file_reservation(s) for '{agent_name}' on '{project_key}'" +
-# DISABLED:             (" and released them immediately." if auto_release else ".")
-# DISABLED:         )
-# DISABLED:         return {
-# DISABLED:             "file_reservations": file_reservations_result,
-# DISABLED:             "released": release_result,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="macro_contact_handshake")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "macro_contact_handshake",
-# DISABLED:         cluster=CLUSTER_MACROS,
-# DISABLED:         capabilities={"workflow", "contact", "messaging"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="requester",
-# DISABLED:     )
-# DISABLED:     async def macro_contact_handshake(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         requester: Optional[str] = None,
-# DISABLED:         target: Optional[str] = None,
-# DISABLED:         reason: str = "",
-# DISABLED:         ttl_seconds: int = 7 * 24 * 3600,
-# DISABLED:         auto_accept: bool = False,
-# DISABLED:         welcome_subject: Optional[str] = None,
-# DISABLED:         welcome_body: Optional[str] = None,
-# DISABLED:         to_project: Optional[str] = None,
-# DISABLED:         # Aliases for compatibility
-# DISABLED:         agent_name: Optional[str] = None,
-# DISABLED:         to_agent: Optional[str] = None,
-# DISABLED:         register_if_missing: bool = True,
-# DISABLED:         program: Optional[str] = None,
-# DISABLED:         model: Optional[str] = None,
-# DISABLED:         task_description: Optional[str] = None,
-# DISABLED:         thread_id: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """Request contact permissions and optionally auto-approve plus send a welcome message."""
-# DISABLED: 
-# DISABLED:         # Resolve aliases
-# DISABLED:         real_requester = (requester or agent_name or "").strip()
-# DISABLED:         real_target = (target or to_agent or "").strip()
-# DISABLED:         target_project_key = (to_project or "").strip()
-# DISABLED:         if not real_requester or not real_target:
-# DISABLED:             # Best-effort inference to honor "obvious intent"
-# DISABLED:             try:
-# DISABLED:                 project = await _get_project_by_identifier(project_key)
-# DISABLED:                 # If requester missing and exactly one agent exists in project, assume that one
-# DISABLED:                 if not real_requester and project.id is not None:
-# DISABLED:                     async with get_session() as s:
-# DISABLED:                         rows = await s.execute(select(Agent.name).where(Agent.project_id == project.id))
-# DISABLED:                         names = [str(row[0]).strip() for row in rows.fetchall() if (row and row[0])]
-# DISABLED:                     if len(names) == 1:
-# DISABLED:                         real_requester = names[0]
-# DISABLED:                 # If target missing and exactly two agents exist, infer the other
-# DISABLED:                 if not real_target and project.id is not None:
-# DISABLED:                     async with get_session() as s2:
-# DISABLED:                         rows2 = await s2.execute(select(Agent.name).where(Agent.project_id == project.id))
-# DISABLED:                         names2 = [str(row[0]).strip() for row in rows2.fetchall() if (row and row[0])]
-# DISABLED:                     if real_requester and len(names2) == 2 and real_requester in names2:
-# DISABLED:                         real_target = next((n for n in names2 if n != real_requester), real_target)
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         if not real_requester or not real_target:
-# DISABLED:             raise ToolExecutionError(
-# DISABLED:                 "INVALID_ARGUMENT",
-# DISABLED:                 "macro_contact_handshake requires requester/agent_name and target/to_agent",
-# DISABLED:                 recoverable=True,
-# DISABLED:                 data={
-# DISABLED:                     "requester": real_requester or requester,
-# DISABLED:                     "agent_name": agent_name,
-# DISABLED:                     "target": real_target or target,
-# DISABLED:                     "to_agent": to_agent,
-# DISABLED:                     "suggested_tool_calls": [
-# DISABLED:                         {
-# DISABLED:                             "tool": "macro_contact_handshake",
-# DISABLED:                             "arguments": {
-# DISABLED:                                 "project_key": project_key,
-# DISABLED:                                 "requester": real_requester or "<your_agent>",
-# DISABLED:                                 "target": real_target or "<their_agent>",
-# DISABLED:                                 "auto_accept": True,
-# DISABLED:                                 "ttl_seconds": ttl_seconds,
-# DISABLED:                             },
-# DISABLED:                         }
-# DISABLED:                     ],
-# DISABLED:                 },
-# DISABLED:             )
-# DISABLED: 
-# DISABLED:         from fastmcp.tools.tool import FunctionTool
-# DISABLED:         request_tool = cast(FunctionTool, cast(Any, request_contact))
-# DISABLED:         request_payload: dict[str, Any] = {
-# DISABLED:             "project_key": project_key,
-# DISABLED:             "from_agent": real_requester,
-# DISABLED:             "to_agent": real_target,
-# DISABLED:             "reason": reason,
-# DISABLED:             "ttl_seconds": ttl_seconds,
-# DISABLED:         }
-# DISABLED:         if target_project_key:
-# DISABLED:             request_payload["to_project"] = target_project_key
-# DISABLED:         if register_if_missing:
-# DISABLED:             request_payload["register_if_missing"] = True
-# DISABLED:         if program:
-# DISABLED:             request_payload["program"] = program
-# DISABLED:         if model:
-# DISABLED:             request_payload["model"] = model
-# DISABLED:         if task_description:
-# DISABLED:             request_payload["task_description"] = task_description
-# DISABLED:         request_tool_result = await request_tool.run(request_payload)
-# DISABLED:         request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
-# DISABLED: 
-# DISABLED:         response_result = None
-# DISABLED:         if auto_accept:
-# DISABLED:             respond_tool = cast(FunctionTool, cast(Any, respond_contact))
-# DISABLED:             respond_payload: dict[str, Any] = {
-# DISABLED:                 "project_key": target_project_key or project_key,
-# DISABLED:                 "to_agent": real_target,
-# DISABLED:                 "from_agent": real_requester,
-# DISABLED:                 "accept": True,
-# DISABLED:                 "ttl_seconds": ttl_seconds,
-# DISABLED:             }
-# DISABLED:             if target_project_key:
-# DISABLED:                 respond_payload["from_project"] = project_key
-# DISABLED:             respond_tool_result = await respond_tool.run(respond_payload)
-# DISABLED:             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
-# DISABLED: 
-# DISABLED:         welcome_result = None
-# DISABLED:         if welcome_subject and welcome_body and not target_project_key:
-# DISABLED:             try:
-# DISABLED:                 send_tool = cast(FunctionTool, cast(Any, send_message))
-# DISABLED:                 send_tool_result = await send_tool.run({
-# DISABLED:                     "project_key": project_key,
-# DISABLED:                     "sender_name": real_requester,
-# DISABLED:                     "to": [real_target],
-# DISABLED:                     "subject": welcome_subject,
-# DISABLED:                     "body_md": welcome_body,
-# DISABLED:                     "thread_id": thread_id,
-# DISABLED:                 })
-# DISABLED:                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
-# DISABLED:             except ToolExecutionError as exc:
-# DISABLED:                 # surface but do not abort handshake
-# DISABLED:                 await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
-# DISABLED: 
-# DISABLED:         return {
-# DISABLED:             "request": request_result,
-# DISABLED:             "response": response_result,
-# DISABLED:             "welcome_message": welcome_result,
-# DISABLED:         }
-# DISABLED: 
+    @mcp.tool(name="macro_start_session")
+    @_instrument_tool(
+        "macro_start_session",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "messaging", "file_reservations", "identity"},
+        project_arg="human_key",
+        agent_arg="agent_name",
+    )
+    async def macro_start_session(
+        ctx: Context,
+        human_key: str,
+        program: str,
+        model: str,
+        task_description: str = "",
+        agent_name: Optional[str] = None,
+        file_reservation_paths: Optional[list[str]] = None,
+        file_reservation_reason: str = "macro-session",
+        file_reservation_ttl_seconds: int = 3600,
+        inbox_limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Macro helper that boots a project session: ensure project, register agent,
+        optionally file_reservation paths, and fetch the latest inbox snapshot.
+        """
+        _validate_program_model(program, model)
+        settings = get_settings()
+        project = await _ensure_project(human_key)
+        agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
+
+        file_reservations_result: Optional[dict[str, Any]] = None
+        if file_reservation_paths:
+            # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
+            from fastmcp.tools.tool import FunctionTool
+            _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
+            _file_reservation_run = await _file_reservation_tool.run({
+                "project_key": project.human_key,
+                "agent_name": agent.name,
+                "paths": file_reservation_paths,
+                "ttl_seconds": file_reservation_ttl_seconds,
+                "exclusive": True,
+                "reason": file_reservation_reason,
+            })
+            file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
+
+        inbox_items = await _list_inbox(
+            project,
+            agent,
+            inbox_limit,
+            urgent_only=False,
+            include_bodies=False,
+            since_ts=None,
+        )
+        await ctx.info(
+            f"macro_start_session prepared agent '{agent.name}' on project '{project.human_key}' "
+            f"(file_reservations={len(file_reservations_result['granted']) if file_reservations_result else 0})."
+        )
+        return {
+            "project": _project_to_dict(project),
+            "agent": _agent_to_dict(agent),
+            "file_reservations": file_reservations_result or {"granted": [], "conflicts": []},
+            "inbox": inbox_items,
+        }
+
+    @mcp.tool(name="macro_prepare_thread")
+    @_instrument_tool(
+        "macro_prepare_thread",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "messaging", "summarization"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def macro_prepare_thread(
+        ctx: Context,
+        project_key: str,
+        thread_id: str,
+        program: str,
+        model: str,
+        agent_name: Optional[str] = None,
+        task_description: str = "",
+        register_if_missing: bool = True,
+        include_examples: bool = True,
+        inbox_limit: int = 10,
+        include_inbox_bodies: bool = False,
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Macro helper that aligns an agent with an existing thread by ensuring registration,
+        summarising the thread, and fetching recent inbox context.
+        """
+        settings = get_settings()
+        project = await _get_project_by_identifier(project_key)
+        if register_if_missing:
+            _validate_program_model(program, model)
+            agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
+        else:
+            if not agent_name:
+                raise ValueError("agent_name is required when register_if_missing is False.")
+            agent = await _get_agent(project, agent_name)
+
+        inbox_items = await _list_inbox(
+            project,
+            agent,
+            inbox_limit,
+            urgent_only=False,
+            include_bodies=include_inbox_bodies,
+            since_ts=None,
+        )
+        summary, examples, total_messages = await _compute_thread_summary(
+            project,
+            thread_id,
+            include_examples,
+            llm_mode,
+            llm_model,
+        )
+        await ctx.info(
+            f"macro_prepare_thread prepared agent '{agent.name}' for thread '{thread_id}' "
+            f"on project '{project.human_key}' (messages={total_messages})."
+        )
+        return {
+            "project": _project_to_dict(project),
+            "agent": _agent_to_dict(agent),
+            "thread": {"thread_id": thread_id, "summary": summary, "examples": examples, "total_messages": total_messages},
+            "inbox": inbox_items,
+        }
+
+    @mcp.tool(name="macro_file_reservation_cycle")
+    @_instrument_tool(
+        "macro_file_reservation_cycle",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "file_reservations", "repository"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def macro_file_reservation_cycle(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        paths: list[str],
+        ttl_seconds: int = 3600,
+        exclusive: bool = True,
+        reason: str = "macro-file_reservation",
+        auto_release: bool = False,
+    ) -> dict[str, Any]:
+        """Reserve a set of file paths and optionally release them at the end of the workflow."""
+
+        # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
+        from fastmcp.tools.tool import FunctionTool
+        file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
+        file_reservations_tool_result = await file_reservations_tool.run({
+            "project_key": project_key,
+            "agent_name": agent_name,
+            "paths": paths,
+            "ttl_seconds": ttl_seconds,
+            "exclusive": exclusive,
+            "reason": reason,
+        })
+        file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
+
+        release_result = None
+        if auto_release:
+            release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
+            release_tool_result = await release_tool.run({
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": paths,
+            })
+            release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
+
+        await ctx.info(
+            f"macro_file_reservation_cycle issued {len(file_reservations_result['granted'])} file_reservation(s) for '{agent_name}' on '{project_key}'" +
+            (" and released them immediately." if auto_release else ".")
+        )
+        return {
+            "file_reservations": file_reservations_result,
+            "released": release_result,
+        }
+
+    @mcp.tool(name="macro_contact_handshake")
+    @_instrument_tool(
+        "macro_contact_handshake",
+        cluster=CLUSTER_MACROS,
+        capabilities={"workflow", "contact", "messaging"},
+        project_arg="project_key",
+        agent_arg="requester",
+    )
+    async def macro_contact_handshake(
+        ctx: Context,
+        project_key: str,
+        requester: Optional[str] = None,
+        target: Optional[str] = None,
+        reason: str = "",
+        ttl_seconds: int = 7 * 24 * 3600,
+        auto_accept: bool = False,
+        welcome_subject: Optional[str] = None,
+        welcome_body: Optional[str] = None,
+        to_project: Optional[str] = None,
+        # Aliases for compatibility
+        agent_name: Optional[str] = None,
+        to_agent: Optional[str] = None,
+        register_if_missing: bool = True,
+        program: Optional[str] = None,
+        model: Optional[str] = None,
+        task_description: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Request contact permissions and optionally auto-approve plus send a welcome message."""
+
+        # Resolve aliases
+        real_requester = (requester or agent_name or "").strip()
+        real_target = (target or to_agent or "").strip()
+        target_project_key = (to_project or "").strip()
+        if not real_requester or not real_target:
+            # Best-effort inference to honor "obvious intent"
+            try:
+                project = await _get_project_by_identifier(project_key)
+                # If requester missing and exactly one agent exists in project, assume that one
+                if not real_requester and project.id is not None:
+                    async with get_session() as s:
+                        rows = await s.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
+                        names = [str(row[0]).strip() for row in rows.fetchall() if (row and row[0])]
+                    if len(names) == 1:
+                        real_requester = names[0]
+                # If target missing and exactly two agents exist, infer the other
+                if not real_target and project.id is not None:
+                    async with get_session() as s2:
+                        rows2 = await s2.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
+                        names2 = [str(row[0]).strip() for row in rows2.fetchall() if (row and row[0])]
+                    if real_requester and len(names2) == 2 and real_requester in names2:
+                        real_target = next((n for n in names2 if n != real_requester), real_target)
+            except Exception:
+                pass
+        if not real_requester or not real_target:
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "macro_contact_handshake requires requester/agent_name and target/to_agent",
+                recoverable=True,
+                data={
+                    "requester": real_requester or requester,
+                    "agent_name": agent_name,
+                    "target": real_target or target,
+                    "to_agent": to_agent,
+                    "suggested_tool_calls": [
+                        {
+                            "tool": "macro_contact_handshake",
+                            "arguments": {
+                                "project_key": project_key,
+                                "requester": real_requester or "<your_agent>",
+                                "target": real_target or "<their_agent>",
+                                "auto_accept": True,
+                                "ttl_seconds": ttl_seconds,
+                            },
+                        }
+                    ],
+                },
+            )
+
+        from fastmcp.tools.tool import FunctionTool
+        request_tool = cast(FunctionTool, cast(Any, request_contact))
+        request_payload: dict[str, Any] = {
+            "project_key": project_key,
+            "from_agent": real_requester,
+            "to_agent": real_target,
+            "reason": reason,
+            "ttl_seconds": ttl_seconds,
+        }
+        if target_project_key:
+            request_payload["to_project"] = target_project_key
+        if register_if_missing:
+            request_payload["register_if_missing"] = True
+        if program:
+            request_payload["program"] = program
+        if model:
+            request_payload["model"] = model
+        if task_description:
+            request_payload["task_description"] = task_description
+        request_tool_result = await request_tool.run(request_payload)
+        request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
+
+        response_result = None
+        if auto_accept:
+            respond_tool = cast(FunctionTool, cast(Any, respond_contact))
+            respond_payload: dict[str, Any] = {
+                "project_key": target_project_key or project_key,
+                "to_agent": real_target,
+                "from_agent": real_requester,
+                "accept": True,
+                "ttl_seconds": ttl_seconds,
+            }
+            if target_project_key:
+                respond_payload["from_project"] = project_key
+            respond_tool_result = await respond_tool.run(respond_payload)
+            response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
+
+        welcome_result = None
+        if welcome_subject and welcome_body and not target_project_key:
+            try:
+                send_tool = cast(FunctionTool, cast(Any, send_message))
+                send_tool_result = await send_tool.run({
+                    "project_key": project_key,
+                    "sender_name": real_requester,
+                    "to": [real_target],
+                    "subject": welcome_subject,
+                    "body_md": welcome_body,
+                    "thread_id": thread_id,
+                })
+                welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
+            except ToolExecutionError as exc:
+                # surface but do not abort handshake
+                await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
+
+        return {
+            "request": request_result,
+            "response": response_result,
+            "welcome_message": welcome_result,
+        }
+
     @mcp.tool(name="search_messages")
     @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH, capabilities={"search"}, project_arg="project_key")
     async def search_messages(
@@ -4765,24 +5414,43 @@ def build_mcp_server() -> FastMCP:
                 pass
         if project.id is None:
             raise ValueError("Project must have an id before searching messages.")
+
+        # Sanitize the FTS query - returns None if query can't produce results
+        sanitized_query = _sanitize_fts_query(query)
+        if sanitized_query is None:
+            await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+            try:
+                from fastmcp.tools.tool import ToolResult  # type: ignore
+                return ToolResult(structured_content={"result": []})
+            except Exception:
+                return []
+
         await ensure_schema()
-        async with get_session() as session:
-            result = await session.execute(
-                text(
-                    """
-                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                           m.thread_id, a.name AS sender_name
-                    FROM fts_messages
-                    JOIN messages m ON fts_messages.rowid = m.id
-                    JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id = :project_id AND fts_messages MATCH :query
-                    ORDER BY bm25(fts_messages) ASC
-                    LIMIT :limit
-                    """
-                ),
-                {"project_id": project.id, "query": query, "limit": limit},
-            )
-            rows = result.mappings().all()
+        rows: list[Any] = []
+        try:
+            async with get_session() as session:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name
+                        FROM fts_messages
+                        JOIN messages m ON fts_messages.rowid = m.id
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id = :project_id AND fts_messages MATCH :query
+                        ORDER BY bm25(fts_messages) ASC
+                        LIMIT :limit
+                        """
+                    ),
+                    {"project_id": project.id, "query": sanitized_query, "limit": limit},
+                )
+                rows = list(result.mappings().all())
+        except Exception as fts_err:
+            # FTS query syntax error - return empty results instead of crashing
+            logger.warning("FTS query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+            await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
+            rows = []
+
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
         if get_settings().tools_log_enabled:
             try:
@@ -4812,243 +5480,227 @@ def build_mcp_server() -> FastMCP:
         except Exception:
             return items
 
-# DISABLED:     @mcp.tool(name="summarize_thread")
-# DISABLED:     @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
-# DISABLED:     async def summarize_thread(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         thread_id: str,
-# DISABLED:         include_examples: bool = False,
-# DISABLED:         llm_mode: bool = True,
-# DISABLED:         llm_model: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Extract participants, key points, and action items for a thread.
-# DISABLED: 
-# DISABLED:         Notes
-# DISABLED:         -----
-# DISABLED:         - If `thread_id` is not an id present on any message, it is treated as a string key
-# DISABLED:         - If `thread_id` is a message id, messages where `id == thread_id` are also included
-# DISABLED:         - `include_examples` returns up to 3 sample messages for quick preview
-# DISABLED: 
-# DISABLED:         Suggested use
-# DISABLED:         -------------
-# DISABLED:         - Call after a long discussion to inform a summarizing or planning agent.
-# DISABLED:         - Use `key_points` to seed a TODO list and `action_items` to assign work.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { thread_id, summary: {participants[], key_points[], action_items[], total_messages}, examples[] }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"11","method":"tools/call","params":{"name":"summarize_thread","arguments":{
-# DISABLED:           "project_key":"/abs/path/backend","thread_id":"TKT-123","include_examples":true
-# DISABLED:         }}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         summary, examples, total_messages = await _compute_thread_summary(
-# DISABLED:             project,
-# DISABLED:             thread_id,
-# DISABLED:             include_examples,
-# DISABLED:             llm_mode,
-# DISABLED:             llm_model,
-# DISABLED:                 )
-# DISABLED:         await ctx.info(
-# DISABLED:             f"Summarized thread '{thread_id}' for project '{project.human_key}' with {total_messages} messages"
-# DISABLED:         )
-# DISABLED:         return {"thread_id": thread_id, "summary": summary, "examples": examples}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="summarize_threads")
-# DISABLED:     @_instrument_tool("summarize_threads", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
-# DISABLED:     async def summarize_threads(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         thread_ids: list[str],
-# DISABLED:         llm_mode: bool = True,
-# DISABLED:         llm_model: Optional[str] = None,
-# DISABLED:         per_thread_limit: int = 50,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Produce a digest across multiple threads including top mentions and action items.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         project_key : str
-# DISABLED:             Project identifier.
-# DISABLED:         thread_ids : list[str]
-# DISABLED:             Collection of thread keys or seed message ids.
-# DISABLED:         llm_mode : bool
-# DISABLED:             If true and LLM is enabled, refine the digest with the LLM for clarity.
-# DISABLED:         llm_model : Optional[str]
-# DISABLED:             Override model name for the LLM call.
-# DISABLED:         per_thread_limit : int
-# DISABLED:             Max messages to consider per thread.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             {
-# DISABLED:               threads: [{thread_id, summary}],
-# DISABLED:               aggregate: { top_mentions[], action_items[], key_points[] }
-# DISABLED:             }
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         if project.id is None:
-# DISABLED:             raise ValueError("Project must have an id before summarizing threads.")
-# DISABLED:         await ensure_schema()
-# DISABLED: 
-# DISABLED:         sender_alias = aliased(Agent)
-# DISABLED:         all_mentions: dict[str, int] = {}
-# DISABLED:         all_actions: list[str] = []
-# DISABLED:         all_points: list[str] = []
-# DISABLED:         thread_summaries: list[dict[str, Any]] = []
-# DISABLED: 
-# DISABLED:         async with get_session() as session:
-# DISABLED:             for tid in thread_ids:
-# DISABLED:                 try:
-# DISABLED:                     seed_id = int(tid)
-# DISABLED:                 except ValueError:
-# DISABLED:                     seed_id = None
-# DISABLED:                 criteria = [Message.thread_id == tid]
-# DISABLED:                 if seed_id is not None:
-# DISABLED:                     criteria.append(Message.id == seed_id)
-# DISABLED:                 stmt = (
-# DISABLED:                     select(Message, sender_alias.name)
-# DISABLED:                     .join(sender_alias, Message.sender_id == sender_alias.id)
-# DISABLED:                     .where(Message.project_id == project.id, or_(*criteria))
-# DISABLED:                     .order_by(asc(Message.created_ts))
-# DISABLED:                     .limit(per_thread_limit)
-# DISABLED:                 )
-# DISABLED:                 rows = (await session.execute(stmt)).all()
-# DISABLED:                 summary = _summarize_messages(rows)
-# DISABLED:                 # accumulate
-# DISABLED:                 for m in summary.get("mentions", []):
-# DISABLED:                     name = str(m.get("name", "")).strip()
-# DISABLED:                     if not name:
-# DISABLED:                         continue
-# DISABLED:                     all_mentions[name] = all_mentions.get(name, 0) + int(m.get("count", 0) or 0)
-# DISABLED:                 all_actions.extend(summary.get("action_items", []))
-# DISABLED:                 all_points.extend(summary.get("key_points", []))
-# DISABLED:                 thread_summaries.append({"thread_id": tid, "summary": summary})
-# DISABLED: 
-# DISABLED:         # Lightweight heuristic digest
-# DISABLED:         top_mentions = sorted(all_mentions.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
-# DISABLED:         aggregate = {
-# DISABLED:             "top_mentions": [{"name": n, "count": c} for n, c in top_mentions],
-# DISABLED:             "action_items": all_actions[:25],
-# DISABLED:             "key_points": all_points[:25],
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:         # Optional LLM refinement
-# DISABLED:         if llm_mode and get_settings().llm.enabled and thread_summaries:
-# DISABLED:             try:
-# DISABLED:                 # Compose compact context combining per-thread key points & actions only
-# DISABLED:                 parts: list[str] = []
-# DISABLED:                 for item in thread_summaries[:8]:
-# DISABLED:                     s = item["summary"]
-# DISABLED:                     parts.append(
-# DISABLED:                         "\n".join(
-# DISABLED:                             [
-# DISABLED:                                 f"# Thread {item['thread_id']}",
-# DISABLED:                                 "## Key Points",
-# DISABLED:                                 *[f"- {p}" for p in s.get("key_points", [])[:6]],
-# DISABLED:                                 "## Actions",
-# DISABLED:                                 *[f"- {a}" for a in s.get("action_items", [])[:6]],
-# DISABLED:                             ]
-# DISABLED:                         )
-# DISABLED:                     )
-# DISABLED:                 system = (
-# DISABLED:                     "You are a senior engineer producing a crisp digest across threads. "
-# DISABLED:                     "Return JSON: { threads: [{thread_id, key_points[], actions[]}], aggregate: {top_mentions[], key_points[], action_items[]} }."
-# DISABLED:                 )
-# DISABLED:                 user = "\n\n".join(parts)
-# DISABLED:                 llm_resp = await complete_system_user(system, user, model=llm_model)
-# DISABLED:                 parsed = _parse_json_safely(llm_resp.content)
-# DISABLED:                 if parsed:
-# DISABLED:                     agg = parsed.get("aggregate") or {}
-# DISABLED:                     if agg:
-# DISABLED:                         for k in ("top_mentions", "key_points", "action_items"):
-# DISABLED:                             v = agg.get(k)
-# DISABLED:                             if v:
-# DISABLED:                                 aggregate[k] = v
-# DISABLED:                     # Replace per-thread summaries' key aggregates if returned
-# DISABLED:                     revised_threads = []
-# DISABLED:                     threads_payload = parsed.get("threads") or []
-# DISABLED:                     if threads_payload:
-# DISABLED:                         mapping = {str(t.get("thread_id")): t for t in threads_payload}
-# DISABLED:                         for item in thread_summaries:
-# DISABLED:                             tid = str(item["thread_id"])
-# DISABLED:                             if tid in mapping:
-# DISABLED:                                 s = item["summary"].copy()
-# DISABLED:                                 tdata = mapping[tid]
-# DISABLED:                                 if tdata.get("key_points"):
-# DISABLED:                                     s["key_points"] = tdata["key_points"]
-# DISABLED:                                 if tdata.get("actions"):
-# DISABLED:                                     s["action_items"] = tdata["actions"]
-# DISABLED:                                 revised_threads.append({"thread_id": item["thread_id"], "summary": s})
-# DISABLED:                             else:
-# DISABLED:                                 revised_threads.append(item)
-# DISABLED:                         thread_summaries = revised_threads
-# DISABLED:             except Exception as e:
-# DISABLED:                 await ctx.debug(f"summarize_threads.llm_skipped: {e}")
-# DISABLED: 
-# DISABLED:         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
-# DISABLED:         return {"threads": thread_summaries, "aggregate": aggregate}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="install_precommit_guard")
-# DISABLED:     @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")
-# DISABLED:     async def install_precommit_guard(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         code_repo_path: str,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         if not settings.worktrees_enabled:
-# DISABLED:             await ctx.info("Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.")
-# DISABLED:             return {"hook": ""}
-# DISABLED:         if get_settings().tools_log_enabled:
-# DISABLED:             try:
-# DISABLED:                 import importlib as _imp
-# DISABLED:                 _rc = _imp.import_module("rich.console")
-# DISABLED:                 _rp = _imp.import_module("rich.panel")
-# DISABLED:                 Console = _rc.Console
-# DISABLED:                 Panel = _rp.Panel
-# DISABLED:                 Console().print(Panel.fit(f"project={project_key}\nrepo={code_repo_path}", title="tool: install_precommit_guard", border_style="green"))
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         repo_path = Path(code_repo_path).expanduser().resolve()
-# DISABLED:         hook_path = await install_guard_script(settings, project.slug, repo_path)
-# DISABLED:         await _ctx_info_safe(ctx, f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
-# DISABLED:         return {"hook": str(hook_path)}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="uninstall_precommit_guard")
-# DISABLED:     @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"})
-# DISABLED:     async def uninstall_precommit_guard(
-# DISABLED:         ctx: Context,
-# DISABLED:         code_repo_path: str,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         if get_settings().tools_log_enabled:
-# DISABLED:             try:
-# DISABLED:                 import importlib as _imp
-# DISABLED:                 _rc = _imp.import_module("rich.console")
-# DISABLED:                 _rp = _imp.import_module("rich.panel")
-# DISABLED:                 Console = _rc.Console
-# DISABLED:                 Panel = _rp.Panel
-# DISABLED:                 Console().print(Panel.fit(f"repo={code_repo_path}", title="tool: uninstall_precommit_guard", border_style="green"))
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         repo_path = Path(code_repo_path).expanduser().resolve()
-# DISABLED:         removed = await uninstall_guard_script(repo_path)
-# DISABLED:         if removed:
-# DISABLED:             await _ctx_info_safe(ctx, f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
-# DISABLED:         else:
-# DISABLED:             await _ctx_info_safe(ctx, f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
-# DISABLED:         return {"removed": removed}
-# DISABLED: 
+    @mcp.tool(name="summarize_thread")
+    @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
+    async def summarize_thread(
+        ctx: Context,
+        project_key: str,
+        thread_id: str,
+        include_examples: bool = False,
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+        per_thread_limit: int = 50,
+    ) -> dict[str, Any]:
+        """
+        Extract participants, key points, and action items for one or more threads.
+
+        Single-thread mode (thread_id is a single ID):
+        - Returns detailed summary with optional example messages
+        - Response: { thread_id, summary: {participants[], key_points[], action_items[]}, examples[] }
+
+        Multi-thread mode (thread_id is comma-separated IDs like "TKT-1,TKT-2,TKT-3"):
+        - Returns aggregate digest across all threads
+        - Response: { threads: [{thread_id, summary}], aggregate: {top_mentions[], key_points[], action_items[]} }
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        thread_id : str
+            Single thread ID for detailed summary, OR comma-separated IDs for aggregate digest.
+        include_examples : bool
+            If true (single-thread mode only), include up to 3 sample messages.
+        llm_mode : bool
+            If true and LLM is enabled, refine the summary with AI.
+        llm_model : Optional[str]
+            Override model name for the LLM call.
+        per_thread_limit : int
+            Max messages to consider per thread (multi-thread mode).
+
+        Examples
+        --------
+        Single thread:
+        ```json
+        {"thread_id": "TKT-123", "include_examples": true}
+        ```
+
+        Multiple threads:
+        ```json
+        {"thread_id": "TKT-1,TKT-2,TKT-3"}
+        ```
+        """
+        # Detect multi-thread mode by checking for comma-separated IDs
+        thread_ids = [t.strip() for t in thread_id.split(",") if t.strip()]
+
+        if len(thread_ids) == 1:
+            # Single-thread mode: detailed summary with examples
+            project = await _get_project_by_identifier(project_key)
+            summary, examples, total_messages = await _compute_thread_summary(
+                project,
+                thread_ids[0],
+                include_examples,
+                llm_mode,
+                llm_model,
+            )
+            await ctx.info(
+                f"Summarized thread '{thread_ids[0]}' for project '{project.human_key}' with {total_messages} messages"
+            )
+            return {"thread_id": thread_ids[0], "summary": summary, "examples": examples}
+
+        # Multi-thread mode: aggregate digest
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ValueError("Project must have an id before summarizing threads.")
+        await ensure_schema()
+
+        sender_alias = aliased(Agent)
+        all_mentions: dict[str, int] = {}
+        all_actions: list[str] = []
+        all_points: list[str] = []
+        thread_summaries: list[dict[str, Any]] = []
+
+        async with get_session() as session:
+            for tid in thread_ids:
+                try:
+                    seed_id = int(tid)
+                except ValueError:
+                    seed_id = None
+                criteria = [cast(Any, Message.thread_id) == tid]
+                if seed_id is not None:
+                    criteria.append(cast(Any, Message.id) == seed_id)
+                stmt = (
+                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                    .where(Message.project_id == project.id, or_(*criteria))
+                    .order_by(asc(cast(Any, Message.created_ts)))
+                    .limit(per_thread_limit)
+                )
+                rows = (await session.execute(stmt)).all()
+                summary = _summarize_messages(rows)  # type: ignore[arg-type]
+                # accumulate
+                for m in summary.get("mentions", []):
+                    name = str(m.get("name", "")).strip()
+                    if not name:
+                        continue
+                    all_mentions[name] = all_mentions.get(name, 0) + int(m.get("count", 0) or 0)
+                all_actions.extend(summary.get("action_items", []))
+                all_points.extend(summary.get("key_points", []))
+                thread_summaries.append({"thread_id": tid, "summary": summary})
+
+        # Lightweight heuristic digest
+        top_mentions = sorted(all_mentions.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+        aggregate = {
+            "top_mentions": [{"name": n, "count": c} for n, c in top_mentions],
+            "action_items": all_actions[:25],
+            "key_points": all_points[:25],
+        }
+
+        # Optional LLM refinement
+        if llm_mode and get_settings().llm.enabled and thread_summaries:
+            try:
+                # Compose compact context combining per-thread key points & actions only
+                parts: list[str] = []
+                for item in thread_summaries[:8]:
+                    s = item["summary"]
+                    parts.append(
+                        "\n".join(
+                            [
+                                f"# Thread {item['thread_id']}",
+                                "## Key Points",
+                                *[f"- {p}" for p in s.get("key_points", [])[:6]],
+                                "## Actions",
+                                *[f"- {a}" for a in s.get("action_items", [])[:6]],
+                            ]
+                        )
+                    )
+                system = (
+                    "You are a senior engineer producing a crisp digest across threads. "
+                    "Return JSON: { threads: [{thread_id, key_points[], actions[]}], aggregate: {top_mentions[], key_points[], action_items[]} }."
+                )
+                user = "\n\n".join(parts)
+                llm_resp = await complete_system_user(system, user, model=llm_model)
+                parsed = _parse_json_safely(llm_resp.content)
+                if parsed:
+                    agg = parsed.get("aggregate") or {}
+                    if agg:
+                        for k in ("top_mentions", "key_points", "action_items"):
+                            v = agg.get(k)
+                            if v:
+                                aggregate[k] = v
+                    # Replace per-thread summaries' key aggregates if returned
+                    revised_threads = []
+                    threads_payload = parsed.get("threads") or []
+                    if threads_payload:
+                        mapping = {str(t.get("thread_id")): t for t in threads_payload}
+                        for item in thread_summaries:
+                            tid = str(item["thread_id"])
+                            if tid in mapping:
+                                s = item["summary"].copy()
+                                tdata = mapping[tid]
+                                if tdata.get("key_points"):
+                                    s["key_points"] = tdata["key_points"]
+                                if tdata.get("actions"):
+                                    s["action_items"] = tdata["actions"]
+                                revised_threads.append({"thread_id": item["thread_id"], "summary": s})
+                            else:
+                                revised_threads.append(item)
+                        thread_summaries = revised_threads
+            except Exception as e:
+                await ctx.debug(f"summarize_thread.llm_skipped: {e}")
+
+        await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
+        return {"threads": thread_summaries, "aggregate": aggregate}
+
+    @mcp.tool(name="install_precommit_guard")
+    @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")
+    async def install_precommit_guard(
+        ctx: Context,
+        project_key: str,
+        code_repo_path: str,
+    ) -> dict[str, Any]:
+        if not settings.worktrees_enabled:
+            await ctx.info("Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.")
+            return {"hook": ""}
+        if get_settings().tools_log_enabled:
+            try:
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
+                Console().print(Panel.fit(f"project={project_key}\nrepo={code_repo_path}", title="tool: install_precommit_guard", border_style="green"))
+            except Exception:
+                pass
+        project = await _get_project_by_identifier(project_key)
+        repo_path = Path(code_repo_path).expanduser().resolve()
+        hook_path = await install_guard_script(settings, project.slug, repo_path)
+        await _ctx_info_safe(ctx, f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
+        return {"hook": str(hook_path)}
+
+    @mcp.tool(name="uninstall_precommit_guard")
+    @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"})
+    async def uninstall_precommit_guard(
+        ctx: Context,
+        code_repo_path: str,
+    ) -> dict[str, Any]:
+        if get_settings().tools_log_enabled:
+            try:
+                import importlib as _imp
+                _rc = _imp.import_module("rich.console")
+                _rp = _imp.import_module("rich.panel")
+                Console = _rc.Console
+                Panel = _rp.Panel
+                Console().print(Panel.fit(f"repo={code_repo_path}", title="tool: uninstall_precommit_guard", border_style="green"))
+            except Exception:
+                pass
+        repo_path = Path(code_repo_path).expanduser().resolve()
+        removed = await uninstall_guard_script(repo_path)
+        if removed:
+            await _ctx_info_safe(ctx, f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
+        else:
+            await _ctx_info_safe(ctx, f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
+        return {"removed": removed}
+
     @mcp.tool(name="file_reservation_paths")
     @_instrument_tool("file_reservation_paths", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations", "repository"}, project_arg="project_key", agent_arg="agent_name")
     async def file_reservation_paths(
@@ -5109,9 +5761,28 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        # Validate paths is not empty
+        if not paths:
+            raise ToolExecutionError(
+                error_type="EMPTY_PATHS",
+                message=(
+                    "paths list cannot be empty. Provide at least one file path or glob pattern "
+                    "to reserve (e.g., ['src/api/*.py', 'config/settings.yaml'])."
+                ),
+                recoverable=True,
+                data={"provided": paths},
+            )
+
+        # Warn on very short TTL (but still allow it for testing scenarios)
+        if ttl_seconds < 60:
+            await ctx.info(
+                f"[warn] ttl_seconds={ttl_seconds} is below recommended minimum (60s). "
+                f"Very short TTLs may cause unexpected expiry during processing."
+            )
+
         project = await _get_project_by_identifier(project_key)
         settings = get_settings()
-        if get_settings().tools_log_enabled:
+        if settings.tools_log_enabled:
             try:
                 import importlib as _imp
                 _rc = _imp.import_module("rich.console")
@@ -5134,18 +5805,19 @@ def build_mcp_server() -> FastMCP:
             extra = f" ({summary})" if summary else ""
             await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
         project_id = project.id
-        # Lightweight validation: warn on ultra-broad patterns
-        broad = [p for p in paths if p.strip() in {"*", "**/*", "**", "/**/*"}]
-        if broad:
-            await ctx.info(f"[warn] Reservation pattern(s) extremely broad: {', '.join(broad)} — consider narrowing to repo-root relative paths (e.g., 'app/api/*.py').")
+        # Validate path patterns and warn on suspicious patterns
+        for pattern in paths:
+            warning = _detect_suspicious_file_reservation(pattern)
+            if warning:
+                await ctx.info(f"[warn] {warning}")
         async with get_session() as session:
             existing_rows = await session.execute(
-                select(FileReservation, Agent.name)
-                .join(Agent, FileReservation.agent_id == Agent.id)
+                cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                 .where(
-                    FileReservation.project_id == project_id,
+                    cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    FileReservation.expires_ts > datetime.now(timezone.utc),
+                    cast(Any, FileReservation.expires_ts) > datetime.now(timezone.utc),
                 )
             )
             existing_reservations = existing_rows.all()
@@ -5174,18 +5846,18 @@ def build_mcp_server() -> FastMCP:
                 ctx_branch: Optional[str] = None
                 ctx_worktree: Optional[str] = None
                 try:
-                    repo = Repo(project.human_key, search_parent_directories=True)
-                    try:
-                        ctx_branch = repo.active_branch.name
-                    except Exception:
+                    with _git_repo(project.human_key) as repo:
                         try:
-                            ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            ctx_branch = repo.active_branch.name
                         except Exception:
-                            ctx_branch = None
-                    try:
-                        ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                    except Exception:
-                        ctx_worktree = None
+                            try:
+                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            except Exception:
+                                ctx_branch = None
+                        try:
+                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                        except Exception:
+                            ctx_worktree = None
                 except Exception:
                     pass
                 file_reservation_payload = {
@@ -5200,7 +5872,7 @@ def build_mcp_server() -> FastMCP:
                     "branch": ctx_branch,
                     "worktree": ctx_worktree,
                 }
-                await write_file_reservation_record(archive, file_reservation_payload)
+                await write_file_reservation_record(archive, file_reservation_payload)  # type: ignore[arg-type]
                 granted.append(
                     {
                         "id": file_reservation.id,
@@ -5210,7 +5882,7 @@ def build_mcp_server() -> FastMCP:
                         "expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
-                existing_reservations.append((file_reservation, agent.name))
+                existing_reservations.append((file_reservation, agent.name))  # type: ignore[attr-defined]
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
@@ -5282,8 +5954,8 @@ def build_mcp_server() -> FastMCP:
                 stmt = (
                     update(FileReservation)
                     .where(
-                        FileReservation.project_id == project.id,
-                        FileReservation.agent_id == agent.id,
+                        cast(Any, FileReservation.project_id) == project.id,
+                        cast(Any, FileReservation.agent_id) == agent.id,
                         cast(Any, FileReservation.released_ts).is_(None),
                     )
                     .values(released_ts=now)
@@ -5294,7 +5966,7 @@ def build_mcp_server() -> FastMCP:
                     stmt = stmt.where(cast(Any, FileReservation.path_pattern).in_(paths))
                 result = await session.execute(stmt)
                 await session.commit()
-            affected = int(result.rowcount or 0)
+            affected = int(result.rowcount or 0)  # type: ignore[attr-defined]
             await ctx.info(f"Released {affected} file_reservations for '{agent.name}'.")
             return {"released": affected, "released_at": _iso(now)}
         except Exception as exc:
@@ -5303,181 +5975,181 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console
-                    JSON = _rj.JSON
+                    Console = _rc.Console  # type: ignore[misc]
+                    JSON = _rj.JSON  # type: ignore[misc]
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
             raise
 
-# DISABLED:     @mcp.tool(name="force_release_file_reservation")
-# DISABLED:     @_instrument_tool(
-# DISABLED:         "force_release_file_reservation",
-# DISABLED:         cluster=CLUSTER_FILE_RESERVATIONS,
-# DISABLED:         capabilities={"file_reservations", "repository"},
-# DISABLED:         project_arg="project_key",
-# DISABLED:         agent_arg="agent_name",
-# DISABLED:     )
-# DISABLED:     async def force_release_file_reservation(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         file_reservation_id: int,
-# DISABLED:         notify_previous: bool = True,
-# DISABLED:         note: str = "",
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Force-release a stale file reservation held by another agent after inactivity heuristics.
-# DISABLED: 
-# DISABLED:         The tool validates that the reservation appears abandoned (agent inactive beyond threshold and
-# DISABLED:         no recent mail/filesystem/git activity). When released, an optional notification is sent to the
-# DISABLED:         previous holder summarizing the heuristics.
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         actor = await _get_agent(project, agent_name)
-# DISABLED:         if project.id is None:
-# DISABLED:             raise ValueError("Project must have an id before releasing file_reservations.")
-# DISABLED: 
-# DISABLED:         await ensure_schema()
-# DISABLED:         async with get_session() as session:
-# DISABLED:             result = await session.execute(
-# DISABLED:                 select(FileReservation, Agent)
-# DISABLED:                 .join(Agent, FileReservation.agent_id == Agent.id)
-# DISABLED:                 .where(
-# DISABLED:                     FileReservation.id == file_reservation_id,
-# DISABLED:                     FileReservation.project_id == project.id,
-# DISABLED:                 )
-# DISABLED:             )
-# DISABLED:             row = result.first()
-# DISABLED:         if not row:
-# DISABLED:             raise ToolExecutionError(
-# DISABLED:                 "NOT_FOUND",
-# DISABLED:                 f"File reservation id={file_reservation_id} not found for project '{project.human_key}'.",
-# DISABLED:                 recoverable=True,
-# DISABLED:                 data={"file_reservation_id": file_reservation_id},
-# DISABLED:             )
-# DISABLED: 
-# DISABLED:         reservation, holder = row
-# DISABLED:         if reservation.released_ts is not None:
-# DISABLED:             return {
-# DISABLED:                 "released": 0,
-# DISABLED:                 "released_at": _iso(reservation.released_ts),
-# DISABLED:                 "already_released": True,
-# DISABLED:             }
-# DISABLED: 
-# DISABLED:         statuses = await _collect_file_reservation_statuses(project, include_released=False)
-# DISABLED:         target_status = next((status for status in statuses if status.reservation.id == reservation.id), None)
-# DISABLED:         if target_status is None:
-# DISABLED:             raise ToolExecutionError(
-# DISABLED:                 "NOT_FOUND",
-# DISABLED:                 "Unable to evaluate reservation status; it may have been released concurrently.",
-# DISABLED:                 recoverable=True,
-# DISABLED:                 data={"file_reservation_id": file_reservation_id},
-# DISABLED:             )
-# DISABLED: 
-# DISABLED:         if not target_status.stale:
-# DISABLED:             raise ToolExecutionError(
-# DISABLED:                 "RESERVATION_ACTIVE",
-# DISABLED:                 "Reservation still shows recent activity; refusing forced release.",
-# DISABLED:                 recoverable=True,
-# DISABLED:                 data={
-# DISABLED:                     "file_reservation_id": file_reservation_id,
-# DISABLED:                     "stale_reasons": target_status.stale_reasons,
-# DISABLED:                 },
-# DISABLED:             )
-# DISABLED: 
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         async with get_session() as session:
-# DISABLED:             await session.execute(
-# DISABLED:                 update(FileReservation)
-# DISABLED:                 .where(
-# DISABLED:                     FileReservation.id == file_reservation_id,
-# DISABLED:                     cast(Any, FileReservation.released_ts).is_(None),
-# DISABLED:                 )
-# DISABLED:                 .values(released_ts=now)
-# DISABLED:             )
-# DISABLED:             await session.commit()
-# DISABLED: 
-# DISABLED:         reservation.released_ts = now
-# DISABLED:         settings = get_settings()
-# DISABLED:         grace_seconds = int(settings.file_reservation_activity_grace_seconds)
-# DISABLED:         inactivity_seconds = int(settings.file_reservation_inactivity_seconds)
-# DISABLED: 
-# DISABLED:         summary = {
-# DISABLED:             "id": reservation.id,
-# DISABLED:             "agent": holder.name,
-# DISABLED:             "path_pattern": reservation.path_pattern,
-# DISABLED:             "exclusive": reservation.exclusive,
-# DISABLED:             "reason": reservation.reason,
-# DISABLED:             "created_ts": _iso(reservation.created_ts),
-# DISABLED:             "expires_ts": _iso(reservation.expires_ts),
-# DISABLED:             "released_ts": _iso(reservation.released_ts),
-# DISABLED:             "stale_reasons": target_status.stale_reasons,
-# DISABLED:             "last_agent_activity_ts": _iso(target_status.last_agent_activity) if target_status.last_agent_activity else None,
-# DISABLED:             "last_mail_activity_ts": _iso(target_status.last_mail_activity) if target_status.last_mail_activity else None,
-# DISABLED:             "last_filesystem_activity_ts": _iso(target_status.last_fs_activity) if target_status.last_fs_activity else None,
-# DISABLED:             "last_git_activity_ts": _iso(target_status.last_git_activity) if target_status.last_git_activity else None,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:         await ctx.info(
-# DISABLED:             f"Force released reservation {file_reservation_id} held by '{holder.name}' on '{reservation.path_pattern}'."
-# DISABLED:         )
-# DISABLED: 
-# DISABLED:         notified = False
-# DISABLED:         if notify_previous and holder.name != actor.name:
-# DISABLED:             reasons_md = "\n".join(f"- {reason}" for reason in target_status.stale_reasons)
-# DISABLED:             extras: list[str] = []
-# DISABLED:             if target_status.last_agent_activity:
-# DISABLED:                 delta = now - target_status.last_agent_activity
-# DISABLED:                 extras.append(f"last agent activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
-# DISABLED:             if target_status.last_mail_activity:
-# DISABLED:                 delta = now - target_status.last_mail_activity
-# DISABLED:                 extras.append(f"last mail activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
-# DISABLED:             if target_status.last_fs_activity:
-# DISABLED:                 delta = now - target_status.last_fs_activity
-# DISABLED:                 extras.append(f"last filesystem touch ≈ {int(delta.total_seconds() // 60)} minutes ago")
-# DISABLED:             if target_status.last_git_activity:
-# DISABLED:                 delta = now - target_status.last_git_activity
-# DISABLED:                 extras.append(f"last git commit ≈ {int(delta.total_seconds() // 60)} minutes ago")
-# DISABLED:             extras.append(f"inactivity threshold={inactivity_seconds}s grace={grace_seconds}s")
-# DISABLED:             extra_md = "\n".join(f"- {line}" for line in extras if line)
-# DISABLED:             body_lines = [
-# DISABLED:                 f"Hi {holder.name},",
-# DISABLED:                 "",
-# DISABLED:                 f"I released your file reservation on `{reservation.path_pattern}` because it looked abandoned.",
-# DISABLED:                 "",
-# DISABLED:                 "Observed signals:",
-# DISABLED:                 reasons_md or "- (none)",
-# DISABLED:             ]
-# DISABLED:             if extra_md:
-# DISABLED:                 body_lines.extend(["", "Details:", extra_md])
-# DISABLED:             if note:
-# DISABLED:                 body_lines.extend(["", f"Additional note from {actor.name}:", note.strip()])
-# DISABLED:             body_lines.extend(
-# DISABLED:                 [
-# DISABLED:                     "",
-# DISABLED:                     "If you still need this reservation, please re-acquire it via `file_reservation_paths`.",
-# DISABLED:                 ]
-# DISABLED:             )
-# DISABLED:             try:
-# DISABLED:                 from fastmcp.tools.tool import FunctionTool
-# DISABLED: 
-# DISABLED:                 send_tool = cast(FunctionTool, cast(Any, send_message))
-# DISABLED:                 await send_tool.run(
-# DISABLED:                     {
-# DISABLED:                         "project_key": project_key,
-# DISABLED:                         "sender_name": agent_name,
-# DISABLED:                         "to": [holder.name],
-# DISABLED:                         "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
-# DISABLED:                         "body_md": "\n".join(body_lines),
-# DISABLED:                     }
-# DISABLED:                 )
-# DISABLED:                 notified = True
-# DISABLED:             except Exception:
-# DISABLED:                 notified = False
-# DISABLED: 
-# DISABLED:         summary["notified"] = notified
-# DISABLED:         return {"released": 1, "released_at": _iso(now), "reservation": summary}
+    @mcp.tool(name="force_release_file_reservation")
+    @_instrument_tool(
+        "force_release_file_reservation",
+        cluster=CLUSTER_FILE_RESERVATIONS,
+        capabilities={"file_reservations", "repository"},
+        project_arg="project_key",
+        agent_arg="agent_name",
+    )
+    async def force_release_file_reservation(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        file_reservation_id: int,
+        notify_previous: bool = True,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """
+        Force-release a stale file reservation held by another agent after inactivity heuristics.
+
+        The tool validates that the reservation appears abandoned (agent inactive beyond threshold and
+        no recent mail/filesystem/git activity). When released, an optional notification is sent to the
+        previous holder summarizing the heuristics.
+        """
+        project = await _get_project_by_identifier(project_key)
+        actor = await _get_agent(project, agent_name)
+        if project.id is None:
+            raise ValueError("Project must have an id before releasing file_reservations.")
+
+        await ensure_schema()
+        async with get_session() as session:
+            result = await session.execute(
+                select(FileReservation, Agent)
+                .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+                .where(
+                    cast(Any, FileReservation.id) == file_reservation_id,
+                    cast(Any, FileReservation.project_id) == project.id,
+                )
+            )
+            row = result.first()
+        if not row:
+            raise ToolExecutionError(
+                "NOT_FOUND",
+                f"File reservation id={file_reservation_id} not found for project '{project.human_key}'.",
+                recoverable=True,
+                data={"file_reservation_id": file_reservation_id},
+            )
+
+        reservation, holder = row
+        if reservation.released_ts is not None:
+            return {
+                "released": 0,
+                "released_at": _iso(reservation.released_ts),
+                "already_released": True,
+            }
+
+        statuses = await _collect_file_reservation_statuses(project, include_released=False)
+        target_status = next((status for status in statuses if status.reservation.id == reservation.id), None)
+        if target_status is None:
+            raise ToolExecutionError(
+                "NOT_FOUND",
+                "Unable to evaluate reservation status; it may have been released concurrently.",
+                recoverable=True,
+                data={"file_reservation_id": file_reservation_id},
+            )
+
+        if not target_status.stale:
+            raise ToolExecutionError(
+                "RESERVATION_ACTIVE",
+                "Reservation still shows recent activity; refusing forced release.",
+                recoverable=True,
+                data={
+                    "file_reservation_id": file_reservation_id,
+                    "stale_reasons": target_status.stale_reasons,
+                },
+            )
+
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            await session.execute(
+                update(FileReservation)
+                .where(
+                    cast(Any, FileReservation.id) == file_reservation_id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                )
+                .values(released_ts=now)
+            )
+            await session.commit()
+
+        reservation.released_ts = now
+        settings = get_settings()
+        grace_seconds = int(settings.file_reservation_activity_grace_seconds)
+        inactivity_seconds = int(settings.file_reservation_inactivity_seconds)
+
+        summary = {
+            "id": reservation.id,
+            "agent": holder.name,
+            "path_pattern": reservation.path_pattern,
+            "exclusive": reservation.exclusive,
+            "reason": reservation.reason,
+            "created_ts": _iso(reservation.created_ts),
+            "expires_ts": _iso(reservation.expires_ts),
+            "released_ts": _iso(reservation.released_ts),
+            "stale_reasons": target_status.stale_reasons,
+            "last_agent_activity_ts": _iso(target_status.last_agent_activity) if target_status.last_agent_activity else None,
+            "last_mail_activity_ts": _iso(target_status.last_mail_activity) if target_status.last_mail_activity else None,
+            "last_filesystem_activity_ts": _iso(target_status.last_fs_activity) if target_status.last_fs_activity else None,
+            "last_git_activity_ts": _iso(target_status.last_git_activity) if target_status.last_git_activity else None,
+        }
+
+        await ctx.info(
+            f"Force released reservation {file_reservation_id} held by '{holder.name}' on '{reservation.path_pattern}'."
+        )
+
+        notified = False
+        if notify_previous and holder.name != actor.name:
+            reasons_md = "\n".join(f"- {reason}" for reason in target_status.stale_reasons)
+            extras: list[str] = []
+            if target_status.last_agent_activity:
+                delta = now - target_status.last_agent_activity
+                extras.append(f"last agent activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_mail_activity:
+                delta = now - target_status.last_mail_activity
+                extras.append(f"last mail activity ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_fs_activity:
+                delta = now - target_status.last_fs_activity
+                extras.append(f"last filesystem touch ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            if target_status.last_git_activity:
+                delta = now - target_status.last_git_activity
+                extras.append(f"last git commit ≈ {int(delta.total_seconds() // 60)} minutes ago")
+            extras.append(f"inactivity threshold={inactivity_seconds}s grace={grace_seconds}s")
+            extra_md = "\n".join(f"- {line}" for line in extras if line)
+            body_lines = [
+                f"Hi {holder.name},",
+                "",
+                f"I released your file reservation on `{reservation.path_pattern}` because it looked abandoned.",
+                "",
+                "Observed signals:",
+                reasons_md or "- (none)",
+            ]
+            if extra_md:
+                body_lines.extend(["", "Details:", extra_md])
+            if note:
+                body_lines.extend(["", f"Additional note from {actor.name}:", note.strip()])
+            body_lines.extend(
+                [
+                    "",
+                    "If you still need this reservation, please re-acquire it via `file_reservation_paths`.",
+                ]
+            )
+            try:
+                from fastmcp.tools.tool import FunctionTool
+
+                send_tool = cast(FunctionTool, cast(Any, send_message))
+                await send_tool.run(
+                    {
+                        "project_key": project_key,
+                        "sender_name": agent_name,
+                        "to": [holder.name],
+                        "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
+                        "body_md": "\n".join(body_lines),
+                    }
+                )
+                notified = True
+            except Exception:
+                notified = False
+
+        summary["notified"] = notified
+        return {"released": 1, "released_at": _iso(now), "reservation": summary}
     @mcp.tool(name="renew_file_reservations")
     @_instrument_tool("renew_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
     async def renew_file_reservations(
@@ -5536,11 +6208,11 @@ def build_mcp_server() -> FastMCP:
             stmt = (
                 select(FileReservation)
                 .where(
-                    FileReservation.project_id == project.id,
-                    FileReservation.agent_id == agent.id,
+                    cast(Any, FileReservation.project_id) == project.id,
+                    cast(Any, FileReservation.agent_id) == agent.id,
                     cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .order_by(asc(FileReservation.expires_ts))
+                .order_by(asc(cast(Any, FileReservation.expires_ts)))
             )
             if file_reservation_ids:
                 stmt = stmt.where(cast(Any, FileReservation.id).in_(file_reservation_ids))
@@ -5592,1975 +6264,1977 @@ def build_mcp_server() -> FastMCP:
         return {"renewed": len(updated), "file_reservations": updated}
 
     # --- Build slots (coarse concurrency control) --------------------------------------------
+    # Only registered when WORKTREES_ENABLED=1 to reduce token overhead for single-worktree setups
 
-    def _safe_component(value: str) -> str:
-        # Keep it simple and dependency-free: replace common problematic filesystem chars
-        safe = value.strip()
-        for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
-            safe = safe.replace(ch, "_")
-        return safe or "unknown"
+    if settings.worktrees_enabled:
+        def _safe_component(value: str) -> str:
+            # Keep it simple and dependency-free: replace common problematic filesystem chars
+            safe = value.strip()
+            for ch in ("/", "\\", ":", "*", "?", "\"", "<", ">", "|", " "):
+                safe = safe.replace(ch, "_")
+            return safe or "unknown"
 
-    def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
-        safe = _safe_component(slot)
-        return archive.root / "build_slots" / safe
+        def _slot_dir(archive: ProjectArchive, slot: str) -> Path:
+            safe = _safe_component(slot)
+            return archive.root / "build_slots" / safe
 
-    def _compute_branch(path: str) -> Optional[str]:
-        try:
-            repo = Repo(path, search_parent_directories=True)
+        def _compute_branch(path: str) -> Optional[str]:
             try:
-                return repo.active_branch.name
-            except Exception:
-                return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
-        except Exception:
-            return None
-
-    def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        if not slot_path.exists():
-            return results
-        for f in slot_path.glob("*.json"):
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                exp = data.get("expires_ts")
-                if exp:
+                with _git_repo(path) as repo:
                     try:
-                        if datetime.fromisoformat(exp) <= now:
-                            continue
+                        return repo.active_branch.name  # type: ignore[no-any-return]
                     except Exception:
-                        pass
-                results.append(data)
+                        return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
             except Exception:
-                continue
-        return results
+                return None
 
-# DISABLED:     @mcp.tool(name="acquire_build_slot")
-# DISABLED:     @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-# DISABLED:     async def acquire_build_slot(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         slot: str,
-# DISABLED:         ttl_seconds: int = 3600,
-# DISABLED:         exclusive: bool = True,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
-# DISABLED:         """
-# DISABLED:         if not settings.worktrees_enabled:
-# DISABLED:             await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-# DISABLED:             return {"granted": None, "conflicts": [], "disabled": True}
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         archive = await ensure_archive(settings, project.slug)
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         slot_path = _slot_dir(archive, slot)
-# DISABLED:         await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
-# DISABLED:         active = _read_active_slots(slot_path, now)
-# DISABLED: 
-# DISABLED:         branch = _compute_branch(project.human_key)
-# DISABLED:         holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-# DISABLED:         lease_path = slot_path / f"{holder_id}.json"
-# DISABLED: 
-# DISABLED:         conflicts: list[dict[str, Any]] = []
-# DISABLED:         if exclusive:
-# DISABLED:             for entry in active:
-# DISABLED:                 if entry.get("agent") == agent_name and entry.get("branch") == branch:
-# DISABLED:                     continue
-# DISABLED:                 if entry.get("exclusive", True):
-# DISABLED:                     conflicts.append(entry)
-# DISABLED:         payload = {
-# DISABLED:             "slot": slot,
-# DISABLED:             "agent": agent_name,
-# DISABLED:             "branch": branch,
-# DISABLED:             "exclusive": exclusive,
-# DISABLED:             "acquired_ts": _iso(now),
-# DISABLED:             "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
-# DISABLED:         }
-# DISABLED:         with contextlib.suppress(Exception):
-# DISABLED:             await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
-# DISABLED:         if conflicts:
-# DISABLED:             await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
-# DISABLED:         return {"granted": payload, "conflicts": conflicts}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="renew_build_slot")
-# DISABLED:     @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-# DISABLED:     async def renew_build_slot(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         slot: str,
-# DISABLED:         extend_seconds: int = 1800,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Extend expiry for an existing build slot lease. No-op if missing.
-# DISABLED:         """
-# DISABLED:         if not settings.worktrees_enabled:
-# DISABLED:             await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-# DISABLED:             return {"renewed": False, "expires_ts": None, "disabled": True}
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         archive = await ensure_archive(settings, project.slug)
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         slot_path = _slot_dir(archive, slot)
-# DISABLED:         branch = _compute_branch(project.human_key)
-# DISABLED:         holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-# DISABLED:         lease_path = slot_path / f"{holder_id}.json"
-# DISABLED:         try:
-# DISABLED:             current = json.loads(lease_path.read_text(encoding="utf-8"))
-# DISABLED:         except Exception:
-# DISABLED:             current = {}
-# DISABLED:         new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
-# DISABLED:         current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
-# DISABLED:         with contextlib.suppress(Exception):
-# DISABLED:             await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
-# DISABLED:         return {"renewed": True, "expires_ts": new_exp}
-# DISABLED: 
-# DISABLED:     @mcp.tool(name="release_build_slot")
-# DISABLED:     @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
-# DISABLED:     async def release_build_slot(
-# DISABLED:         ctx: Context,
-# DISABLED:         project_key: str,
-# DISABLED:         agent_name: str,
-# DISABLED:         slot: str,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
-# DISABLED:         """
-# DISABLED:         if not settings.worktrees_enabled:
-# DISABLED:             await ctx.info("Build slots are disabled (WORKTREES_ENABLED=0).")
-# DISABLED:             return {"released": False, "released_at": _iso(datetime.now(timezone.utc)), "disabled": True}
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         archive = await ensure_archive(settings, project.slug)
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         slot_path = _slot_dir(archive, slot)
-# DISABLED:         branch = _compute_branch(project.human_key)
-# DISABLED:         holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
-# DISABLED:         lease_path = slot_path / f"{holder_id}.json"
-# DISABLED:         released = False
-# DISABLED:         try:
-# DISABLED:             data = {}
-# DISABLED:             if lease_path.exists():
-# DISABLED:                 data = json.loads(lease_path.read_text(encoding="utf-8"))
-# DISABLED:             data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
-# DISABLED:             await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
-# DISABLED:             released = True
-# DISABLED:         except Exception:
-# DISABLED:             released = False
-# DISABLED:         return {"released": released, "released_at": _iso(now)}
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://config/environment", mime_type="application/json")
-# DISABLED:     def environment_resource() -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Inspect the server's current environment and HTTP settings.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Debugging client connection issues (wrong host/port/path).
-# DISABLED:         - Verifying which environment (dev/stage/prod) the server is running in.
-# DISABLED: 
-# DISABLED:         Notes
-# DISABLED:         -----
-# DISABLED:         - This surfaces configuration only; it does not perform live health checks.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             {
-# DISABLED:               "environment": str,
-# DISABLED:               "database_url": str,
-# DISABLED:               "http": { "host": str, "port": int, "path": str }
-# DISABLED:             }
-# DISABLED: 
-# DISABLED:         Example (JSON-RPC)
-# DISABLED:         ------------------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r1","method":"resources/read","params":{"uri":"resource://config/environment"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         return {
-# DISABLED:             "environment": settings.environment,
-# DISABLED:             "database_url": settings.database.url,
-# DISABLED:             "http": {
-# DISABLED:                 "host": settings.http.host,
-# DISABLED:                 "port": settings.http.port,
-# DISABLED:                 "path": settings.http.path,
-# DISABLED:             },
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
-# DISABLED: 
-# DISABLED:     async def _get_product_by_key(session, key: str) -> Optional[Product]:
-# DISABLED:         # Key may match product_uid or name (case-sensitive by default)
-# DISABLED:         stmt = select(Product).where((Product.product_uid == key) | (Product.name == key))
-# DISABLED:         res = await session.execute(stmt)
-# DISABLED:         return res.scalars().first()
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.tool(name="ensure_product")
-# DISABLED:         @_instrument_tool("ensure_product", cluster=CLUSTER_PRODUCT, capabilities={"product"})
-# DISABLED:         async def ensure_product_tool(
-# DISABLED:             ctx: Context,
-# DISABLED:             product_key: Optional[str] = None,
-# DISABLED:             name: Optional[str] = None,
-# DISABLED:         ) -> dict[str, Any]:
-# DISABLED:             """
-# DISABLED:             Ensure a Product exists. If not, create one.
-# DISABLED: 
-# DISABLED:             - product_key may be a product_uid or a name
-# DISABLED:             - If both are absent, error
-# DISABLED:             """
-# DISABLED:             await ensure_schema()
-# DISABLED:             key_raw = (product_key or name or "").strip()
-# DISABLED:             if not key_raw:
-# DISABLED:                 raise ToolExecutionError("INVALID_ARGUMENT", "Provide product_key or name.")
-# DISABLED:             async with get_session() as session:
-# DISABLED:                 prod = await _get_product_by_key(session, key_raw)
-# DISABLED:                 if prod is None:
-# DISABLED:                     # Create with strict uid pattern; otherwise generate uid and normalize name
-# DISABLED:                     import uuid as _uuid
-# DISABLED:                     import re as _re
-# DISABLED:                     uid_pattern = _re.compile(r"^[A-Fa-f0-9]{8,64}$")
-# DISABLED:                     if product_key and uid_pattern.fullmatch(product_key.strip()):
-# DISABLED:                         uid = product_key.strip().lower()
-# DISABLED:                     else:
-# DISABLED:                         uid = _uuid.uuid4().hex[:20]
-# DISABLED:                     display_name = (name or key_raw).strip()
-# DISABLED:                     # Collapse internal whitespace and cap length
-# DISABLED:                     display_name = " ".join(display_name.split())[:255] or uid
-# DISABLED:                     prod = Product(product_uid=uid, name=display_name)
-# DISABLED:                     session.add(prod)
-# DISABLED:                     await session.commit()
-# DISABLED:                     await session.refresh(prod)
-# DISABLED:             return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
-# DISABLED:     else:
-# DISABLED:         async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
-# DISABLED:             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.tool(name="products_link")
-# DISABLED:         @_instrument_tool("products_link", cluster=CLUSTER_PRODUCT, capabilities={"product"}, project_arg="project_key")
-# DISABLED:         async def products_link_tool(
-# DISABLED:             ctx: Context,
-# DISABLED:             product_key: str,
-# DISABLED:             project_key: str,
-# DISABLED:         ) -> dict[str, Any]:
-# DISABLED:             """
-# DISABLED:             Link a project into a product (idempotent).
-# DISABLED:             """
-# DISABLED:             await ensure_schema()
-# DISABLED:             async with get_session() as session:
-# DISABLED:                 prod = await _get_product_by_key(session, product_key.strip())
-# DISABLED:                 if prod is None:
-# DISABLED:                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-# DISABLED:                 # Resolve project
-# DISABLED:                 project = await _get_project_by_identifier(project_key)
-# DISABLED:                 if project.id is None:
-# DISABLED:                     raise ToolExecutionError("NOT_FOUND", f"Project '{project_key}' not found.", recoverable=True)
-# DISABLED:                 # Link if missing
-# DISABLED:                 existing = await session.execute(
-# DISABLED:                     select(ProductProjectLink).where(
-# DISABLED:                         ProductProjectLink.product_id == cast(Any, prod.id),
-# DISABLED:                         ProductProjectLink.project_id == cast(Any, project.id),
-# DISABLED:                     )
-# DISABLED:                 )
-# DISABLED:                 link = existing.scalars().first()
-# DISABLED:                 if link is None:
-# DISABLED:                     link = ProductProjectLink(product_id=int(prod.id), project_id=int(project.id))
-# DISABLED:                     session.add(link)
-# DISABLED:                     await session.commit()
-# DISABLED:                     await session.refresh(link)
-# DISABLED:                 return {
-# DISABLED:                     "product": {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name},
-# DISABLED:                     "project": {"id": project.id, "slug": project.slug, "human_key": project.human_key},
-# DISABLED:                     "linked": True,
-# DISABLED:                 }
-# DISABLED:     else:
-# DISABLED:         async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:
-# DISABLED:             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.resource("resource://product/{key}", mime_type="application/json")
-# DISABLED:         def product_resource(key: str) -> dict[str, Any]:
-# DISABLED:             """
-# DISABLED:             Inspect product and list linked projects.
-# DISABLED:             """
-# DISABLED:             # Safe runner that works even if an event loop is already running
-# DISABLED:             def _run_coro_sync(coro):
-# DISABLED:                 try:
-# DISABLED:                     asyncio.get_running_loop()
-# DISABLED:                     # Run in a separate thread to avoid nested loop issues
-# DISABLED:                 except RuntimeError:
-# DISABLED:                     return asyncio.run(coro)
-# DISABLED:                 import threading  # type: ignore
-# DISABLED:                 import queue  # type: ignore
-# DISABLED:                 q: "queue.Queue[tuple[bool, Any]]" = queue.Queue()
-# DISABLED:                 def _runner():
-# DISABLED:                     try:
-# DISABLED:                         q.put((True, asyncio.run(coro)))
-# DISABLED:                     except Exception as e:
-# DISABLED:                         q.put((False, e))
-# DISABLED:                 t = threading.Thread(target=_runner, daemon=True)
-# DISABLED:                 t.start()
-# DISABLED:                 ok, val = q.get()
-# DISABLED:                 if ok:
-# DISABLED:                     return val
-# DISABLED:                 raise val
-# DISABLED:             async def _load() -> dict[str, Any]:
-# DISABLED:                 await ensure_schema()
-# DISABLED:                 async with get_session() as session:
-# DISABLED:                     prod = await _get_product_by_key(session, key.strip())
-# DISABLED:                     if prod is None:
-# DISABLED:                         raise ToolExecutionError("NOT_FOUND", f"Product '{key}' not found.", recoverable=True)
-# DISABLED:                     proj_rows = await session.execute(
-# DISABLED:                         select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-# DISABLED:                             ProductProjectLink.product_id == cast(Any, prod.id)
-# DISABLED:                         )
-# DISABLED:                     )
-# DISABLED:                     projects = [
-# DISABLED:                         {"id": p.id, "slug": p.slug, "human_key": p.human_key, "created_at": _iso(p.created_at)}
-# DISABLED:                         for p in proj_rows.scalars().all()
-# DISABLED:                     ]
-# DISABLED:                     return {
-# DISABLED:                         "id": prod.id,
-# DISABLED:                         "product_uid": prod.product_uid,
-# DISABLED:                         "name": prod.name,
-# DISABLED:                         "created_at": _iso(prod.created_at),
-# DISABLED:                         "projects": projects,
-# DISABLED:                     }
-# DISABLED:             # Run async in a synchronous resource
-# DISABLED:             return _run_coro_sync(_load())
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.tool(name="search_messages_product")
-# DISABLED:         @_instrument_tool("search_messages_product", cluster=CLUSTER_PRODUCT, capabilities={"search"})
-# DISABLED:         async def search_messages_product(
-# DISABLED:             ctx: Context,
-# DISABLED:             product_key: str,
-# DISABLED:             query: str,
-# DISABLED:             limit: int = 20,
-# DISABLED:         ) -> Any:
-# DISABLED:             """
-# DISABLED:             Full-text search across all projects linked to a product.
-# DISABLED:             """
-# DISABLED:             await ensure_schema()
-# DISABLED:             async with get_session() as session:
-# DISABLED:                 prod = await _get_product_by_key(session, product_key.strip())
-# DISABLED:                 if prod is None:
-# DISABLED:                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-# DISABLED:                 proj_ids_rows = await session.execute(
-# DISABLED:                     select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
-# DISABLED:                 )
-# DISABLED:                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
-# DISABLED:                 if not proj_ids:
-# DISABLED:                     return []
-# DISABLED:                 # FTS search limited to projects in proj_ids
-# DISABLED:                 result = await session.execute(
-# DISABLED:                     text(
-# DISABLED:                         """
-# DISABLED:                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-# DISABLED:                                m.thread_id, a.name AS sender_name, m.project_id
-# DISABLED:                         FROM fts_messages
-# DISABLED:                         JOIN messages m ON fts_messages.rowid = m.id
-# DISABLED:                         JOIN agents a ON m.sender_id = a.id
-# DISABLED:                         WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-# DISABLED:                         ORDER BY bm25(fts_messages) ASC
-# DISABLED:                         LIMIT :limit
-# DISABLED:                         """
-# DISABLED:                     ).bindparams(bindparam("proj_ids", expanding=True)),
-# DISABLED:                     {"proj_ids": proj_ids, "query": query, "limit": limit},
-# DISABLED:                 )
-# DISABLED:                 rows = result.mappings().all()
-# DISABLED:             items = [
-# DISABLED:                 {
-# DISABLED:                     "id": row["id"],
-# DISABLED:                     "subject": row["subject"],
-# DISABLED:                     "importance": row["importance"],
-# DISABLED:                     "ack_required": row["ack_required"],
-# DISABLED:                     "created_ts": _iso(row["created_ts"]),
-# DISABLED:                     "thread_id": row["thread_id"],
-# DISABLED:                     "from": row["sender_name"],
-# DISABLED:                     "project_id": row["project_id"],
-# DISABLED:                 }
-# DISABLED:                 for row in rows
-# DISABLED:             ]
-# DISABLED:             try:
-# DISABLED:                 from fastmcp.tools.tool import ToolResult  # type: ignore
-# DISABLED:                 return ToolResult(structured_content={"result": items})
-# DISABLED:             except Exception:
-# DISABLED:                 return items
-# DISABLED:     else:
-# DISABLED:         async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:
-# DISABLED:             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.tool(name="fetch_inbox_product")
-# DISABLED:         @_instrument_tool("fetch_inbox_product", cluster=CLUSTER_PRODUCT, capabilities={"messaging", "read"})
-# DISABLED:         async def fetch_inbox_product(
-# DISABLED:             ctx: Context,
-# DISABLED:             product_key: str,
-# DISABLED:             agent_name: str,
-# DISABLED:             limit: int = 20,
-# DISABLED:             urgent_only: bool = False,
-# DISABLED:             include_bodies: bool = False,
-# DISABLED:             since_ts: Optional[str] = None,
-# DISABLED:         ) -> list[dict[str, Any]]:
-# DISABLED:             """
-# DISABLED:             Retrieve recent messages for an agent across all projects linked to a product (non-mutating).
-# DISABLED:             """
-# DISABLED:             await ensure_schema()
-# DISABLED:             # Collect linked projects
-# DISABLED:             async with get_session() as session:
-# DISABLED:                 prod = await _get_product_by_key(session, product_key.strip())
-# DISABLED:                 if prod is None:
-# DISABLED:                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-# DISABLED:                 proj_rows = await session.execute(
-# DISABLED:                     select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-# DISABLED:                         ProductProjectLink.product_id == cast(Any, prod.id)
-# DISABLED:                     )
-# DISABLED:                 )
-# DISABLED:                 projects: list[Project] = list(proj_rows.scalars().all())
-# DISABLED:             # For each project, if agent exists, list inbox items
-# DISABLED:             messages: list[dict[str, Any]] = []
-# DISABLED:             for project in projects:
-# DISABLED:                 try:
-# DISABLED:                     ag = await _get_agent(project, agent_name)
-# DISABLED:                 except Exception:
-# DISABLED:                     continue
-# DISABLED:                 proj_items = await _list_inbox(project, ag, limit, urgent_only, include_bodies, since_ts)
-# DISABLED:                 for item in proj_items:
-# DISABLED:                     item["project_id"] = item.get("project_id") or project.id
-# DISABLED:                     messages.append(item)
-# DISABLED:             # Sort by created_ts desc and trim to limit
-# DISABLED:             def _dt_key(it: dict[str, Any]) -> float:
-# DISABLED:                 ts = _parse_iso(str(it.get("created_ts") or ""))
-# DISABLED:                 return ts.timestamp() if ts else 0.0
-# DISABLED:             messages.sort(key=_dt_key, reverse=True)
-# DISABLED:             return messages[: max(0, int(limit))]
-# DISABLED:     else:
-# DISABLED:         async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:
-# DISABLED:             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
-# DISABLED: 
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.tool(name="summarize_thread_product")
-# DISABLED:         @_instrument_tool("summarize_thread_product", cluster=CLUSTER_PRODUCT, capabilities={"summarization", "search"})
-# DISABLED:         async def summarize_thread_product(
-# DISABLED:             ctx: Context,
-# DISABLED:             product_key: str,
-# DISABLED:             thread_id: str,
-# DISABLED:             include_examples: bool = False,
-# DISABLED:             llm_mode: bool = True,
-# DISABLED:             llm_model: Optional[str] = None,
-# DISABLED:             per_thread_limit: Optional[int] = None,
-# DISABLED:         ) -> dict[str, Any]:
-# DISABLED:             """
-# DISABLED:             Summarize a thread (by id or thread key) across all projects linked to a product.
-# DISABLED:             """
-# DISABLED:             await ensure_schema()
-# DISABLED:             sender_alias = aliased(Agent)
-# DISABLED:             try:
-# DISABLED:                 seed_id = int(thread_id)
-# DISABLED:             except ValueError:
-# DISABLED:                 seed_id = None
-# DISABLED:             criteria = [Message.thread_id == thread_id]
-# DISABLED:             if seed_id is not None:
-# DISABLED:                 criteria.append(Message.id == seed_id)
-# DISABLED: 
-# DISABLED:             async with get_session() as session:
-# DISABLED:                 prod = await _get_product_by_key(session, product_key.strip())
-# DISABLED:                 if prod is None:
-# DISABLED:                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-# DISABLED:                 proj_ids_rows = await session.execute(
-# DISABLED:                     select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == cast(Any, prod.id))
-# DISABLED:                 )
-# DISABLED:                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
-# DISABLED:                 if not proj_ids:
-# DISABLED:                     return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
-# DISABLED:                 stmt = (
-# DISABLED:                     select(Message, sender_alias.name)
-# DISABLED:                     .join(sender_alias, Message.sender_id == sender_alias.id)
-# DISABLED:                     .where(cast(Any, Message.project_id).in_(proj_ids), or_(*criteria))
-# DISABLED:                     .order_by(asc(Message.created_ts))
-# DISABLED:                 )
-# DISABLED:                 if per_thread_limit:
-# DISABLED:                     stmt = stmt.limit(per_thread_limit)
-# DISABLED:                 rows = (await session.execute(stmt)).all()
-# DISABLED:             summary = _summarize_messages(rows)
-# DISABLED: 
-# DISABLED:             # Optional LLM refinement (same as project-level)
-# DISABLED:             if llm_mode and get_settings().llm.enabled:
-# DISABLED:                 try:
-# DISABLED:                     excerpts: list[str] = []
-# DISABLED:                     for message, sender_name in rows[:15]:
-# DISABLED:                         excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
-# DISABLED:                     if excerpts:
-# DISABLED:                         system = (
-# DISABLED:                             "You are a senior engineer. Produce a concise JSON summary with keys: "
-# DISABLED:                             "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
-# DISABLED:                             "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
-# DISABLED:                         )
-# DISABLED:                         user = "\n\n".join(excerpts)
-# DISABLED:                         llm_resp = await complete_system_user(system, user, model=llm_model)
-# DISABLED:                         parsed = _parse_json_safely(llm_resp.content)
-# DISABLED:                         if parsed:
-# DISABLED:                             for key in (
-# DISABLED:                                 "participants",
-# DISABLED:                                 "key_points",
-# DISABLED:                                 "action_items",
-# DISABLED:                                 "mentions",
-# DISABLED:                                 "code_references",
-# DISABLED:                                 "total_messages",
-# DISABLED:                                 "open_actions",
-# DISABLED:                                 "done_actions",
-# DISABLED:                             ):
-# DISABLED:                                 value = parsed.get(key)
-# DISABLED:                                 if value:
-# DISABLED:                                     summary[key] = value
-# DISABLED:                 except Exception as e:
-# DISABLED:                     await ctx.debug(f"summarize_thread_product.llm_skipped: {e}")
-# DISABLED: 
-# DISABLED:             examples: list[dict[str, Any]] = []
-# DISABLED:             if include_examples:
-# DISABLED:                 for message, sender_name in rows[:3]:
-# DISABLED:                     examples.append(
-# DISABLED:                         {
-# DISABLED:                             "id": message.id,
-# DISABLED:                             "subject": message.subject,
-# DISABLED:                             "from": sender_name,
-# DISABLED:                             "created_ts": _iso(message.created_ts),
-# DISABLED:                         }
-# DISABLED:                     )
-# DISABLED:             await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
-# DISABLED:             return {"thread_id": thread_id, "summary": summary, "examples": examples}
-# DISABLED:     else:
-# DISABLED:         async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:
-# DISABLED:             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
-# DISABLED:     if settings.worktrees_enabled:
-# DISABLED:         @mcp.resource("resource://identity/{project}", mime_type="application/json")
-# DISABLED:         def identity_resource(project: str) -> dict[str, Any]:
-# DISABLED:             """
-# DISABLED:             Inspect identity resolution for a given project path. Returns the slug actually used,
-# DISABLED:             the identity mode in effect, canonical path for the selected mode, and git repo facts.
-# DISABLED:             """
-# DISABLED:             raw_path, _ = _split_slug_and_query(project)
-# DISABLED:             target_path = str(Path(raw_path).expanduser().resolve())
-# DISABLED: 
-# DISABLED:             return _resolve_project_identity(target_path)
-# DISABLED:     @mcp.resource("resource://tooling/directory", mime_type="application/json")
-# DISABLED:     def tooling_directory_resource() -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Provide a clustered view of exposed MCP tools to combat option overload.
-# DISABLED: 
-# DISABLED:         The directory groups tools by workflow, outlines primary use cases,
-# DISABLED:         highlights nearby alternatives, and shares starter playbooks so agents
-# DISABLED:         can focus on the verbs relevant to their immediate task.
-# DISABLED:         """
-# DISABLED: 
-# DISABLED:         clusters = [
-# DISABLED:             {
-# DISABLED:                 "name": "Infrastructure & Workspace Setup",
-# DISABLED:                 "purpose": "Bootstrap coordination and guardrails before agents begin editing.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "health_check",
-# DISABLED:                         "summary": "Report environment and HTTP wiring so orchestrators confirm connectivity.",
-# DISABLED:                         "use_when": "Beginning a session or during incident response triage.",
-# DISABLED:                         "related": ["ensure_project"],
-# DISABLED:                         "expected_frequency": "Once per agent session or when connectivity is in doubt.",
-# DISABLED:                         "required_capabilities": ["infrastructure"],
-# DISABLED:                         "usage_examples": [{"hint": "Pre-flight", "sample": "health_check()"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "ensure_project",
-# DISABLED:                         "summary": "Ensure project slug, schema, and archive exist for a shared repo identifier.",
-# DISABLED:                         "use_when": "First call against a repo or when switching projects.",
-# DISABLED:                         "related": ["register_agent", "file_reservation_paths"],
-# DISABLED:                         "expected_frequency": "Whenever a new repo/path is encountered.",
-# DISABLED:                         "required_capabilities": ["infrastructure", "storage"],
-# DISABLED:                         "usage_examples": [{"hint": "First action", "sample": "ensure_project(human_key='/abs/path/backend')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "install_precommit_guard",
-# DISABLED:                         "summary": "Install Git pre-commit hook that enforces advisory file_reservations locally.",
-# DISABLED:                         "use_when": "Onboarding a repository into coordinated mode.",
-# DISABLED:                         "related": ["file_reservation_paths", "uninstall_precommit_guard"],
-# DISABLED:                         "expected_frequency": "Infrequent—per repository setup.",
-# DISABLED:                         "required_capabilities": ["repository", "filesystem"],
-# DISABLED:                         "usage_examples": [{"hint": "Onboard", "sample": "install_precommit_guard(project_key='backend', code_repo_path='~/repo')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "uninstall_precommit_guard",
-# DISABLED:                         "summary": "Remove the advisory pre-commit hook from a repo.",
-# DISABLED:                         "use_when": "Decommissioning or debugging the guard hook.",
-# DISABLED:                         "related": ["install_precommit_guard"],
-# DISABLED:                         "expected_frequency": "Rare; only when disabling guard enforcement.",
-# DISABLED:                         "required_capabilities": ["repository"],
-# DISABLED:                         "usage_examples": [{"hint": "Cleanup", "sample": "uninstall_precommit_guard(code_repo_path='~/repo')"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "Identity & Directory",
-# DISABLED:                 "purpose": "Register agents, mint unique identities, and inspect directory metadata.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "register_agent",
-# DISABLED:                         "summary": "Upsert an agent profile and refresh last_active_ts for a known persona.",
-# DISABLED:                         "use_when": "Resuming an identity or updating program/model/task metadata.",
-# DISABLED:                         "related": ["create_agent_identity", "whois"],
-# DISABLED:                         "expected_frequency": "At the start of each automated work session.",
-# DISABLED:                         "required_capabilities": ["identity"],
-# DISABLED:                         "usage_examples": [{"hint": "Resume persona", "sample": "register_agent(project_key='/abs/path/backend', program='codex', model='gpt5')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "create_agent_identity",
-# DISABLED:                         "summary": "Always create a new unique agent name (optionally using a sanitized hint).",
-# DISABLED:                         "use_when": "Spawning a brand-new helper that should not overwrite existing profiles.",
-# DISABLED:                         "related": ["register_agent"],
-# DISABLED:                         "expected_frequency": "When minting fresh, short-lived identities.",
-# DISABLED:                         "required_capabilities": ["identity"],
-# DISABLED:                         "usage_examples": [{"hint": "New helper", "sample": "create_agent_identity(project_key='backend', name_hint='GreenCastle', program='codex', model='gpt5')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "whois",
-# DISABLED:                         "summary": "Return enriched profile info plus recent archive commits for an agent.",
-# DISABLED:                         "use_when": "Dashboarding, routing coordination messages, or auditing activity.",
-# DISABLED:                         "related": ["register_agent"],
-# DISABLED:                         "expected_frequency": "Ad hoc when context about an agent is required.",
-# DISABLED:                         "required_capabilities": ["identity", "audit"],
-# DISABLED:                         "usage_examples": [{"hint": "Directory lookup", "sample": "whois(project_key='backend', agent_name='BlueLake')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "set_contact_policy",
-# DISABLED:                         "summary": "Set inbound contact policy (open, auto, contacts_only, block_all).",
-# DISABLED:                         "use_when": "Adjusting how permissive an agent is about unsolicited messages.",
-# DISABLED:                         "related": ["request_contact", "respond_contact"],
-# DISABLED:                         "expected_frequency": "Occasional configuration change.",
-# DISABLED:                         "required_capabilities": ["contact"],
-# DISABLED:                         "usage_examples": [{"hint": "Restrict inbox", "sample": "set_contact_policy(project_key='backend', agent_name='BlueLake', policy='contacts_only')"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "Messaging Lifecycle",
-# DISABLED:                 "purpose": "Send, receive, and acknowledge threaded Markdown mail.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "send_message",
-# DISABLED:                         "summary": "Deliver a new message with attachments, WebP conversion, and policy enforcement.",
-# DISABLED:                         "use_when": "Starting new threads or broadcasting plans across projects.",
-# DISABLED:                         "related": ["reply_message", "request_contact"],
-# DISABLED:                         "expected_frequency": "Frequent—core write operation.",
-# DISABLED:                         "required_capabilities": ["messaging"],
-# DISABLED:                         "usage_examples": [{"hint": "New plan", "sample": "send_message(project_key='backend', sender_name='GreenCastle', to=['BlueLake'], subject='Plan', body_md='...')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "reply_message",
-# DISABLED:                         "summary": "Reply within an existing thread, inheriting flags and default recipients.",
-# DISABLED:                         "use_when": "Continuing discussions or acknowledging decisions.",
-# DISABLED:                         "related": ["send_message"],
-# DISABLED:                         "expected_frequency": "Frequent when collaborating inside a thread.",
-# DISABLED:                         "required_capabilities": ["messaging"],
-# DISABLED:                         "usage_examples": [{"hint": "Thread reply", "sample": "reply_message(project_key='backend', message_id=42, sender_name='BlueLake', body_md='Got it!')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "fetch_inbox",
-# DISABLED:                         "summary": "Poll recent messages for an agent with filters (urgent_only, since_ts).",
-# DISABLED:                         "use_when": "After each work unit to ingest coordination updates.",
-# DISABLED:                         "related": ["mark_message_read", "acknowledge_message"],
-# DISABLED:                         "expected_frequency": "Frequent polling in agent loops.",
-# DISABLED:                         "required_capabilities": ["messaging", "read"],
-# DISABLED:                         "usage_examples": [{"hint": "Poll", "sample": "fetch_inbox(project_key='backend', agent_name='BlueLake', since_ts='2025-10-24T00:00:00Z')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "mark_message_read",
-# DISABLED:                         "summary": "Record read_ts for FYI messages without sending acknowledgements.",
-# DISABLED:                         "use_when": "Clearing inbox notifications once reviewed.",
-# DISABLED:                         "related": ["acknowledge_message"],
-# DISABLED:                         "expected_frequency": "Whenever FYI mail is processed.",
-# DISABLED:                         "required_capabilities": ["messaging", "read"],
-# DISABLED:                         "usage_examples": [{"hint": "Read receipt", "sample": "mark_message_read(project_key='backend', agent_name='BlueLake', message_id=42)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "acknowledge_message",
-# DISABLED:                         "summary": "Set read_ts and ack_ts so senders know action items landed.",
-# DISABLED:                         "use_when": "Responding to ack_required messages.",
-# DISABLED:                         "related": ["mark_message_read"],
-# DISABLED:                         "expected_frequency": "Each time a message requests acknowledgement.",
-# DISABLED:                         "required_capabilities": ["messaging", "ack"],
-# DISABLED:                         "usage_examples": [{"hint": "Ack", "sample": "acknowledge_message(project_key='backend', agent_name='BlueLake', message_id=42)"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "Contact Governance",
-# DISABLED:                 "purpose": "Manage messaging permissions when policies are not open by default.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "request_contact",
-# DISABLED:                         "summary": "Create or refresh a pending AgentLink and notify the target with ack_required intro.",
-# DISABLED:                         "use_when": "Requesting permission before messaging another agent.",
-# DISABLED:                         "related": ["respond_contact", "set_contact_policy"],
-# DISABLED:                         "expected_frequency": "Occasional—when new communication lines are needed.",
-# DISABLED:                         "required_capabilities": ["contact"],
-# DISABLED:                         "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "respond_contact",
-# DISABLED:                         "summary": "Approve or block a pending contact request, optionally setting expiry.",
-# DISABLED:                         "use_when": "Granting or revoking messaging permissions.",
-# DISABLED:                         "related": ["request_contact"],
-# DISABLED:                         "expected_frequency": "As often as requests arrive.",
-# DISABLED:                         "required_capabilities": ["contact"],
-# DISABLED:                         "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "list_contacts",
-# DISABLED:                         "summary": "List outbound contact links, statuses, and expirations for an agent.",
-# DISABLED:                         "use_when": "Auditing who an agent may message or rotating expiring approvals.",
-# DISABLED:                         "related": ["request_contact", "respond_contact"],
-# DISABLED:                         "expected_frequency": "Periodic audits or dashboards.",
-# DISABLED:                         "required_capabilities": ["contact", "audit"],
-# DISABLED:                         "usage_examples": [{"hint": "Audit", "sample": "list_contacts(project_key='backend', agent_name='BlueLake')"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "Search & Summaries",
-# DISABLED:                 "purpose": "Surface signal from large mailboxes and compress long threads.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "search_messages",
-# DISABLED:                         "summary": "Run FTS5 queries across subject/body text to locate relevant threads.",
-# DISABLED:                         "use_when": "Triage or gathering context before editing.",
-# DISABLED:                         "related": ["fetch_inbox", "summarize_thread"],
-# DISABLED:                         "expected_frequency": "Regular during investigation phases.",
-# DISABLED:                         "required_capabilities": ["search"],
-# DISABLED:                         "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "summarize_thread",
-# DISABLED:                         "summary": "Extract participants, key points, and action items for a single thread.",
-# DISABLED:                         "use_when": "Briefing new agents on long discussions or closing loops.",
-# DISABLED:                         "related": ["summarize_threads"],
-# DISABLED:                         "expected_frequency": "When threads exceed quick skim length.",
-# DISABLED:                         "required_capabilities": ["search", "summarization"],
-# DISABLED:                         "usage_examples": [{"hint": "Thread brief", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "summarize_threads",
-# DISABLED:                         "summary": "Produce a digest across multiple threads with aggregate mentions/actions.",
-# DISABLED:                         "use_when": "Daily standups or cross-team sync summaries.",
-# DISABLED:                         "related": ["summarize_thread"],
-# DISABLED:                         "expected_frequency": "At cadence checkpoints (daily/weekly).",
-# DISABLED:                         "required_capabilities": ["search", "summarization"],
-# DISABLED:                         "usage_examples": [{"hint": "Digest", "sample": "summarize_threads(project_key='backend', thread_ids=['TKT-123','UX-42'])"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "File Reservations & Workspace Guardrails",
-# DISABLED:                 "purpose": "Coordinate file/glob ownership to avoid overwriting concurrent work.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "file_reservation_paths",
-# DISABLED:                         "summary": "Issue advisory file_reservations with overlap detection and Git artifacts.",
-# DISABLED:                         "use_when": "Before touching high-traffic surfaces or long-lived refactors.",
-# DISABLED:                         "related": ["release_file_reservations", "renew_file_reservations"],
-# DISABLED:                         "expected_frequency": "Whenever starting work on contested surfaces.",
-# DISABLED:                         "required_capabilities": ["file_reservations", "repository"],
-# DISABLED:                         "usage_examples": [{"hint": "Lock file", "sample": "file_reservation_paths(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], ttl_seconds=7200)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "release_file_reservations",
-# DISABLED:                         "summary": "Release active file_reservations (fully or by subset) and stamp released_ts.",
-# DISABLED:                         "use_when": "Finishing work so surfaces become available again.",
-# DISABLED:                         "related": ["file_reservation_paths", "renew_file_reservations"],
-# DISABLED:                         "expected_frequency": "Each time work on a surface completes.",
-# DISABLED:                         "required_capabilities": ["file_reservations"],
-# DISABLED:                         "usage_examples": [{"hint": "Unlock", "sample": "release_file_reservations(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "renew_file_reservations",
-# DISABLED:                         "summary": "Extend file_reservation expiry windows without allocating new file_reservation IDs.",
-# DISABLED:                         "use_when": "Long-running work needs more time but should retain ownership.",
-# DISABLED:                         "related": ["file_reservation_paths", "release_file_reservations"],
-# DISABLED:                         "expected_frequency": "Periodically during multi-hour work items.",
-# DISABLED:                         "required_capabilities": ["file_reservations"],
-# DISABLED:                         "usage_examples": [{"hint": "Extend", "sample": "renew_file_reservations(project_key='backend', agent_name='BlueLake', extend_seconds=1800)"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "name": "Workflow Macros",
-# DISABLED:                 "purpose": "Opinionated orchestrations that compose multiple primitives for smaller agents.",
-# DISABLED:                 "tools": [
-# DISABLED:                     {
-# DISABLED:                         "name": "macro_start_session",
-# DISABLED:                         "summary": "Ensure project, register/update agent, optionally file_reservation surfaces, and return inbox context.",
-# DISABLED:                         "use_when": "Kickstarting a focused work session with one call.",
-# DISABLED:                         "related": ["ensure_project", "register_agent", "file_reservation_paths", "fetch_inbox"],
-# DISABLED:                         "expected_frequency": "At the beginning of each autonomous session.",
-# DISABLED:                         "required_capabilities": ["workflow", "messaging", "file_reservations", "identity"],
-# DISABLED:                         "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', file_reservation_paths=['src/api/*.py'])"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "macro_prepare_thread",
-# DISABLED:                         "summary": "Register or refresh an agent, summarise a thread, and fetch inbox context in one call.",
-# DISABLED:                         "use_when": "Briefing a helper before joining an ongoing discussion.",
-# DISABLED:                         "related": ["register_agent", "summarize_thread", "fetch_inbox"],
-# DISABLED:                         "expected_frequency": "Whenever onboarding a new contributor to an active thread.",
-# DISABLED:                         "required_capabilities": ["workflow", "messaging", "summarization"],
-# DISABLED:                         "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "macro_file_reservation_cycle",
-# DISABLED:                         "summary": "FileReservation a set of paths and optionally release them once work is complete.",
-# DISABLED:                         "use_when": "Wrapping a focused edit cycle that needs advisory locks.",
-# DISABLED:                         "related": ["file_reservation_paths", "release_file_reservations", "renew_file_reservations"],
-# DISABLED:                         "expected_frequency": "Per guarded work block.",
-# DISABLED:                         "required_capabilities": ["workflow", "file_reservations", "repository"],
-# DISABLED:                         "usage_examples": [{"hint": "FileReservation & release", "sample": "macro_file_reservation_cycle(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], auto_release=true)"}],
-# DISABLED:                     },
-# DISABLED:                     {
-# DISABLED:                         "name": "macro_contact_handshake",
-# DISABLED:                         "summary": "Request contact approval, optionally auto-accept, and send a welcome message.",
-# DISABLED:                         "use_when": "Spinning up collaboration between two agents who lack permissions.",
-# DISABLED:                         "related": ["request_contact", "respond_contact", "send_message"],
-# DISABLED:                         "expected_frequency": "When onboarding new agent pairs.",
-# DISABLED:                         "required_capabilities": ["workflow", "contact", "messaging"],
-# DISABLED:                         "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
-# DISABLED:                     },
-# DISABLED:                 ],
-# DISABLED:             },
-# DISABLED:         ]
-# DISABLED: 
-# DISABLED:         for cluster in clusters:
-# DISABLED:             for tool_entry in cluster["tools"]:
-# DISABLED:                 tool_dict = cast(dict[str, Any], tool_entry)
-# DISABLED:                 meta = TOOL_METADATA.get(str(tool_dict.get("name", "")))
-# DISABLED:                 if not meta:
-# DISABLED:                     continue
-# DISABLED:                 tool_dict["capabilities"] = meta["capabilities"]
-# DISABLED:                 tool_dict.setdefault("complexity", meta["complexity"])
-# DISABLED:                 if "required_capabilities" in tool_dict:
-# DISABLED:                     tool_dict["required_capabilities"] = meta["capabilities"]
-# DISABLED: 
-# DISABLED:         playbooks = [
-# DISABLED:             {
-# DISABLED:                 "workflow": "Kick off new agent session (macro)",
-# DISABLED:                 "sequence": ["health_check", "macro_start_session", "summarize_thread"],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "workflow": "Kick off new agent session (manual)",
-# DISABLED:                 "sequence": ["health_check", "ensure_project", "register_agent", "fetch_inbox"],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "workflow": "Start focused refactor",
-# DISABLED:                 "sequence": ["ensure_project", "file_reservation_paths", "send_message", "fetch_inbox", "acknowledge_message"],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "workflow": "Join existing discussion",
-# DISABLED:                 "sequence": ["macro_prepare_thread", "reply_message", "acknowledge_message"],
-# DISABLED:             },
-# DISABLED:             {
-# DISABLED:                 "workflow": "Manage contact approvals",
-# DISABLED:                 "sequence": ["set_contact_policy", "request_contact", "respond_contact", "send_message"],
-# DISABLED:             },
-# DISABLED:         ]
-# DISABLED: 
-# DISABLED:         return {
-# DISABLED:             "generated_at": _iso(datetime.now(timezone.utc)),
-# DISABLED:             "metrics_uri": "resource://tooling/metrics",
-# DISABLED:             "clusters": clusters,
-# DISABLED:             "playbooks": playbooks,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://tooling/schemas", mime_type="application/json")
-# DISABLED:     def tooling_schemas_resource() -> dict[str, Any]:
-# DISABLED:         """Expose JSON-like parameter schemas for tools/macros to prevent drift.
-# DISABLED: 
-# DISABLED:         This is a lightweight, hand-maintained view focusing on the most error-prone
-# DISABLED:         parameters and accepted aliases to guide clients.
-# DISABLED:         """
-# DISABLED:         return {
-# DISABLED:             "generated_at": _iso(datetime.now(timezone.utc)),
-# DISABLED:             "tools": {
-# DISABLED:                 "send_message": {
-# DISABLED:                     "required": ["project_key", "sender_name", "to", "subject", "body_md"],
-# DISABLED:                     "optional": ["cc", "bcc", "attachment_paths", "convert_images", "importance", "ack_required", "thread_id", "auto_contact_if_blocked"],
-# DISABLED:                     "shapes": {
-# DISABLED:                         "to": "list[str]",
-# DISABLED:                         "cc": "list[str] | str",
-# DISABLED:                         "bcc": "list[str] | str",
-# DISABLED:                         "importance": "low|normal|high|urgent",
-# DISABLED:                         "auto_contact_if_blocked": "bool",
-# DISABLED:                     },
-# DISABLED:                 },
-# DISABLED:                 "macro_contact_handshake": {
-# DISABLED:                     "required": ["project_key", "requester|agent_name", "target|to_agent"],
-# DISABLED:                     "optional": ["reason", "ttl_seconds", "auto_accept", "welcome_subject", "welcome_body"],
-# DISABLED:                     "aliases": {
-# DISABLED:                         "requester": ["agent_name"],
-# DISABLED:                         "target": ["to_agent"],
-# DISABLED:                     },
-# DISABLED:                 },
-# DISABLED:             },
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://tooling/metrics", mime_type="application/json")
-# DISABLED:     def tooling_metrics_resource() -> dict[str, Any]:
-# DISABLED:         """Expose aggregated tool call/error counts for analysis."""
-# DISABLED:         return {
-# DISABLED:             "generated_at": _iso(datetime.now(timezone.utc)),
-# DISABLED:             "tools": _tool_metrics_snapshot(),
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://tooling/locks", mime_type="application/json")
-# DISABLED:     def tooling_locks_resource() -> dict[str, Any]:
-# DISABLED:         """Return lock metadata from the shared archive storage."""
-# DISABLED: 
-# DISABLED:         settings_local = get_settings()
-# DISABLED:         return collect_lock_status(settings_local)
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
-# DISABLED:     def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
-# DISABLED:         # Parse query embedded in agent path if present (robust to FastMCP variants)
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         caps = _capabilities_for(agent, project)
-# DISABLED:         return {
-# DISABLED:             "generated_at": _iso(datetime.now(timezone.utc)),
-# DISABLED:             "agent": agent,
-# DISABLED:             "project": project,
-# DISABLED:             "capabilities": caps,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://tooling/recent/{window_seconds}", mime_type="application/json")
-# DISABLED:     def tooling_recent_resource(
-# DISABLED:         window_seconds: str,
-# DISABLED:         agent: Optional[str] = None,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         # Allow query string to be embedded in the path segment per some transports
-# DISABLED:         if "?" in window_seconds:
-# DISABLED:             seg, _, qs = window_seconds.partition("?")
-# DISABLED:             window_seconds = seg
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 agent = agent or (parsed.get("agent") or [None])[0]
-# DISABLED:                 project = project or (parsed.get("project") or [None])[0]
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         try:
-# DISABLED:             win = int(window_seconds)
-# DISABLED:         except Exception:
-# DISABLED:             win = 60
-# DISABLED:         cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, win))
-# DISABLED:         entries: list[dict[str, Any]] = []
-# DISABLED:         for ts, tool_name, proj, ag in list(RECENT_TOOL_USAGE):
-# DISABLED:             if ts < cutoff:
-# DISABLED:                 continue
-# DISABLED:             if project and proj != project:
-# DISABLED:                 continue
-# DISABLED:             if agent and ag != agent:
-# DISABLED:                 continue
-# DISABLED: 
-# DISABLED:             record = {
-# DISABLED:                 "timestamp": _iso(ts),
-# DISABLED:                 "tool": tool_name,
-# DISABLED:                 "project": proj,
-# DISABLED:                 "agent": ag,
-# DISABLED:                 "cluster": TOOL_CLUSTER_MAP.get(tool_name, "unclassified"),
-# DISABLED:             }
-# DISABLED:             entries.append(record)
-# DISABLED:         return {
-# DISABLED:             "generated_at": _iso(datetime.now(timezone.utc)),
-# DISABLED:             "window_seconds": win,
-# DISABLED:             "count": len(entries),
-# DISABLED:             "entries": entries,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://projects", mime_type="application/json")
-# DISABLED:     async def projects_resource() -> list[dict[str, Any]]:
-# DISABLED:         """
-# DISABLED:         List all projects known to the server in creation order.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Discover available projects when a user provides only an agent name.
-# DISABLED:         - Build UIs that let operators switch context between projects.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         list[dict]
-# DISABLED:             Each: { id, slug, human_key, created_at }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://projects"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         settings = get_settings()
-# DISABLED:         await ensure_schema(settings)
-# DISABLED:         # Build ignore matcher for test/demo projects
-# DISABLED:         import fnmatch as _fnmatch
-# DISABLED:         ignore_patterns = set(getattr(settings, "retention_ignore_project_patterns", []) or [])
-# DISABLED:         async with get_session() as session:
-# DISABLED:             result = await session.execute(select(Project).order_by(asc(Project.created_at)))
-# DISABLED:             projects = result.scalars().all()
-# DISABLED:             def _is_ignored(name: str) -> bool:
-# DISABLED:                 return any(_fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
-# DISABLED:             filtered = [p for p in projects if not (_is_ignored(p.slug) or _is_ignored(p.human_key))]
-# DISABLED:             return [_project_to_dict(project) for project in filtered]
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://project/{slug}", mime_type="application/json")
-# DISABLED:     async def project_detail(slug: str) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Fetch a project and its agents by project slug or human key.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Populate an "LDAP-like" directory for agents in tooling UIs.
-# DISABLED:         - Determine available agent identities and their metadata before addressing mail.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         slug : str
-# DISABLED:             Project slug (or human key; both resolve to the same target).
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             Project descriptor including { agents: [...] } with agent profiles.
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r3","method":"resources/read","params":{"uri":"resource://project/backend-abc123"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(slug)
-# DISABLED:         await ensure_schema()
-# DISABLED:         async with get_session() as session:
-# DISABLED:             result = await session.execute(select(Agent).where(Agent.project_id == project.id))
-# DISABLED:             agents = result.scalars().all()
-# DISABLED:         return {
-# DISABLED:             **_project_to_dict(project),
-# DISABLED:             "agents": [_agent_to_dict(agent) for agent in agents],
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://agents/{project_key}", mime_type="application/json")
-# DISABLED:     async def agents_directory(project_key: str) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         List all registered agents in a project for easy agent discovery.
-# DISABLED: 
-# DISABLED:         This is the recommended way to discover other agents working on a project.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - At the start of a coding session to see who else is working on the project.
-# DISABLED:         - Before sending messages to discover available recipients.
-# DISABLED:         - To check if a specific agent is registered before attempting contact.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         project_key : str
-# DISABLED:             Project slug or human key (both work).
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             {
-# DISABLED:               "project": { "slug": "...", "human_key": "..." },
-# DISABLED:               "agents": [
-# DISABLED:                 {
-# DISABLED:                   "name": "BackendDev",
-# DISABLED:                   "program": "claude-code",
-# DISABLED:                   "model": "sonnet-4.5",
-# DISABLED:                   "task_description": "API development",
-# DISABLED:                   "inception_ts": "2025-10-25T...",
-# DISABLED:                   "last_active_ts": "2025-10-25T...",
-# DISABLED:                   "unread_count": 3
-# DISABLED:                 },
-# DISABLED:                 ...
-# DISABLED:               ]
-# DISABLED:             }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://agents/backend-abc123"}}
-# DISABLED:         ```
-# DISABLED: 
-# DISABLED:         Notes
-# DISABLED:         -----
-# DISABLED:         - Agent names are NOT the same as your program name or user name.
-# DISABLED:         - Use the returned names when calling tools like whois(), request_contact(), send_message().
-# DISABLED:         - Agents in different projects cannot see each other - project isolation is enforced.
-# DISABLED:         """
-# DISABLED:         project = await _get_project_by_identifier(project_key)
-# DISABLED:         await ensure_schema()
-# DISABLED: 
-# DISABLED:         async with get_session() as session:
-# DISABLED:             # Get all agents in the project
-# DISABLED:             result = await session.execute(
-# DISABLED:                 select(Agent).where(Agent.project_id == project.id).order_by(desc(Agent.last_active_ts))
-# DISABLED:             )
-# DISABLED:             agents = result.scalars().all()
-# DISABLED: 
-# DISABLED:             # Get unread message counts for all agents in one query
-# DISABLED:             unread_counts_stmt = (
-# DISABLED:                 select(
-# DISABLED:                     MessageRecipient.agent_id,
-# DISABLED:                     func.count(MessageRecipient.message_id).label("unread_count")
-# DISABLED:                 )
-# DISABLED:                 .where(
-# DISABLED:                     cast(Any, MessageRecipient.read_ts).is_(None),
-# DISABLED:                     cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents])
-# DISABLED:                 )
-# DISABLED:                 .group_by(MessageRecipient.agent_id)
-# DISABLED:             )
-# DISABLED:             unread_counts_result = await session.execute(unread_counts_stmt)
-# DISABLED:             unread_counts_map = {row.agent_id: row.unread_count for row in unread_counts_result}
-# DISABLED: 
-# DISABLED:             # Build agent data with unread counts
-# DISABLED:             agent_data = []
-# DISABLED:             for agent in agents:
-# DISABLED:                 agent_dict = _agent_to_dict(agent)
-# DISABLED:                 agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
-# DISABLED:                 agent_data.append(agent_dict)
-# DISABLED: 
-# DISABLED:         return {
-# DISABLED:             "project": {
-# DISABLED:                 "slug": project.slug,
-# DISABLED:                 "human_key": project.human_key,
-# DISABLED:             },
-# DISABLED:             "agents": agent_data,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://file_reservations/{slug}", mime_type="application/json")
-# DISABLED:     async def file_reservations_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
-# DISABLED:         """
-# DISABLED:         List file_reservations for a project, optionally filtering to active-only.
-# DISABLED: 
-# DISABLED:         Why this exists
-# DISABLED:         ---------------
-# DISABLED:         - File reservations communicate edit intent and reduce collisions across agents.
-# DISABLED:         - Surfacing them helps humans review ongoing work and resolve contention.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         slug : str
-# DISABLED:             Project slug or human key.
-# DISABLED:         active_only : bool
-# DISABLED:             If true (default), only returns file_reservations with no `released_ts`.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         list[dict]
-# DISABLED:             Each file_reservation with { id, agent, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=true"}}
-# DISABLED:         ```
-# DISABLED: 
-# DISABLED:         Also see all historical (including released) file_reservations:
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=false"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         slug_value, query_params = _split_slug_and_query(slug)
-# DISABLED:         if "active_only" in query_params:
-# DISABLED:             active_only = _coerce_flag_to_bool(query_params["active_only"], default=active_only)
-# DISABLED: 
-# DISABLED:         project = await _get_project_by_identifier(slug_value)
-# DISABLED:         await ensure_schema()
-# DISABLED:         if project.id is None:
-# DISABLED:             raise ValueError("Project must have an id before listing file_reservations.")
-# DISABLED: 
-# DISABLED:         await _expire_stale_file_reservations(project.id)
-# DISABLED:         statuses = await _collect_file_reservation_statuses(project, include_released=not active_only)
-# DISABLED: 
-# DISABLED:         payload: list[dict[str, Any]] = []
-# DISABLED:         for status in statuses:
-# DISABLED:             reservation = status.reservation
-# DISABLED:             if active_only and reservation.released_ts is not None:
-# DISABLED:                 continue
-# DISABLED:             payload.append(
-# DISABLED:                 {
-# DISABLED:                     "id": reservation.id,
-# DISABLED:                     "agent": status.agent.name,
-# DISABLED:                     "path_pattern": reservation.path_pattern,
-# DISABLED:                     "exclusive": reservation.exclusive,
-# DISABLED:                     "reason": reservation.reason,
-# DISABLED:                     "created_ts": _iso(reservation.created_ts),
-# DISABLED:                     "expires_ts": _iso(reservation.expires_ts),
-# DISABLED:                     "released_ts": _iso(reservation.released_ts) if reservation.released_ts else None,
-# DISABLED:                     "stale": status.stale,
-# DISABLED:                     "stale_reasons": status.stale_reasons,
-# DISABLED:                     "last_agent_activity_ts": _iso(status.last_agent_activity) if status.last_agent_activity else None,
-# DISABLED:                     "last_mail_activity_ts": _iso(status.last_mail_activity) if status.last_mail_activity else None,
-# DISABLED:                     "last_filesystem_activity_ts": _iso(status.last_fs_activity) if status.last_fs_activity else None,
-# DISABLED:                     "last_git_activity_ts": _iso(status.last_git_activity) if status.last_git_activity else None,
-# DISABLED:                 }
-# DISABLED:             )
-# DISABLED:         return payload
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://message/{message_id}", mime_type="application/json")
-# DISABLED:     async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Read a single message by id within a project.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Fetch the canonical body/metadata for rendering in a client after list/search.
-# DISABLED:         - Retrieve attachments and full details for a given message id.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         message_id : str
-# DISABLED:             Numeric id as a string.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required for disambiguation).
-# DISABLED: 
-# DISABLED:         Common mistakes
-# DISABLED:         ---------------
-# DISABLED:         - Omitting `project` when a message id might exist in multiple projects.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             Full message payload including body and sender name.
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         # Support toolkits that pass query in the template segment
-# DISABLED:         if "?" in message_id:
-# DISABLED:             id_part, _, qs = message_id.partition("?")
-# DISABLED:             message_id = id_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         if project is None:
-# DISABLED:             # Try to infer project by message id when unique
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(select(Project, Message).join(Message, Message.project_id == Project.id).where(cast(Any, Message.id) == int(message_id)).limit(2))
-# DISABLED:                 data = rows.all()
-# DISABLED:             if len(data) == 1:
-# DISABLED:                 project_obj = data[0][0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for message resource")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         message = await _get_message(project_obj, int(message_id))
-# DISABLED:         sender = await _get_agent_by_id(project_obj, message.sender_id)
-# DISABLED:         payload = _message_to_dict(message, include_body=True)
-# DISABLED:         payload["from"] = sender.name
-# DISABLED:         return payload
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://thread/{thread_id}", mime_type="application/json")
-# DISABLED:     async def thread_resource(
-# DISABLED:         thread_id: str,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:         include_bodies: bool = False,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         List messages for a thread within a project.
-# DISABLED: 
-# DISABLED:         When to use
-# DISABLED:         -----------
-# DISABLED:         - Present a conversation view for a given ticket/thread key.
-# DISABLED:         - Export a thread for summarization or reporting.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         thread_id : str
-# DISABLED:             Either a string thread key or a numeric message id to seed the thread.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required).
-# DISABLED:         include_bodies : bool
-# DISABLED:             Include message bodies if true (default false).
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { project, thread_id, messages: [{...}] }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&include_bodies=true"}}
-# DISABLED:         ```
-# DISABLED: 
-# DISABLED:         Numeric seed example (message id as thread seed):
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         # Robust query parsing: some FastMCP versions do not inject query args.
-# DISABLED:         # If the templating layer included the query string in the path segment,
-# DISABLED:         # extract it and fill missing parameters.
-# DISABLED:         if "?" in thread_id:
-# DISABLED:             id_part, _, qs = thread_id.partition("?")
-# DISABLED:             thread_id = id_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and "project" in parsed and parsed["project"]:
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("include_bodies"):
-# DISABLED:                     val = parsed["include_bodies"][0].strip().lower()
-# DISABLED:                     include_bodies = val in ("1", "true", "t", "yes", "y")
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         # Determine project if omitted by client
-# DISABLED:         if project is None:
-# DISABLED:             # Auto-detect project using numeric seed (message id) or unique thread key
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 try:
-# DISABLED:                     msg_id = int(thread_id)
-# DISABLED:                 except ValueError:
-# DISABLED:                     msg_id = None
-# DISABLED:                 if msg_id is not None:
-# DISABLED:                     rows = await s_auto.execute(
-# DISABLED:                         select(Project)
-# DISABLED:                         .join(Message, Message.project_id == Project.id)
-# DISABLED:                         .where(cast(Any, Message.id) == msg_id)
-# DISABLED:                         .limit(2)
-# DISABLED:                     )
-# DISABLED:                     projects = [row[0] for row in rows.all()]
-# DISABLED:                 else:
-# DISABLED:                     rows = await s_auto.execute(
-# DISABLED:                         select(Project)
-# DISABLED:                         .join(Message, Message.project_id == Project.id)
-# DISABLED:                         .where(Message.thread_id == thread_id)
-# DISABLED:                         .limit(2)
-# DISABLED:                     )
-# DISABLED:                     projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for thread resource")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED: 
-# DISABLED:         if project_obj.id is None:
-# DISABLED:             raise ValueError("Project must have an id before listing threads.")
-# DISABLED:         await ensure_schema()
-# DISABLED:         try:
-# DISABLED:             message_id = int(thread_id)
-# DISABLED:         except ValueError:
-# DISABLED:             message_id = None
-# DISABLED:         sender_alias = aliased(Agent)
-# DISABLED:         criteria = [Message.thread_id == thread_id]
-# DISABLED:         if message_id is not None:
-# DISABLED:             criteria.append(Message.id == message_id)
-# DISABLED:         async with get_session() as session:
-# DISABLED:             stmt = (
-# DISABLED:                 select(Message, sender_alias.name)
-# DISABLED:                 .join(sender_alias, Message.sender_id == sender_alias.id)
-# DISABLED:                 .where(Message.project_id == project_obj.id, or_(*criteria))
-# DISABLED:                 .order_by(asc(Message.created_ts))
-# DISABLED:             )
-# DISABLED:             result = await session.execute(stmt)
-# DISABLED:             rows = result.all()
-# DISABLED:         messages = []
-# DISABLED:         for message, sender_name in rows:
-# DISABLED:             payload = _message_to_dict(message, include_body=include_bodies)
-# DISABLED:             payload["from"] = sender_name
-# DISABLED:             messages.append(payload)
-# DISABLED:         return {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
-# DISABLED: 
-# DISABLED:     @mcp.resource(
-# DISABLED:         "resource://inbox/{agent}",
-# DISABLED:         mime_type="application/json",
-# DISABLED:     )
-# DISABLED:     async def inbox_resource(
-# DISABLED:         agent: str,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:         since_ts: Optional[str] = None,
-# DISABLED:         urgent_only: bool = False,
-# DISABLED:         include_bodies: bool = False,
-# DISABLED:         limit: int = 20,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Read an agent's inbox for a project.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         agent : str
-# DISABLED:             Agent name.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required).
-# DISABLED:         since_ts : Optional[str]
-# DISABLED:             ISO-8601 timestamp string; only messages newer than this are returned.
-# DISABLED:         urgent_only : bool
-# DISABLED:             If true, limits to importance in {high, urgent}.
-# DISABLED:         include_bodies : bool
-# DISABLED:             Include message bodies in results (default false).
-# DISABLED:         limit : int
-# DISABLED:             Maximum number of messages to return (default 20).
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { project, agent, count, messages: [...] }
-# DISABLED: 
-# DISABLED:         Example
-# DISABLED:         -------
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true"}}
-# DISABLED:         ```
-# DISABLED:         Incremental fetch example (using since_ts):
-# DISABLED:         ```json
-# DISABLED:         {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z"}}
-# DISABLED:         ```
-# DISABLED:         """
-# DISABLED:         # Robust query parsing: some FastMCP versions do not inject query args.
-# DISABLED:         # If the templating layer included the query string in the last path segment,
-# DISABLED:         # extract it and fill missing parameters.
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and "project" in parsed and parsed["project"]:
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if since_ts is None and "since_ts" in parsed and parsed["since_ts"]:
-# DISABLED:                     since_ts = parsed["since_ts"][0]
-# DISABLED:                 if parsed.get("urgent_only"):
-# DISABLED:                     val = parsed["urgent_only"][0].strip().lower()
-# DISABLED:                     urgent_only = val in ("1", "true", "t", "yes", "y")
-# DISABLED:                 if parsed.get("include_bodies"):
-# DISABLED:                     val = parsed["include_bodies"][0].strip().lower()
-# DISABLED:                     include_bodies = val in ("1", "true", "t", "yes", "y")
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             # Auto-detect project by agent name if uniquely identifiable
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for inbox resource")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
-# DISABLED:         # Enrich with commit info for canonical markdown files (best-effort)
-# DISABLED:         enriched: list[dict[str, Any]] = []
-# DISABLED:         for item in messages:
-# DISABLED:             try:
-# DISABLED:                 msg_obj = await _get_message(project_obj, int(item["id"]))
-# DISABLED:                 commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
-# DISABLED:                 if commit_info:
-# DISABLED:                     item["commit"] = commit_info
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:             enriched.append(item)
-# DISABLED:         return {
-# DISABLED:             "project": project_obj.human_key,
-# DISABLED:             "agent": agent_obj.name,
-# DISABLED:             "count": len(enriched),
-# DISABLED:             "messages": enriched,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://views/urgent-unread/{agent}", mime_type="application/json")
-# DISABLED:     async def urgent_unread_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Convenience view listing urgent and high-importance messages that are unread for an agent.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         agent : str
-# DISABLED:             Agent name.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required).
-# DISABLED:         limit : int
-# DISABLED:             Max number of messages.
-# DISABLED:         """
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for urgent view")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=True, include_bodies=False, since_ts=None)
-# DISABLED:         # Filter unread (no read_ts recorded)
-# DISABLED:         unread: list[dict[str, Any]] = []
-# DISABLED:         async with get_session() as session:
-# DISABLED:             from .models import MessageRecipient  # local import to avoid cycle at top
-# DISABLED: 
-# DISABLED:             for item in items:
-# DISABLED:                 result = await session.execute(
-# DISABLED:                     select(MessageRecipient.read_ts).where(
-# DISABLED:                         MessageRecipient.message_id == item["id"], MessageRecipient.agent_id == agent_obj.id
-# DISABLED:                     )
-# DISABLED:                 )
-# DISABLED:                 read_ts = result.scalar_one_or_none()
-# DISABLED:                 if read_ts is None:
-# DISABLED:                     unread.append(item)
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://views/ack-required/{agent}", mime_type="application/json")
-# DISABLED:     async def ack_required_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         Convenience view listing messages requiring acknowledgement for an agent where ack is pending.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         agent : str
-# DISABLED:             Agent name.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required).
-# DISABLED:         limit : int
-# DISABLED:             Max number of messages.
-# DISABLED:         """
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for ack view")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         if project_obj.id is None or agent_obj.id is None:
-# DISABLED:             raise ValueError("Project/agent IDs must exist")
-# DISABLED:         await ensure_schema()
-# DISABLED:         out: list[dict[str, Any]] = []
-# DISABLED:         async with get_session() as session:
-# DISABLED:             rows = await session.execute(
-# DISABLED:                 select(Message, MessageRecipient.kind)
-# DISABLED:                 .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-# DISABLED:                 .where(
-# DISABLED:                     Message.project_id == project_obj.id,
-# DISABLED:                     MessageRecipient.agent_id == agent_obj.id,
-# DISABLED:                     cast(Any, Message.ack_required).is_(True),
-# DISABLED:                     cast(Any, MessageRecipient.ack_ts).is_(None),
-# DISABLED:                 )
-# DISABLED:                 .order_by(desc(Message.created_ts))
-# DISABLED:                 .limit(limit)
-# DISABLED:             )
-# DISABLED:             for msg, kind in rows.all():
-# DISABLED:                 payload = _message_to_dict(msg, include_body=False)
-# DISABLED:                 payload["kind"] = kind
-# DISABLED:                 out.append(payload)
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://views/acks-stale/{agent}", mime_type="application/json")
-# DISABLED:     async def acks_stale_view(
-# DISABLED:         agent: str,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:         ttl_seconds: Optional[int] = None,
-# DISABLED:         limit: int = 20,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         List ack-required messages older than a TTL where acknowledgement is still missing.
-# DISABLED: 
-# DISABLED:         Parameters
-# DISABLED:         ----------
-# DISABLED:         agent : str
-# DISABLED:             Agent name.
-# DISABLED:         project : str
-# DISABLED:             Project slug or human key (required).
-# DISABLED:         ttl_seconds : Optional[int]
-# DISABLED:             Minimum age in seconds to consider a message stale. Defaults to settings.ack_ttl_seconds.
-# DISABLED:         limit : int
-# DISABLED:             Max number of messages to return.
-# DISABLED:         """
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("ttl_seconds"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         ttl_seconds = int(parsed["ttl_seconds"][0])
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for stale acks view")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         if project_obj.id is None or agent_obj.id is None:
-# DISABLED:             raise ValueError("Project/agent IDs must exist")
-# DISABLED:         await ensure_schema()
-# DISABLED:         ttl = int(ttl_seconds) if ttl_seconds is not None else get_settings().ack_ttl_seconds
-# DISABLED:         now = datetime.now(timezone.utc)
-# DISABLED:         out: list[dict[str, Any]] = []
-# DISABLED:         async with get_session() as session:
-# DISABLED:             rows = await session.execute(
-# DISABLED:                 select(Message, MessageRecipient.kind, MessageRecipient.read_ts)
-# DISABLED:                 .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-# DISABLED:                 .where(
-# DISABLED:                     Message.project_id == project_obj.id,
-# DISABLED:                     MessageRecipient.agent_id == agent_obj.id,
-# DISABLED:                     cast(Any, Message.ack_required).is_(True),
-# DISABLED:                     cast(Any, MessageRecipient.ack_ts).is_(None),
-# DISABLED:                 )
-# DISABLED:                 .order_by(asc(Message.created_ts))
-# DISABLED:                 .limit(limit * 5)
-# DISABLED:             )
-# DISABLED:             for msg, kind, read_ts in rows.all():
-# DISABLED:                 # Coerce potential naive datetimes from SQLite to UTC for arithmetic
-# DISABLED:                 created = msg.created_ts
-# DISABLED:                 if getattr(created, "tzinfo", None) is None:
-# DISABLED:                     created = created.replace(tzinfo=timezone.utc)
-# DISABLED:                 age_s = int((now - created).total_seconds())
-# DISABLED:                 if age_s >= ttl:
-# DISABLED:                     payload = _message_to_dict(msg, include_body=False)
-# DISABLED:                     payload["kind"] = kind
-# DISABLED:                     payload["read_at"] = _iso(read_ts) if read_ts else None
-# DISABLED:                     payload["age_seconds"] = age_s
-# DISABLED:                     out.append(payload)
-# DISABLED:                     if len(out) >= limit:
-# DISABLED:                         break
-# DISABLED:         return {
-# DISABLED:             "project": project_obj.human_key,
-# DISABLED:             "agent": agent_obj.name,
-# DISABLED:             "ttl_seconds": ttl,
-# DISABLED:             "count": len(out),
-# DISABLED:             "messages": out,
-# DISABLED:         }
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://views/ack-overdue/{agent}", mime_type="application/json")
-# DISABLED:     async def ack_overdue_view(
-# DISABLED:         agent: str,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:         ttl_minutes: int = 60,
-# DISABLED:         limit: int = 50,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """List messages requiring acknowledgement older than ttl_minutes without ack."""
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("ttl_minutes"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         ttl_minutes = int(parsed["ttl_minutes"][0])
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for ack-overdue view")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         if project_obj.id is None or agent_obj.id is None:
-# DISABLED:             raise ValueError("Project/agent IDs must exist")
-# DISABLED:         await ensure_schema()
-# DISABLED:         cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, ttl_minutes))
-# DISABLED:         out: list[dict[str, Any]] = []
-# DISABLED:         async with get_session() as session:
-# DISABLED:             rows = await session.execute(
-# DISABLED:                 select(Message, MessageRecipient.kind)
-# DISABLED:                 .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-# DISABLED:                 .where(
-# DISABLED:                     Message.project_id == project_obj.id,
-# DISABLED:                     MessageRecipient.agent_id == agent_obj.id,
-# DISABLED:                     cast(Any, Message.ack_required).is_(True),
-# DISABLED:                     cast(Any, MessageRecipient.ack_ts).is_(None),
-# DISABLED:                 )
-# DISABLED:                 .order_by(asc(Message.created_ts))
-# DISABLED:                 .limit(limit * 5)
-# DISABLED:             )
-# DISABLED:             for msg, kind in rows.all():
-# DISABLED:                 created = msg.created_ts
-# DISABLED:                 if getattr(created, "tzinfo", None) is None:
-# DISABLED:                     created = created.replace(tzinfo=timezone.utc)
-# DISABLED:                 if created <= cutoff:
-# DISABLED:                     payload = _message_to_dict(msg, include_body=False)
-# DISABLED:                     payload["kind"] = kind
-# DISABLED:                     out.append(payload)
-# DISABLED:                     if len(out) >= limit:
-# DISABLED:                         break
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://mailbox/{agent}", mime_type="application/json")
-# DISABLED:     async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
-# DISABLED:         """
-# DISABLED:         List recent messages in an agent's mailbox with lightweight Git commit context.
-# DISABLED: 
-# DISABLED:         Returns
-# DISABLED:         -------
-# DISABLED:         dict
-# DISABLED:             { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
-# DISABLED:         """
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED: 
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for mailbox resource")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
-# DISABLED: 
-# DISABLED:         # Attach recent commit summaries touching the archive (best-effort)
-# DISABLED:         commits_index: dict[str, dict[str, str]] = {}
-# DISABLED:         try:
-# DISABLED:             archive = await ensure_archive(settings, project_obj.slug)
-# DISABLED:             repo: Repo = archive.repo
-# DISABLED:             for commit in repo.iter_commits(paths=["."], max_count=200):
-# DISABLED:                 # Heuristic: extract message id from commit summary when present in canonical subject format
-# DISABLED:                 # Expected: "mail: <from> -> ... | <subject>"
-# DISABLED:                 summary = str(commit.summary)
-# DISABLED:                 hexsha = commit.hexsha[:12]
-# DISABLED:                 if hexsha not in commits_index:
-# DISABLED:                     commits_index[hexsha] = {"hexsha": hexsha, "summary": summary}
-# DISABLED:         except Exception:
-# DISABLED:             pass
-# DISABLED: 
-# DISABLED:         # Map messages to nearest commit (best-effort: none if not determinable)
-# DISABLED:         out: list[dict[str, Any]] = []
-# DISABLED:         for item in items:
-# DISABLED:             commit_meta = None
-# DISABLED:             # We cannot cheaply know exact commit per message without parsing message ids from log; keep null
-# DISABLED:             # but preserve structure for clients
-# DISABLED:             if commits_index:
-# DISABLED:                 commit_meta = next(iter(commits_index.values()))  # provide at least one recent reference
-# DISABLED:             payload = dict(item)
-# DISABLED:             payload["commit"] = commit_meta
-# DISABLED:             out.append(payload)
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
-# DISABLED: 
-# DISABLED:     @mcp.resource(
-# DISABLED:         "resource://mailbox-with-commits/{agent}",
-# DISABLED:         mime_type="application/json",
-# DISABLED:     )
-# DISABLED:     async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
-# DISABLED:         """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
-# DISABLED:         # Parse query embedded in agent path if present
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         if project is None:
-# DISABLED:             async with get_session() as s_auto:
-# DISABLED:                 rows = await s_auto.execute(
-# DISABLED:                     select(Project)
-# DISABLED:                     .join(Agent, Agent.project_id == Project.id)
-# DISABLED:                     .where(func.lower(Agent.name) == agent.lower())
-# DISABLED:                     .limit(2)
-# DISABLED:                 )
-# DISABLED:                 projects = [row[0] for row in rows.all()]
-# DISABLED:             if len(projects) == 1:
-# DISABLED:                 project_obj = projects[0]
-# DISABLED:             else:
-# DISABLED:                 raise ValueError("project parameter is required for mailbox-with-commits resource")
-# DISABLED:         else:
-# DISABLED:             project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
-# DISABLED: 
-# DISABLED:         enriched: list[dict[str, Any]] = []
-# DISABLED:         for item in items:
-# DISABLED:             try:
-# DISABLED:                 msg_obj = await _get_message(project_obj, int(item["id"]))
-# DISABLED:                 commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
-# DISABLED:                 if commit_info:
-# DISABLED:                     item["commit"] = commit_info
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:             enriched.append(item)
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
-# DISABLED: 
-# DISABLED:     @mcp.resource("resource://outbox/{agent}", mime_type="application/json")
-# DISABLED:     async def outbox_resource(
-# DISABLED:         agent: str,
-# DISABLED:         project: Optional[str] = None,
-# DISABLED:         limit: int = 20,
-# DISABLED:         include_bodies: bool = False,
-# DISABLED:         since_ts: Optional[str] = None,
-# DISABLED:     ) -> dict[str, Any]:
-# DISABLED:         """List messages sent by the agent, enriched with commit metadata for canonical files."""
-# DISABLED:         # Support toolkits that incorrectly pass query in the template segment
-# DISABLED:         if "?" in agent:
-# DISABLED:             name_part, _, qs = agent.partition("?")
-# DISABLED:             agent = name_part
-# DISABLED:             try:
-# DISABLED:                 from urllib.parse import parse_qs
-# DISABLED:                 parsed = parse_qs(qs, keep_blank_values=False)
-# DISABLED:                 if project is None and parsed.get("project"):
-# DISABLED:                     project = parsed["project"][0]
-# DISABLED:                 if parsed.get("limit"):
-# DISABLED:                     from contextlib import suppress
-# DISABLED:                     with suppress(Exception):
-# DISABLED:                         limit = int(parsed["limit"][0])
-# DISABLED:                 if parsed.get("include_bodies"):
-# DISABLED:                     include_bodies = parsed["include_bodies"][0].lower() in {"1","true","t","yes","y"}
-# DISABLED:                 if parsed.get("since_ts"):
-# DISABLED:                     since_ts = parsed["since_ts"][0]
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:         """List messages sent by the agent, enriched with commit metadata for canonical files."""
-# DISABLED:         if project is None:
-# DISABLED:             raise ValueError("project parameter is required for outbox resource")
-# DISABLED:         project_obj = await _get_project_by_identifier(project)
-# DISABLED:         agent_obj = await _get_agent(project_obj, agent)
-# DISABLED:         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
-# DISABLED:         enriched: list[dict[str, Any]] = []
-# DISABLED:         for item in items:
-# DISABLED:             try:
-# DISABLED:                 msg_obj = await _get_message(project_obj, int(item["id"]))
-# DISABLED:                 commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
-# DISABLED:                 if commit_info:
-# DISABLED:                     item["commit"] = commit_info
-# DISABLED:             except Exception:
-# DISABLED:                 pass
-# DISABLED:             enriched.append(item)
-# DISABLED:         return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
-# DISABLED: 
-# DISABLED:     # No explicit output-schema transform; the tool returns ToolResult with {"result": ...}
-# DISABLED: 
+        def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
+            results: list[dict[str, Any]] = []
+            if not slot_path.exists():
+                return results
+            for f in slot_path.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    exp = data.get("expires_ts")
+                    if exp:
+                        try:
+                            if datetime.fromisoformat(exp) <= now:
+                                continue
+                        except Exception:
+                            pass
+                    results.append(data)
+                except Exception:
+                    continue
+            return results
+
+        @mcp.tool(name="acquire_build_slot")
+        @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def acquire_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            ttl_seconds: int = 3600,
+            exclusive: bool = True,
+        ) -> dict[str, Any]:
+            """
+            Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
+            active = _read_active_slots(slot_path, now)
+
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+
+            conflicts: list[dict[str, Any]] = []
+            if exclusive:
+                for entry in active:
+                    if entry.get("agent") == agent_name and entry.get("branch") == branch:
+                        continue
+                    if entry.get("exclusive", True):
+                        conflicts.append(entry)
+            payload = {
+                "slot": slot,
+                "agent": agent_name,
+                "branch": branch,
+                "exclusive": exclusive,
+                "acquired_ts": _iso(now),
+                "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
+            }
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
+            if conflicts:
+                await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
+            return {"granted": payload, "conflicts": conflicts}
+
+        @mcp.tool(name="renew_build_slot")
+        @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def renew_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+            extend_seconds: int = 1800,
+        ) -> dict[str, Any]:
+            """
+            Extend expiry for an existing build slot lease. No-op if missing.
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+            try:
+                current = json.loads(lease_path.read_text(encoding="utf-8"))
+            except Exception:
+                current = {}
+            new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
+            current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
+            return {"renewed": True, "expires_ts": new_exp}
+
+        @mcp.tool(name="release_build_slot")
+        @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
+        async def release_build_slot(
+            ctx: Context,
+            project_key: str,
+            agent_name: str,
+            slot: str,
+        ) -> dict[str, Any]:
+            """
+            Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
+            """
+            project = await _get_project_by_identifier(project_key)
+            archive = await ensure_archive(settings, project.slug)
+            now = datetime.now(timezone.utc)
+            slot_path = _slot_dir(archive, slot)
+            branch = _compute_branch(project.human_key)
+            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            lease_path = slot_path / f"{holder_id}.json"
+            released = False
+            try:
+                data = {}
+                if lease_path.exists():
+                    data = json.loads(lease_path.read_text(encoding="utf-8"))
+                data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
+                await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
+                released = True
+            except Exception:
+                released = False
+            return {"released": released, "released_at": _iso(now)}
+
+    @mcp.resource("resource://config/environment", mime_type="application/json")
+    def environment_resource() -> dict[str, Any]:
+        """
+        Inspect the server's current environment and HTTP settings.
+
+        When to use
+        -----------
+        - Debugging client connection issues (wrong host/port/path).
+        - Verifying which environment (dev/stage/prod) the server is running in.
+
+        Notes
+        -----
+        - This surfaces configuration only; it does not perform live health checks.
+
+        Returns
+        -------
+        dict
+            {
+              "environment": str,
+              "database_url": str,
+              "http": { "host": str, "port": int, "path": str }
+            }
+
+        Example (JSON-RPC)
+        ------------------
+        ```json
+        {"jsonrpc":"2.0","id":"r1","method":"resources/read","params":{"uri":"resource://config/environment"}}
+        ```
+        """
+        return {
+            "environment": settings.environment,
+            "database_url": settings.database.url,
+            "http": {
+                "host": settings.http.host,
+                "port": settings.http.port,
+                "path": settings.http.path,
+            },
+        }
+
+    # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
+
+    async def _get_product_by_key(session, key: str) -> Optional[Product]:  # type: ignore[no-untyped-def]
+        # Key may match product_uid or name (case-sensitive by default)
+        stmt = select(Product).where(cast(Any, (Product.product_uid == key) | (Product.name == key)))
+        res = await session.execute(stmt)
+        return res.scalars().first()  # type: ignore[no-any-return]
+
+    if settings.worktrees_enabled:
+        @mcp.tool(name="ensure_product")
+        @_instrument_tool("ensure_product", cluster=CLUSTER_PRODUCT, capabilities={"product"})
+        async def ensure_product_tool(
+            ctx: Context,
+            product_key: Optional[str] = None,
+            name: Optional[str] = None,
+        ) -> dict[str, Any]:
+            """
+            Ensure a Product exists. If not, create one.
+
+            - product_key may be a product_uid or a name
+            - If both are absent, error
+            """
+            await ensure_schema()
+            key_raw = (product_key or name or "").strip()
+            if not key_raw:
+                raise ToolExecutionError("INVALID_ARGUMENT", "Provide product_key or name.")
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, key_raw)
+                if prod is None:
+                    # Create with strict uid pattern; otherwise generate uid and normalize name
+                    import uuid as _uuid
+                    import re as _re
+                    uid_pattern = _re.compile(r"^[A-Fa-f0-9]{8,64}$")
+                    if product_key and uid_pattern.fullmatch(product_key.strip()):
+                        uid = product_key.strip().lower()
+                    else:
+                        uid = _uuid.uuid4().hex[:20]
+                    display_name = (name or key_raw).strip()
+                    # Collapse internal whitespace and cap length
+                    display_name = " ".join(display_name.split())[:255] or uid
+                    prod = Product(product_uid=uid, name=display_name)
+                    session.add(prod)
+                    await session.commit()
+                    await session.refresh(prod)
+            return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
+    else:
+        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:  # type: ignore[misc]
+            raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
+
+    if settings.worktrees_enabled:
+        @mcp.tool(name="products_link")
+        @_instrument_tool("products_link", cluster=CLUSTER_PRODUCT, capabilities={"product"}, project_arg="project_key")
+        async def products_link_tool(
+            ctx: Context,
+            product_key: str,
+            project_key: str,
+        ) -> dict[str, Any]:
+            """
+            Link a project into a product (idempotent).
+            """
+            await ensure_schema()
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, product_key.strip())
+                if prod is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+                # Resolve project
+                project = await _get_project_by_identifier(project_key)
+                if project.id is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Project '{project_key}' not found.", recoverable=True)
+                # Link if missing
+                existing = await session.execute(
+                    select(ProductProjectLink).where(
+                        cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id),
+                        cast(Any, ProductProjectLink.project_id) == cast(Any, project.id),
+                    )
+                )
+                link = existing.scalars().first()
+                if link is None:
+                    link = ProductProjectLink(product_id=int(cast(int, prod.id)), project_id=int(project.id))
+                    session.add(link)
+                    await session.commit()
+                    await session.refresh(link)
+                return {
+                    "product": {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name},
+                    "project": {"id": project.id, "slug": project.slug, "human_key": project.human_key},
+                    "linked": True,
+                }
+    else:
+        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:  # type: ignore[misc]
+            raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
+
+    if settings.worktrees_enabled:
+        @mcp.resource("resource://product/{key}", mime_type="application/json")
+        def product_resource(key: str) -> dict[str, Any]:
+            """
+            Inspect product and list linked projects.
+            """
+            # Safe runner that works even if an event loop is already running
+            def _run_coro_sync(coro):  # type: ignore[no-untyped-def]
+                try:
+                    asyncio.get_running_loop()
+                    # Run in a separate thread to avoid nested loop issues
+                except RuntimeError:
+                    return asyncio.run(coro)
+                import threading  # type: ignore
+                import queue  # type: ignore
+                q: "queue.Queue[tuple[bool, Any]]" = queue.Queue()
+                def _runner():  # type: ignore[no-untyped-def]
+                    try:
+                        q.put((True, asyncio.run(coro)))
+                    except Exception as e:
+                        q.put((False, e))
+                t = threading.Thread(target=_runner, daemon=True)
+                t.start()
+                ok, val = q.get()
+                if ok:
+                    return val
+                raise val
+            async def _load() -> dict[str, Any]:
+                await ensure_schema()
+                async with get_session() as session:
+                    prod = await _get_product_by_key(session, key.strip())
+                    if prod is None:
+                        raise ToolExecutionError("NOT_FOUND", f"Product '{key}' not found.", recoverable=True)
+                    proj_rows = await session.execute(
+                        select(Project).join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id).where(
+                            cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id)
+                        )
+                    )
+                    projects = [
+                        {"id": p.id, "slug": p.slug, "human_key": p.human_key, "created_at": _iso(p.created_at)}
+                        for p in proj_rows.scalars().all()
+                    ]
+                    return {
+                        "id": prod.id,
+                        "product_uid": prod.product_uid,
+                        "name": prod.name,
+                        "created_at": _iso(prod.created_at),
+                        "projects": projects,
+                    }
+            # Run async in a synchronous resource
+            return _run_coro_sync(_load())  # type: ignore[no-any-return]
+
+    if settings.worktrees_enabled:
+        @mcp.tool(name="search_messages_product")
+        @_instrument_tool("search_messages_product", cluster=CLUSTER_PRODUCT, capabilities={"search"})
+        async def search_messages_product(
+            ctx: Context,
+            product_key: str,
+            query: str,
+            limit: int = 20,
+        ) -> Any:
+            """
+            Full-text search across all projects linked to a product.
+            """
+            # Sanitize the FTS query first
+            sanitized_query = _sanitize_fts_query(query)
+            if sanitized_query is None:
+                await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
+                try:
+                    from fastmcp.tools.tool import ToolResult  # type: ignore
+                    return ToolResult(structured_content={"result": []})
+                except Exception:
+                    return []
+
+            await ensure_schema()
+            rows: list[Any] = []
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, product_key.strip())
+                if prod is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+                proj_ids_rows = await session.execute(
+                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
+                )
+                proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
+                if not proj_ids:
+                    return []
+                # FTS search limited to projects in proj_ids
+                try:
+                    result = await session.execute(
+                        text(
+                            """
+                            SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                   m.thread_id, a.name AS sender_name, m.project_id
+                            FROM fts_messages
+                            JOIN messages m ON fts_messages.rowid = m.id
+                            JOIN agents a ON m.sender_id = a.id
+                            WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
+                            ORDER BY bm25(fts_messages) ASC
+                            LIMIT :limit
+                            """
+                        ).bindparams(bindparam("proj_ids", expanding=True)),
+                        {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                    )
+                    rows = list(result.mappings().all())
+                except Exception as fts_err:
+                    logger.warning("FTS product query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+                    rows = []
+            items = [
+                {
+                    "id": row["id"],
+                    "subject": row["subject"],
+                    "importance": row["importance"],
+                    "ack_required": row["ack_required"],
+                    "created_ts": _iso(row["created_ts"]),
+                    "thread_id": row["thread_id"],
+                    "from": row["sender_name"],
+                    "project_id": row["project_id"],
+                }
+                for row in rows
+            ]
+            try:
+                from fastmcp.tools.tool import ToolResult  # type: ignore
+                return ToolResult(structured_content={"result": items})
+            except Exception:
+                return items
+    else:
+        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:  # type: ignore[misc]
+            raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
+
+    if settings.worktrees_enabled:
+        @mcp.tool(name="fetch_inbox_product")
+        @_instrument_tool("fetch_inbox_product", cluster=CLUSTER_PRODUCT, capabilities={"messaging", "read"})
+        async def fetch_inbox_product(
+            ctx: Context,
+            product_key: str,
+            agent_name: str,
+            limit: int = 20,
+            urgent_only: bool = False,
+            include_bodies: bool = False,
+            since_ts: Optional[str] = None,
+        ) -> list[dict[str, Any]]:
+            """
+            Retrieve recent messages for an agent across all projects linked to a product (non-mutating).
+            """
+            await ensure_schema()
+            # Collect linked projects
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, product_key.strip())
+                if prod is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+                proj_rows = await session.execute(
+                    select(Project).join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id).where(
+                        cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id)
+                    )
+                )
+                projects: list[Project] = list(proj_rows.scalars().all())
+            # For each project, if agent exists, list inbox items
+            messages: list[dict[str, Any]] = []
+            for project in projects:
+                try:
+                    ag = await _get_agent(project, agent_name)
+                except Exception:
+                    continue
+                proj_items = await _list_inbox(project, ag, limit, urgent_only, include_bodies, since_ts)
+                for item in proj_items:
+                    item["project_id"] = item.get("project_id") or project.id
+                    messages.append(item)
+            # Sort by created_ts desc and trim to limit
+            def _dt_key(it: dict[str, Any]) -> float:
+                ts = _parse_iso(str(it.get("created_ts") or ""))
+                return ts.timestamp() if ts else 0.0
+            messages.sort(key=_dt_key, reverse=True)
+            return messages[: max(0, int(limit))]
+    else:
+        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:  # type: ignore[misc]
+            raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
+
+    if settings.worktrees_enabled:
+        @mcp.tool(name="summarize_thread_product")
+        @_instrument_tool("summarize_thread_product", cluster=CLUSTER_PRODUCT, capabilities={"summarization", "search"})
+        async def summarize_thread_product(
+            ctx: Context,
+            product_key: str,
+            thread_id: str,
+            include_examples: bool = False,
+            llm_mode: bool = True,
+            llm_model: Optional[str] = None,
+            per_thread_limit: Optional[int] = None,
+        ) -> dict[str, Any]:
+            """
+            Summarize a thread (by id or thread key) across all projects linked to a product.
+            """
+            await ensure_schema()
+            sender_alias = aliased(Agent)
+            try:
+                seed_id = int(thread_id)
+            except ValueError:
+                seed_id = None
+            criteria = [Message.thread_id == thread_id]
+            if seed_id is not None:
+                criteria.append(Message.id == seed_id)
+
+            async with get_session() as session:
+                prod = await _get_product_by_key(session, product_key.strip())
+                if prod is None:
+                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+                proj_ids_rows = await session.execute(
+                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
+                )
+                proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
+                if not proj_ids:
+                    return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
+                stmt = (
+                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                    .where(cast(Any, Message.project_id).in_(proj_ids), or_(*cast(Any, criteria)))
+                    .order_by(asc(cast(Any, Message.created_ts)))
+                )
+                if per_thread_limit:
+                    stmt = stmt.limit(per_thread_limit)
+                rows = (await session.execute(stmt)).all()
+            summary = _summarize_messages(rows)  # type: ignore[arg-type]
+
+            # Optional LLM refinement (same as project-level)
+            if llm_mode and get_settings().llm.enabled:
+                try:
+                    excerpts: list[str] = []
+                    for message, sender_name in rows[:15]:
+                        excerpts.append(f"- {sender_name}: {message.subject}\n{message.body_md[:800]}")
+                    if excerpts:
+                        system = (
+                            "You are a senior engineer. Produce a concise JSON summary with keys: "
+                            "participants[], key_points[], action_items[], mentions[{name,count}], code_references[], "
+                            "total_messages, open_actions, done_actions. Derive from the given thread excerpts."
+                        )
+                        user = "\n\n".join(excerpts)
+                        llm_resp = await complete_system_user(system, user, model=llm_model)
+                        parsed = _parse_json_safely(llm_resp.content)
+                        if parsed:
+                            for key in (
+                                "participants",
+                                "key_points",
+                                "action_items",
+                                "mentions",
+                                "code_references",
+                                "total_messages",
+                                "open_actions",
+                                "done_actions",
+                            ):
+                                value = parsed.get(key)
+                                if value:
+                                    summary[key] = value
+                except Exception as e:
+                    await ctx.debug(f"summarize_thread_product.llm_skipped: {e}")
+
+            examples: list[dict[str, Any]] = []
+            if include_examples:
+                for message, sender_name in rows[:3]:
+                    examples.append(
+                        {
+                            "id": message.id,
+                            "subject": message.subject,
+                            "from": sender_name,
+                            "created_ts": _iso(message.created_ts),
+                        }
+                    )
+            await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
+            return {"thread_id": thread_id, "summary": summary, "examples": examples}
+    else:
+        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:  # type: ignore[misc]
+            raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
+    if settings.worktrees_enabled:
+        @mcp.resource("resource://identity/{project}", mime_type="application/json")
+        def identity_resource(project: str) -> dict[str, Any]:
+            """
+            Inspect identity resolution for a given project path. Returns the slug actually used,
+            the identity mode in effect, canonical path for the selected mode, and git repo facts.
+            """
+            raw_path, _ = _split_slug_and_query(project)
+            target_path = str(Path(raw_path).expanduser().resolve())
+
+            return _resolve_project_identity(target_path)
+    @mcp.resource("resource://tooling/directory", mime_type="application/json")
+    def tooling_directory_resource() -> dict[str, Any]:
+        """
+        Provide a clustered view of exposed MCP tools to combat option overload.
+
+        The directory groups tools by workflow, outlines primary use cases,
+        highlights nearby alternatives, and shares starter playbooks so agents
+        can focus on the verbs relevant to their immediate task.
+        """
+
+        clusters = [
+            {
+                "name": "Infrastructure & Workspace Setup",
+                "purpose": "Bootstrap coordination and guardrails before agents begin editing.",
+                "tools": [
+                    {
+                        "name": "health_check",
+                        "summary": "Report environment and HTTP wiring so orchestrators confirm connectivity.",
+                        "use_when": "Beginning a session or during incident response triage.",
+                        "related": ["ensure_project"],
+                        "expected_frequency": "Once per agent session or when connectivity is in doubt.",
+                        "required_capabilities": ["infrastructure"],
+                        "usage_examples": [{"hint": "Pre-flight", "sample": "health_check()"}],
+                    },
+                    {
+                        "name": "ensure_project",
+                        "summary": "Ensure project slug, schema, and archive exist for a shared repo identifier.",
+                        "use_when": "First call against a repo or when switching projects.",
+                        "related": ["register_agent", "file_reservation_paths"],
+                        "expected_frequency": "Whenever a new repo/path is encountered.",
+                        "required_capabilities": ["infrastructure", "storage"],
+                        "usage_examples": [{"hint": "First action", "sample": "ensure_project(human_key='/abs/path/backend')"}],
+                    },
+                    {
+                        "name": "install_precommit_guard",
+                        "summary": "Install Git pre-commit hook that enforces advisory file_reservations locally.",
+                        "use_when": "Onboarding a repository into coordinated mode.",
+                        "related": ["file_reservation_paths", "uninstall_precommit_guard"],
+                        "expected_frequency": "Infrequent—per repository setup.",
+                        "required_capabilities": ["repository", "filesystem"],
+                        "usage_examples": [{"hint": "Onboard", "sample": "install_precommit_guard(project_key='backend', code_repo_path='~/repo')"}],
+                    },
+                    {
+                        "name": "uninstall_precommit_guard",
+                        "summary": "Remove the advisory pre-commit hook from a repo.",
+                        "use_when": "Decommissioning or debugging the guard hook.",
+                        "related": ["install_precommit_guard"],
+                        "expected_frequency": "Rare; only when disabling guard enforcement.",
+                        "required_capabilities": ["repository"],
+                        "usage_examples": [{"hint": "Cleanup", "sample": "uninstall_precommit_guard(code_repo_path='~/repo')"}],
+                    },
+                ],
+            },
+            {
+                "name": "Identity & Directory",
+                "purpose": "Register agents, mint unique identities, and inspect directory metadata.",
+                "tools": [
+                    {
+                        "name": "register_agent",
+                        "summary": "Upsert an agent profile and refresh last_active_ts for a known persona.",
+                        "use_when": "Resuming an identity or updating program/model/task metadata.",
+                        "related": ["create_agent_identity", "whois"],
+                        "expected_frequency": "At the start of each automated work session.",
+                        "required_capabilities": ["identity"],
+                        "usage_examples": [{"hint": "Resume persona", "sample": "register_agent(project_key='/abs/path/backend', program='codex', model='gpt5')"}],
+                    },
+                    {
+                        "name": "create_agent_identity",
+                        "summary": "Always create a new unique agent name (optionally using a sanitized hint).",
+                        "use_when": "Spawning a brand-new helper that should not overwrite existing profiles.",
+                        "related": ["register_agent"],
+                        "expected_frequency": "When minting fresh, short-lived identities.",
+                        "required_capabilities": ["identity"],
+                        "usage_examples": [{"hint": "New helper", "sample": "create_agent_identity(project_key='backend', name_hint='GreenCastle', program='codex', model='gpt5')"}],
+                    },
+                    {
+                        "name": "whois",
+                        "summary": "Return enriched profile info plus recent archive commits for an agent.",
+                        "use_when": "Dashboarding, routing coordination messages, or auditing activity.",
+                        "related": ["register_agent"],
+                        "expected_frequency": "Ad hoc when context about an agent is required.",
+                        "required_capabilities": ["identity", "audit"],
+                        "usage_examples": [{"hint": "Directory lookup", "sample": "whois(project_key='backend', agent_name='BlueLake')"}],
+                    },
+                    {
+                        "name": "set_contact_policy",
+                        "summary": "Set inbound contact policy (open, auto, contacts_only, block_all).",
+                        "use_when": "Adjusting how permissive an agent is about unsolicited messages.",
+                        "related": ["request_contact", "respond_contact"],
+                        "expected_frequency": "Occasional configuration change.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Restrict inbox", "sample": "set_contact_policy(project_key='backend', agent_name='BlueLake', policy='contacts_only')"}],
+                    },
+                ],
+            },
+            {
+                "name": "Messaging Lifecycle",
+                "purpose": "Send, receive, and acknowledge threaded Markdown mail.",
+                "tools": [
+                    {
+                        "name": "send_message",
+                        "summary": "Deliver a new message with attachments, WebP conversion, and policy enforcement.",
+                        "use_when": "Starting new threads or broadcasting plans across projects.",
+                        "related": ["reply_message", "request_contact"],
+                        "expected_frequency": "Frequent—core write operation.",
+                        "required_capabilities": ["messaging"],
+                        "usage_examples": [{"hint": "New plan", "sample": "send_message(project_key='backend', sender_name='GreenCastle', to=['BlueLake'], subject='Plan', body_md='...')"}],
+                    },
+                    {
+                        "name": "reply_message",
+                        "summary": "Reply within an existing thread, inheriting flags and default recipients.",
+                        "use_when": "Continuing discussions or acknowledging decisions.",
+                        "related": ["send_message"],
+                        "expected_frequency": "Frequent when collaborating inside a thread.",
+                        "required_capabilities": ["messaging"],
+                        "usage_examples": [{"hint": "Thread reply", "sample": "reply_message(project_key='backend', message_id=42, sender_name='BlueLake', body_md='Got it!')"}],
+                    },
+                    {
+                        "name": "fetch_inbox",
+                        "summary": "Poll recent messages for an agent with filters (urgent_only, since_ts).",
+                        "use_when": "After each work unit to ingest coordination updates.",
+                        "related": ["mark_message_read", "acknowledge_message"],
+                        "expected_frequency": "Frequent polling in agent loops.",
+                        "required_capabilities": ["messaging", "read"],
+                        "usage_examples": [{"hint": "Poll", "sample": "fetch_inbox(project_key='backend', agent_name='BlueLake', since_ts='2025-10-24T00:00:00Z')"}],
+                    },
+                    {
+                        "name": "mark_message_read",
+                        "summary": "Record read_ts for FYI messages without sending acknowledgements.",
+                        "use_when": "Clearing inbox notifications once reviewed.",
+                        "related": ["acknowledge_message"],
+                        "expected_frequency": "Whenever FYI mail is processed.",
+                        "required_capabilities": ["messaging", "read"],
+                        "usage_examples": [{"hint": "Read receipt", "sample": "mark_message_read(project_key='backend', agent_name='BlueLake', message_id=42)"}],
+                    },
+                    {
+                        "name": "acknowledge_message",
+                        "summary": "Set read_ts and ack_ts so senders know action items landed.",
+                        "use_when": "Responding to ack_required messages.",
+                        "related": ["mark_message_read"],
+                        "expected_frequency": "Each time a message requests acknowledgement.",
+                        "required_capabilities": ["messaging", "ack"],
+                        "usage_examples": [{"hint": "Ack", "sample": "acknowledge_message(project_key='backend', agent_name='BlueLake', message_id=42)"}],
+                    },
+                ],
+            },
+            {
+                "name": "Contact Governance",
+                "purpose": "Manage messaging permissions when policies are not open by default.",
+                "tools": [
+                    {
+                        "name": "request_contact",
+                        "summary": "Create or refresh a pending AgentLink and notify the target with ack_required intro.",
+                        "use_when": "Requesting permission before messaging another agent.",
+                        "related": ["respond_contact", "set_contact_policy"],
+                        "expected_frequency": "Occasional—when new communication lines are needed.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake')"}],
+                    },
+                    {
+                        "name": "respond_contact",
+                        "summary": "Approve or block a pending contact request, optionally setting expiry.",
+                        "use_when": "Granting or revoking messaging permissions.",
+                        "related": ["request_contact"],
+                        "expected_frequency": "As often as requests arrive.",
+                        "required_capabilities": ["contact"],
+                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True)"}],
+                    },
+                    {
+                        "name": "list_contacts",
+                        "summary": "List outbound contact links, statuses, and expirations for an agent.",
+                        "use_when": "Auditing who an agent may message or rotating expiring approvals.",
+                        "related": ["request_contact", "respond_contact"],
+                        "expected_frequency": "Periodic audits or dashboards.",
+                        "required_capabilities": ["contact", "audit"],
+                        "usage_examples": [{"hint": "Audit", "sample": "list_contacts(project_key='backend', agent_name='BlueLake')"}],
+                    },
+                ],
+            },
+            {
+                "name": "Search & Summaries",
+                "purpose": "Surface signal from large mailboxes and compress long threads.",
+                "tools": [
+                    {
+                        "name": "search_messages",
+                        "summary": "Run FTS5 queries across subject/body text to locate relevant threads.",
+                        "use_when": "Triage or gathering context before editing.",
+                        "related": ["fetch_inbox", "summarize_thread"],
+                        "expected_frequency": "Regular during investigation phases.",
+                        "required_capabilities": ["search"],
+                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20)"}],
+                    },
+                    {
+                        "name": "summarize_thread",
+                        "summary": "Extract participants, key points, and action items for one or more threads.",
+                        "use_when": "Briefing new agents on long discussions, closing loops, or producing digests.",
+                        "related": ["search_messages"],
+                        "expected_frequency": "When threads exceed quick skim length or at cadence checkpoints.",
+                        "required_capabilities": ["search", "summarization"],
+                        "usage_examples": [
+                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"},
+                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99')"},
+                        ],
+                    },
+                ],
+            },
+            {
+                "name": "File Reservations & Workspace Guardrails",
+                "purpose": "Coordinate file/glob ownership to avoid overwriting concurrent work.",
+                "tools": [
+                    {
+                        "name": "file_reservation_paths",
+                        "summary": "Issue advisory file_reservations with overlap detection and Git artifacts.",
+                        "use_when": "Before touching high-traffic surfaces or long-lived refactors.",
+                        "related": ["release_file_reservations", "renew_file_reservations"],
+                        "expected_frequency": "Whenever starting work on contested surfaces.",
+                        "required_capabilities": ["file_reservations", "repository"],
+                        "usage_examples": [{"hint": "Lock file", "sample": "file_reservation_paths(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], ttl_seconds=7200)"}],
+                    },
+                    {
+                        "name": "release_file_reservations",
+                        "summary": "Release active file_reservations (fully or by subset) and stamp released_ts.",
+                        "use_when": "Finishing work so surfaces become available again.",
+                        "related": ["file_reservation_paths", "renew_file_reservations"],
+                        "expected_frequency": "Each time work on a surface completes.",
+                        "required_capabilities": ["file_reservations"],
+                        "usage_examples": [{"hint": "Unlock", "sample": "release_file_reservations(project_key='backend', agent_name='BlueLake', paths=['src/app.py'])"}],
+                    },
+                    {
+                        "name": "renew_file_reservations",
+                        "summary": "Extend file_reservation expiry windows without allocating new file_reservation IDs.",
+                        "use_when": "Long-running work needs more time but should retain ownership.",
+                        "related": ["file_reservation_paths", "release_file_reservations"],
+                        "expected_frequency": "Periodically during multi-hour work items.",
+                        "required_capabilities": ["file_reservations"],
+                        "usage_examples": [{"hint": "Extend", "sample": "renew_file_reservations(project_key='backend', agent_name='BlueLake', extend_seconds=1800)"}],
+                    },
+                ],
+            },
+            {
+                "name": "Workflow Macros",
+                "purpose": "Opinionated orchestrations that compose multiple primitives for smaller agents.",
+                "tools": [
+                    {
+                        "name": "macro_start_session",
+                        "summary": "Ensure project, register/update agent, optionally file_reservation surfaces, and return inbox context.",
+                        "use_when": "Kickstarting a focused work session with one call.",
+                        "related": ["ensure_project", "register_agent", "file_reservation_paths", "fetch_inbox"],
+                        "expected_frequency": "At the beginning of each autonomous session.",
+                        "required_capabilities": ["workflow", "messaging", "file_reservations", "identity"],
+                        "usage_examples": [{"hint": "Bootstrap", "sample": "macro_start_session(human_key='/abs/path/backend', program='codex', model='gpt5', file_reservation_paths=['src/api/*.py'])"}],
+                    },
+                    {
+                        "name": "macro_prepare_thread",
+                        "summary": "Register or refresh an agent, summarise a thread, and fetch inbox context in one call.",
+                        "use_when": "Briefing a helper before joining an ongoing discussion.",
+                        "related": ["register_agent", "summarize_thread", "fetch_inbox"],
+                        "expected_frequency": "Whenever onboarding a new contributor to an active thread.",
+                        "required_capabilities": ["workflow", "messaging", "summarization"],
+                        "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
+                    },
+                    {
+                        "name": "macro_file_reservation_cycle",
+                        "summary": "FileReservation a set of paths and optionally release them once work is complete.",
+                        "use_when": "Wrapping a focused edit cycle that needs advisory locks.",
+                        "related": ["file_reservation_paths", "release_file_reservations", "renew_file_reservations"],
+                        "expected_frequency": "Per guarded work block.",
+                        "required_capabilities": ["workflow", "file_reservations", "repository"],
+                        "usage_examples": [{"hint": "FileReservation & release", "sample": "macro_file_reservation_cycle(project_key='backend', agent_name='BlueLake', paths=['src/app.py'], auto_release=true)"}],
+                    },
+                    {
+                        "name": "macro_contact_handshake",
+                        "summary": "Request contact approval, optionally auto-accept, and send a welcome message.",
+                        "use_when": "Spinning up collaboration between two agents who lack permissions.",
+                        "related": ["request_contact", "respond_contact", "send_message"],
+                        "expected_frequency": "When onboarding new agent pairs.",
+                        "required_capabilities": ["workflow", "contact", "messaging"],
+                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
+                    },
+                ],
+            },
+        ]
+
+        for cluster in clusters:
+            for tool_entry in cluster["tools"]:
+                tool_dict = cast(dict[str, Any], tool_entry)
+                meta = TOOL_METADATA.get(str(tool_dict.get("name", "")))
+                if not meta:
+                    continue
+                tool_dict["capabilities"] = meta["capabilities"]
+                tool_dict.setdefault("complexity", meta["complexity"])
+                if "required_capabilities" in tool_dict:
+                    tool_dict["required_capabilities"] = meta["capabilities"]
+
+        playbooks = [
+            {
+                "workflow": "Kick off new agent session (macro)",
+                "sequence": ["health_check", "macro_start_session", "summarize_thread"],
+            },
+            {
+                "workflow": "Kick off new agent session (manual)",
+                "sequence": ["health_check", "ensure_project", "register_agent", "fetch_inbox"],
+            },
+            {
+                "workflow": "Start focused refactor",
+                "sequence": ["ensure_project", "file_reservation_paths", "send_message", "fetch_inbox", "acknowledge_message"],
+            },
+            {
+                "workflow": "Join existing discussion",
+                "sequence": ["macro_prepare_thread", "reply_message", "acknowledge_message"],
+            },
+            {
+                "workflow": "Manage contact approvals",
+                "sequence": ["set_contact_policy", "request_contact", "respond_contact", "send_message"],
+            },
+        ]
+
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "metrics_uri": "resource://tooling/metrics",
+            "clusters": clusters,
+            "playbooks": playbooks,
+        }
+
+    @mcp.resource("resource://tooling/schemas", mime_type="application/json")
+    def tooling_schemas_resource() -> dict[str, Any]:
+        """Expose JSON-like parameter schemas for tools/macros to prevent drift.
+
+        This is a lightweight, hand-maintained view focusing on the most error-prone
+        parameters and accepted aliases to guide clients.
+        """
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "tools": {
+                "send_message": {
+                    "required": ["project_key", "sender_name", "to", "subject", "body_md"],
+                    "optional": ["cc", "bcc", "attachment_paths", "convert_images", "importance", "ack_required", "thread_id", "auto_contact_if_blocked"],
+                    "shapes": {
+                        "to": "list[str]",
+                        "cc": "list[str] | str",
+                        "bcc": "list[str] | str",
+                        "importance": "low|normal|high|urgent",
+                        "auto_contact_if_blocked": "bool",
+                    },
+                },
+                "macro_contact_handshake": {
+                    "required": ["project_key", "requester|agent_name", "target|to_agent"],
+                    "optional": ["reason", "ttl_seconds", "auto_accept", "welcome_subject", "welcome_body"],
+                    "aliases": {
+                        "requester": ["agent_name"],
+                        "target": ["to_agent"],
+                    },
+                },
+            },
+        }
+
+    @mcp.resource("resource://tooling/metrics", mime_type="application/json")
+    def tooling_metrics_resource() -> dict[str, Any]:
+        """Expose aggregated tool call/error counts for analysis."""
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "tools": _tool_metrics_snapshot(),
+        }
+
+    @mcp.resource("resource://tooling/locks", mime_type="application/json")
+    def tooling_locks_resource() -> dict[str, Any]:
+        """Return lock metadata from the shared archive storage."""
+
+        settings_local = get_settings()
+        return collect_lock_status(settings_local)
+
+    @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
+    def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
+        # Parse query embedded in agent path if present (robust to FastMCP variants)
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+            except Exception:
+                pass
+        caps = _capabilities_for(agent, project)
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "agent": agent,
+            "project": project,
+            "capabilities": caps,
+        }
+
+    @mcp.resource("resource://tooling/recent/{window_seconds}", mime_type="application/json")
+    def tooling_recent_resource(
+        window_seconds: str,
+        agent: Optional[str] = None,
+        project: Optional[str] = None,
+    ) -> dict[str, Any]:
+        # Allow query string to be embedded in the path segment per some transports
+        if "?" in window_seconds:
+            seg, _, qs = window_seconds.partition("?")
+            window_seconds = seg
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                agent = agent or (parsed.get("agent") or [None])[0]  # type: ignore[list-item]
+                project = project or (parsed.get("project") or [None])[0]  # type: ignore[list-item]
+            except Exception:
+                pass
+        try:
+            win = int(window_seconds)
+        except Exception:
+            win = 60
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(1, win))
+        entries: list[dict[str, Any]] = []
+        for ts, tool_name, proj, ag in list(RECENT_TOOL_USAGE):
+            if ts < cutoff:
+                continue
+            if project and proj != project:
+                continue
+            if agent and ag != agent:
+                continue
+
+            record = {
+                "timestamp": _iso(ts),
+                "tool": tool_name,
+                "project": proj,
+                "agent": ag,
+                "cluster": TOOL_CLUSTER_MAP.get(tool_name, "unclassified"),
+            }
+            entries.append(record)
+        return {
+            "generated_at": _iso(datetime.now(timezone.utc)),
+            "window_seconds": win,
+            "count": len(entries),
+            "entries": entries,
+        }
+
+    @mcp.resource("resource://projects", mime_type="application/json")
+    async def projects_resource() -> list[dict[str, Any]]:
+        """
+        List all projects known to the server in creation order.
+
+        When to use
+        -----------
+        - Discover available projects when a user provides only an agent name.
+        - Build UIs that let operators switch context between projects.
+
+        Returns
+        -------
+        list[dict]
+            Each: { id, slug, human_key, created_at }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://projects"}}
+        ```
+        """
+        settings = get_settings()
+        await ensure_schema(settings)
+        # Build ignore matcher for test/demo projects
+        import fnmatch as _fnmatch
+        ignore_patterns = set(getattr(settings, "retention_ignore_project_patterns", []) or [])
+        async with get_session() as session:
+            result = await session.execute(select(Project).order_by(asc(cast(Any, Project.created_at))))
+            projects = result.scalars().all()
+            def _is_ignored(name: str) -> bool:
+                return any(_fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
+            filtered = [p for p in projects if not (_is_ignored(p.slug) or _is_ignored(p.human_key))]
+            return [_project_to_dict(project) for project in filtered]
+
+    @mcp.resource("resource://project/{slug}", mime_type="application/json")
+    async def project_detail(slug: str) -> dict[str, Any]:
+        """
+        Fetch a project and its agents by project slug or human key.
+
+        When to use
+        -----------
+        - Populate an "LDAP-like" directory for agents in tooling UIs.
+        - Determine available agent identities and their metadata before addressing mail.
+
+        Parameters
+        ----------
+        slug : str
+            Project slug (or human key; both resolve to the same target).
+
+        Returns
+        -------
+        dict
+            Project descriptor including { agents: [...] } with agent profiles.
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r3","method":"resources/read","params":{"uri":"resource://project/backend-abc123"}}
+        ```
+        """
+        project = await _get_project_by_identifier(slug)
+        await ensure_schema()
+        async with get_session() as session:
+            result = await session.execute(select(Agent).where(cast(Any, Agent.project_id == project.id)))
+            agents = result.scalars().all()
+        return {
+            **_project_to_dict(project),
+            "agents": [_agent_to_dict(agent) for agent in agents],
+        }
+
+    @mcp.resource("resource://agents/{project_key}", mime_type="application/json")
+    async def agents_directory(project_key: str) -> dict[str, Any]:
+        """
+        List all registered agents in a project for easy agent discovery.
+
+        This is the recommended way to discover other agents working on a project.
+
+        When to use
+        -----------
+        - At the start of a coding session to see who else is working on the project.
+        - Before sending messages to discover available recipients.
+        - To check if a specific agent is registered before attempting contact.
+
+        Parameters
+        ----------
+        project_key : str
+            Project slug or human key (both work).
+
+        Returns
+        -------
+        dict
+            {
+              "project": { "slug": "...", "human_key": "..." },
+              "agents": [
+                {
+                  "name": "BackendDev",
+                  "program": "claude-code",
+                  "model": "sonnet-4.5",
+                  "task_description": "API development",
+                  "inception_ts": "2025-10-25T...",
+                  "last_active_ts": "2025-10-25T...",
+                  "unread_count": 3
+                },
+                ...
+              ]
+            }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://agents/backend-abc123"}}
+        ```
+
+        Notes
+        -----
+        - Agent names are NOT the same as your program name or user name.
+        - Use the returned names when calling tools like whois(), request_contact(), send_message().
+        - Agents in different projects cannot see each other - project isolation is enforced.
+        """
+        project = await _get_project_by_identifier(project_key)
+        await ensure_schema()
+
+        async with get_session() as session:
+            # Get all agents in the project
+            result = await session.execute(
+                select(Agent).where(cast(Any, Agent.project_id == project.id)).order_by(desc(cast(Any, Agent.last_active_ts)))
+            )
+            agents = result.scalars().all()
+
+            # Get unread message counts for all agents in one query
+            unread_counts_stmt = (
+                cast(Any, select(  # type: ignore[call-overload]
+                    MessageRecipient.agent_id,
+                    func.count(cast(Any, MessageRecipient.message_id)).label("unread_count")  # type: ignore[arg-type]
+                ))
+                .where(
+                    cast(Any, MessageRecipient.read_ts).is_(None),
+                    cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents])
+                )
+                .group_by(MessageRecipient.agent_id)
+            )
+            unread_counts_result = await session.execute(unread_counts_stmt)
+            unread_counts_map = {row.agent_id: row.unread_count for row in unread_counts_result}
+
+            # Build agent data with unread counts
+            agent_data = []
+            for agent in agents:
+                agent_dict = _agent_to_dict(agent)
+                agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
+                agent_data.append(agent_dict)
+
+        return {
+            "project": {
+                "slug": project.slug,
+                "human_key": project.human_key,
+            },
+            "agents": agent_data,
+        }
+
+    @mcp.resource("resource://file_reservations/{slug}", mime_type="application/json")
+    async def file_reservations_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
+        """
+        List file_reservations for a project, optionally filtering to active-only.
+
+        Why this exists
+        ---------------
+        - File reservations communicate edit intent and reduce collisions across agents.
+        - Surfacing them helps humans review ongoing work and resolve contention.
+
+        Parameters
+        ----------
+        slug : str
+            Project slug or human key.
+        active_only : bool
+            If true (default), only returns file_reservations with no `released_ts`.
+
+        Returns
+        -------
+        list[dict]
+            Each file_reservation with { id, agent, path_pattern, exclusive, reason, created_ts, expires_ts, released_ts }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r4","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=true"}}
+        ```
+
+        Also see all historical (including released) file_reservations:
+        ```json
+        {"jsonrpc":"2.0","id":"r4b","method":"resources/read","params":{"uri":"resource://file_reservations/backend-abc123?active_only=false"}}
+        ```
+        """
+        slug_value, query_params = _split_slug_and_query(slug)
+        if "active_only" in query_params:
+            active_only = _coerce_flag_to_bool(query_params["active_only"], default=active_only)
+
+        project = await _get_project_by_identifier(slug_value)
+        await ensure_schema()
+        if project.id is None:
+            raise ValueError("Project must have an id before listing file_reservations.")
+
+        await _expire_stale_file_reservations(project.id)
+        statuses = await _collect_file_reservation_statuses(project, include_released=not active_only)
+
+        payload: list[dict[str, Any]] = []
+        for status in statuses:
+            reservation = status.reservation
+            if active_only and reservation.released_ts is not None:
+                continue
+            payload.append(
+                {
+                    "id": reservation.id,
+                    "agent": status.agent.name,
+                    "path_pattern": reservation.path_pattern,
+                    "exclusive": reservation.exclusive,
+                    "reason": reservation.reason,
+                    "created_ts": _iso(reservation.created_ts),
+                    "expires_ts": _iso(reservation.expires_ts),
+                    "released_ts": _iso(reservation.released_ts) if reservation.released_ts else None,
+                    "stale": status.stale,
+                    "stale_reasons": status.stale_reasons,
+                    "last_agent_activity_ts": _iso(status.last_agent_activity) if status.last_agent_activity else None,
+                    "last_mail_activity_ts": _iso(status.last_mail_activity) if status.last_mail_activity else None,
+                    "last_filesystem_activity_ts": _iso(status.last_fs_activity) if status.last_fs_activity else None,
+                    "last_git_activity_ts": _iso(status.last_git_activity) if status.last_git_activity else None,
+                }
+            )
+        return payload
+
+    @mcp.resource("resource://message/{message_id}", mime_type="application/json")
+    async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
+        """
+        Read a single message by id within a project.
+
+        When to use
+        -----------
+        - Fetch the canonical body/metadata for rendering in a client after list/search.
+        - Retrieve attachments and full details for a given message id.
+
+        Parameters
+        ----------
+        message_id : str
+            Numeric id as a string.
+        project : str
+            Project slug or human key (required for disambiguation).
+
+        Common mistakes
+        ---------------
+        - Omitting `project` when a message id might exist in multiple projects.
+
+        Returns
+        -------
+        dict
+            Full message payload including body and sender name.
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend"}}
+        ```
+        """
+        # Support toolkits that pass query in the template segment
+        if "?" in message_id:
+            id_part, _, qs = message_id.partition("?")
+            message_id = id_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+            except Exception:
+                pass
+        if project is None:
+            # Try to infer project by message id when unique
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(select(Project, Message).join(Message, cast(Any, Message.project_id) == Project.id).where(cast(Any, Message.id) == int(message_id)).limit(2))
+                data = rows.all()
+            if len(data) == 1:
+                project_obj = data[0][0]
+            else:
+                raise ValueError("project parameter is required for message resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        message = await _get_message(project_obj, int(message_id))
+        sender = await _get_agent_by_id(project_obj, message.sender_id)
+        payload = _message_to_dict(message, include_body=True)
+        payload["from"] = sender.name
+        return payload
+
+    @mcp.resource("resource://thread/{thread_id}", mime_type="application/json")
+    async def thread_resource(
+        thread_id: str,
+        project: Optional[str] = None,
+        include_bodies: bool = False,
+    ) -> dict[str, Any]:
+        """
+        List messages for a thread within a project.
+
+        When to use
+        -----------
+        - Present a conversation view for a given ticket/thread key.
+        - Export a thread for summarization or reporting.
+
+        Parameters
+        ----------
+        thread_id : str
+            Either a string thread key or a numeric message id to seed the thread.
+        project : str
+            Project slug or human key (required).
+        include_bodies : bool
+            Include message bodies if true (default false).
+
+        Returns
+        -------
+        dict
+            { project, thread_id, messages: [{...}] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&include_bodies=true"}}
+        ```
+
+        Numeric seed example (message id as thread seed):
+        ```json
+        {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend"}}
+        ```
+        """
+        # Robust query parsing: some FastMCP versions do not inject query args.
+        # If the templating layer included the query string in the path segment,
+        # extract it and fill missing parameters.
+        if "?" in thread_id:
+            id_part, _, qs = thread_id.partition("?")
+            thread_id = id_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and "project" in parsed and parsed["project"]:
+                    project = parsed["project"][0]
+                if parsed.get("include_bodies"):
+                    val = parsed["include_bodies"][0].strip().lower()
+                    include_bodies = val in ("1", "true", "t", "yes", "y")
+            except Exception:
+                pass
+
+        # Determine project if omitted by client
+        if project is None:
+            # Auto-detect project using numeric seed (message id) or unique thread key
+            async with get_session() as s_auto:
+                try:
+                    msg_id = int(thread_id)
+                except ValueError:
+                    msg_id = None
+                if msg_id is not None:
+                    rows = await s_auto.execute(
+                        select(Project)
+                        .join(Message, cast(Any, Message.project_id) == Project.id)
+                        .where(cast(Any, Message.id) == msg_id)
+                        .limit(2)
+                    )
+                    projects = [row[0] for row in rows.all()]
+                else:
+                    rows = await s_auto.execute(
+                        select(Project)
+                        .join(Message, cast(Any, Message.project_id) == Project.id)
+                        .where(cast(Any, Message.thread_id == thread_id))
+                        .limit(2)
+                    )
+                    projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for thread resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+
+        if project_obj.id is None:
+            raise ValueError("Project must have an id before listing threads.")
+        await ensure_schema()
+        try:
+            message_id = int(thread_id)
+        except ValueError:
+            message_id = None
+        sender_alias = aliased(Agent)
+        criteria = [Message.thread_id == thread_id]
+        if message_id is not None:
+            criteria.append(Message.id == message_id)
+        async with get_session() as session:
+            stmt = (
+                cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .where(cast(Any, Message.project_id == project_obj.id), or_(*cast(Any, criteria)))
+                .order_by(asc(cast(Any, Message.created_ts)))
+            )
+            result = await session.execute(stmt)
+            rows = result.all()  # type: ignore[assignment]
+        messages = []
+        for message, sender_name in rows:
+            payload = _message_to_dict(message, include_body=include_bodies)
+            payload["from"] = sender_name
+            messages.append(payload)
+        return {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
+
+    @mcp.resource(
+        "resource://inbox/{agent}",
+        mime_type="application/json",
+    )
+    async def inbox_resource(
+        agent: str,
+        project: Optional[str] = None,
+        since_ts: Optional[str] = None,
+        urgent_only: bool = False,
+        include_bodies: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        Read an agent's inbox for a project.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        since_ts : Optional[str]
+            ISO-8601 timestamp string; only messages newer than this are returned.
+        urgent_only : bool
+            If true, limits to importance in {high, urgent}.
+        include_bodies : bool
+            Include message bodies in results (default false).
+        limit : int
+            Maximum number of messages to return (default 20).
+
+        Returns
+        -------
+        dict
+            { project, agent, count, messages: [...] }
+
+        Example
+        -------
+        ```json
+        {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true"}}
+        ```
+        Incremental fetch example (using since_ts):
+        ```json
+        {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z"}}
+        ```
+        """
+        # Robust query parsing: some FastMCP versions do not inject query args.
+        # If the templating layer included the query string in the last path segment,
+        # extract it and fill missing parameters.
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and "project" in parsed and parsed["project"]:
+                    project = parsed["project"][0]
+                if since_ts is None and "since_ts" in parsed and parsed["since_ts"]:
+                    since_ts = parsed["since_ts"][0]
+                if parsed.get("urgent_only"):
+                    val = parsed["urgent_only"][0].strip().lower()
+                    urgent_only = val in ("1", "true", "t", "yes", "y")
+                if parsed.get("include_bodies"):
+                    val = parsed["include_bodies"][0].strip().lower()
+                    include_bodies = val in ("1", "true", "t", "yes", "y")
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            # Auto-detect project by agent name if uniquely identifiable
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for inbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
+        # Enrich with commit info for canonical markdown files (best-effort)
+        enriched: list[dict[str, Any]] = []
+        for item in messages:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
+        return {
+            "project": project_obj.human_key,
+            "agent": agent_obj.name,
+            "count": len(enriched),
+            "messages": enriched,
+        }
+
+    @mcp.resource("resource://views/urgent-unread/{agent}", mime_type="application/json")
+    async def urgent_unread_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        Convenience view listing urgent and high-importance messages that are unread for an agent.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        limit : int
+            Max number of messages.
+        """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for urgent view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=True, include_bodies=False, since_ts=None)
+        # Filter unread (no read_ts recorded)
+        unread: list[dict[str, Any]] = []
+        async with get_session() as session:
+            from .models import MessageRecipient  # local import to avoid cycle at top
+
+            for item in items:
+                result = await session.execute(
+                    cast(Any, select(MessageRecipient.read_ts)).where(  # type: ignore[call-overload]
+                        cast(Any, MessageRecipient.message_id == item["id"]), cast(Any, MessageRecipient.agent_id == agent_obj.id)
+                    )
+                )
+                read_ts = result.scalar_one_or_none()
+                if read_ts is None:
+                    unread.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
+
+    @mcp.resource("resource://views/ack-required/{agent}", mime_type="application/json")
+    async def ack_required_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        Convenience view listing messages requiring acknowledgement for an agent where ack is pending.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        limit : int
+            Max number of messages.
+        """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for ack view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
+                .where(
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(desc(cast(Any, Message.created_ts)))  # type: ignore[arg-type]
+                .limit(limit)
+            )
+            for msg, kind in rows.all():
+                payload = _message_to_dict(msg, include_body=False)
+                payload["kind"] = kind
+                out.append(payload)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource("resource://views/acks-stale/{agent}", mime_type="application/json")
+    async def acks_stale_view(
+        agent: str,
+        project: Optional[str] = None,
+        ttl_seconds: Optional[int] = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """
+        List ack-required messages older than a TTL where acknowledgement is still missing.
+
+        Parameters
+        ----------
+        agent : str
+            Agent name.
+        project : str
+            Project slug or human key (required).
+        ttl_seconds : Optional[int]
+            Minimum age in seconds to consider a message stale. Defaults to settings.ack_ttl_seconds.
+        limit : int
+            Max number of messages to return.
+        """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("ttl_seconds"):
+                    with suppress(Exception):
+                        ttl_seconds = int(parsed["ttl_seconds"][0])
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for stale acks view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        ttl = int(ttl_seconds) if ttl_seconds is not None else get_settings().ack_ttl_seconds
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                cast(Any, select(Message, MessageRecipient.kind, MessageRecipient.read_ts))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
+                .where(
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(asc(cast(Any, Message.created_ts)))
+                .limit(limit * 5)
+            )
+            for msg, kind, read_ts in rows.all():
+                # Coerce potential naive datetimes from SQLite to UTC for arithmetic
+                created = msg.created_ts
+                if getattr(created, "tzinfo", None) is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age_s = int((now - created).total_seconds())
+                if age_s >= ttl:
+                    payload = _message_to_dict(msg, include_body=False)
+                    payload["kind"] = kind
+                    payload["read_at"] = _iso(read_ts) if read_ts else None
+                    payload["age_seconds"] = age_s
+                    out.append(payload)
+                    if len(out) >= limit:
+                        break
+        return {
+            "project": project_obj.human_key,
+            "agent": agent_obj.name,
+            "ttl_seconds": ttl,
+            "count": len(out),
+            "messages": out,
+        }
+
+    @mcp.resource("resource://views/ack-overdue/{agent}", mime_type="application/json")
+    async def ack_overdue_view(
+        agent: str,
+        project: Optional[str] = None,
+        ttl_minutes: int = 60,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List messages requiring acknowledgement older than ttl_minutes without ack."""
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("ttl_minutes"):
+                    with suppress(Exception):
+                        ttl_minutes = int(parsed["ttl_minutes"][0])
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for ack-overdue view")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        if project_obj.id is None or agent_obj.id is None:
+            raise ValueError("Project/agent IDs must exist")
+        await ensure_schema()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, ttl_minutes))
+        out: list[dict[str, Any]] = []
+        async with get_session() as session:
+            rows = await session.execute(
+                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
+                .where(
+                    cast(Any, Message.project_id) == project_obj.id,
+                    cast(Any, MessageRecipient.agent_id == agent_obj.id),
+                    cast(Any, Message.ack_required).is_(True),
+                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                )
+                .order_by(asc(cast(Any, Message.created_ts)))
+                .limit(limit * 5)
+            )
+            for msg, kind in rows.all():
+                created = msg.created_ts
+                if getattr(created, "tzinfo", None) is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created <= cutoff:
+                    payload = _message_to_dict(msg, include_body=False)
+                    payload["kind"] = kind
+                    out.append(payload)
+                    if len(out) >= limit:
+                        break
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource("resource://mailbox/{agent}", mime_type="application/json")
+    async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """
+        List recent messages in an agent's mailbox with lightweight Git commit context.
+
+        Returns
+        -------
+        dict
+            { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
+        """
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for mailbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
+
+        # Attach recent commit summaries touching the archive (best-effort)
+        commits_index: dict[str, dict[str, str]] = {}
+        try:
+            archive = await ensure_archive(settings, project_obj.slug)
+            repo: Repo = archive.repo
+            for commit in repo.iter_commits(paths=["."], max_count=200):
+                # Heuristic: extract message id from commit summary when present in canonical subject format
+                # Expected: "mail: <from> -> ... | <subject>"
+                summary = str(commit.summary)
+                hexsha = commit.hexsha[:12]
+                if hexsha not in commits_index:
+                    commits_index[hexsha] = {"hexsha": hexsha, "summary": summary}
+        except Exception:
+            pass
+
+        # Map messages to nearest commit (best-effort: none if not determinable)
+        out: list[dict[str, Any]] = []
+        for item in items:
+            commit_meta = None
+            # We cannot cheaply know exact commit per message without parsing message ids from log; keep null
+            # but preserve structure for clients
+            if commits_index:
+                commit_meta = next(iter(commits_index.values()))  # provide at least one recent reference
+            payload = dict(item)
+            payload["commit"] = commit_meta
+            out.append(payload)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+
+    @mcp.resource(
+        "resource://mailbox-with-commits/{agent}",
+        mime_type="application/json",
+    )
+    async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+        """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
+        # Parse query embedded in agent path if present
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+            except Exception:
+                pass
+        if project is None:
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for mailbox-with-commits resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
+
+        enriched: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+
+    @mcp.resource("resource://outbox/{agent}", mime_type="application/json")
+    async def outbox_resource(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        include_bodies: bool = False,
+        since_ts: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """List messages sent by the agent, enriched with commit metadata for canonical files."""
+        # Support toolkits that incorrectly pass query in the template segment
+        if "?" in agent:
+            name_part, _, qs = agent.partition("?")
+            agent = name_part
+            try:
+                from urllib.parse import parse_qs
+                parsed = parse_qs(qs, keep_blank_values=False)
+                if project is None and parsed.get("project"):
+                    project = parsed["project"][0]
+                if parsed.get("limit"):
+                    from contextlib import suppress
+                    with suppress(Exception):
+                        limit = int(parsed["limit"][0])
+                if parsed.get("include_bodies"):
+                    include_bodies = parsed["include_bodies"][0].lower() in {"1","true","t","yes","y"}
+                if parsed.get("since_ts"):
+                    since_ts = parsed["since_ts"][0]
+            except Exception:
+                pass
+        """List messages sent by the agent, enriched with commit metadata for canonical files."""
+        if project is None:
+            raise ValueError("project parameter is required for outbox resource")
+        project_obj = await _get_project_by_identifier(project)
+        agent_obj = await _get_agent(project_obj, agent)
+        items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
+        enriched: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    item["commit"] = commit_info
+            except Exception:
+                pass
+            enriched.append(item)
+        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+
+    # No explicit output-schema transform; the tool returns ToolResult with {"result": ...}
+
     return mcp

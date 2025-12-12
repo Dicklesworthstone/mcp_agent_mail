@@ -29,10 +29,11 @@ import typer
 import uvicorn
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import asc, bindparam, desc, func, select, text
+from sqlalchemy import and_, asc, bindparam, desc, func, or_, select, text
 from sqlalchemy.engine import make_url
+from sqlalchemy.sql import ColumnElement
 
-from .app import build_mcp_server
+from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -103,7 +104,7 @@ async def _get_project_record(identifier: str) -> Project:
     slug = slugify(identifier)
     await ensure_schema()
     async with get_session() as session:
-        stmt = select(Project).where((Project.slug == slug) | (Project.human_key == identifier))
+        stmt = select(Project).where(or_(cast(ColumnElement[bool], Project.slug == slug), cast(ColumnElement[bool], Project.human_key == identifier)))
         result = await session.execute(stmt)
         project = result.scalars().first()
         if not project:
@@ -117,7 +118,7 @@ async def _get_agent_record(project: Project, agent_name: str) -> Agent:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.name == agent_name)
+            select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == project.id), cast(ColumnElement[bool], Agent.name == agent_name)))
         )
         agent = result.scalars().first()
         if not agent:
@@ -126,8 +127,15 @@ async def _get_agent_record(project: Project, agent_name: str) -> Agent:
 
 
 def _iso(dt: Optional[datetime]) -> str:
+    """Return ISO-8601 in UTC from datetime.
+
+    Naive datetimes (from SQLite) are assumed to be UTC already.
+    """
     if dt is None:
         return ""
+    # Handle naive datetimes from SQLite (assume UTC)
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat()
 
 
@@ -179,7 +187,7 @@ def products_ensure(
             await ensure_schema()
             async with get_session() as session:
                 existing = await session.execute(
-                    select(Product).where((Product.product_uid == key) | (Product.name == key))
+                    select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == key), cast(ColumnElement[bool], Product.name == key)))
                 )
                 prod = existing.scalars().first()
                 if prod:
@@ -230,11 +238,13 @@ def products_link(
         async with get_session() as session:
             existing = await session.execute(
                 select(ProductProjectLink).where(
-                    ProductProjectLink.product_id == prod.id, ProductProjectLink.project_id == proj.id
+                    and_(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id), cast(ColumnElement[bool], ProductProjectLink.project_id == proj.id))
                 )
             )
             link = existing.scalars().first()
             if link is None:
+                assert prod.id is not None
+                assert proj.id is not None
                 link = ProductProjectLink(product_id=int(prod.id), project_id=int(proj.id))
                 session.add(link)
                 await session.commit()
@@ -254,13 +264,14 @@ def products_status(
     async def _status() -> tuple[Product, list[Project]]:
         await ensure_schema()
         async with get_session() as session:
-            stmt_prod = select(Product).where((Product.product_uid == product_key) | (Product.name == product_key))
+            stmt_prod = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key)))
             prod = (await session.execute(stmt_prod)).scalars().first()
             if prod is None:
                 raise typer.BadParameter(f"Product '{product_key}' not found.")
+            assert prod.id is not None
             rows = await session.execute(
-                select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-                    ProductProjectLink.product_id == prod.id
+                select(Project).join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id)).where(
+                    cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id)
                 )
             )
             projects = list(rows.scalars().all())
@@ -292,35 +303,46 @@ def products_search(
     """
     Full-text search over messages for all projects linked to a product.
     """
+    # Sanitize query before executing
+    sanitized_query = _sanitize_fts_query(query)
+    if sanitized_query is None:
+        console.print(f"[yellow]Query '{query}' cannot produce search results.[/]")
+        return
+
     async def _run() -> list[dict]:
         await ensure_schema()
         async with get_session() as session:
-            stmt_prod = select(Product).where((Product.product_uid == product_key) | (Product.name == product_key))
+            stmt_prod = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key)))
             prod = (await session.execute(stmt_prod)).scalars().first()
             if prod is None:
                 raise typer.BadParameter(f"Product '{product_key}' not found.")
+            assert prod.id is not None
             rows = await session.execute(
-                select(ProductProjectLink.project_id).where(ProductProjectLink.product_id == prod.id)
+                select(ProductProjectLink.project_id).where(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id))  # type: ignore[call-overload]
             )
             proj_ids = [int(r[0]) for r in rows.fetchall()]
             if not proj_ids:
                 return []
-            result = await session.execute(
-                text(
-                    """
-                    SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                           m.thread_id, a.name AS sender_name, m.project_id
-                    FROM fts_messages
-                    JOIN messages m ON fts_messages.rowid = m.id
-                    JOIN agents a ON m.sender_id = a.id
-                    WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
-                    ORDER BY bm25(fts_messages) ASC
-                    LIMIT :limit
-                    """
-                ).bindparams(bindparam("proj_ids", expanding=True)),
-                {"proj_ids": proj_ids, "query": query, "limit": limit},
-            )
-            return [dict(row) for row in result.mappings().all()]
+            try:
+                result = await session.execute(
+                    text(
+                        """
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name, m.project_id
+                        FROM fts_messages
+                        JOIN messages m ON fts_messages.rowid = m.id
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
+                        ORDER BY bm25(fts_messages) ASC
+                        LIMIT :limit
+                        """
+                    ).bindparams(bindparam("proj_ids", expanding=True)),
+                    {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
+                )
+                return [dict(row) for row in result.mappings().all()]
+            except Exception:
+                # FTS query failed - return empty results
+                return []
     rows = asyncio.run(_run())
     if not rows:
         console.print("[yellow]No results.[/]")
@@ -385,28 +407,31 @@ def products_inbox(
         async def _fallback() -> list[dict]:
             await ensure_schema()
             async with get_session() as session:
-                prod = (await session.execute(select(Product).where((Product.product_uid == product_key) | (Product.name == product_key)))).scalars().first()
+                prod = (await session.execute(select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key))))).scalars().first()
                 if prod is None:
                     return []
+                assert prod.id is not None
                 proj_rows = await session.execute(
-                    select(Project).join(ProductProjectLink, ProductProjectLink.project_id == Project.id).where(
-                        ProductProjectLink.product_id == prod.id
+                    select(Project).join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id)).where(
+                        cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id)
                     )
                 )
                 projects = list(proj_rows.scalars().all())
                 items: list[dict] = []
                 for proj in projects:
-                    agent_row = (await session.execute(select(Agent).where(Agent.project_id == proj.id, Agent.name == agent))).scalars().first()
+                    assert proj.id is not None
+                    agent_row = (await session.execute(select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == proj.id), cast(ColumnElement[bool], Agent.name == agent))))).scalars().first()
                     if not agent_row:
                         continue
+                    assert agent_row.id is not None
                     from sqlalchemy.orm import aliased as _aliased  # local to avoid top-level churn
                     sender_alias = _aliased(Agent)
                     stmt = (
-                        select(Message, MessageRecipient.kind, sender_alias.name)
-                        .join(MessageRecipient, MessageRecipient.message_id == Message.id)
-                        .join(sender_alias, Message.sender_id == sender_alias.id)
-                        .where(Message.project_id == proj.id, MessageRecipient.agent_id == agent_row.id)
-                        .order_by(desc(Message.created_ts))
+                        select(Message, MessageRecipient.kind, sender_alias.name)  # type: ignore[call-overload]
+                        .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
+                        .join(sender_alias, cast(ColumnElement[bool], Message.sender_id == sender_alias.id))
+                        .where(and_(cast(ColumnElement[bool], Message.project_id == proj.id), cast(ColumnElement[bool], MessageRecipient.agent_id == agent_row.id)))
+                        .order_by(desc(cast(Any, Message.created_ts)))
                         .limit(limit)
                     )
                     if urgent_only:
@@ -538,7 +563,7 @@ async def _get_product_record(key: str) -> Product:
     """Fetch Product by uid or name."""
     await ensure_schema()
     async with get_session() as session:
-        stmt = select(Product).where((Product.product_uid == key) | (Product.name == key))
+        stmt = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == key), cast(ColumnElement[bool], Product.name == key)))
         result = await session.execute(stmt)
         prod = result.scalars().first()
         if not prod:
@@ -1094,7 +1119,7 @@ def _start_preview_server(bundle_path: Path, host: str, port: int) -> ThreadingH
     bundle_path = bundle_path.resolve()
 
     class PreviewRequestHandler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
             super().__init__(*args, directory=str(bundle_path), **kwargs)
 
         def end_headers(self) -> None:  # type: ignore[override]
@@ -1427,12 +1452,12 @@ def share_preview(
     actual_host = actual_host or host
 
     console.rule("[bold]Static Bundle Preview[/bold]")
-    console.print(f"Serving {bundle_path} at http://{actual_host}:{actual_port}/ (Ctrl+C to stop)")
+    console.print(f"Serving {bundle_path} at http://{actual_host}:{actual_port}/ (Ctrl+C to stop)")  # type: ignore[str-bytes-safe]
     console.print("[dim]Commands: press 'r' to force refresh, 'd' to deploy now, 'q' to stop.[/]")
 
     if open_browser:
         with suppress(Exception):
-            webbrowser.open(f"http://{actual_host}:{actual_port}/viewer/")
+            webbrowser.open(f"http://{actual_host}:{actual_port}/viewer/")  # type: ignore[str-bytes-safe]
 
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -2378,7 +2403,7 @@ def list_projects(
             if include_agents:
                 for project in projects:
                     count_result = await session.execute(
-                        select(func.count(Agent.id)).where(Agent.project_id == project.id)
+                        select(func.count(Agent.id)).where(Agent.project_id == project.id)  # type: ignore[arg-type]
                     )
                     count = int(count_result.scalar_one())
                     rows.append((project, count))
@@ -2506,14 +2531,14 @@ def file_reservations_list(
             raise ValueError("Project must have an id")
         await ensure_schema()
         async with get_session() as session:
-            stmt = select(FileReservation, Agent.name).join(Agent, FileReservation.agent_id == Agent.id).where(
-                FileReservation.project_id == project_record.id
+            stmt = select(FileReservation, Agent.name).join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id)).where(  # type: ignore[call-overload]
+                cast(ColumnElement[bool], FileReservation.project_id == project_record.id)
             )
             if active_only:
-                stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
-            stmt = stmt.order_by(asc(FileReservation.expires_ts))
+                stmt = stmt.where(cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)))
+            stmt = stmt.order_by(asc(cast(Any, FileReservation.expires_ts)))
             rows = (await session.execute(stmt)).all()
-        return project_record, rows
+        return project_record, rows  # type: ignore[return-value]
 
     try:
         project_record, rows = asyncio.run(_run())
@@ -2556,6 +2581,7 @@ def amctl_env(
     # Determine branch
     branch = ident.get("branch") or ""
     if not branch:
+        repo = None
         try:
             from git import Repo as _Repo
             repo = _Repo(str(p), search_parent_directories=True)
@@ -2565,6 +2591,10 @@ def amctl_env(
                 branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
         except Exception:
             branch = "unknown"
+        finally:
+            if repo is not None:
+                with suppress(Exception):
+                    repo.close()
     # Compute cache key and artifact dir
     settings = get_settings()
     cache_key = f"am-cache-{project_uid}-{agent_name}-{branch}"
@@ -2604,6 +2634,7 @@ def am_run(
     # Always ensure archive structure exists (for tests and local runs)
     asyncio.run(ensure_archive(get_settings(), slug))
     if not branch:
+        repo = None
         try:
             from git import Repo as _Repo
             repo = _Repo(str(p), search_parent_directories=True)
@@ -2613,6 +2644,10 @@ def am_run(
                 branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
         except Exception:
             branch = "unknown"
+        finally:
+            if repo is not None:
+                with suppress(Exception):
+                    repo.close()
     settings = get_settings()
     guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
     worktrees_enabled = bool(settings.worktrees_enabled)
@@ -2872,12 +2907,17 @@ def projects_mark_identity(
     if not uid:
         raise typer.BadParameter("Unable to resolve project_uid for this path.")
     # Determine repo root
+    repo = None
     try:
         from git import Repo as _Repo  # local import to avoid CLI startup cost
         repo = _Repo(str(p), search_parent_directories=True)
         root = Path(repo.working_tree_dir or str(p))
     except Exception:
         root = p
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
     marker_path = root / ".agent-mail-project-id"
     marker_path.write_text(uid + "\n", encoding="utf-8")
     console.print(f"[green]Wrote[/] {marker_path} with project_uid={uid}")
@@ -2954,6 +2994,7 @@ def mail_status(
         return f"{host}/{owner}/{repo}"
 
     normalized_remote: Optional[str] = None
+    repo = None
     try:
         from git import Repo as _Repo  # local import to avoid CLI startup cost
         repo = _Repo(str(p), search_parent_directories=True)
@@ -2968,6 +3009,10 @@ def mail_status(
         normalized_remote = _norm_remote(url)
     except Exception:
         normalized_remote = None
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
 
     # Compute a candidate slug using the same logic as the server helper (summarized)
     from mcp_agent_mail.app import _compute_project_slug as _compute_slug  # type: ignore
@@ -3105,7 +3150,7 @@ def guard_check(
         s = p.replace("\\", "/").lstrip("/")
         return s.lower() if ignorecase else s
 
-    def _compile(pattern: str):
+    def _compile(pattern: str):  # type: ignore[no-untyped-def]
         patt = pattern.lower() if ignorecase else pattern
         if _PS is not None:
             try:
@@ -3114,7 +3159,7 @@ def guard_check(
                 return None
         return None
 
-    def _match(spec, a: str, b: str) -> bool:
+    def _match(spec, a: str, b: str) -> bool:  # type: ignore[no-untyped-def]
         aa = _normalize(a)
         bb = _normalize(b)
         if spec is not None:
@@ -3234,8 +3279,8 @@ def projects_adopt(
         # Detect agent name conflicts
         await ensure_schema()
         async with get_session() as session:
-            src_agents = [row[0] for row in (await session.execute(select(Agent.name).where(Agent.project_id == src.id))).all()]
-            dst_agents = [row[0] for row in (await session.execute(select(Agent.name).where(Agent.project_id == dst.id))).all()]
+            src_agents = [row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == src.id)))).all()]  # type: ignore[call-overload]
+            dst_agents = [row[0] for row in (await session.execute(select(Agent.name).where(cast(ColumnElement[bool], Agent.project_id == dst.id)))).all()]  # type: ignore[call-overload]
             dup = sorted(set(src_agents).intersection(set(dst_agents)))
             if dup:
                 raise typer.BadParameter(f"Agent name conflicts in target project: {', '.join(dup)}")
@@ -3264,9 +3309,9 @@ def projects_adopt(
         # Re-key database rows (agents, messages, file_reservations)
         async with get_session() as session:
             from sqlalchemy import update as _update  # local import to avoid top-of-file churn
-            await session.execute(_update(Agent).where(Agent.project_id == src.id).values(project_id=dst.id))
-            await session.execute(_update(Message).where(Message.project_id == src.id).values(project_id=dst.id))
-            await session.execute(_update(FileReservation).where(FileReservation.project_id == src.id).values(project_id=dst.id))
+            await session.execute(_update(Agent).where(cast(ColumnElement[bool], Agent.project_id == src.id)).values(project_id=dst.id))
+            await session.execute(_update(Message).where(cast(ColumnElement[bool], Message.project_id == src.id)).values(project_id=dst.id))
+            await session.execute(_update(FileReservation).where(cast(ColumnElement[bool], FileReservation.project_id == src.id)).values(project_id=dst.id))
             await session.commit()
         # Write aliases.json under target
         aliases_path = dst_archive.root / "aliases.json"
@@ -3304,14 +3349,14 @@ def file_reservations_active(
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(FileReservation, Agent.name)
-                .join(Agent, FileReservation.agent_id == Agent.id)
-                .where(FileReservation.project_id == project_record.id, cast(Any, FileReservation.released_ts).is_(None))
-                .order_by(asc(FileReservation.expires_ts))
+                select(FileReservation, Agent.name)  # type: ignore[call-overload]
+                .join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id))
+                .where(and_(cast(ColumnElement[bool], FileReservation.project_id == project_record.id), cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None))))
+                .order_by(asc(cast(Any, FileReservation.expires_ts)))
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).all()
-        return project_record, rows
+        return project_record, rows  # type: ignore[return-value]
 
     try:
         project_record, rows = asyncio.run(_run())
@@ -3363,16 +3408,18 @@ def file_reservations_soon(
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(FileReservation, Agent.name)
-                .join(Agent, FileReservation.agent_id == Agent.id)
+                select(FileReservation, Agent.name)  # type: ignore[call-overload]
+                .join(Agent, cast(ColumnElement[bool], FileReservation.agent_id == Agent.id))
                 .where(
-                    FileReservation.project_id == project_record.id,
-                    cast(Any, FileReservation.released_ts).is_(None),
+                    and_(
+                        cast(ColumnElement[bool], FileReservation.project_id == project_record.id),
+                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None))
+                    )
                 )
-                .order_by(asc(FileReservation.expires_ts))
+                .order_by(asc(cast(Any, FileReservation.expires_ts)))
             )
             rows = (await session.execute(stmt)).all()
-        return project_record, rows
+        return project_record, rows  # type: ignore[return-value]
 
     try:
         project_record, rows = asyncio.run(_run())
@@ -3427,19 +3474,21 @@ def acks_pending(
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_record.id,
-                    MessageRecipient.agent_id == agent_record.id,
-                    cast(Any, Message.ack_required).is_(True),
-                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                    and_(
+                        cast(ColumnElement[bool], Message.project_id == project_record.id),
+                        cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
+                        cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                    )
                 )
-                .order_by(desc(Message.created_ts))
+                .order_by(desc(cast(Any, Message.created_ts)))
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).all()
-        return project_record, agent_record, rows
+        return project_record, agent_record, rows  # type: ignore[return-value]
 
     try:
         project_record, agent_record, rows = asyncio.run(_run())
@@ -3497,19 +3546,21 @@ def acks_remind(
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                select(Message, MessageRecipient.read_ts, MessageRecipient.ack_ts, MessageRecipient.kind)  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_record.id,
-                    MessageRecipient.agent_id == agent_record.id,
-                    cast(Any, Message.ack_required).is_(True),
-                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                    and_(
+                        cast(ColumnElement[bool], Message.project_id == project_record.id),
+                        cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
+                        cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                    )
                 )
-                .order_by(asc(Message.created_ts))  # oldest first
+                .order_by(asc(cast(Any, Message.created_ts)))  # oldest first
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).all()
-        return project_record, agent_record, rows
+        return project_record, agent_record, rows  # type: ignore[return-value]
 
     try:
         _project_record, agent_record, rows = asyncio.run(_run())
@@ -3572,20 +3623,22 @@ def acks_overdue(
         async with get_session() as session:
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)
             stmt = (
-                select(Message, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                select(Message, MessageRecipient.kind)  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project_record.id,
-                    MessageRecipient.agent_id == agent_record.id,
-                    cast(Any, Message.ack_required).is_(True),
-                    cast(Any, MessageRecipient.ack_ts).is_(None),
-                    Message.created_ts <= cutoff,
+                    and_(
+                        cast(ColumnElement[bool], Message.project_id == project_record.id),
+                        cast(ColumnElement[bool], MessageRecipient.agent_id == agent_record.id),
+                        cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None)),
+                        cast(ColumnElement[bool], Message.created_ts <= cutoff)
+                    )
                 )
-                .order_by(asc(Message.created_ts))
+                .order_by(asc(cast(Any, Message.created_ts)))
                 .limit(limit)
             )
             rows = (await session.execute(stmt)).all()
-        return project_record, agent_record, rows
+        return project_record, agent_record, rows  # type: ignore[return-value]
 
     try:
         project_record, agent_record, rows = asyncio.run(_run())
@@ -3638,29 +3691,33 @@ def list_acks(
         await ensure_schema()
         async with get_session() as session:
             # Resolve project and agent
-            proj_result = await session.execute(select(Project).where((Project.slug == slugify(project_key)) | (Project.human_key == project_key)))
+            proj_result = await session.execute(select(Project).where(or_(cast(ColumnElement[bool], Project.slug == slugify(project_key)), cast(ColumnElement[bool], Project.human_key == project_key))))
             project = proj_result.scalars().first()
             if not project:
                 raise typer.BadParameter(f"Project not found for key: {project_key}")
+            assert project.id is not None
             agent_result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == agent_name.lower())
+                select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == project.id), func.lower(Agent.name) == agent_name.lower()))
             )
             agent = agent_result.scalars().first()
             if not agent:
                 raise typer.BadParameter(f"Agent '{agent_name}' not found in project '{project.human_key}'")
+            assert agent.id is not None
             rows = await session.execute(
-                select(Message, MessageRecipient.kind)
-                .join(MessageRecipient, MessageRecipient.message_id == Message.id)
+                select(Message, MessageRecipient.kind)  # type: ignore[call-overload]
+                .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                 .where(
-                    Message.project_id == project.id,
-                    MessageRecipient.agent_id == agent.id,
-                    cast(Any, Message.ack_required).is_(True),
-                    cast(Any, MessageRecipient.ack_ts).is_(None),
+                    and_(
+                        cast(ColumnElement[bool], Message.project_id == project.id),
+                        cast(ColumnElement[bool], MessageRecipient.agent_id == agent.id),
+                        cast(ColumnElement[bool], cast(Any, Message.ack_required).is_(True)),
+                        cast(ColumnElement[bool], cast(Any, MessageRecipient.ack_ts).is_(None))
+                    )
                 )
-                .order_by(desc(Message.created_ts))
+                .order_by(desc(cast(Any, Message.created_ts)))
                 .limit(limit)
             )
-            return rows.all()
+            return rows.all()  # type: ignore[return-value]
 
     console.rule("[bold blue]Ack-required Messages")
     rows = asyncio.run(_collect())
@@ -3869,7 +3926,7 @@ def _iter_doc_files(base: Path, max_depth: int) -> Iterable[Path]:
             dirnames[:] = []
         dirnames[:] = [d for d in dirnames if d not in SKIP_SCAN_DIRS]
         for name in filenames:
-            if name.upper() in TARGET_DOC_FILENAMES:
+            if cast(str, name).upper() in TARGET_DOC_FILENAMES:
                 yield Path(dirpath) / name
 
 

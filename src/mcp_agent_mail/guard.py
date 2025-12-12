@@ -132,6 +132,10 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
         "",
+        "# Exit early if gate is not enabled (WORKTREES_ENABLED=0 and GIT_IDENTITY_ENABLED=0)",
+        "if GATE.strip().lower() not in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
+        "    sys.exit(0)",
+        "",
         "# Advisory/blocking mode: default to 'block' unless explicitly set to 'warn'.",
         "MODE = (os.environ.get(\"AGENT_MAIL_GUARD_MODE\",\"block\") or \"block\").strip().lower()",
         "ADVISORY = MODE in {\"warn\",\"advisory\",\"adv\"}",
@@ -181,14 +185,14 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "# Local conflict detection against FILE_RESERVATIONS_DIR",
         "def _now_iso_utc():",
         "    return datetime.now(timezone.utc).isoformat()",
-        "def _not_expired(expires_ts: str | None) -> bool:",
+        "def _not_expired(expires_ts):",
         "    if not expires_ts:",
         "        return True",
         "    try:",
         "        return expires_ts > _now_iso_utc()",
         "    except Exception:",
         "        return True",
-        "def _compile_one(patt: str):",
+        "def _compile_one(patt):",
         "    q = patt.replace(\"\\\\\",\"/\")",
         "    if _PS and _GWM:",
         "        try:",
@@ -268,6 +272,11 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "",
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
+        "",
+        "# Exit early if gate is not enabled (WORKTREES_ENABLED=0 and GIT_IDENTITY_ENABLED=0)",
+        "if GATE.strip().lower() not in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
+        "    sys.exit(0)",
+        "",
         "MODE = (os.environ.get(\"AGENT_MAIL_GUARD_MODE\",\"block\") or \"block\").strip().lower()",
         "ADVISORY = MODE in {\"warn\",\"advisory\",\"adv\"}",
         "if (os.environ.get(\"AGENT_MAIL_BYPASS\",\"0\") or \"0\").strip().lower() in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
@@ -327,14 +336,14 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "    sys.exit(0)",
         "def _now_iso_utc():",
         "    return datetime.now(timezone.utc).isoformat()",
-        "def _not_expired(expires_ts: str | None) -> bool:",
+        "def _not_expired(expires_ts):",
         "    if not expires_ts:",
         "        return True",
         "    try:",
         "        return expires_ts > _now_iso_utc()",
         "    except Exception:",
         "        return True",
-        "def _compile_one(patt: str):",
+        "def _compile_one(patt):",
         "    q = patt.replace(\"\\\\\",\"/\")",
         "    if _PS and _GWM:",
         "        try:",
@@ -401,7 +410,7 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
         # Prefer core.hooksPath if configured
         hooks_path = _git(repo, "config", "--get", "core.hooksPath")
         if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/")):
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
                 resolved = Path(hooks_path)
             else:
                 # Resolve relative to repo root
@@ -485,7 +494,7 @@ async def install_prepush_guard(settings: Settings, project_slug: str, repo_path
     def _resolve_hooks_dir(repo: Path) -> Path:
         hooks_path = _git(repo, "config", "--get", "core.hooksPath")
         if hooks_path:
-            if hooks_path.startswith("/") or ((((len(hooks_path) > 1) and (hooks_path[1:3] == ":\\")) or (hooks_path[1:3] == ":/"))):
+            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
                 resolved = Path(hooks_path)
             else:
                 root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
@@ -595,11 +604,8 @@ async def uninstall_guard(repo_path: Path) -> bool:
                 content = (await asyncio.to_thread(hook_path.read_text, "utf-8")).strip()
             except Exception:
                 content = ""
-            # Keep chain-runner files
-            if "mcp-agent-mail chain-runner" in content:
-                await asyncio.to_thread(hook_path.unlink)
-                removed = True
-            if any(s in content for s in SENTINELS):
+            # Remove our chain-runner files (leave other hooks intact)
+            if "mcp-agent-mail chain-runner" in content or any(s in content for s in SENTINELS):
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
     return removed

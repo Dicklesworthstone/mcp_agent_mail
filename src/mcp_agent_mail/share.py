@@ -690,11 +690,11 @@ def apply_project_scope(snapshot_path: Path, identifiers: Sequence[str]) -> Proj
             key = identifier.strip().lower()
             if not key:
                 continue
-            record = lookup.get(key)
-            if record is None:
+            found_record = lookup.get(key)
+            if found_record is None:
                 raise ShareExportError(f"Project identifier '{identifier}' not found in snapshot.")
-            if record not in selected:
-                selected.append(record)
+            if found_record not in selected:
+                selected.append(found_record)
 
         if not selected:
             raise ShareExportError("No matching projects found for provided filters.")
@@ -1708,7 +1708,7 @@ def copy_viewer_assets(output_dir: Path) -> None:
 
     package_root = resources.files("mcp_agent_mail.viewer_assets")
 
-    def _walk(node: abc.Traversable, relative: Path) -> None:  # type: ignore[attr-defined]
+    def _walk(node: abc.Traversable, relative: Path) -> None:  # type: ignore[name-defined]
         for child in node.iterdir():
             child_relative = relative / child.name
             if child.is_dir():
@@ -1725,7 +1725,7 @@ def _load_vendor_manifest() -> dict[str, Any]:
     manifest_path = resources.files("mcp_agent_mail.viewer_assets") / "vendor_manifest.json"
     try:
         with manifest_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            return cast(dict[str, Any], json.load(handle))
     except FileNotFoundError as exc:  # pragma: no cover - packaging error
         raise ShareExportError("Viewer asset manifest missing; reinstall package.") from exc
 

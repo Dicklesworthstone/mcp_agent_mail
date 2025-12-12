@@ -15,10 +15,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
+from git.objects.tree import Tree
 from PIL import Image
 
 from .config import Settings
@@ -45,6 +46,143 @@ class ProjectArchive:
 
 _PROCESS_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _PROCESS_LOCK_OWNERS: dict[tuple[int, str], int] = {}
+
+
+class _LRURepoCache:
+    """LRU cache for Git Repo objects with size limit.
+
+    This prevents file descriptor leaks by:
+    1. Limiting the number of cached repos (default: 8)
+    2. Evicting oldest repos when at capacity (they will be GC'd when no longer referenced)
+
+    IMPORTANT: Evicted repos are NOT closed immediately because they may still be in use
+    by other coroutines. They will be closed when garbage collected or when clear() is called.
+    """
+
+    def __init__(self, maxsize: int = 8) -> None:
+        self._maxsize = max(1, maxsize)
+        self._cache: dict[str, Repo] = {}
+        self._order: list[str] = []  # LRU order: oldest first
+        self._evicted: list[Repo] = []  # Evicted repos pending close
+
+    def peek(self, key: str) -> Repo | None:
+        """Check if key exists and return value WITHOUT updating LRU order.
+
+        Safe to call without holding the external lock for a fast-path check.
+        """
+        return self._cache.get(key)
+
+    def get(self, key: str) -> Repo | None:
+        """Get a repo from cache, updating LRU order.
+
+        Should only be called while holding the external lock.
+        """
+        if key in self._cache:
+            # Move to end (most recently used)
+            with contextlib.suppress(ValueError):
+                self._order.remove(key)
+            self._order.append(key)
+            return self._cache[key]
+        return None
+
+    def put(self, key: str, repo: Repo) -> None:
+        """Add a repo to cache, evicting oldest if at capacity.
+
+        Should only be called while holding the external lock.
+        Evicted repos are added to a pending list for later cleanup.
+        """
+        if key in self._cache:
+            # Already exists, just update LRU order
+            with contextlib.suppress(ValueError):
+                self._order.remove(key)
+            self._order.append(key)
+            return
+
+        # Evict oldest entries if at capacity
+        while len(self._cache) >= self._maxsize and self._order:
+            oldest_key = self._order.pop(0)
+            old_repo = self._cache.pop(oldest_key, None)
+            if old_repo is not None:
+                # Don't close immediately - repo may still be in use by another coroutine
+                # Add to evicted list for later cleanup
+                self._evicted.append(old_repo)
+
+        self._cache[key] = repo
+        self._order.append(key)
+
+        # Opportunistically try to close evicted repos that are no longer referenced
+        self._cleanup_evicted()
+
+    def _cleanup_evicted(self) -> int:
+        """Try to close evicted repos that have only one reference (ours).
+
+        Returns count of repos closed.
+        """
+        import sys
+        still_in_use: list[Repo] = []
+        closed = 0
+        for repo in self._evicted:
+            # If refcount is 2 (our list + the getrefcount call), it's safe to close
+            # In practice, we use 3 as threshold to be safe (list + local var + getrefcount)
+            if sys.getrefcount(repo) <= 3:
+                with contextlib.suppress(Exception):
+                    repo.close()
+                    closed += 1
+            else:
+                still_in_use.append(repo)
+        self._evicted = still_in_use
+        return closed
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    def clear(self) -> int:
+        """Close all cached and evicted repos and clear the cache. Returns count closed."""
+        count = 0
+        # Close cached repos
+        for repo in self._cache.values():
+            with contextlib.suppress(Exception):
+                repo.close()
+                count += 1
+        self._cache.clear()
+        self._order.clear()
+        # Also close any evicted repos still in pending list
+        for repo in self._evicted:
+            with contextlib.suppress(Exception):
+                repo.close()
+                count += 1
+        self._evicted.clear()
+        return count
+
+    def values(self) -> list[Repo]:
+        """Return list of cached repos (for iteration)."""
+        return list(self._cache.values())
+
+
+# LRU cache for Repo objects with automatic cleanup
+# Limits to 8 concurrent repos to prevent file handle exhaustion
+_REPO_CACHE: _LRURepoCache = _LRURepoCache(maxsize=8)
+_REPO_CACHE_LOCK: asyncio.Lock | None = None
+
+
+def _get_repo_cache_lock() -> asyncio.Lock:
+    """Get or create the repo cache lock (must be called from async context)."""
+    global _REPO_CACHE_LOCK
+    if _REPO_CACHE_LOCK is None:
+        _REPO_CACHE_LOCK = asyncio.Lock()
+    return _REPO_CACHE_LOCK
+
+
+def clear_repo_cache() -> int:
+    """Close all cached Repo objects and clear the cache.
+
+    Returns the number of repos that were closed.
+    Should be called during shutdown or between tests.
+    """
+    return _REPO_CACHE.clear()
 
 
 class AsyncFileLock:
@@ -139,8 +277,9 @@ class AsyncFileLock:
                 metadata = {}
         pid_val = metadata.get("pid")
         pid_int: int | None = None
-        with contextlib.suppress(Exception):
-            pid_int = int(pid_val)
+        if pid_val is not None:
+            with contextlib.suppress(Exception):
+                pid_int = int(pid_val)
         owner_alive = self._pid_alive(pid_int) if pid_int else False
         created_ts = metadata.get("created_ts")
         age = None
@@ -179,7 +318,7 @@ class AsyncFileLock:
         self._metadata_path.write_text(json.dumps(payload), encoding="utf-8")
         return None
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         if self._held:
             # Release the file lock first
             with contextlib.suppress(Exception):
@@ -223,8 +362,8 @@ class AsyncFileLock:
 
         # Try psutil first if available (most reliable cross-platform method)
         try:
-            import psutil
-            return psutil.pid_exists(pid)
+            import psutil  # type: ignore[import-not-found]
+            return bool(psutil.pid_exists(pid))
         except ImportError:
             pass
 
@@ -260,7 +399,7 @@ class AsyncFileLock:
 
 
 @asynccontextmanager
-async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0):
+async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     """Context manager for safely mutating archive surfaces."""
 
     lock = AsyncFileLock(archive.lock_path, timeout_seconds=timeout_seconds)
@@ -274,8 +413,17 @@ async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float 
         await lock.__aexit__(None, None, None)
 
 
-async def _to_thread(func, /, *args, **kwargs):
+T = TypeVar('T')
+
+async def _to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _ensure_str(value: str | bytes) -> str:
+    """Ensure a value is a string, decoding bytes if necessary."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 def collect_lock_status(settings: Settings) -> dict[str, Any]:
@@ -318,8 +466,9 @@ def collect_lock_status(settings: Settings) -> dict[str, Any]:
 
             pid_val = metadata.get("pid")
             pid_int: int | None = None
-            with contextlib.suppress(Exception):
-                pid_int = int(pid_val)
+            if pid_val is not None:
+                with contextlib.suppress(Exception):
+                    pid_int = int(pid_val)
             info["owner_pid"] = pid_int
             info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
 
@@ -384,24 +533,43 @@ async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
 
 
 async def _ensure_repo(root: Path, settings: Settings) -> Repo:
-    git_dir = root / ".git"
-    if git_dir.exists():
-        return Repo(str(root))
+    """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
+    cache_key = str(root.resolve())
 
-    repo = await _to_thread(Repo.init, str(root))
-    # Ensure deterministic, non-interactive commits (disable GPG signing)
-    try:
-        def _configure_repo() -> None:
-            with repo.config_writer() as cw:
-                cw.set_value("commit", "gpgsign", "false")
-        await _to_thread(_configure_repo)
-    except Exception:
-        pass
-    attributes_path = root / ".gitattributes"
-    if not attributes_path.exists():
-        await _write_text(attributes_path, "*.json text\n*.md text\n")
-    await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
-    return repo
+    # Fast path: check cache without lock using peek() which doesn't modify LRU order
+    cached = _REPO_CACHE.peek(cache_key)
+    if cached is not None:
+        return cached
+
+    # Slow path: acquire lock and check/create
+    async with _get_repo_cache_lock():
+        # Double-check after acquiring lock, use get() to update LRU order
+        cached = _REPO_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        git_dir = root / ".git"
+        if git_dir.exists():
+            repo = Repo(str(root))
+            _REPO_CACHE.put(cache_key, repo)
+            return repo
+
+        repo_result = await _to_thread(Repo.init, str(root))
+        repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
+        # Ensure deterministic, non-interactive commits (disable GPG signing)
+        try:
+            def _configure_repo() -> None:
+                with repo.config_writer() as cw:
+                    cw.set_value("commit", "gpgsign", "false")
+            await _to_thread(_configure_repo)
+        except Exception:
+            pass
+        attributes_path = root / ".gitattributes"
+        if not attributes_path.exists():
+            await _write_text(attributes_path, "*.json text\n*.md text\n")
+        await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
+        _REPO_CACHE.put(cache_key, repo)
+        return repo
 
 
 async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object]) -> None:
@@ -659,10 +827,11 @@ async def _convert_markdown_images(
             last_idx = path_end
             continue
         attachment_meta, rel_path = await _store_image(archive, file_path, embed_policy=embed_policy)
+        replacement_value: str
         if attachment_meta["type"] == "inline":
             replacement_value = f"data:image/webp;base64,{attachment_meta['data_base64']}"
         else:
-            replacement_value = attachment_meta["path"]
+            replacement_value = str(attachment_meta["path"])
         leading_ws_len = len(raw_path) - len(raw_path.lstrip())
         trailing_ws_len = len(raw_path) - len(raw_path.rstrip())
         leading_ws = raw_path[:leading_ws_len] if leading_ws_len else ""
@@ -678,91 +847,100 @@ async def _convert_markdown_images(
 
 async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str = "auto") -> tuple[dict[str, object], str | None]:
     data = await _to_thread(path.read_bytes)
-    pil = await _to_thread(Image.open, path)
-    img = pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")
-    width, height = img.size
-    buffer_path = archive.attachments_dir
-    await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
-    digest = hashlib.sha1(data).hexdigest()
-    target_dir = buffer_path / digest[:2]
-    await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
-    target_path = target_dir / f"{digest}.webp"
-    # Optionally store original alongside (in originals/)
-    original_rel: str | None = None
-    if archive.settings.storage.keep_original_images:
-        originals_dir = archive.root / "attachments" / "originals" / digest[:2]
-        await _to_thread(originals_dir.mkdir, parents=True, exist_ok=True)
-        orig_ext = path.suffix.lower().lstrip(".") or "bin"
-        orig_path = originals_dir / f"{digest}.{orig_ext}"
-        if not orig_path.exists():
-            await _to_thread(orig_path.write_bytes, data)
-        original_rel = orig_path.relative_to(archive.repo_root).as_posix()
-    if not target_path.exists():
-        await _save_webp(img, target_path)
-    new_bytes = await _to_thread(target_path.read_bytes)
-    rel_path = target_path.relative_to(archive.repo_root).as_posix()
-    # Update per-attachment manifest with metadata
+
+    # Open image and convert, properly closing the original to prevent file handle leaks
+    def _open_and_convert(p: Path) -> Image.Image:
+        with Image.open(p) as pil:
+            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")  # type: ignore[no-any-return]
+
+    img = await _to_thread(_open_and_convert, path)
     try:
-        manifest_dir = archive.root / "attachments" / "_manifests"
-        await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
-        manifest_path = manifest_dir / f"{digest}.json"
-        manifest_payload = {
-            "sha1": digest,
-            "webp_path": rel_path,
-            "bytes_webp": len(new_bytes),
-            "width": width,
-            "height": height,
-            "original_path": original_rel,
-            "bytes_original": len(data),
-            "original_ext": path.suffix.lower(),
-        }
-        await _write_json(manifest_path, manifest_payload)
-        await _append_attachment_audit(
-            archive,
-            digest,
-            {
-                "event": "stored",
-                "ts": datetime.now(timezone.utc).isoformat(),
+        width, height = img.size
+        buffer_path = archive.attachments_dir
+        await _to_thread(buffer_path.mkdir, parents=True, exist_ok=True)
+        digest = hashlib.sha1(data).hexdigest()
+        target_dir = buffer_path / digest[:2]
+        await _to_thread(target_dir.mkdir, parents=True, exist_ok=True)
+        target_path = target_dir / f"{digest}.webp"
+        # Optionally store original alongside (in originals/)
+        original_rel: str | None = None
+        if archive.settings.storage.keep_original_images:
+            originals_dir = archive.root / "attachments" / "originals" / digest[:2]
+            await _to_thread(originals_dir.mkdir, parents=True, exist_ok=True)
+            orig_ext = path.suffix.lower().lstrip(".") or "bin"
+            orig_path = originals_dir / f"{digest}.{orig_ext}"
+            if not orig_path.exists():
+                await _to_thread(orig_path.write_bytes, data)
+            original_rel = orig_path.relative_to(archive.repo_root).as_posix()
+        if not target_path.exists():
+            await _save_webp(img, target_path)
+        new_bytes = await _to_thread(target_path.read_bytes)
+        rel_path = target_path.relative_to(archive.repo_root).as_posix()
+        # Update per-attachment manifest with metadata
+        try:
+            manifest_dir = archive.root / "attachments" / "_manifests"
+            await _to_thread(manifest_dir.mkdir, parents=True, exist_ok=True)
+            manifest_path = manifest_dir / f"{digest}.json"
+            manifest_payload = {
+                "sha1": digest,
                 "webp_path": rel_path,
                 "bytes_webp": len(new_bytes),
+                "width": width,
+                "height": height,
                 "original_path": original_rel,
                 "bytes_original": len(data),
-                "ext": path.suffix.lower(),
-            },
-        )
-    except Exception:
-        pass
+                "original_ext": path.suffix.lower(),
+            }
+            await _write_json(manifest_path, manifest_payload)
+            await _append_attachment_audit(
+                archive,
+                digest,
+                {
+                    "event": "stored",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "webp_path": rel_path,
+                    "bytes_webp": len(new_bytes),
+                    "original_path": original_rel,
+                    "bytes_original": len(data),
+                    "ext": path.suffix.lower(),
+                },
+            )
+        except Exception:
+            pass
 
-    should_inline = False
-    if embed_policy == "inline":
-        should_inline = True
-    elif embed_policy == "file":
         should_inline = False
-    else:
-        should_inline = len(new_bytes) <= archive.settings.storage.inline_image_max_bytes
-    if should_inline:
-        encoded = base64.b64encode(new_bytes).decode("ascii")
-        return {
-            "type": "inline",
+        if embed_policy == "inline":
+            should_inline = True
+        elif embed_policy == "file":
+            should_inline = False
+        else:
+            should_inline = len(new_bytes) <= archive.settings.storage.inline_image_max_bytes
+        if should_inline:
+            encoded = base64.b64encode(new_bytes).decode("ascii")
+            return {
+                "type": "inline",
+                "media_type": "image/webp",
+                "bytes": len(new_bytes),
+                "width": width,
+                "height": height,
+                "sha1": digest,
+                "data_base64": encoded,
+            }, rel_path
+        meta: dict[str, object] = {
+            "type": "file",
             "media_type": "image/webp",
             "bytes": len(new_bytes),
+            "path": rel_path,
             "width": width,
             "height": height,
             "sha1": digest,
-            "data_base64": encoded,
-        }, rel_path
-    meta: dict[str, object] = {
-        "type": "file",
-        "media_type": "image/webp",
-        "bytes": len(new_bytes),
-        "path": rel_path,
-        "width": width,
-        "height": height,
-        "sha1": digest,
-    }
-    if original_rel:
-        meta["original_path"] = original_rel
-    return meta, rel_path
+        }
+        if original_rel:
+            meta["original_path"] = original_rel
+        return meta, rel_path
+    finally:
+        # Close the converted image to prevent file handle leaks
+        img.close()
 
 
 async def _save_webp(img: Image.Image, path: Path) -> None:
@@ -834,7 +1012,10 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
             repo.index.commit(final_message, author=actor, committer=actor)
     # Serialize commits across all projects sharing the same Git repo to avoid index races
-    commit_lock_path = Path(repo.working_tree_dir).resolve() / ".commit.lock"
+    working_tree = repo.working_tree_dir
+    if working_tree is None:
+        raise ValueError("Repository has no working tree directory")
+    commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
     async with AsyncFileLock(commit_lock_path):
         await _to_thread(_perform_commit)
 
@@ -943,6 +1124,7 @@ async def get_recent_commits(
             else:
                 relative_date = "just now"
 
+            message_str = _ensure_str(commit.message)
             commits.append({
                 "sha": commit.hexsha,
                 "short_sha": commit.hexsha[:8],
@@ -950,8 +1132,8 @@ async def get_recent_commits(
                 "email": commit.author.email,
                 "date": commit_time.isoformat(),
                 "relative_date": relative_date,
-                "subject": commit.message.split("\n")[0],
-                "body": commit.message,
+                "subject": message_str.split("\n")[0],
+                "body": message_str,
                 "files_changed": files_changed,
                 "insertions": insertions,
                 "deletions": deletions,
@@ -959,7 +1141,8 @@ async def get_recent_commits(
 
         return commits
 
-    return await _to_thread(_get_commits)
+    result: list[dict[str, Any]] = await _to_thread(_get_commits)
+    return result
 
 
 async def get_commit_detail(
@@ -1019,20 +1202,25 @@ async def get_commit_detail(
 
             # Get diff text with size limit
             if diff.diff:
-                decoded_diff = diff.diff.decode("utf-8", errors="replace")
+                diff_bytes = diff.diff
+                if isinstance(diff_bytes, bytes):
+                    decoded_diff = diff_bytes.decode("utf-8", errors="replace")
+                else:
+                    decoded_diff = str(diff_bytes)
                 if len(diff_text) + len(decoded_diff) > max_diff_size:
                     diff_text += "\n\n[... Diff truncated - exceeds size limit ...]\n"
                     break
                 diff_text += decoded_diff
 
         # Parse commit body into message and trailers
-        lines = commit.message.split("\n")
+        message_str = _ensure_str(commit.message)
+        lines = message_str.split("\n")
         subject = lines[0] if lines else ""
 
         # Find where trailers start (Git trailers are at end after blank line)
         # We scan backwards to find the trailer block
-        body_lines = []
-        trailer_lines = []
+        body_lines: list[str] = []
+        trailer_lines: list[str] = []
 
         rest_lines = lines[1:] if len(lines) > 1 else []
         if not rest_lines:
@@ -1110,7 +1298,8 @@ async def get_commit_detail(
             },
         }
 
-    return await _to_thread(_get_detail)
+    result: dict[str, Any] = await _to_thread(_get_detail)
+    return result
 
 
 async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> str | None:
@@ -1160,7 +1349,8 @@ async def get_message_commit_sha(archive: ProjectArchive, message_id: int) -> st
 
         return None
 
-    return await _to_thread(_find_commit)
+    result: str | None = await _to_thread(_find_commit)
+    return result
 
 
 async def get_archive_tree(
@@ -1212,13 +1402,17 @@ async def get_archive_tree(
 
         # Get tree object at path
         try:
-            tree = commit.tree / tree_path
+            tree_obj = commit.tree / tree_path
         except KeyError:
             # Path doesn't exist
             return []
 
+        # Ensure we have a tree object (not a blob)
+        if not isinstance(tree_obj, Tree):
+            return []
+
         entries = []
-        for item in tree:
+        for item in tree_obj:
             entry_type = "dir" if item.type == "tree" else "file"
             size = item.size if hasattr(item, "size") else 0
 
@@ -1231,11 +1425,12 @@ async def get_archive_tree(
             })
 
         # Sort: directories first, then files, both alphabetically
-        entries.sort(key=lambda x: (x["type"] != "dir", x["name"].lower()))
+        entries.sort(key=lambda x: (x["type"] != "dir", str(x["name"]).lower()))
 
         return entries
 
-    return await _to_thread(_get_tree)
+    result: list[dict[str, Any]] = await _to_thread(_get_tree)
+    return result
 
 
 async def get_file_content(
@@ -1292,11 +1487,12 @@ async def get_file_content(
             # Check size before reading
             if obj.size > max_size_bytes:
                 raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
-            return obj.data_stream.read().decode("utf-8", errors="replace")
+            return str(obj.data_stream.read().decode("utf-8", errors="replace"))
         except KeyError:
             return None
 
-    return await _to_thread(_get_content)
+    result: str | None = await _to_thread(_get_content)
+    return result
 
 
 async def get_agent_communication_graph(
@@ -1325,7 +1521,8 @@ async def get_agent_communication_graph(
         for commit in repo.iter_commits(paths=[path_spec], max_count=limit):
             # Parse commit message to extract sender and recipients
             # Format: "mail: Sender -> Recipient1, Recipient2 | Subject"
-            subject = commit.message.split("\n")[0]
+            message_str = _ensure_str(commit.message)
+            subject = message_str.split("\n")[0]
 
             if not subject.startswith("mail: "):
                 continue
@@ -1391,7 +1588,8 @@ async def get_agent_communication_graph(
             "edges": edges,
         }
 
-    return await _to_thread(_analyze_graph)
+    result: dict[str, Any] = await _to_thread(_analyze_graph)
+    return result
 
 
 async def get_timeline_commits(
@@ -1415,7 +1613,8 @@ async def get_timeline_commits(
 
         timeline = []
         for commit in repo.iter_commits(paths=[path_spec], max_count=limit):
-            subject = commit.message.split("\n")[0]
+            message_str = _ensure_str(commit.message)
+            subject = message_str.split("\n")[0]
             commit_time = datetime.fromtimestamp(commit.authored_date, tz=timezone.utc)
 
             # Classify commit type
@@ -1453,11 +1652,15 @@ async def get_timeline_commits(
             })
 
         # Sort by timestamp (oldest first for timeline)
-        timeline.sort(key=lambda x: x["timestamp"])
+        def _get_timestamp(x: dict[str, Any]) -> int:
+            ts = x.get("timestamp", 0)
+            return int(ts) if isinstance(ts, (int, float)) else 0
+        timeline.sort(key=_get_timestamp)
 
         return timeline
 
-    return await _to_thread(_get_timeline)
+    result: list[dict[str, Any]] = await _to_thread(_get_timeline)
+    return result
 
 
 async def get_historical_inbox_snapshot(
@@ -1538,7 +1741,7 @@ async def get_historical_inbox_snapshot(
                 tree = tree / part
 
             # Recursively traverse inbox subdirectories (YYYY/MM/) to find message files
-            def traverse_tree(subtree, depth=0):
+            def traverse_tree(subtree: Any, depth: int = 0) -> None:
                 """Recursively traverse git tree looking for .md files"""
                 if depth > 3:  # Safety limit: inbox/YYYY/MM is 2 levels, add buffer
                     return
@@ -1635,4 +1838,5 @@ async def get_historical_inbox_snapshot(
             "requested_time": timestamp,
         }
 
-    return await _to_thread(_get_snapshot)
+    result: dict[str, Any] = await _to_thread(_get_snapshot)
+    return result

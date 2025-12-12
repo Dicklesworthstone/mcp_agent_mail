@@ -54,7 +54,7 @@ Result: you invest 1–2 hours of human supervision, but dozens of agent-hours e
 ### One-line installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --yes
 ```
 
 What this does:
@@ -64,6 +64,7 @@ What this does:
 - Runs the auto-detect integration to wire up supported agent tools
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
 - Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
+- Adds an `am` shell alias to your `.zshrc` or `.bashrc` for quick server startup (just type `am` in a new terminal!)
 - Installs/updates, verifies, and wires the Beads `bd` CLI into your PATH via its official curl installer so the task planner is ready out of the box (pass `--skip-beads` to opt out or install manually)
 - Installs/updates the Beads Viewer `bv` TUI for interactive task browsing and AI-friendly robot commands (pass `--skip-bv` to opt out)
 - Prints a short on-exit summary of each setup step so you immediately know what changed
@@ -72,11 +73,26 @@ Prefer a specific location or options? Add flags like `--dir <path>`, `--project
 
 Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--skip-bv` to bypass automatic installation.
 
+### Starting the server in the future
+
+After installation, you can start the MCP Agent Mail server from **anywhere** by simply typing:
+
+```bash
+am
+```
+
+That's it! The `am` alias (added to your `.zshrc` or `.bashrc` during installation) automatically:
+1. Changes to the MCP Agent Mail directory
+2. Runs the server startup script (which uses `uv run` to handle the virtual environment)
+3. Loads your saved bearer token from `.env` and starts the HTTP server
+
+**Note:** If you just ran the installer, open a new terminal or run `source ~/.zshrc` (or `source ~/.bashrc`) to load the alias.
+
 **Port conflicts?** Use `--port` to specify a different port (default: 8765):
 
 ```bash
 # Install with custom port
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
 
 # Or use the CLI command after installation
 uv run python -m mcp_agent_mail.cli config set-port 9000
@@ -1771,7 +1787,7 @@ If port 8765 is already in use (e.g., by Cursor's Python extension), you can cha
 **Option 1: During installation**
 ```bash
 # One-liner with custom port
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh | bash -s -- --port 9000 --yes
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
 
 # Or with local script
 ./scripts/install.sh --port 9000 --yes
@@ -1836,7 +1852,7 @@ Common variables you may set:
 | `HTTP_RBAC_READER_ROLES` | `reader,read,ro` | CSV of reader roles |
 | `HTTP_RBAC_WRITER_ROLES` | `writer,write,tools,rw` | CSV of writer roles |
 | `HTTP_RBAC_DEFAULT_ROLE` | `reader` | Role used when none present |
-| `HTTP_RBAC_READONLY_TOOLS` | `health_check,fetch_inbox,whois,search_messages,summarize_thread,summarize_threads` | CSV of read-only tool names |
+| `HTTP_RBAC_READONLY_TOOLS` | `health_check,fetch_inbox,whois,search_messages,summarize_thread` | CSV of read-only tool names |
 | `HTTP_RATE_LIMIT_ENABLED` | `false` | Enable token-bucket limiter |
 | `HTTP_RATE_LIMIT_BACKEND` | `memory` | `memory` or `redis` |
 | `HTTP_RATE_LIMIT_PER_MINUTE` | `60` | Legacy per-IP limit (fallback) |
@@ -2077,8 +2093,7 @@ This section has been removed to keep the README focused. Client code samples be
 | `macro_file_reservation_cycle` | `macro_file_reservation_cycle(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str, auto_release?: bool)` | `{file_reservations, released}` | File Reservation + optionally release surfaces around a focused edit block |
 | `macro_contact_handshake` | `macro_contact_handshake(project_key: str, requester|agent_name: str, target|to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int, auto_accept?: bool, welcome_subject?: str, welcome_body?: str)` | `{request, response, welcome_message}` | Automates contact request/approval and optional welcome ping |
 | `search_messages` | `search_messages(project_key: str, query: str, limit?: int)` | `list[dict]` | FTS5 search (bm25) |
-| `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool, llm_mode?: bool, llm_model?: str)` | `{thread_id, summary, examples}` | Extracts participants, key points, actions |
-| `summarize_threads` | `summarize_threads(project_key: str, thread_ids: list[str], llm_mode?: bool, llm_model?: str, per_thread_limit?: int)` | `{threads[], aggregate}` | Digest across multiple threads (optional LLM refinement) |
+| `summarize_thread` | `summarize_thread(project_key: str, thread_id: str, include_examples?: bool, llm_mode?: bool, llm_model?: str, per_thread_limit?: int)` | Single: `{thread_id, summary, examples}` Multi (comma-sep): `{threads[], aggregate}` | Extracts participants, key points, actions. Use comma-separated thread_id for multi-thread digest. |
 | `install_precommit_guard` | `install_precommit_guard(project_key: str, code_repo_path: str)` | `{hook}` | Install a Git pre-commit guard in a target repo |
 | `uninstall_precommit_guard` | `uninstall_precommit_guard(code_repo_path: str)` | `{removed}` | Remove the guard from a repo |
 | `file_reservation_paths` | `file_reservation_paths(project_key: str, agent_name: str, paths: list[str], ttl_seconds?: int, exclusive?: bool, reason?: str)` | `{granted: list, conflicts: list}` | Advisory leases; Git artifact per path |

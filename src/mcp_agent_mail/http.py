@@ -10,14 +10,14 @@ import importlib
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from collections.abc import MutableMapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
@@ -70,7 +70,7 @@ def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
         segment = token.split(".", 1)[0]
         padded = segment + "=" * (-len(segment) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
     except Exception:
         return None
 
@@ -94,7 +94,7 @@ def _configure_logging(settings: Settings) -> None:
     else:
         processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
     structlog.configure(
-        processors=processors,
+        processors=processors,  # type: ignore[arg-type]
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.log_level.upper(), logging.INFO)),
         cache_logger_on_first_use=True,
     )
@@ -128,7 +128,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
         self._allow_localhost = allow_localhost
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
@@ -299,7 +299,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
         # Allow CORS preflight and health endpoints
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
@@ -390,8 +390,8 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 maybe_claims = getattr(request.state, "jwt_claims", None)
                 if isinstance(maybe_claims, dict):
                     sub = maybe_claims.get("sub")
-                if isinstance(sub, str) and sub:
-                    identity = f"sub:{sub}"
+                    if isinstance(sub, str) and sub:
+                        identity = f"sub:{sub}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
@@ -407,7 +407,7 @@ async def readiness_check() -> None:
         await session.execute(text("SELECT 1"))
 
 
-def build_http_app(settings: Settings, server=None) -> FastAPI:
+def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[no-untyped-def]
     # Configure logging once
     _configure_logging(settings)
     if server is None:
@@ -771,7 +771,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def lifespan_context(app: FastAPI):
+    async def lifespan_context(app: FastAPI):  # type: ignore[no-untyped-def]
         # Ensure the mounted MCP app initializes its internal task group
         async with mcp_http_app.lifespan(mcp_http_app):
             await _startup()
@@ -788,7 +788,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         import time as _time
 
         class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
                 start = _time.time()
                 response = await call_next(request)
                 dur_ms = int((_time.time() - start) * 1000)
@@ -899,7 +899,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     from mcp.server.streamable_http import StreamableHTTPServerTransport
 
     class StatelessMCPASGIApp:
-        def __init__(self, mcp_server) -> None:
+        def __init__(self, mcp_server) -> None:  # type: ignore[no-untyped-def]
             self._server = mcp_server
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -969,11 +969,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     @fastapi_app.post(base_no_slash)
     async def _base_passthrough(request: Request) -> JSONResponse:
         # Re-dispatch to mounted stateless app by calling it directly
-        response_body = {}
+        response_body: dict[str, Any] = {}
         status_code = 200
         headers: dict[str, str] = {}
 
-        async def _send(message: dict) -> None:
+        async def _send(message: MutableMapping[str, Any]) -> None:
             nonlocal response_body, status_code, headers
             if message.get("type") == "http.response.start":
                 status_code = int(message.get("status", 200))
@@ -1022,20 +1022,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             loader=FileSystemLoader(str(templates_root)),
             autoescape=select_autoescape(["html", "xml"]),
             enable_async=True,
-            auto_reload=True,  # Reload templates when source file changes
         )
-        # Mount static CSS files
-        static_path = templates_root / "css"
-        fastapi_app.mount("/static/css", StaticFiles(directory=str(static_path)), name="static")
-        
-        # Add url_for function to Jinja2 globals for template rendering
-        def url_for(name: str, **path_params: Any) -> str:
-            if name == "static":
-                filename = path_params.get("filename", "")
-                return f"/static/{filename}"
-            return "#"
-        
-        env.globals["url_for"] = url_for
         # HTML sanitizer (allow safe images and limited CSS)
         _css_sanitizer = (
             CSSSanitizer(
@@ -1096,7 +1083,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             css_sanitizer=_css_sanitizer,
         )
 
-        async def _render(name: str, **ctx) -> HTMLResponse:
+        async def _render(name: str, **ctx: Any) -> HTMLResponse:
             tpl = env.get_template(name)
             html = await tpl.render_async(**ctx)
             return HTMLResponse(html)
@@ -1269,70 +1256,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         )
 
                     if include_projects:
-                        # Enhanced query with agent/message counts and last activity
                         rows = await session.execute(
-                            text("""
-                                SELECT
-                                    p.id, p.slug, p.human_key, p.display_name, p.created_at,
-                                    COUNT(DISTINCT a.id) as agent_count,
-                                    COUNT(DISTINCT m.id) as message_count,
-                                    MAX(COALESCE(a.last_active_ts, m.created_ts)) as last_activity
-                                FROM projects p
-                                LEFT JOIN agents a ON a.project_id = p.id
-                                LEFT JOIN messages m ON m.project_id = p.id
-                                GROUP BY p.id, p.slug, p.human_key, p.display_name, p.created_at
-                                ORDER BY p.created_at DESC
-                            """)
+                            text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
                         )
-
-                        # Get 7-day sparkline data for all projects
-                        sparkline_rows = await session.execute(
-                            text("""
-                                SELECT
-                                    project_id,
-                                    DATE(created_ts) as day,
-                                    COUNT(*) as msg_count
-                                FROM messages
-                                WHERE created_ts >= DATE('now', '-7 days')
-                                GROUP BY project_id, DATE(created_ts)
-                                ORDER BY project_id, day
-                            """)
-                        )
-
-                        # Build sparkline map: project_id -> [day0_count, day1_count, ..., day6_count]
-                        today = datetime.now().date()
-                        sparkline_map: dict[int, list[int]] = {}
-                        for sr in sparkline_rows.fetchall():
-                            pid = int(sr[0])
-                            day_str = sr[1]
-                            count = int(sr[2])
-                            if pid not in sparkline_map:
-                                sparkline_map[pid] = [0] * 7
-                            # Calculate day index (0 = 6 days ago, 6 = today)
-                            day_date = datetime.strptime(day_str, "%Y-%m-%d").date() if isinstance(day_str, str) else day_str
-                            day_index = (day_date - (today - timedelta(days=6))).days
-                            if 0 <= day_index < 7:
-                                sparkline_map[pid][day_index] = count
-
                         for r in rows.fetchall():
                             project_id = int(r[0])
                             siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
-                            human_key = r[2]
-                            display_name = r[3]
-                            # Default display_name to last folder segment if not set
-                            if not display_name:
-                                display_name = human_key.rstrip("/").split("/")[-1] if human_key else human_key
                             projects.append(
                                 {
                                     "id": project_id,
                                     "slug": r[1],
-                                    "human_key": human_key,
-                                    "display_name": display_name,
-                                    "created_at": str(r[4]),
-                                    "agent_count": int(r[5]) if r[5] else 0,
-                                    "message_count": int(r[6]) if r[6] else 0,
-                                    "last_activity": str(r[7]) if r[7] else None,
-                                    "sparkline": sparkline_map.get(project_id, [0] * 7),
+                                    "human_key": r[2],
+                                    "created_at": str(r[3]),
                                     "confirmed_siblings": siblings.get("confirmed", []),
                                     "suggested_siblings": siblings.get("suggested", []),
                                 }
@@ -1374,72 +1309,19 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             await refresh_project_sibling_suggestions()
             sibling_map = await get_project_sibling_data()
             async with get_session() as session:
-                # Main query with agent/message counts and last activity
                 rows = await session.execute(
-                    text("""
-                        SELECT
-                            p.id, p.slug, p.human_key, p.display_name, p.created_at,
-                            COUNT(DISTINCT a.id) as agent_count,
-                            COUNT(DISTINCT m.id) as message_count,
-                            MAX(COALESCE(a.last_active_ts, m.created_ts)) as last_activity
-                        FROM projects p
-                        LEFT JOIN agents a ON a.project_id = p.id
-                        LEFT JOIN messages m ON m.project_id = p.id
-                        GROUP BY p.id, p.slug, p.human_key, p.display_name, p.created_at
-                        ORDER BY p.created_at DESC
-                    """)
+                    text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
                 )
-
-                # Get 7-day sparkline data for all projects
-                sparkline_rows = await session.execute(
-                    text("""
-                        SELECT
-                            project_id,
-                            DATE(created_ts) as day,
-                            COUNT(*) as msg_count
-                        FROM messages
-                        WHERE created_ts >= DATE('now', '-7 days')
-                        GROUP BY project_id, DATE(created_ts)
-                        ORDER BY project_id, day
-                    """)
-                )
-
-                # Build sparkline map: project_id -> [day0_count, day1_count, ..., day6_count]
-                from datetime import datetime, timedelta
-                today = datetime.now().date()
-                sparkline_map: dict[int, list[int]] = {}
-                for sr in sparkline_rows.fetchall():
-                    pid = int(sr[0])
-                    day_str = sr[1]
-                    count = int(sr[2])
-                    if pid not in sparkline_map:
-                        sparkline_map[pid] = [0] * 7
-                    # Calculate day index (0 = 6 days ago, 6 = today)
-                    day_date = datetime.strptime(day_str, "%Y-%m-%d").date() if isinstance(day_str, str) else day_str
-                    day_index = (day_date - (today - timedelta(days=6))).days
-                    if 0 <= day_index < 7:
-                        sparkline_map[pid][day_index] = count
-
                 projects = []
                 for r in rows.fetchall():
                     project_id = int(r[0])
                     siblings = sibling_map.get(project_id, {"confirmed": [], "suggested": []})
-                    human_key = r[2]
-                    display_name = r[3]
-                    # Default display_name to last folder segment if not set
-                    if not display_name:
-                        display_name = human_key.rstrip("/").split("/")[-1] if human_key else human_key
                     projects.append(
                         {
                             "id": project_id,
                             "slug": r[1],
-                            "human_key": human_key,
-                            "display_name": display_name,
-                            "created_at": str(r[4]),
-                            "agent_count": int(r[5]) if r[5] else 0,
-                            "message_count": int(r[6]) if r[6] else 0,
-                            "last_activity": str(r[7]) if r[7] else None,
-                            "sparkline": sparkline_map.get(project_id, [0] * 7),
+                            "human_key": r[2],
+                            "created_at": str(r[3]),
                             "confirmed_siblings": siblings.get("confirmed", []),
                             "suggested_siblings": siblings.get("suggested", []),
                         }
@@ -1570,62 +1452,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 )
 
             return JSONResponse({"status": suggestion["status"], "suggestion": suggestion})
-
-        @fastapi_app.post("/api/projects/{project_id}/display-name", response_class=JSONResponse)
-        async def update_project_display_name(project_id: int, request: Request) -> JSONResponse:
-            """Update a project's display name."""
-            try:
-                payload = await request.json()
-            except Exception:
-                payload = {}
-
-            display_name = payload.get("display_name")
-            if display_name is not None:
-                display_name = str(display_name).strip()
-                if len(display_name) > 128:
-                    return JSONResponse(
-                        {"error": "Display name must be 128 characters or less"},
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                    )
-                # Empty string means reset to default (None)
-                if display_name == "":
-                    display_name = None
-
-            try:
-                async with get_session() as session:
-                    result = await session.execute(
-                        text("SELECT id, slug, human_key FROM projects WHERE id = :pid"),
-                        {"pid": project_id},
-                    )
-                    row = result.fetchone()
-                    if not row:
-                        return JSONResponse({"error": "Project not found"}, status_code=status.HTTP_404_NOT_FOUND)
-
-                    await session.execute(
-                        text("UPDATE projects SET display_name = :name WHERE id = :pid"),
-                        {"name": display_name, "pid": project_id},
-                    )
-                    await session.commit()
-
-                    # Return the effective display name (computed if null)
-                    human_key = row[2]
-                    effective_name = display_name or (human_key.rstrip("/").split("/")[-1] if human_key else human_key)
-
-                    return JSONResponse({
-                        "id": project_id,
-                        "display_name": display_name,
-                        "effective_name": effective_name,
-                    })
-            except Exception as exc:
-                structlog.get_logger("project").exception(
-                    "project.update_display_name_failed",
-                    project_id=project_id,
-                    error=str(exc),
-                )
-                return JSONResponse(
-                    {"error": "Unable to update display name"},
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
 
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
         async def unified_inbox(limit: int = 10000, filter_importance: str | None = None) -> HTMLResponse:
@@ -1971,7 +1797,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0
+                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
 
                     return JSONResponse({
                         "success": True,
@@ -2034,7 +1860,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0
+                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
 
                     return JSONResponse({
                         "success": True,
@@ -2489,7 +2315,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     # Insert recipients (optimized: bulk SELECT + bulk INSERT instead of N+1 queries)
                     # Build SQL with proper parameter expansion for IN clause
                     placeholders = ", ".join([f":name_{i}" for i in range(len(recipients))])
-                    params = {"pid": project_id}
+                    params: dict[str, Any] = {"pid": project_id}
                     params.update({f"name_{i}": name for i, name in enumerate(recipients)})
 
                     # Single query to get all valid recipient IDs
@@ -2620,6 +2446,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             repo_root = P(storage_root)
             if (repo_root / ".git").exists():
+                repo = None
                 try:
                     repo = GitRepo(str(repo_root))
                     # Use efficient commit counting with limit to prevent DoS
@@ -2642,7 +2469,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     import asyncio as _asyncio
                     import subprocess as _subprocess
                     try:
-                        def _run_du():
+                        def _run_du():  # type: ignore[no-untyped-def]
                             return _subprocess.run(
                                 ["du", "-sh", str(repo_root)],
                                 capture_output=True,
@@ -2663,6 +2490,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_count = 0
                     repo_size = "Unknown"
                     last_commit_time = "Unknown"
+                finally:
+                    if repo is not None:
+                        repo.close()
             else:
                 total_commits = "0"
                 project_count = 0
@@ -2699,9 +2529,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("archive_activity.html", commits=[])
 
             repo = GitRepo(str(repo_root))
-            commits = await get_recent_commits(repo, limit=limit)
-
-            return await _render("archive_activity.html", commits=commits)
+            try:
+                commits = await get_recent_commits(repo, limit=limit)
+                return await _render("archive_activity.html", commits=commits)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
@@ -2714,6 +2546,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if not (repo_root / ".git").exists():
                 return await _render("error.html", message="Archive repository not found")
 
+            repo = None
             try:
                 repo = GitRepo(str(repo_root))
                 commit = await get_commit_detail(repo, sha)
@@ -2724,6 +2557,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception:
                 # Don't leak error details
                 return await _render("error.html", message="Commit not found")
+            finally:
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
@@ -2761,9 +2597,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            commits = await get_timeline_commits(repo, project, limit=100)
-
-            return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            try:
+                commits = await get_timeline_commits(repo, project, limit=100)
+                return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -2840,9 +2678,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_name = row[0]
 
             repo = GitRepo(str(repo_root))
-            graph = await get_agent_communication_graph(repo, project, limit=200)
-
-            return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            try:
+                graph = await get_agent_communication_graph(repo, project, limit=200)
+                return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
+            finally:
+                repo.close()
 
         @fastapi_app.get("/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
