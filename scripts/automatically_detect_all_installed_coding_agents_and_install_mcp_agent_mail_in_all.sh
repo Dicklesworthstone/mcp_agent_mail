@@ -124,7 +124,8 @@ HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
 HAS_GEMINI=0; [[ -d "${HOME}/.gemini" ]] && HAS_GEMINI=1
 
 HAS_OPENCODE=0; command -v opencode >/dev/null 2>&1 && HAS_OPENCODE=1; [[ -d "${HOME}/.opencode" ]] && HAS_OPENCODE=1
-_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI} opencode=${HAS_OPENCODE}"
+HAS_OPENHANDS=0; command -v openhands >/dev/null 2>&1 && HAS_OPENHANDS=1; [[ -f "${HOME}/.openhands/agent_settings.json" ]] && HAS_OPENHANDS=1
+_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI} opencode=${HAS_OPENCODE} openhands=${HAS_OPENHANDS}"
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
@@ -158,6 +159,13 @@ if [[ $HAS_OPENCODE -eq 1 ]]; then
   bash "${ROOT_DIR}/scripts/integrate_opencode.sh" --yes "$@" || echo "(warn) OpenCode integration reported a non-fatal issue"
 else
   echo "-- Skipping OpenCode: not detected (install opencode to enable)."
+fi
+
+if [[ $HAS_OPENHANDS -eq 1 ]]; then
+  echo "-- Integrating OpenHands (agent-sdk)..."
+  bash "${ROOT_DIR}/scripts/integrate_openhands.sh" --yes "$@" || echo "(warn) OpenHands integration reported a non-fatal issue"
+else
+  echo "-- Skipping OpenHands: not detected (install OpenHands CLI/agent-sdk to enable)."
 fi
 
 # GitHub Copilot integration (best effort - typically in VS Code)
