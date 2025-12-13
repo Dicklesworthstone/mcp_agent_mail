@@ -87,7 +87,6 @@ async def test_concurrent_message_sends(isolated_env):
                 "to": [recipient],
                 "subject": subject,
                 "body_md": f"Message from {sender} to {recipient}",
-                "ack_required": True,
             },
         )
         return result
