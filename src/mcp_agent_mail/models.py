@@ -55,6 +55,7 @@ class Agent(SQLModel, table=True):
     last_active_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     attachments_policy: str = Field(default="auto", max_length=16)
     contact_policy: str = Field(default="auto", max_length=16)  # open | auto | contacts_only | block_all
+    platform: Optional[str] = Field(default=None, max_length=32)  # claude | gemini | codex | cursor
 
 
 class MessageRecipient(SQLModel, table=True):
