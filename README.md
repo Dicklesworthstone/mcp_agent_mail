@@ -1790,6 +1790,8 @@ WEBHOOK_COMMAND=claude --print -p "You are {recipient}. Check inbox in {project}
 
 Command runs once per recipient, non-blocking. Agents can spawn each other in a loop until task completion.
 
+**Environment Variables:** The webhook subprocess inherits the MCP server's environment. CLI tools like Gemini require API keys (e.g., `GEMINI_API_KEY`) to be set in the environment where the MCP server runs. If a webhook exits with code 41 (Gemini) or similar authentication errors, ensure the required API keys are exported in the shell session that starts the MCP server.
+
 ## Configuration
 
 Configuration is loaded from an existing `.env` via `python-decouple`. Do not use `os.getenv` or auto-dotenv loaders.
