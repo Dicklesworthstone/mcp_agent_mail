@@ -78,9 +78,6 @@ PY
 fi
 export HTTP_BEARER_TOKEN="${_TOKEN}"
 
-# Prepare MCP config entry
-AUTH_HEADER_LINE="\"Authorization\": \"Bearer ${_TOKEN}\""
-
 log_step "Updating ${AGENT_SETTINGS}"
 backup_file "$AGENT_SETTINGS"
 UPDATED_SETTINGS=$(AGENT_SETTINGS_PATH="$AGENT_SETTINGS" MCP_URL="${_URL}" MCP_TOKEN="${_TOKEN}" uv run python - <<'PY'
