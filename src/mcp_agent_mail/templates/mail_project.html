@@ -85,7 +85,7 @@
 
   <!-- Enhanced Search Section -->
   <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700"
-       x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ 'true' if (q is not none and q != '') else 'false' }} }">
+       x-data='{ scope: {{ (scope or "")|tojson }}, order: {{ (order or "relevance")|tojson }}, query: {{ (q or "")|tojson }}, isExpanded: {{ "true" if (q is not none and q != "") else "false" }} }'>
 
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-3">
