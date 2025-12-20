@@ -25,7 +25,7 @@ echo "  3) Auto-generate a bearer token if missing and embed it in the client co
 echo "  4) Create scripts/run_server_with_token.sh that exports the token and starts the server."
 echo
 TARGET_DIR="${PROJECT_DIR:-}"
-if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="${ROOT_DIR}"; fi
+if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="$(pwd)"; fi
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
 cd "$ROOT_DIR"

@@ -27,7 +27,7 @@ echo "  5) Attempt a readiness check and bootstrap ensure_project/register_agent
 echo
 
 TARGET_DIR="${PROJECT_DIR:-}"
-if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="${ROOT_DIR}"; fi
+if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="$(pwd)"; fi
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
 cd "$ROOT_DIR"

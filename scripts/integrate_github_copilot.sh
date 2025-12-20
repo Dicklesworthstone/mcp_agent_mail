@@ -30,7 +30,7 @@ echo "  4) Optionally enable MCP discovery in user settings (if VS Code installe
 echo "  5) Create run helper script and bootstrap project/agent registration."
 echo
 TARGET_DIR="${PROJECT_DIR:-}"
-if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="${ROOT_DIR}"; fi
+if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="$(pwd)"; fi
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
 cd "$ROOT_DIR"

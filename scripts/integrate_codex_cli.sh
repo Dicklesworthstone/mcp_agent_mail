@@ -25,7 +25,7 @@ echo "  3) Generate a project-local codex.mcp.json (auto-backup existing)."
 echo "  4) Create scripts/run_server_with_token.sh to start the server with the token."
 echo
 TARGET_DIR="${PROJECT_DIR:-}"
-if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="${ROOT_DIR}"; fi
+if [[ -z "${TARGET_DIR}" ]]; then TARGET_DIR="$(pwd)"; fi
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
 
 cd "$ROOT_DIR"
