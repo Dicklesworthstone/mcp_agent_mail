@@ -599,6 +599,15 @@ def serve_http(
     uvicorn.run(app, **_kwargs)
 
 
+@app.command("serve-stdio")
+def serve_stdio() -> None:
+    """Run the MCP server over stdio (standard input/output)."""
+    # Important: Do not print anything to stdout (banners, logs) before
+    # or during the server run, as it corrupts the JSON-RPC transport.
+    server = build_mcp_server()
+    server.run(transport="stdio")
+
+
 def _run_command(command: list[str]) -> None:
     console.print(f"[cyan]$ {' '.join(command)}[/]")
     result = subprocess.run(command, check=False)
