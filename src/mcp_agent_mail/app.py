@@ -1482,6 +1482,32 @@ def _looks_like_descriptive_name(value: str) -> bool:
     return any(v.endswith(p) for p in descriptive_patterns)
 
 
+def _looks_like_unix_username(value: str) -> bool:
+    """
+    Check if value looks like a Unix username rather than an adjective+noun agent name.
+
+    This helps detect when hooks or scripts pass $USER instead of the actual agent name.
+    Unix usernames typically:
+    - Are all lowercase
+    - Don't contain capital letters (unlike CamelCase agent names)
+    - Are short (3-12 chars typically)
+    - Often match common first name patterns
+    """
+    v = value.strip()
+    if not v:
+        return False
+
+    # Agent names are PascalCase (e.g., "GreenLake"), usernames are usually all lowercase
+    # If there are no uppercase letters and it's a single "word", it's likely a username
+    if v.islower() and v.isalnum() and 2 <= len(v) <= 16:
+        # Additional check: if it doesn't match any adjective or noun, more likely a username
+        from mcp_agent_mail.utils import ADJECTIVES, NOUNS
+        if v.lower() not in {a.lower() for a in ADJECTIVES} and v.lower() not in {n.lower() for n in NOUNS}:
+            return True
+
+    return False
+
+
 def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
     """
     Detect common mistakes when agents provide invalid agent names.
@@ -1519,6 +1545,15 @@ def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
             f"'{value}' looks like a descriptive role name. Agent names must be randomly generated "
             f"adjective+noun combinations like 'WhiteMountain' or 'BrownCreek', NOT descriptive of the agent's task. "
             f"Omit the 'name' parameter to auto-generate a valid name."
+        )
+    if _looks_like_unix_username(value):
+        return (
+            "UNIX_USERNAME_AS_AGENT",
+            f"'{value}' looks like a Unix username (possibly from $USER environment variable). "
+            f"Agent names must be adjective+noun combinations like 'BlueLake' or 'GreenCastle'. "
+            f"When you called register_agent, the system likely auto-generated a valid name for you. "
+            f"To find your actual agent name, check the response from register_agent or use "
+            f"resource://agents/{{project_key}} to list all registered agents in this project."
         )
     return None
 
@@ -2105,19 +2140,26 @@ async def _get_agent(project: Project, name: str) -> Agent:
     suggestions = await _find_similar_agents(project, name)
     available_agents = await _list_project_agents(project)
 
+    # Check for common mistakes (Unix username, program name, etc.)
+    mistake = _detect_agent_name_mistake(name)
+    mistake_hint = ""
+    if mistake:
+        mistake_hint = f"\n\nHINT: {mistake[1]}"
+
     if suggestions:
         # Found similar names - probably a typo
         suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
         raise ToolExecutionError(
-            "NOT_FOUND",
+            mistake[0] if mistake else "NOT_FOUND",
             f"Agent '{name}' not found in project '{project.human_key}'. Did you mean: {suggestion_text}? "
-            f"Agent names are case-insensitive but must match exactly.",
+            f"Agent names are case-insensitive but must match exactly.{mistake_hint}",
             recoverable=True,
             data={
                 "agent_name": name,
                 "project": project.slug,
                 "suggestions": [{"name": s[0], "score": round(s[1], 2)} for s in suggestions],
                 "available_agents": available_agents,
+                "mistake_type": mistake[0] if mistake else None,
             },
         )
     elif available_agents:
@@ -2125,26 +2167,27 @@ async def _get_agent(project: Project, name: str) -> Agent:
         agents_list = ", ".join([f"'{a}'" for a in available_agents[:5]])
         more_text = f" and {len(available_agents) - 5} more" if len(available_agents) > 5 else ""
         raise ToolExecutionError(
-            "NOT_FOUND",
+            mistake[0] if mistake else "NOT_FOUND",
             f"Agent '{name}' not found in project '{project.human_key}'. "
             f"Available agents: {agents_list}{more_text}. "
-            f"Use register_agent to create a new agent identity.",
+            f"Use register_agent to create a new agent identity.{mistake_hint}",
             recoverable=True,
             data={
                 "agent_name": name,
                 "project": project.slug,
                 "available_agents": available_agents,
+                "mistake_type": mistake[0] if mistake else None,
             },
         )
     else:
         # Project has no agents
         raise ToolExecutionError(
-            "NOT_FOUND",
+            mistake[0] if mistake else "NOT_FOUND",
             f"Agent '{name}' not found. Project '{project.human_key}' has no registered agents yet. "
-            f"Use register_agent to create an agent identity first. "
-            f"Example: register_agent(project_key='{project.slug}', program='claude-code', model='opus-4', name='{name}')",
+            f"Use register_agent to create an agent identity first (omit 'name' to auto-generate a valid one). "
+            f"Example: register_agent(project_key='{project.slug}', program='claude-code', model='opus-4'){mistake_hint}",
             recoverable=True,
-            data={"agent_name": name, "project": project.slug, "available_agents": []},
+            data={"agent_name": name, "project": project.slug, "available_agents": [], "mistake_type": mistake[0] if mistake else None},
         )
 
 
