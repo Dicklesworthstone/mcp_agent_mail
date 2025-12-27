@@ -3,25 +3,26 @@
     "mcp-agent-mail": {
       "type": "http",
       "url": "http://127.0.0.1:8765/mcp/",
-      "headers": {        "Authorization": "Bearer 552e3d77c4386828e5fc260b6243d44c9880177a1f945224e1aed7be1efd3c48"}
+      "headers": { "Authorization": "Bearer YOUR_BEARER_TOKEN" }
     }
   },
   "hooks": {
     "SessionStart": [
       {
-        "matcher": {},
+        "matcher": "",
         "hooks": [
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active mcp_agent_mail" },
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending mcp_agent_mail jemanuel --limit 20" }
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active YOUR_PROJECT" },
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending YOUR_PROJECT YOUR_AGENT_NAME --limit 20" }
         ]
       }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon mcp_agent_mail --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon YOUR_PROJECT --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tools": ["send_message"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project mcp_agent_mail --agent jemanuel --limit 10" } ] },
-      { "matcher": { "tools": ["file_reservation_paths"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list mcp_agent_mail" } ] }
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "AGENT_MAIL_PROJECT='YOUR_PROJECT_PATH' AGENT_MAIL_AGENT='YOUR_AGENT_NAME' AGENT_MAIL_URL='http://127.0.0.1:8765/mcp/' AGENT_MAIL_TOKEN='YOUR_BEARER_TOKEN' AGENT_MAIL_INTERVAL='120' '.claude/hooks/check_inbox.sh'" } ] },
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project YOUR_PROJECT --agent YOUR_AGENT_NAME --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list YOUR_PROJECT" } ] }
     ]
   }
 }

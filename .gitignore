@@ -224,7 +224,9 @@ signing-*.key
 signing-*.pub
 
 # Local agent configuration directories (per-user, not project config)
+# Exception: We track settings.json templates as examples for this project
 .claude/
+!.claude/settings.json
 .codex/
 .cursor/
 .gemini/
