@@ -60,6 +60,7 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/m
 What this does:
 
 - Installs uv if missing and updates your PATH for this session
+- Installs jq if missing (needed for safe config merging; auto-detects your package manager)
 - Creates a Python 3.14 virtual environment and installs dependencies with uv
 - Runs the auto-detect integration to wire up supported agent tools
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
@@ -2298,6 +2299,80 @@ uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 ## Client integrations
 
 Use the automated installer to wire up supported tools automatically (e.g., Claude Code, Cline, Windsurf, OpenCode). Run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh` or the one-liner in the Quickstart above.
+
+### Tool-specific integration scripts
+
+For manual integration or customization, dedicated scripts are available:
+
+| Tool | Script | What it configures |
+|------|--------|-------------------|
+| Claude Code | `scripts/integrate_claude_code.sh` | `.claude/settings.json`, hooks, MCP server |
+| Codex CLI | `scripts/integrate_codex_cli.sh` | `~/.codex/config.toml`, MCP server, notify handler |
+| Gemini CLI | `scripts/integrate_gemini_cli.sh` | `~/.gemini/settings.json`, MCP server, hooks |
+
+Each script:
+- Detects the MCP server endpoint from your settings
+- Generates or reuses a bearer token for authentication
+- Configures the MCP server connection
+- Installs hooks/notify handlers for inbox reminders
+- Bootstraps your project and agent identity on the server
+
+### Automatic inbox reminders
+
+Agents often get absorbed in their work and forget to check their mail. The integration scripts install lightweight hooks that periodically remind agents when they have unread messages.
+
+**How it works:**
+
+- A rate-limited hook script (`scripts/hooks/check_inbox.sh`) runs after certain tool invocations
+- It checks the inbox via a fast curl call (avoids Python import overhead)
+- If there are unread messages, it outputs a brief reminder
+- Rate limited to at most once per 2 minutes to avoid noise
+
+**Claude Code / Gemini CLI:**
+
+The hook is configured as a `PostToolUse` hook that fires after `Bash` or `shell` tool invocations:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "...check_inbox.sh" }]
+      }
+    ]
+  }
+}
+```
+
+**Codex CLI:**
+
+Uses the `notify` configuration in `config.toml` to fire on `agent-turn-complete` events:
+
+```toml
+notify = ["/path/to/.codex/hooks/notify_wrapper.sh"]
+```
+
+**Additional hooks installed:**
+
+| Event | What it does |
+|-------|-------------|
+| `SessionStart` | Shows active file reservations and pending acknowledgments |
+| `PreToolUse` (Edit) | Warns about file reservations expiring within 10 minutes |
+| `PostToolUse` (send_message) | Lists recent acknowledgment requests |
+| `PostToolUse` (file_reservation_paths) | Shows current file reservations |
+
+### Environment variables for hooks
+
+The inbox check hooks accept these environment variables (set automatically by the integration scripts):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_MAIL_PROJECT` | Project key (absolute path) | *required* |
+| `AGENT_MAIL_AGENT` | Agent name | *required* |
+| `AGENT_MAIL_URL` | Server URL | `http://127.0.0.1:8765/mcp/` |
+| `AGENT_MAIL_TOKEN` | Bearer token | *none* |
+| `AGENT_MAIL_INTERVAL` | Seconds between checks | `120` |
 
 ---
 
