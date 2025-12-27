@@ -145,35 +145,146 @@ else
 fi
 
 log_step "Bootstrapping project and agent on server"
+_AGENT=""
+_SERVER_AVAILABLE=0
 if [[ $_rc -ne 0 ]]; then
-  log_warn "Skipping bootstrap: server not reachable (ensure_project/register_agent)."
+  log_warn "Server not reachable. Hooks will be configured without agent name."
+  log_warn "Agent will need to call register_agent at session start."
 else
+  _SERVER_AVAILABLE=1
   _AUTH_ARGS=()
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
-  # Bug 6 fix: Use json_escape_string to safely escape variables
-  # Issue #7 fix: Validate escaping succeeded
+  # Escape the project path for JSON
   _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-gemini}") || { log_err "Failed to escape agent name"; exit 1; }
 
-  # ensure_project - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+  # ensure_project
+  if curl -fsS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
       -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
       "${_URL}" >/dev/null 2>&1; then
     log_ok "Ensured project on server"
   else
-    log_warn "Failed to ensure project (server may be starting)"
+    log_warn "Failed to ensure project"
   fi
 
-  # register_agent - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"gemini-cli\",\"model\":\"gemini\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Registered agent on server"
+  # register_agent - DON'T pass a name, let server auto-generate adjective+noun name
+  # Capture response to extract the generated name
+  _REGISTER_RESPONSE=$(curl -sS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"gemini-cli\",\"model\":\"gemini\",\"task_description\":\"setup\"}}}" \
+      "${_URL}" 2>/dev/null || echo "")
+
+  if [[ -n "${_REGISTER_RESPONSE}" ]]; then
+    # Extract agent name from JSON response using jq or Python
+    if command -v jq >/dev/null 2>&1; then
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || echo "")
+    else
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"])["name"] if c else "")' 2>/dev/null || echo "")
+    fi
+    if [[ -n "${_AGENT}" ]]; then
+      log_ok "Registered agent: ${_AGENT}"
+    else
+      log_warn "Could not parse agent name from response"
+    fi
   else
-    log_warn "Failed to register agent (server may be starting)"
+    log_warn "Failed to register agent"
   fi
 fi
+
+# If we still don't have an agent name, hooks that need it will be omitted
+if [[ -z "${_AGENT}" ]]; then
+  log_warn "No agent name available. Agent-specific hooks will need manual configuration."
+  _PROJ=$(basename "$TARGET_DIR")
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
+fi
+
+log_step "Installing inbox check hook"
+HOOKS_DIR="${TARGET_DIR}/.gemini/hooks"
+mkdir -p "${HOOKS_DIR}"
+INBOX_HOOK="${HOOKS_DIR}/check_inbox.sh"
+if [[ -f "${ROOT_DIR}/scripts/hooks/check_inbox.sh" ]]; then
+  cp "${ROOT_DIR}/scripts/hooks/check_inbox.sh" "${INBOX_HOOK}"
+  chmod +x "${INBOX_HOOK}"
+  log_ok "Installed inbox check hook to ${INBOX_HOOK}"
+else
+  log_warn "Could not find check_inbox.sh hook script"
+fi
+
+# Build the inbox check command with environment variables
+_PROJ=$(basename "$TARGET_DIR")
+INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_INTERVAL='120' '${INBOX_HOOK}'"
+
+log_step "Updating ~/.gemini/settings.json with hooks"
+HOME_SETTINGS="${HOME}/.gemini/settings.json"
+if [[ -f "$HOME_SETTINGS" ]]; then
+  backup_file "$HOME_SETTINGS"
+fi
+
+# Use jq to merge hooks into existing settings if available
+if command -v jq >/dev/null 2>&1; then
+  # jq is available - merge hooks into existing or create new
+  if [[ ! -f "$HOME_SETTINGS" ]]; then
+    # Create minimal starting point if file doesn't exist
+    umask 077
+    echo '{}' > "$HOME_SETTINGS"
+  fi
+  TMP_MERGE="${HOME_SETTINGS}.tmp.$$.$(date +%s)"
+  trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
+  umask 077
+  # Add hooks configuration using jq
+  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" '
+    .hooks = (.hooks // {}) |
+    .hooks.SessionStart = [{"matcher": "", "hooks": [
+      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations active " + $proj)},
+      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli acks pending " + $proj + " " + $agent + " --limit 20")}
+    ]}] |
+    .hooks.BeforeTool = [{"matcher": "write_file|replace|edit_file", "hooks": [
+      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations soon " + $proj + " --minutes 10")}
+    ]}] |
+    .hooks.AfterTool = [
+      {"matcher": "shell|run_command", "hooks": [{"type": "command", "command": $inbox_cmd}]},
+      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": ("uv run python -m mcp_agent_mail.cli list-acks --project " + $proj + " --agent " + $agent + " --limit 10")}]},
+      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations list " + $proj)}]}
+    ]
+  ' "$HOME_SETTINGS" > "$TMP_MERGE"; then
+    if mv "$TMP_MERGE" "$HOME_SETTINGS"; then
+      log_ok "Updated ${HOME_SETTINGS} with hooks"
+    else
+      log_err "Failed to update ${HOME_SETTINGS}"
+      rm -f "$TMP_MERGE" 2>/dev/null
+    fi
+  else
+    log_err "jq merge failed for hooks"
+    rm -f "$TMP_MERGE" 2>/dev/null
+  fi
+  trap - EXIT INT TERM
+else
+  # No jq available - only create new file if it doesn't exist (to avoid overwriting)
+  if [[ -f "$HOME_SETTINGS" ]]; then
+    log_warn "jq not found; cannot safely merge hooks into existing ${HOME_SETTINGS}"
+    log_warn "Please install jq or manually add hooks configuration"
+  else
+    log_warn "jq not found; creating new settings.json with hooks"
+    write_atomic "$HOME_SETTINGS" <<JSON
+{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [
+      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}"},
+      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20"}
+    ]}],
+    "BeforeTool": [{"matcher": "write_file|replace|edit_file", "hooks": [
+      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10"}
+    ]}],
+    "AfterTool": [
+      {"matcher": "shell|run_command", "hooks": [{"type": "command", "command": "${INBOX_CHECK_CMD}"}]},
+      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10"}]},
+      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}"}]}
+    ]
+  }
+}
+JSON
+  fi
+fi
+set_secure_file "$HOME_SETTINGS" || true
 
 log_step "Registering MCP server in Gemini (user scope)"
 if command -v gemini >/dev/null 2>&1; then
