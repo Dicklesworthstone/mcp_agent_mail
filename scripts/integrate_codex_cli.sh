@@ -115,14 +115,87 @@ uv run python -m mcp_agent_mail.cli serve-http "$@"
 SH
 set_secure_exec "$RUN_HELPER"
 
-log_step "Attempt readiness check (bounded)"
+log_step "Checking server and registering agent"
+_AGENT=""
+_SERVER_AVAILABLE=0
 if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
-  _rc=0; log_ok "Server readiness OK."
+  _SERVER_AVAILABLE=1
+  log_ok "Server is reachable."
+
+  _AUTH_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+
+  # Escape the project path for JSON
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
+
+  # ensure_project
+  if curl -fsS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project"
+  fi
+
+  # register_agent - DON'T pass a name, let server auto-generate adjective+noun name
+  # Capture response to extract the generated name
+  _REGISTER_RESPONSE=$(curl -sS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"task_description\":\"setup\"}}}" \
+      "${_URL}" 2>/dev/null || echo "")
+
+  if [[ -n "${_REGISTER_RESPONSE}" ]]; then
+    # Extract agent name from JSON response using jq or Python
+    if command -v jq >/dev/null 2>&1; then
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || echo "")
+    else
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"])["name"] if c else "")' 2>/dev/null || echo "")
+    fi
+    if [[ -n "${_AGENT}" ]]; then
+      log_ok "Registered agent: ${_AGENT}"
+    else
+      log_warn "Could not parse agent name from response"
+    fi
+  else
+    log_warn "Failed to register agent"
+  fi
 else
   _rc=1; log_warn "Server not reachable. Start with: uv run python -m mcp_agent_mail.cli serve-http"
+  log_warn "Hooks will be configured without agent name. Agent will need to call register_agent at session start."
+fi
+
+# If we still don't have an agent name, warn the user
+_PROJ=$(basename "$TARGET_DIR")
+if [[ -z "${_AGENT}" ]]; then
+  log_warn "No agent name available. Agent-specific hooks will need manual configuration."
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
 fi
 
 echo
+log_step "Installing notify handler for inbox reminders"
+HOOKS_DIR="${TARGET_DIR}/.codex/hooks"
+mkdir -p "${HOOKS_DIR}"
+NOTIFY_HOOK="${HOOKS_DIR}/notify_inbox.sh"
+if [[ -f "${ROOT_DIR}/scripts/hooks/codex_notify.sh" ]]; then
+  cp "${ROOT_DIR}/scripts/hooks/codex_notify.sh" "${NOTIFY_HOOK}"
+  chmod +x "${NOTIFY_HOOK}"
+  log_ok "Installed notify handler to ${NOTIFY_HOOK}"
+else
+  log_warn "Could not find codex_notify.sh script"
+fi
+
+# Build the notify command with environment variables wrapper
+NOTIFY_WRAPPER="${HOOKS_DIR}/notify_wrapper.sh"
+write_atomic "$NOTIFY_WRAPPER" <<SH
+#!/usr/bin/env bash
+export AGENT_MAIL_PROJECT='${TARGET_DIR}'
+export AGENT_MAIL_AGENT='${_AGENT}'
+export AGENT_MAIL_URL='${_URL}'
+export AGENT_MAIL_TOKEN='${_TOKEN}'
+export AGENT_MAIL_INTERVAL='120'
+exec '${NOTIFY_HOOK}' "\$@"
+SH
+chmod +x "$NOTIFY_WRAPPER"
+
 log_step "Registering MCP server in Codex CLI config"
 # Update user-level ~/.codex/config.toml
 CODEX_DIR="${HOME}/.codex"
@@ -138,6 +211,16 @@ if ! grep -q "^\[mcp_servers.mcp_agent_mail\]" "$USER_TOML" 2>/dev/null; then
     echo "url = \"${_URL}\""
     # Headers omitted for local dev (server allows localhost without Authorization)
   } >> "$USER_TOML"
+fi
+
+# Add notify configuration for inbox reminders (only if not already set)
+if ! grep -q "^notify = " "$USER_TOML" 2>/dev/null; then
+  {
+    echo ""
+    echo "# Notify handler for inbox reminders (agent-turn-complete event)"
+    echo "notify = [\"${NOTIFY_WRAPPER}\"]"
+  } >> "$USER_TOML"
+  log_ok "Added notify handler to ${USER_TOML}"
 fi
 
 # Also write project-local .codex/config.toml for portability
@@ -156,42 +239,21 @@ write_atomic "$LOCAL_TOML" <<TOML
 transport = "http"
 url = "${_URL}"
 # headers can be added if needed; localhost allowed without Authorization
+
+# Notify handler for inbox reminders (agent-turn-complete event)
+notify = ["${NOTIFY_WRAPPER}"]
 TOML
 
 # Bug 1 fix: Ensure secure permissions
 # Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
 set_secure_file "$LOCAL_TOML" || true
 
-echo "Done."
-
-log_step "Bootstrapping project and agent on server"
-if [[ $_rc -ne 0 ]]; then
-  log_warn "Skipping bootstrap: server not reachable (ensure_project/register_agent)."
-else
-  _AUTH_ARGS=()
-  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-
-  # Bug 6 fix: Use json_escape_string to safely escape variables
-  # Issue #7 fix: Validate escaping succeeded
-  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-codex}") || { log_err "Failed to escape agent name"; exit 1; }
-
-  # ensure_project - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Ensured project on server"
-  else
-    log_warn "Failed to ensure project (server may be starting)"
-  fi
-
-  # register_agent - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"codex-cli\",\"model\":\"gpt-5-codex\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Registered agent on server"
-  else
-    log_warn "Failed to register agent (server may be starting)"
-  fi
+log_ok "==> Done."
+if [[ -n "${_AGENT}" ]]; then
+  _print "Your agent name is: ${_AGENT}"
+fi
+_print "Codex CLI should now be configured to use MCP Agent Mail."
+if [[ ${_SERVER_AVAILABLE} -eq 0 ]]; then
+  _print "Remember to start the server: uv run python -m mcp_agent_mail.cli serve-http"
 fi
 

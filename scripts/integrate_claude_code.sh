@@ -77,16 +77,88 @@ mkdir -p "$CLAUDE_DIR"
 
 # Derive project name from TARGET_DIR (Bug 14 fix - was hardcoded to "backend")
 _PROJ=$(basename "$TARGET_DIR")
-_AGENT="${USER:-user}"
-log_ok "Using project name: ${_PROJ}, agent name: ${_AGENT}"
+# Note: We'll set _AGENT after registering with the server (it auto-generates adjective+noun names)
+_AGENT=""
+log_ok "Using project name: ${_PROJ}"
 
 # Backup existing file if it exists (Bug 5 fix - backup BEFORE creating empty file)
 if [[ -f "$SETTINGS_PATH" ]]; then
   backup_file "$SETTINGS_PATH"
 fi
 
+log_step "Installing inbox check hook"
+HOOKS_DIR="${CLAUDE_DIR}/hooks"
+mkdir -p "${HOOKS_DIR}"
+INBOX_HOOK="${HOOKS_DIR}/check_inbox.sh"
+if [[ -f "${ROOT_DIR}/scripts/hooks/check_inbox.sh" ]]; then
+  cp "${ROOT_DIR}/scripts/hooks/check_inbox.sh" "${INBOX_HOOK}"
+  chmod +x "${INBOX_HOOK}"
+  log_ok "Installed inbox check hook to ${INBOX_HOOK}"
+else
+  log_warn "Could not find check_inbox.sh hook script"
+fi
+
+# Check server readiness and register agent BEFORE writing hooks config
+# This ensures we get the auto-generated agent name (adjective+noun format)
+log_step "Checking server and registering agent"
+_SERVER_AVAILABLE=0
+if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
+  _SERVER_AVAILABLE=1
+  log_ok "Server is reachable."
+else
+  log_warn "Server not reachable. Hooks will be configured without agent name."
+  log_warn "Agent will need to call register_agent at session start."
+fi
+
+if [[ ${_SERVER_AVAILABLE} -eq 1 ]]; then
+  _AUTH_ARGS=()
+  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
+
+  # Escape the project path for JSON
+  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
+
+  # ensure_project
+  if curl -fsS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
+      "${_URL}" >/dev/null 2>&1; then
+    log_ok "Ensured project on server"
+  else
+    log_warn "Failed to ensure project"
+  fi
+
+  # register_agent - DON'T pass a name, let server auto-generate adjective+noun name
+  # Capture response to extract the generated name
+  _REGISTER_RESPONSE=$(curl -sS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"task_description\":\"setup\"}}}" \
+      "${_URL}" 2>/dev/null || echo "")
+
+  if [[ -n "${_REGISTER_RESPONSE}" ]]; then
+    # Extract agent name from JSON response using jq or Python
+    if command -v jq >/dev/null 2>&1; then
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || echo "")
+    else
+      _AGENT=$(echo "${_REGISTER_RESPONSE}" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"])["name"] if c else "")' 2>/dev/null || echo "")
+    fi
+    if [[ -n "${_AGENT}" ]]; then
+      log_ok "Registered agent: ${_AGENT}"
+    else
+      log_warn "Could not parse agent name from response"
+    fi
+  else
+    log_warn "Failed to register agent"
+  fi
+fi
+
+# If we still don't have an agent name, hooks that need it will be omitted
+if [[ -z "${_AGENT}" ]]; then
+  log_warn "No agent name available. Agent-specific hooks will need manual configuration."
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
+fi
+
 log_step "Writing MCP server config and hooks"
 AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
+# Build the inbox check command with environment variables
+INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_INTERVAL='120' '${INBOX_HOOK}'"
 write_atomic "$SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
@@ -99,7 +171,7 @@ write_atomic "$SETTINGS_PATH" <<JSON
   "hooks": {
     "SessionStart": [
       {
-        "matcher": {},
+        "matcher": "",
         "hooks": [
           { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}" },
           { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20" }
@@ -110,8 +182,9 @@ write_atomic "$SETTINGS_PATH" <<JSON
       { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tools": ["send_message"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tools": ["file_reservation_paths"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${INBOX_CHECK_CMD}" } ] },
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
     ]
   }
 }
@@ -138,7 +211,7 @@ write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
   "hooks": {
     "SessionStart": [
       {
-        "matcher": {},
+        "matcher": "",
         "hooks": [
           { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}" },
           { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20" }
@@ -149,8 +222,9 @@ write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
       { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": { "tools": ["send_message"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": { "tools": ["file_reservation_paths"] }, "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${INBOX_CHECK_CMD}" } ] },
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
     ]
   }
 }
@@ -173,9 +247,9 @@ else
   echo '{ "mcpServers": {} }' > "$HOME_SETTINGS_PATH"
 fi
 
-# Bug 3, 9 fix: Proper temp file handling with nanosecond timestamp and error checking
+# Bug 3, 9 fix: Proper temp file handling and error checking
 if command -v jq >/dev/null 2>&1; then
-  TMP_MERGE="${HOME_SETTINGS_PATH}.tmp.$$.$(date +%s_%N)"  # Bug 9 fix: add PID and nanoseconds
+  TMP_MERGE="${HOME_SETTINGS_PATH}.tmp.$$.$(date +%s)"
   trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
 
   umask 077  # Bug 1 fix: secure permissions for temp file
@@ -199,8 +273,13 @@ if command -v jq >/dev/null 2>&1; then
   fi
   trap - EXIT INT TERM
 else
-  # Fallback: use write_atomic for secure atomic write
-  write_atomic "$HOME_SETTINGS_PATH" <<JSON
+  # No jq available - only create new file if it doesn't exist (to avoid overwriting)
+  if [[ -f "$HOME_SETTINGS_PATH" ]] && [[ $(cat "$HOME_SETTINGS_PATH" 2>/dev/null) != '{ "mcpServers": {} }' ]]; then
+    log_warn "jq not found; cannot safely merge MCP config into existing ${HOME_SETTINGS_PATH}"
+    log_warn "Please install jq or manually add mcp-agent-mail server configuration"
+  else
+    # File is empty/minimal or doesn't exist - safe to write
+    write_atomic "$HOME_SETTINGS_PATH" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
@@ -211,6 +290,8 @@ else
   }
 }
 JSON
+    log_ok "Created ${HOME_SETTINGS_PATH} with MCP config"
+  fi
 fi
 
 # Bug 1 fix: Ensure secure permissions
@@ -247,53 +328,21 @@ SH
 set_secure_exec "$RUN_HELPER"
 echo "Created $RUN_HELPER"
 
-log_step "Verifying server readiness (bounded)"
-if readiness_poll "${_HTTP_HOST}" "${_HTTP_PORT}" "/health/readiness" 3 0.5; then
-  _curl_rc=0; log_ok "Server readiness OK."
-else
-  _curl_rc=1; log_warn "Readiness endpoint not reachable right now. Start the server:"
-  _print "  uv run python -m mcp_agent_mail.cli serve-http"
-fi
-
 # Register with Claude Code CLI at user and project scope for immediate discovery
 if command -v claude >/dev/null 2>&1; then
-  echo "==> Registering MCP server with Claude CLI"
+  log_step "Registering MCP server with Claude CLI"
   # User scope
   claude mcp add --transport http --scope user mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}" || true
   # Project scope (run from target dir)
   (cd "${TARGET_DIR}" && claude mcp add --transport http --scope project mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}") || true
 fi
 
-log_step "Bootstrapping project and agent on server"
-if [[ $_curl_rc -ne 0 ]]; then
-  log_warn "Skipping bootstrap: server not reachable (ensure_project/register_agent)."
-else
-  _AUTH_ARGS=()
-  if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
-
-  # Bug 6 fix: Use json_escape_string to safely escape variables
-  # Issue #7 fix: Validate escaping succeeded
-  _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${_AGENT}") || { log_err "Failed to escape agent name"; exit 1; }
-
-  # ensure_project - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Ensured project on server"
-  else
-    log_warn "Failed to ensure project (server may be starting)"
-  fi
-
-  # register_agent - Bug 16 fix: add logging
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"claude-code\",\"model\":\"claude-sonnet\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Registered agent on server"
-  else
-    log_warn "Failed to register agent (server may be starting)"
-  fi
+log_ok "==> Done."
+if [[ -n "${_AGENT}" ]]; then
+  _print "Your agent name is: ${_AGENT}"
 fi
-
-log_ok "==> Done."; _print "Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
+_print "Open your project in Claude Code; it should auto-detect the project-level .claude/settings.json."
+if [[ ${_SERVER_AVAILABLE} -eq 0 ]]; then
+  _print "Remember to start the server: uv run python -m mcp_agent_mail.cli serve-http"
+fi
 
