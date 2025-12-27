@@ -246,7 +246,7 @@ persist_bd_path() {
   rc_candidates+=("~/.bashrc" "~/.zshrc" "~/.profile")
 
   local appended=0
-  declare -A seen_rc=()
+  local seen_rc=""
   local rc
   for rc in "${rc_candidates[@]}"; do
     [[ -n "${rc}" ]] || continue
@@ -255,10 +255,11 @@ persist_bd_path() {
     if [[ -z "${rc_path}" ]]; then
       continue
     fi
-    if [[ -n "${seen_rc["${rc_path}"]:-}" ]]; then
+    # Check if we've already seen this path (Bash 3.2 compatible string matching)
+    if [[ ":${seen_rc}:" == *":${rc_path}:"* ]]; then
       continue
     fi
-    seen_rc["${rc_path}"]=1
+    seen_rc="${seen_rc}:${rc_path}"
     if append_path_snippet "${dir}" "${rc_path}"; then
       appended=1
       break
@@ -420,6 +421,75 @@ ensure_uv() {
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="${HOME}/.local/bin:${PATH}"
   if need_cmd uv; then ok "uv installed"; record_summary "uv: installed"; else err "uv install failed"; exit 1; fi
+}
+
+ensure_jq() {
+  # jq is needed for safe JSON merging in integration scripts
+  if need_cmd jq; then
+    ok "jq is already installed"
+    record_summary "jq: already installed"
+    return 0
+  fi
+
+  info "jq not found - needed for safe config merging"
+
+  # Try to install automatically
+  local installed=0
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # macOS - use Homebrew
+    if need_cmd brew; then
+      info "Installing jq via Homebrew"
+      if brew install jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/debian_version ]]; then
+    # Debian/Ubuntu
+    if need_cmd apt-get; then
+      info "Installing jq via apt"
+      if sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/fedora-release ]] || [[ -f /etc/redhat-release ]]; then
+    # Fedora/RHEL
+    if need_cmd dnf; then
+      info "Installing jq via dnf"
+      if sudo dnf install -y -q jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    elif need_cmd yum; then
+      info "Installing jq via yum"
+      if sudo yum install -y -q jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/alpine-release ]]; then
+    # Alpine
+    if need_cmd apk; then
+      info "Installing jq via apk"
+      if sudo apk add --quiet jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  fi
+
+  if [[ ${installed} -eq 1 ]] && need_cmd jq; then
+    ok "jq installed"
+    record_summary "jq: installed"
+    return 0
+  fi
+
+  # Couldn't auto-install
+  warn "Could not auto-install jq"
+  warn "Integration scripts will fall back to safe mode (won't overwrite existing configs)"
+  warn "To install manually:"
+  warn "  macOS:   brew install jq"
+  warn "  Ubuntu:  sudo apt install jq"
+  warn "  Fedora:  sudo dnf install jq"
+  record_summary "jq: not installed (manual install recommended)"
+  return 0  # Don't fail the installer, just warn
 }
 
 update_existing_repo() {
@@ -811,6 +881,7 @@ main() {
   fi
 
   ensure_uv
+  ensure_jq
   ensure_beads
   ensure_bv
   install_cli_stub
