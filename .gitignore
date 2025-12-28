@@ -223,11 +223,16 @@ out/
 signing-*.key
 signing-*.pub
 
+# IDE settings
+.vscode/
+.idea/
+
 # Local agent configuration directories (per-user, not project config)
-# Exception: We track settings.json templates as examples for this project
+# Exception: We track template config files as examples for this project
 .claude/
 !.claude/settings.json
 .codex/
+!.codex/config.toml
 .cursor/
 .gemini/
 
