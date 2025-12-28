@@ -73,7 +73,6 @@ write_atomic "$OUT_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
-      "type": "http",
       "url": "${_URL}",
       "headers": {${AUTH_HEADER_LINE}}
     }
@@ -127,7 +126,6 @@ write_atomic "$HOME_GEMINI_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
-      "type": "http",
       "url": "${_URL}"
     }
   }
