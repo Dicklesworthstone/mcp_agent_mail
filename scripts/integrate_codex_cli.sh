@@ -213,14 +213,22 @@ if ! grep -q "^\[mcp_servers.mcp_agent_mail\]" "$USER_TOML" 2>/dev/null; then
   } >> "$USER_TOML"
 fi
 
-# Add notify configuration for inbox reminders (only if not already set)
-if ! grep -q "^notify = " "$USER_TOML" 2>/dev/null; then
+
+# Add hooks configuration for inbox reminders (only if not already set)
+if ! grep -q "^\[hooks\]" "$USER_TOML" 2>/dev/null; then
   {
     echo ""
-    echo "# Notify handler for inbox reminders (agent-turn-complete event)"
-    echo "notify = [\"${NOTIFY_WRAPPER}\"]"
+    echo "# Hooks for agent notifications"
+    echo "[hooks]"
+    echo "agent-turn-complete = [\"${NOTIFY_WRAPPER}\"]"
   } >> "$USER_TOML"
-  log_ok "Added notify handler to ${USER_TOML}"
+  log_ok "Added hooks section to ${USER_TOML}"
+elif ! grep -q "^agent-turn-complete = " "$USER_TOML" 2>/dev/null; then
+  # [hooks] exists but agent-turn-complete not set - need to insert after [hooks]
+  # Use sed to insert after [hooks] line
+  sed -i.bak "/^\[hooks\]/a\\
+agent-turn-complete = [\"${NOTIFY_WRAPPER}\"]" "$USER_TOML" && rm -f "${USER_TOML}.bak"
+  log_ok "Added agent-turn-complete hook to existing [hooks] section"
 fi
 
 # Also write project-local .codex/config.toml for portability
@@ -240,10 +248,10 @@ transport = "http"
 url = "${_URL}"
 # headers can be added if needed; localhost allowed without Authorization
 
-# Notify handler for inbox reminders (agent-turn-complete event)
-notify = ["${NOTIFY_WRAPPER}"]
+# Hooks for agent notifications
+[hooks]
+agent-turn-complete = ["${NOTIFY_WRAPPER}"]
 TOML
-
 # Bug 1 fix: Ensure secure permissions
 # Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
 set_secure_file "$LOCAL_TOML" || true
