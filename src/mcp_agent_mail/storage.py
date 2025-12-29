@@ -185,6 +185,221 @@ def clear_repo_cache() -> int:
     return _REPO_CACHE.clear()
 
 
+# =============================================================================
+# Git Commit Queue - Serializes all Git commits to prevent lock contention
+# =============================================================================
+
+@dataclass
+class _CommitRequest:
+    """A request to commit changes to a Git repository."""
+    repo_path: str  # Working tree path for the repo
+    message: str
+    rel_paths: Sequence[str]
+    author_name: str
+    author_email: str
+    future: asyncio.Future[None]  # Caller awaits this
+
+
+class _GitCommitQueue:
+    """A queue that serializes Git commit operations to prevent lock contention.
+
+    All Git commits go through a single worker, ensuring only one commit
+    happens at a time across the entire server. This prevents:
+    1. Git index.lock contention
+    2. Deadlocks between concurrent writers
+    3. Race conditions in the Git working tree
+
+    Usage:
+        queue = get_commit_queue()
+        await queue.enqueue(repo_path, message, rel_paths, author_name, author_email)
+    """
+
+    def __init__(self, max_queue_size: int = 1000) -> None:
+        self._queue: asyncio.Queue[_CommitRequest | None] = asyncio.Queue(maxsize=max_queue_size)
+        self._worker_task: asyncio.Task[None] | None = None
+        self._started = False
+        self._shutdown = False
+
+    async def start(self) -> None:
+        """Start the commit queue worker."""
+        if self._started:
+            return
+        self._started = True
+        self._shutdown = False
+        self._worker_task = asyncio.create_task(self._worker(), name="git-commit-worker")
+
+    async def stop(self, stop_timeout: float = 30.0) -> None:
+        """Stop the commit queue worker gracefully."""
+        if not self._started or self._worker_task is None:
+            return
+        self._shutdown = True
+        # Signal worker to exit
+        await self._queue.put(None)
+        try:
+            await asyncio.wait_for(self._worker_task, timeout=stop_timeout)
+        except asyncio.TimeoutError:
+            self._worker_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._worker_task
+        self._started = False
+        self._worker_task = None
+
+    async def enqueue(
+        self,
+        repo_path: str,
+        message: str,
+        rel_paths: Sequence[str],
+        author_name: str,
+        author_email: str,
+        wait_timeout: float = 120.0,
+    ) -> None:
+        """Enqueue a commit request and wait for it to complete.
+
+        Args:
+            repo_path: Working tree path of the Git repo
+            message: Commit message
+            rel_paths: Relative paths to add and commit
+            author_name: Git author name
+            author_email: Git author email
+            wait_timeout: Max time to wait for commit to complete (default 120s)
+
+        Raises:
+            GitOperationTimeout: If the commit times out
+            RuntimeError: If the queue is not started
+            Exception: Any error from the actual Git commit
+        """
+        if not self._started:
+            await self.start()
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+
+        request = _CommitRequest(
+            repo_path=repo_path,
+            message=message,
+            rel_paths=rel_paths,
+            author_name=author_name,
+            author_email=author_email,
+            future=future,
+        )
+
+        try:
+            # Put request in queue (with timeout to avoid blocking forever)
+            await asyncio.wait_for(self._queue.put(request), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise GitOperationTimeout(
+                "Commit queue is full - too many pending commits. Try again later."
+            ) from None
+
+        # Wait for the worker to process our request
+        try:
+            await asyncio.wait_for(future, timeout=wait_timeout)
+        except asyncio.TimeoutError:
+            raise GitOperationTimeout(
+                f"Commit operation timed out after {wait_timeout}s. "
+                f"The commit queue may be backed up."
+            ) from None
+
+    async def _worker(self) -> None:
+        """Worker task that processes commit requests one at a time."""
+        while not self._shutdown:
+            try:
+                request = await self._queue.get()
+
+                # None signals shutdown
+                if request is None:
+                    break
+
+                try:
+                    await self._perform_commit(request)
+                    request.future.set_result(None)
+                except Exception as e:
+                    if not request.future.done():
+                        request.future.set_exception(e)
+                finally:
+                    self._queue.task_done()
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Log but don't crash the worker
+                continue
+
+    async def _perform_commit(self, request: _CommitRequest) -> None:
+        """Execute a single commit operation."""
+        if not request.rel_paths:
+            return
+
+        def _do_commit() -> None:
+            repo = Repo(request.repo_path)
+            actor = Actor(request.author_name, request.author_email)
+
+            repo.index.add(request.rel_paths)
+            if repo.is_dirty(index=True, working_tree=True):
+                # Build trailers
+                trailers: list[str] = []
+                message = request.message
+                try:
+                    lower_msg = message.lower()
+                    have_agent_line = "\nagent:" in lower_msg
+                    if message.startswith("mail: ") and not have_agent_line:
+                        head = message[len("mail: "):]
+                        agent_part = head.split("->", 1)[0].strip()
+                        if agent_part:
+                            trailers.append(f"Agent: {agent_part}")
+                    elif message.startswith("file_reservation: ") and not have_agent_line:
+                        head = message[len("file_reservation: "):]
+                        agent_part = head.split(" ", 1)[0].strip()
+                        if agent_part:
+                            trailers.append(f"Agent: {agent_part}")
+                except Exception:
+                    pass
+
+                final_message = message
+                if trailers:
+                    final_message = message + "\n\n" + "\n".join(trailers) + "\n"
+                repo.index.commit(final_message, author=actor, committer=actor)
+
+        # Run the actual commit in a thread with timeout
+        await _to_thread(_do_commit, _timeout=60.0)
+
+
+# Global commit queue instance
+_COMMIT_QUEUE: _GitCommitQueue | None = None
+_COMMIT_QUEUE_LOCK: asyncio.Lock | None = None
+
+
+def _get_commit_queue_lock() -> asyncio.Lock:
+    """Get or create the commit queue lock."""
+    global _COMMIT_QUEUE_LOCK
+    if _COMMIT_QUEUE_LOCK is None:
+        _COMMIT_QUEUE_LOCK = asyncio.Lock()
+    return _COMMIT_QUEUE_LOCK
+
+
+async def get_commit_queue() -> _GitCommitQueue:
+    """Get the global commit queue, creating and starting it if needed."""
+    global _COMMIT_QUEUE
+
+    # Fast path - already initialized
+    if _COMMIT_QUEUE is not None and _COMMIT_QUEUE._started:
+        return _COMMIT_QUEUE
+
+    async with _get_commit_queue_lock():
+        if _COMMIT_QUEUE is None:
+            _COMMIT_QUEUE = _GitCommitQueue()
+        if not _COMMIT_QUEUE._started:
+            await _COMMIT_QUEUE.start()
+        return _COMMIT_QUEUE
+
+
+async def stop_commit_queue() -> None:
+    """Stop the global commit queue gracefully."""
+    global _COMMIT_QUEUE
+    if _COMMIT_QUEUE is not None:
+        await _COMMIT_QUEUE.stop()
+
+
 class AsyncFileLock:
     """Async-friendly wrapper around SoftFileLock with metadata tracking."""
 
@@ -415,8 +630,51 @@ async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float 
 
 T = TypeVar('T')
 
-async def _to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
-    return await asyncio.to_thread(func, *args, **kwargs)
+# Default timeout for thread operations (especially Git ops that can hang on lock contention)
+_DEFAULT_THREAD_TIMEOUT: float = 60.0
+
+
+class GitOperationTimeout(Exception):
+    """Raised when a Git operation times out waiting for locks."""
+    pass
+
+
+async def _to_thread(
+    func: Any,
+    /,
+    *args: Any,
+    _timeout: float | None = None,
+    **kwargs: Any,
+) -> Any:
+    """Run a blocking function in a thread with optional timeout.
+
+    Args:
+        func: The blocking function to run
+        *args: Positional arguments for func
+        _timeout: Timeout in seconds. None means use default (60s).
+                  Use 0 or negative to disable timeout (infinite wait).
+        **kwargs: Keyword arguments for func
+
+    Raises:
+        GitOperationTimeout: If the operation times out
+    """
+    timeout = _timeout if _timeout is not None else _DEFAULT_THREAD_TIMEOUT
+
+    if timeout <= 0:
+        # No timeout - original behavior
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        func_name = getattr(func, '__name__', str(func))
+        raise GitOperationTimeout(
+            f"Operation '{func_name}' timed out after {timeout}s. "
+            f"This may indicate Git lock contention. Try again or check for stale lock files."
+        ) from None
 
 
 def _ensure_str(value: str | bytes) -> str:
@@ -978,72 +1236,66 @@ async def _append_attachment_audit(archive: ProjectArchive, sha1: str, event: di
 
 
 async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
+    """Commit changes to the Git repository via the global commit queue.
+
+    This ensures all commits are serialized to prevent Git lock contention.
+    """
     if not rel_paths:
         return
-    actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
 
-    def _perform_commit() -> None:
-        repo.index.add(rel_paths)
-        if repo.is_dirty(index=True, working_tree=True):
-            # Append commit trailers with Agent and optional Thread if present in message text
-            trailers: list[str] = []
-            # Extract simple Agent/Thread heuristics from the message subject line
-            # Expected message formats include:
-            #   mail: <Agent> -> ... | <Subject>
-            #   file_reservation: <Agent> ...
-            try:
-                # Avoid duplicating trailers if already embedded
-                lower_msg = message.lower()
-                have_agent_line = "\nagent:" in lower_msg
-                if message.startswith("mail: ") and not have_agent_line:
-                    head = message[len("mail: ") :]
-                    agent_part = head.split("->", 1)[0].strip()
-                    if agent_part:
-                        trailers.append(f"Agent: {agent_part}")
-                elif message.startswith("file_reservation: ") and not have_agent_line:
-                    head = message[len("file_reservation: ") :]
-                    agent_part = head.split(" ", 1)[0].strip()
-                    if agent_part:
-                        trailers.append(f"Agent: {agent_part}")
-            except Exception:
-                pass
-            final_message = message
-            if trailers:
-                final_message = message + "\n\n" + "\n".join(trailers) + "\n"
-            repo.index.commit(final_message, author=actor, committer=actor)
-    # Serialize commits across all projects sharing the same Git repo to avoid index races
     working_tree = repo.working_tree_dir
     if working_tree is None:
         raise ValueError("Repository has no working tree directory")
-    commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
-    async with AsyncFileLock(commit_lock_path):
-        await _to_thread(_perform_commit)
+
+    # Use the global commit queue to serialize all Git commits
+    queue = await get_commit_queue()
+    await queue.enqueue(
+        repo_path=str(working_tree),
+        message=message,
+        rel_paths=list(rel_paths),
+        author_name=settings.storage.git_author_name,
+        author_email=settings.storage.git_author_email,
+    )
 
 
 async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
-    """Scan the archive root for stale lock artifacts and clean them."""
+    """Scan the archive root for stale lock artifacts and clean them.
+
+    This includes:
+    1. Application-level locks (*.lock files with owner metadata)
+    2. Git internal locks (.git/index.lock, .git/HEAD.lock, etc.) that may be
+       left behind after crashes or interrupted operations
+    """
 
     root = Path(settings.storage.root).expanduser().resolve()
-    await _to_thread(root.mkdir, parents=True, exist_ok=True)
+    await _to_thread(root.mkdir, parents=True, exist_ok=True, _timeout=10.0)
     summary: dict[str, Any] = {
         "locks_scanned": 0,
         "locks_removed": [],
         "metadata_removed": [],
+        "git_locks_removed": [],
     }
     if not root.exists():
         return summary
 
-    for lock_path in sorted(root.rglob("*.lock"), key=str):
+    # --- Phase 1: Clean application-level locks ---
+    for lock_path_raw in sorted(root.rglob("*.lock"), key=str):
+        lock_path = Path(str(lock_path_raw))
+        # Skip Git internal locks - handled separately in Phase 2
+        if ".git" in lock_path.parts:
+            continue
         summary["locks_scanned"] += 1
         try:
             lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=0.0)
-            removed = await _to_thread(lock._cleanup_if_stale)
+            removed = await _to_thread(lock._cleanup_if_stale, _timeout=5.0)
             if removed:
                 summary["locks_removed"].append(str(lock_path))
         except FileNotFoundError:
             continue
 
-    for metadata_path in sorted(root.rglob("*.lock.owner.json"), key=str):
+    # --- Phase 2: Clean orphaned metadata files ---
+    for metadata_path_raw in sorted(root.rglob("*.lock.owner.json"), key=str):
+        metadata_path = Path(str(metadata_path_raw))
         name = metadata_path.name
         if not name.endswith(".owner.json"):
             continue
@@ -1051,12 +1303,57 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
         if lock_candidate.exists():
             continue
         try:
-            await _to_thread(metadata_path.unlink)
+            await _to_thread(metadata_path.unlink, _timeout=5.0)
             summary["metadata_removed"].append(str(metadata_path))
         except FileNotFoundError:
             continue
         except PermissionError:
             continue
+
+    # --- Phase 3: Clean stale Git internal locks ---
+    # These are left behind when Git operations are interrupted (crash, timeout, etc.)
+    # Git lock files: index.lock, HEAD.lock, config.lock, refs/heads/*.lock, etc.
+    git_lock_patterns = [
+        "index.lock",
+        "HEAD.lock",
+        "config.lock",
+        "COMMIT_EDITMSG.lock",
+        "MERGE_HEAD.lock",
+        "FETCH_HEAD.lock",
+        "ORIG_HEAD.lock",
+    ]
+
+    # Find all .git directories in the archive
+    for git_dir in root.rglob(".git"):
+        if not git_dir.is_dir():
+            continue
+
+        # Clean known Git lock files
+        for lock_name in git_lock_patterns:
+            lock_file = git_dir / lock_name
+            if lock_file.exists():
+                try:
+                    # Check if lock is stale (file older than 5 minutes = likely orphaned)
+                    mtime = lock_file.stat().st_mtime
+                    age_seconds = time.time() - mtime
+                    if age_seconds > 300:  # 5 minutes
+                        await _to_thread(lock_file.unlink, _timeout=5.0)
+                        summary["git_locks_removed"].append(str(lock_file))
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
+
+        # Also check refs/heads/*.lock for stale branch locks
+        refs_heads = git_dir / "refs" / "heads"
+        if refs_heads.exists():
+            for ref_lock in refs_heads.glob("*.lock"):
+                try:
+                    mtime = ref_lock.stat().st_mtime
+                    age_seconds = time.time() - mtime
+                    if age_seconds > 300:  # 5 minutes
+                        await _to_thread(ref_lock.unlink, _timeout=5.0)
+                        summary["git_locks_removed"].append(str(ref_lock))
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
 
     return summary
 

@@ -10,7 +10,6 @@ import importlib
 import json
 import logging
 import re
-from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -22,8 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import NoResultFound
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.types import Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .app import (
     _expire_stale_file_reservations,
@@ -122,40 +120,55 @@ def _configure_logging(settings: Settings) -> None:
     _LOGGING_CONFIGURED = True
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI, token: str, allow_localhost: bool = False) -> None:
-        super().__init__(app)
+class BearerAuthMiddleware:
+    """Pure ASGI middleware for bearer token authentication (avoids BaseHTTPMiddleware streaming issues)."""
+
+    def __init__(self, app: ASGIApp, token: str, allow_localhost: bool = False) -> None:
+        self.app = app
         self._token = token
         self._allow_localhost = allow_localhost
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
-        if request.method == "OPTIONS":  # allow CORS preflight
-            return await call_next(request)
-        if request.url.path.startswith("/health/"):
-            return await call_next(request)
-        # Allow localhost without Authorization when enabled
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+
+        if method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+        if path.startswith("/health/"):
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get("client")
+        client_host = client[0] if client else ""
         if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
-            return await call_next(request)
-        auth_header = request.headers.get("Authorization", "")
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or [])
+        auth_header = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
         if auth_header != f"Bearer {self._token}":
-            return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
-        return await call_next(request)
+            response = JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
+            await response(scope, receive, send)
+            return
+
+        await self.app(scope, receive, send)
 
 
-class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
-    """JWT auth (optional), RBAC, and token-bucket rate limiting.
+class SecurityAndRateLimitMiddleware:
+    """Pure ASGI middleware for JWT auth, RBAC, and token-bucket rate limiting.
 
     - If JWT is enabled, validates Authorization: Bearer <token> using either HMAC secret or JWKS URL.
     - Enforces basic RBAC when enabled: read-only roles may only call whitelisted tools and resource reads.
     - Applies per-endpoint token-bucket limits (tools vs resources) with in-memory or Redis backend.
     """
 
-    def __init__(self, app: FastAPI, settings: Settings):
-        super().__init__(app)
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        self.app = app
         self.settings = settings
         self._jwt_enabled = bool(getattr(settings.http, "jwt_enabled", False))
         self._rbac_enabled = bool(getattr(settings.http, "rbac_enabled", True))
@@ -299,38 +312,72 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+
         # Allow CORS preflight and health endpoints
-        if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
-            return await call_next(request)
+        if method == "OPTIONS" or path.startswith("/health/"):
+            await self.app(scope, receive, send)
+            return
 
-        # Only read/patch body for POST requests. GET (including SSE) must not receive http.request messages.
+        # MCP streaming endpoints must pass through without body buffering
+        # Body buffering breaks streaming responses (Content-Length mismatch)
+        if path == "/mcp" or path.startswith("/mcp/"):
+            await self.app(scope, receive, send)
+            return
+
+        # Get client info
+        client = scope.get("client")
+        client_host = client[0] if client else ""
+
+        # Get headers
+        headers_list = scope.get("headers") or []
+        headers = {k.decode("utf-8", errors="ignore"): v.decode("utf-8", errors="ignore") for k, v in headers_list}
+
+        # For POST requests (non-MCP), buffer body for classification
         body_bytes = b""
-        if request.method.upper() == "POST":
-            try:
-                body_bytes = await request.body()
+        body_consumed = False
+        if method.upper() == "POST":
+            body_parts: list[bytes] = []
+            while True:
+                message = await receive()
+                if message["type"] == "http.request":
+                    body_parts.append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        break
+                elif message["type"] == "http.disconnect":
+                    break
+            body_bytes = b"".join(body_parts)
+            body_consumed = True
 
-                async def _receive() -> dict:
-                    return {"type": "http.request", "body": body_bytes, "more_body": False}
+            # Create a new receive that replays the buffered body
+            async def buffered_receive() -> Message:
+                return {"type": "http.request", "body": body_bytes, "more_body": False}
 
-                cast(Any, request)._receive = _receive
-            except Exception:
-                body_bytes = b""
-
-        kind, tool_name = self._classify_request(request.url.path, request.method, body_bytes)
+        kind, tool_name = self._classify_request(path, method, body_bytes)
 
         # JWT auth (if enabled)
+        roles: set[str]
+        jwt_claims: dict[str, Any] | None = None
         if self._jwt_enabled:
-            auth_header = request.headers.get("Authorization", "")
+            auth_header = headers.get("authorization", "")
             if not auth_header.startswith("Bearer "):
-                return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
+                response = JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
+                await response(scope, receive, send)
+                return
             token = auth_header.split(" ", 1)[1].strip()
             claims_dict = await self._decode_jwt(token)
             if claims_dict is None:
-                return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
-            claims = cast(dict[str, Any], claims_dict)
-            request.state.jwt_claims = claims
-            roles_raw = claims.get(self.settings.http.jwt_role_claim, [])
+                response = JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
+                await response(scope, receive, send)
+                return
+            jwt_claims = cast(dict[str, Any], claims_dict)
+            roles_raw = jwt_claims.get(self.settings.http.jwt_role_claim, [])
             if isinstance(roles_raw, str):
                 roles = {roles_raw}
             elif isinstance(roles_raw, (list, tuple)):
@@ -342,10 +389,6 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         else:
             roles = {self._default_role}
             # Elevate localhost to writer when unauthenticated localhost is allowed
-            try:
-                client_host = request.client.host if request.client else ""
-            except Exception:
-                client_host = ""
             if bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
                 "127.0.0.1",
                 "::1",
@@ -354,10 +397,6 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 roles.add("writer")
 
         # RBAC enforcement (skip for localhost when allowed)
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
         is_local_ok = bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
             "127.0.0.1",
             "::1",
@@ -372,33 +411,47 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 if not tool_name:
                     # Without name, assume write-required to be safe
                     if not is_writer:
-                        return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                        response = JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                        await response(scope, receive, send)
+                        return
                 else:
                     if tool_name in self._readonly_tools:
                         if not is_reader and not is_writer:
-                            return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                            response = JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                            await response(scope, receive, send)
+                            return
                     else:
                         if not is_writer:
-                            return JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                            response = JSONResponse({"detail": "Forbidden"}, status_code=status.HTTP_403_FORBIDDEN)
+                            await response(scope, receive, send)
+                            return
 
         # Rate limiting
         if self.settings.http.rate_limit_enabled:
             rpm, burst = self._rate_limits_for(kind)
-            identity = request.client.host if request.client else "ip-unknown"
+            identity = client_host or "ip-unknown"
             # Prefer stable subject from JWT if present
-            with contextlib.suppress(Exception):
-                maybe_claims = getattr(request.state, "jwt_claims", None)
-                if isinstance(maybe_claims, dict):
-                    sub = maybe_claims.get("sub")
-                    if isinstance(sub, str) and sub:
-                        identity = f"sub:{sub}"
+            if jwt_claims and isinstance(jwt_claims.get("sub"), str) and jwt_claims["sub"]:
+                identity = f"sub:{jwt_claims['sub']}"
             endpoint = tool_name or "*"
             key = f"{kind}:{endpoint}:{identity}"
             allowed = await self._consume_bucket(key, rpm, burst)
             if not allowed:
-                return JSONResponse({"detail": "Rate limit exceeded"}, status_code=status.HTTP_429_TOO_MANY_REQUESTS)
+                response = JSONResponse({"detail": "Rate limit exceeded"}, status_code=status.HTTP_429_TOO_MANY_REQUESTS)
+                await response(scope, receive, send)
+                return
 
-        return await call_next(request)
+        # Store JWT claims in scope state for downstream access (extension dict pattern)
+        if jwt_claims:
+            if "state" not in scope:
+                scope["state"] = {}
+            scope["state"]["jwt_claims"] = jwt_claims
+
+        # Call downstream with buffered receive if we consumed the body
+        if body_consumed:
+            await self.app(scope, buffered_receive, send)
+        else:
+            await self.app(scope, receive, send)
 
 
 async def readiness_check() -> None:
@@ -781,55 +834,83 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 await _shutdown()
 
     # Now construct FastAPI with the composed lifespan so ASGI transports run it
-    fastapi_app = FastAPI(lifespan=lifespan_context)
+    # Disable redirect_slashes to avoid 307 Temporary Redirect responses
+    fastapi_app = FastAPI(lifespan=lifespan_context, redirect_slashes=False)
 
-    # Simple request logging (configurable)
+    # Simple request logging (configurable) - Pure ASGI middleware
     if settings.http.request_log_enabled:
         import time as _time
 
-        class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+        class RequestLoggingMiddleware:
+            """Pure ASGI middleware for request logging (avoids BaseHTTPMiddleware streaming issues)."""
+
+            def __init__(self, app: ASGIApp) -> None:
+                self.app = app
+
+            async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+                if scope["type"] != "http":
+                    await self.app(scope, receive, send)
+                    return
+
+                path = scope.get("path", "")
+
+                # MCP streaming endpoints must pass through without any send wrapping
+                # Send wrapping breaks streaming responses (Content-Length mismatch)
+                if path == "/mcp" or path.startswith("/mcp/"):
+                    await self.app(scope, receive, send)
+                    return
+
                 start = _time.time()
-                response = await call_next(request)
-                dur_ms = int((_time.time() - start) * 1000)
-                method = request.method
-                path = request.url.path
-                status_code = getattr(response, "status_code", 0)
-                client = request.client.host if request.client else "-"
-                with contextlib.suppress(Exception):
-                    structlog.get_logger("http").info(
-                        "request",
-                        method=method,
-                        path=path,
-                        status=status_code,
-                        duration_ms=dur_ms,
-                        client_ip=client,
-                    )
+                method = scope.get("method", "")
+                client_info = scope.get("client")
+                client = client_info[0] if client_info else "-"
+
+                # Track response status from send messages
+                status_code = 0
+
+                async def logging_send(message: Message) -> None:
+                    nonlocal status_code
+                    if message["type"] == "http.response.start":
+                        status_code = message.get("status", 0)
+                    await send(message)
+
                 try:
-                    rich_console = importlib.import_module("rich.console")
-                    rich_panel = importlib.import_module("rich.panel")
-                    rich_text = importlib.import_module("rich.text")
-                    Console = rich_console.Console
-                    Panel = rich_panel.Panel
-                    Text = rich_text.Text
-                    console = Console(width=100)
-                    title = Text.assemble(
-                        (method, "bold blue"),
-                        ("  "),
-                        (path, "bold white"),
-                        ("  "),
-                        (f"{status_code}", "bold green" if 200 <= status_code < 400 else "bold red"),
-                        ("  "),
-                        (f"{dur_ms}ms", "bold yellow"),
-                    )
-                    body = Text.assemble(
-                        ("client: ", "cyan"),
-                        (client, "white"),
-                    )
-                    console.print(Panel(body, title=title, border_style="dim"))
-                except Exception:
-                    print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
-                return response
+                    await self.app(scope, receive, logging_send)
+                finally:
+                    dur_ms = int((_time.time() - start) * 1000)
+                    with contextlib.suppress(Exception):
+                        structlog.get_logger("http").info(
+                            "request",
+                            method=method,
+                            path=path,
+                            status=status_code,
+                            duration_ms=dur_ms,
+                            client_ip=client,
+                        )
+                    try:
+                        rich_console = importlib.import_module("rich.console")
+                        rich_panel = importlib.import_module("rich.panel")
+                        rich_text = importlib.import_module("rich.text")
+                        Console = rich_console.Console
+                        Panel = rich_panel.Panel
+                        Text = rich_text.Text
+                        console = Console(width=100)
+                        title = Text.assemble(
+                            (method, "bold blue"),
+                            ("  "),
+                            (path, "bold white"),
+                            ("  "),
+                            (f"{status_code}", "bold green" if 200 <= status_code < 400 else "bold red"),
+                            ("  "),
+                            (f"{dur_ms}ms", "bold yellow"),
+                        )
+                        body = Text.assemble(
+                            ("client: ", "cyan"),
+                            (client, "white"),
+                        )
+                        console.print(Panel(body, title=title, border_style="dim"))
+                    except Exception:
+                        print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
 
         fastapi_app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
 
@@ -944,11 +1025,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 # MCP clients can handle JSON-RPC format properly
                 try:
                     await http_transport.handle_request(new_scope, receive, send)
+                except Exception:
+                    # Client disconnected or other transport error - this is normal
+                    pass
                 finally:
+                    # Cancel server task first to prevent ClosedResourceError
+                    server_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await server_task
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
-                    with contextlib.suppress(Exception):
-                        await server_task
 
     # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
     mount_base = settings.http.path or "/mcp"
@@ -957,54 +1043,52 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
     base_no_slash = mount_base.rstrip("/") or "/"
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = StatelessMCPASGIApp(server)
-    with contextlib.suppress(Exception):
+    print(f"[DEBUG] Mounting MCP at: {base_no_slash!r} and {base_with_slash!r}")
+    try:
         fastapi_app.mount(base_no_slash, stateless_app)
-    with contextlib.suppress(Exception):
+        print(f"[DEBUG] Successfully mounted at {base_no_slash!r}")
+    except Exception as e:
+        print(f"[DEBUG] Failed to mount at {base_no_slash!r}: {e}")
+    try:
         fastapi_app.mount(base_with_slash, stateless_app)
+        print(f"[DEBUG] Successfully mounted at {base_with_slash!r}")
+    except Exception as e:
+        print(f"[DEBUG] Failed to mount at {base_with_slash!r}: {e}")
+
+    # Direct ASGI passthrough for /mcp POST requests (mount may not handle exact path match)
+    # Create wrapper ASGI app that injects auth headers for localhost
+    class MCPPassthroughApp:
+        """ASGI app wrapper that injects auth header for localhost before passing to MCP."""
+
+        def __init__(self, mcp_app: ASGIApp) -> None:
+            self._app = mcp_app
+
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+            # Inject auth header for localhost if needed
+            client = scope.get("client")
+            client_host = client[0] if client else ""
+            if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+                scope_headers = list(scope.get("headers") or [])
+                has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
+                if not has_auth and settings.http.bearer_token:
+                    scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
+                    scope = dict(scope)
+                    scope["headers"] = scope_headers
+
+            # Direct passthrough to stateless MCP app
+            await self._app(scope, receive, send)
+
+    # Use Mount with exact path matching by mounting at root-like path
+    from starlette.routing import Mount
+
+    mcp_passthrough = MCPPassthroughApp(stateless_app)
+    # Insert as first route to take priority over the later mounts
+    mcp_mount = Mount(base_no_slash, app=mcp_passthrough)
+    fastapi_app.router.routes.insert(0, mcp_mount)
+    print(f"[DEBUG] Routes after insert: {[str(r) for r in fastapi_app.router.routes[:5]]}")
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
-
-    # Add a direct route at the base path without redirect to tolerate clients omitting trailing slash
-    @fastapi_app.post(base_no_slash)
-    async def _base_passthrough(request: Request) -> JSONResponse:
-        # Re-dispatch to mounted stateless app by calling it directly
-        response_body: dict[str, Any] = {}
-        status_code = 200
-        headers: dict[str, str] = {}
-
-        async def _send(message: MutableMapping[str, Any]) -> None:
-            nonlocal response_body, status_code, headers
-            if message.get("type") == "http.response.start":
-                status_code = int(message.get("status", 200))
-                hdrs = message.get("headers") or []
-                for k, v in hdrs:
-                    headers[k.decode("latin1")] = v.decode("latin1")
-            elif message.get("type") == "http.response.body":
-                body = message.get("body") or b""
-                try:
-                    response_body = json.loads(body.decode("utf-8")) if body else {}
-                except Exception:
-                    response_body = {}
-
-        # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
-        scope = dict(request.scope)
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
-            scope_headers = list(scope.get("headers") or [])
-            has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
-            if not has_auth and settings.http.bearer_token:
-                scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
-            scope["headers"] = scope_headers
-        await stateless_app(
-            {**scope, "path": base_with_slash},  # ensure mounted path
-            request.receive,
-            _send,
-        )
-        return JSONResponse(response_body, status_code=status_code, headers=headers)
 
     # ----- Simple SSR Mail UI -----
     def _register_mail_ui() -> None:

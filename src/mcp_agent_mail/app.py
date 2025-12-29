@@ -60,6 +60,7 @@ from .storage import (
     ensure_archive,
     heal_archive_locks,
     process_attachments,
+    stop_commit_queue,
     write_agent_profile,
     write_file_reservation_record,
     write_message_bundle,
@@ -458,17 +459,22 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[N
     async def lifespan(app: FastMCP) -> AsyncIterator[None]:
         init_engine(settings)
         heal_summary = await heal_archive_locks(settings)
-        if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed"):
+        if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed") or heal_summary.get("git_locks_removed"):
             logger.info(
                 "archive.healed_on_startup",
                 extra={
                     "locks_scanned": heal_summary.get("locks_scanned", 0),
                     "locks_removed": len(heal_summary.get("locks_removed", [])),
                     "metadata_removed": len(heal_summary.get("metadata_removed", [])),
+                    "git_locks_removed": len(heal_summary.get("git_locks_removed", [])),
                 },
             )
         await ensure_schema(settings)
-        yield
+        try:
+            yield
+        finally:
+            # Gracefully stop the commit queue on shutdown
+            await stop_commit_queue()
 
     return lifespan  # type: ignore[return-value]
 
@@ -3076,7 +3082,7 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     @_instrument_tool("health_check", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, complexity="low")
-    async def health_check(ctx: Context) -> dict[str, Any]:
+    async def health_check(ctx: Context, reason: str) -> dict[str, Any]:
         """
         Quick readiness probe for agents and orchestrators.
 
