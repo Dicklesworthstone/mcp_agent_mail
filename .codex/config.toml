@@ -3,3 +3,7 @@
 transport = "http"
 url = "http://127.0.0.1:8765/mcp/"
 # headers can be added if needed; localhost allowed without Authorization
+
+# Hooks for agent notifications
+[hooks]
+agent-turn-complete = ["/home/faz/development/structric/mcp_agent_mail/.codex/hooks/notify_wrapper.sh"]

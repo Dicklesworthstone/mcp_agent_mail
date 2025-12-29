@@ -1,0 +1,31 @@
+[Unit]
+Description=Agent Companion Daemon - Multi-Agent Inbox Polling & Spawning
+Documentation=https://github.com/Dicklesworthstone/mcp_agent_mail
+After=network.target mcp-agent-mail.service
+Wants=mcp-agent-mail.service
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/home/faz/development/structric
+Environment="PATH=/home/faz/.local/bin:/home/faz/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="STRUCTRIC_ROOT=/home/faz/development/structric"
+Environment="POLL_INTERVAL=30"
+ExecStart=/home/faz/development/structric/scripts/agent_companion.sh
+Restart=on-failure
+RestartSec=10
+
+# Logging
+StandardOutput=append:/home/faz/development/structric/.companion/companion.log
+StandardError=append:/home/faz/development/structric/.companion/companion.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/faz/development/structric/.companion
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target
