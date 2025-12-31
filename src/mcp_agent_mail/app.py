@@ -41,6 +41,7 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session, init_engine
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
+from .notifications import notify_recipients
 from .models import (
     Agent,
     AgentLink,
@@ -3070,6 +3071,25 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(
             f"Message {message.id} created by {sender.name} (to {', '.join(recipients_for_archive)})"
         )
+
+        # Send push notifications to recipients
+        try:
+            notification_results = await notify_recipients(
+                recipients=[{"name": name} for name in recipients_for_archive],
+                sender_name=sender.name,
+                subject=subject,
+                message_id=message.id or 0,
+                project_key=project.human_key,
+                enable_signals=True,
+            )
+            if notification_results.get("signals_created"):
+                await ctx.info(
+                    f"Push signals created for: {', '.join(notification_results['signals_created'])}"
+                )
+        except Exception as e:
+            # Don't fail message delivery if notifications fail
+            logger.warning(f"Push notification failed: {e}")
+
         if payload is None:
             raise RuntimeError("Message payload was not generated.")
         return payload
