@@ -3290,7 +3290,9 @@ def projects_adopt(
         src_archive = asyncio.run(_ensure_archive(settings, src.slug))
         dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
         moved_relpaths: list[str] = []
-        for path in sorted(src_archive.root.rglob("*"), key=str):
+        for path_item in sorted(src_archive.root.rglob("*"), key=str):
+            # rglob returns Path objects at runtime; cast for type checker
+            path = cast(Path, path_item)
             if not path.is_file():
                 continue
             if path.name.endswith(".lock") or path.name.endswith(".lock.owner.json"):
@@ -3925,7 +3927,7 @@ def _iter_doc_files(base: Path, max_depth: int) -> Iterable[Path]:
             dirnames[:] = []
         dirnames[:] = [d for d in dirnames if d not in SKIP_SCAN_DIRS]
         for name in filenames:
-            if cast(str, name).upper() in TARGET_DOC_FILENAMES:
+            if name.upper() in TARGET_DOC_FILENAMES:
                 yield Path(dirpath) / name
 
 

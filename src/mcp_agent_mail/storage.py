@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar
+from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar, cast
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
@@ -1033,7 +1033,9 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
     if not root.exists():
         return summary
 
-    for lock_path in sorted(root.rglob("*.lock"), key=str):
+    for lock_path_item in sorted(root.rglob("*.lock"), key=str):
+        # rglob returns Path objects at runtime; cast for type checker
+        lock_path = cast(Path, lock_path_item)
         summary["locks_scanned"] += 1
         try:
             lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=0.0)
@@ -1043,7 +1045,9 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
         except FileNotFoundError:
             continue
 
-    for metadata_path in sorted(root.rglob("*.lock.owner.json"), key=str):
+    for metadata_path_item in sorted(root.rglob("*.lock.owner.json"), key=str):
+        # rglob returns Path objects at runtime; cast for type checker
+        metadata_path = cast(Path, metadata_path_item)
         name = metadata_path.name
         if not name.endswith(".owner.json"):
             continue
