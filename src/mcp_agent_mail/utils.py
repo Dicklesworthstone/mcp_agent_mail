@@ -7,7 +7,7 @@ import re
 from typing import Iterable, Optional
 
 # Agent name word lists - used to generate memorable adjective+noun combinations
-# These lists are designed to provide a large namespace (62 x 71 = 4402 combinations)
+# These lists are designed to provide a large namespace (62 x 69 = 4278 combinations)
 # while keeping names easy to remember, spell, and distinguish.
 #
 # Design principles:
