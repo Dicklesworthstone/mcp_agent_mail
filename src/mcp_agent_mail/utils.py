@@ -6,7 +6,19 @@ import random
 import re
 from typing import Iterable, Optional
 
+# Agent name word lists - used to generate memorable adjective+noun combinations
+# These lists are designed to provide a large namespace (62 x 71 = 4402 combinations)
+# while keeping names easy to remember, spell, and distinguish.
+#
+# Design principles:
+# - All words are capitalized for consistent CamelCase output (e.g., "GreenLake")
+# - Adjectives are colors, weather, materials, and nature-themed descriptors
+# - Nouns are nature, geography, animals, and simple objects
+# - No offensive, controversial, or confusing words
+# - No words that could be easily misspelled or confused with each other
+
 ADJECTIVES: Iterable[str] = (
+    # Colors (original + expanded)
     "Red",
     "Orange",
     "Pink",
@@ -19,8 +31,62 @@ ADJECTIVES: Iterable[str] = (
     "Chartreuse",
     "Lilac",
     "Fuchsia",
+    "Azure",
+    "Amber",
+    "Coral",
+    "Crimson",
+    "Cyan",
+    "Gold",
+    "Gray",
+    "Indigo",
+    "Ivory",
+    "Jade",
+    "Lavender",
+    "Magenta",
+    "Maroon",
+    "Navy",
+    "Olive",
+    "Pearl",
+    "Rose",
+    "Ruby",
+    "Sage",
+    "Scarlet",
+    "Silver",
+    "Teal",
+    "Topaz",
+    "Violet",
+    "Cobalt",
+    "Copper",
+    "Bronze",
+    "Emerald",
+    "Sapphire",
+    "Turquoise",
+    # Weather and nature
+    "Sunny",
+    "Misty",
+    "Foggy",
+    "Stormy",
+    "Windy",
+    "Frosty",
+    "Dusty",
+    "Hazy",
+    "Cloudy",
+    "Rainy",
+    # Descriptive
+    "Swift",
+    "Quiet",
+    "Bold",
+    "Calm",
+    "Bright",
+    "Dark",
+    "Wild",
+    "Silent",
+    "Gentle",
+    "Rustic",
 )
+
 NOUNS: Iterable[str] = (
+    # Original nouns
     "Stone",
     "Lake",
     "Dog",
@@ -32,6 +98,67 @@ NOUNS: Iterable[str] = (
     "Hill",
     "Snow",
     "Castle",
+    # Geography and nature
+    "River",
+    "Forest",
+    "Valley",
+    "Canyon",
+    "Meadow",
+    "Prairie",
+    "Desert",
+    "Island",
+    "Cliff",
+    "Cave",
+    "Glacier",
+    "Waterfall",
+    "Spring",
+    "Stream",
+    "Reef",
+    "Dune",
+    "Ridge",
+    "Peak",
+    "Gorge",
+    "Marsh",
+    "Brook",
+    "Glen",
+    "Grove",
+    "Hollow",
+    "Basin",
+    "Cove",
+    "Bay",
+    "Harbor",
+    # Animals
+    "Fox",
+    "Wolf",
+    "Hawk",
+    "Eagle",
+    "Owl",
+    "Deer",
+    "Elk",
+    "Moose",
+    "Falcon",
+    "Raven",
+    "Heron",
+    "Crane",
+    "Otter",
+    "Beaver",
+    "Badger",
+    "Finch",
+    "Robin",
+    "Sparrow",
+    "Lynx",
+    "Puma",
+    # Objects and structures
+    "Tower",
+    "Bridge",
+    "Forge",
+    "Mill",
+    "Barn",
+    "Gate",
+    "Anchor",
+    "Lantern",
+    "Beacon",
+    "Compass",
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
