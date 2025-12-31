@@ -164,10 +164,12 @@ else
 fi
 
 # If we still don't have an agent name, warn the user
-_PROJ=$(basename "$TARGET_DIR")
+_PROJ_DISPLAY=$(basename "$TARGET_DIR")
+_PROJ="${TARGET_DIR}"
+_MCP_DIR="${ROOT_DIR}"
 if [[ -z "${_AGENT}" ]]; then
   log_warn "No agent name available. Agent-specific hooks will need manual configuration."
-  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ_DISPLAY}"
 fi
 
 echo

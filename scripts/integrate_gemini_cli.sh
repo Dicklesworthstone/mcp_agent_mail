@@ -191,8 +191,10 @@ fi
 # If we still don't have an agent name, hooks that need it will be omitted
 if [[ -z "${_AGENT}" ]]; then
   log_warn "No agent name available. Agent-specific hooks will need manual configuration."
-  _PROJ=$(basename "$TARGET_DIR")
-  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
+  _PROJ_DISPLAY=$(basename "$TARGET_DIR")
+  _PROJ="${TARGET_DIR}"
+  _MCP_DIR="${ROOT_DIR}"
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ_DISPLAY}"
 fi
 
 log_step "Installing inbox check hook"
@@ -208,7 +210,9 @@ else
 fi
 
 # Build the inbox check command with environment variables
-_PROJ=$(basename "$TARGET_DIR")
+_PROJ_DISPLAY=$(basename "$TARGET_DIR")
+_PROJ="${TARGET_DIR}"
+_MCP_DIR="${ROOT_DIR}"
 INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_INTERVAL='120' '${INBOX_HOOK}'"
 
 log_step "Updating ~/.gemini/settings.json with hooks"
@@ -229,19 +233,19 @@ if command -v jq >/dev/null 2>&1; then
   trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
   umask 077
   # Add hooks configuration using jq
-  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" '
+  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" --arg mcp_dir "$_MCP_DIR" '
     .hooks = (.hooks // {}) |
     .hooks.SessionStart = [{"matcher": "", "hooks": [
-      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations active " + $proj)},
-      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli acks pending " + $proj + " " + $agent + " --limit 20")}
+      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations active '" + $proj + "'")},
+      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli acks pending '" + $proj + "' '" + $agent + "' --limit 20")}
     ]}] |
     .hooks.BeforeTool = [{"matcher": "write_file|replace|edit_file", "hooks": [
-      {"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations soon " + $proj + " --minutes 10")}
+      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations soon '" + $proj + "' --minutes 10")}
     ]}] |
     .hooks.AfterTool = [
       {"matcher": "shell|run_command", "hooks": [{"type": "command", "command": $inbox_cmd}]},
-      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": ("uv run python -m mcp_agent_mail.cli list-acks --project " + $proj + " --agent " + $agent + " --limit 10")}]},
-      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": ("uv run python -m mcp_agent_mail.cli file_reservations list " + $proj)}]}
+      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli list-acks --project '" + $proj + "' --agent '" + $agent + "' --limit 10")}]},
+      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations list '" + $proj + "'")}]}
     ]
   ' "$HOME_SETTINGS" > "$TMP_MERGE"; then
     if mv "$TMP_MERGE" "$HOME_SETTINGS"; then
@@ -266,16 +270,16 @@ else
 {
   "hooks": {
     "SessionStart": [{"matcher": "", "hooks": [
-      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}"},
-      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20"}
+      {"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations active '${_PROJ}'"},
+      {"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli acks pending '${_PROJ}' '${_AGENT}' --limit 20"}
     ]}],
     "BeforeTool": [{"matcher": "write_file|replace|edit_file", "hooks": [
-      {"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10"}
+      {"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations soon '${_PROJ}' --minutes 10"}
     ]}],
     "AfterTool": [
       {"matcher": "shell|run_command", "hooks": [{"type": "command", "command": "${INBOX_CHECK_CMD}"}]},
-      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10"}]},
-      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}"}]}
+      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli list-acks --project '${_PROJ}' --agent '${_AGENT}' --limit 10"}]},
+      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations list '${_PROJ}'"}]}
     ]
   }
 }
