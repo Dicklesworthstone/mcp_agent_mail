@@ -76,10 +76,14 @@ SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
 mkdir -p "$CLAUDE_DIR"
 
 # Derive project name from TARGET_DIR (Bug 14 fix - was hardcoded to "backend")
-_PROJ=$(basename "$TARGET_DIR")
+_PROJ_DISPLAY=$(basename "$TARGET_DIR")
+# Store full path for CLI commands (Bug 48 fix - hooks need absolute path, not basename)
+_PROJ="${TARGET_DIR}"
+# Store MCP Agent Mail installation directory for hook commands (Bug 48 fix - hooks run from user's project dir)
+_MCP_DIR="${ROOT_DIR}"
 # Note: We'll set _AGENT after registering with the server (it auto-generates adjective+noun names)
 _AGENT=""
-log_ok "Using project name: ${_PROJ}"
+log_ok "Using project: ${_PROJ_DISPLAY} (${_PROJ})"
 
 # Backup existing file if it exists (Bug 5 fix - backup BEFORE creating empty file)
 if [[ -f "$SETTINGS_PATH" ]]; then
@@ -152,7 +156,7 @@ fi
 # If we still don't have an agent name, hooks that need it will be omitted
 if [[ -z "${_AGENT}" ]]; then
   log_warn "No agent name available. Agent-specific hooks will need manual configuration."
-  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ}"
+  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ_DISPLAY}"
 fi
 
 log_step "Writing MCP server config and hooks"
@@ -173,18 +177,18 @@ write_atomic "$SETTINGS_PATH" <<JSON
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}" },
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20" }
+          { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations active '${_PROJ}'" },
+          { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli acks pending '${_PROJ}' '${_AGENT}' --limit 20" }
         ]
       }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations soon '${_PROJ}' --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${INBOX_CHECK_CMD}" } ] },
-      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli list-acks --project '${_PROJ}' --agent '${_AGENT}' --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations list '${_PROJ}'" } ] }
     ]
   }
 }
@@ -213,18 +217,18 @@ write_atomic "$LOCAL_SETTINGS_PATH" <<JSON
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active ${_PROJ}" },
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending ${_PROJ} ${_AGENT} --limit 20" }
+          { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations active '${_PROJ}'" },
+          { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli acks pending '${_PROJ}' '${_AGENT}' --limit 20" }
         ]
       }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon ${_PROJ} --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations soon '${_PROJ}' --minutes 10" } ] }
     ],
     "PostToolUse": [
       { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${INBOX_CHECK_CMD}" } ] },
-      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project ${_PROJ} --agent ${_AGENT} --limit 10" } ] },
-      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list ${_PROJ}" } ] }
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli list-acks --project '${_PROJ}' --agent '${_AGENT}' --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations list '${_PROJ}'" } ] }
     ]
   }
 }
