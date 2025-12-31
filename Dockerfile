@@ -16,7 +16,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 WORKDIR /app
 
 # Copy project metadata and sync deps first for better caching
-COPY pyproject.toml ./
+# README.md is required by hatchling since pyproject.toml references it
+COPY pyproject.toml README.md ./
 # Install runtime deps
 RUN uv sync --no-dev
 
