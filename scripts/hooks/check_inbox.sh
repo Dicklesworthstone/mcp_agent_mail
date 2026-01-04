@@ -36,11 +36,12 @@ if [[ -z "${PROJECT}" || -z "${AGENT}" ]]; then
 fi
 
 # Detect placeholder values (indicates unconfigured settings)
-if [[ "${PROJECT}" == *"YOUR_"* || "${PROJECT}" == *"PLACEHOLDER"* || "${PROJECT}" == *"CONFIGURE"* ]]; then
+# Must match patterns used by install scripts and server-side validation
+if [[ "${PROJECT}" == *"YOUR_"* || "${PROJECT}" == *"PLACEHOLDER"* || "${PROJECT}" == "<"*">" ]]; then
   # Silent exit - configuration not complete
   exit 0
 fi
-if [[ "${AGENT}" == *"YOUR_"* || "${AGENT}" == *"PLACEHOLDER"* || "${AGENT}" == *"CONFIGURE"* ]]; then
+if [[ "${AGENT}" == *"YOUR_"* || "${AGENT}" == *"PLACEHOLDER"* || "${AGENT}" == "<"*">" ]]; then
   exit 0
 fi
 
