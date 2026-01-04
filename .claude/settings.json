@@ -1,4 +1,12 @@
 {
+  "_IMPORTANT_SETUP_INSTRUCTIONS": [
+    "This is a TEMPLATE file. You MUST replace ALL placeholder values before use:",
+    "  1. YOUR_BEARER_TOKEN -> Generate with: openssl rand -hex 32",
+    "  2. YOUR_PROJECT -> Your project slug (e.g., 'my-project')",
+    "  3. YOUR_PROJECT_PATH -> Absolute path (e.g., '/Users/you/projects/myproject')",
+    "  4. YOUR_AGENT_NAME -> Your agent name (e.g., 'BlueMountain')",
+    "Delete this _IMPORTANT_SETUP_INSTRUCTIONS key after configuring."
+  ],
   "mcpServers": {
     "mcp-agent-mail": {
       "type": "http",
