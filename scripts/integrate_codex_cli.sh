@@ -165,8 +165,6 @@ fi
 
 # If we still don't have an agent name, warn the user
 _PROJ_DISPLAY=$(basename "$TARGET_DIR")
-_PROJ="${TARGET_DIR}"
-_MCP_DIR="${ROOT_DIR}"
 if [[ -z "${_AGENT}" ]]; then
   log_warn "No agent name available. Agent-specific hooks will need manual configuration."
   log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ_DISPLAY}"
@@ -204,33 +202,35 @@ CODEX_DIR="${HOME}/.codex"
 mkdir -p "$CODEX_DIR"
 USER_TOML="${CODEX_DIR}/config.toml"
 backup_file "$USER_TOML"
+
+# Add notify configuration FIRST (top-level keys must come before sections in TOML)
+# We need to prepend it if it doesn't exist, to ensure it's at the top level
+if ! grep -q "^notify = " "$USER_TOML" 2>/dev/null; then
+  # Create temp file with notify at top, then append existing content
+  _TEMP_TOML=$(mktemp)
+  {
+    echo "# Notify hook for agent inbox reminders (fires on agent-turn-complete)"
+    echo "notify = [\"${NOTIFY_WRAPPER}\"]"
+    echo ""
+    if [[ -f "$USER_TOML" ]]; then
+      cat "$USER_TOML"
+    fi
+  } > "$_TEMP_TOML"
+  mv "$_TEMP_TOML" "$USER_TOML"
+  log_ok "Added notify configuration to ${USER_TOML}"
+else
+  log_warn "notify already configured in ${USER_TOML}, skipping"
+fi
+
+# Add MCP server section if not present (sections come after top-level keys)
 if ! grep -q "^\[mcp_servers.mcp_agent_mail\]" "$USER_TOML" 2>/dev/null; then
   {
     echo ""
     echo "# MCP servers configuration (mcp-agent-mail)"
     echo "[mcp_servers.mcp_agent_mail]"
-    echo "transport = \"http\""
     echo "url = \"${_URL}\""
     # Headers omitted for local dev (server allows localhost without Authorization)
   } >> "$USER_TOML"
-fi
-
-
-# Add hooks configuration for inbox reminders (only if not already set)
-if ! grep -q "^\[hooks\]" "$USER_TOML" 2>/dev/null; then
-  {
-    echo ""
-    echo "# Hooks for agent notifications"
-    echo "[hooks]"
-    echo "agent-turn-complete = [\"${NOTIFY_WRAPPER}\"]"
-  } >> "$USER_TOML"
-  log_ok "Added hooks section to ${USER_TOML}"
-elif ! grep -q "^agent-turn-complete = " "$USER_TOML" 2>/dev/null; then
-  # [hooks] exists but agent-turn-complete not set - need to insert after [hooks]
-  # Use sed to insert after [hooks] line
-  sed -i.bak "/^\[hooks\]/a\\
-agent-turn-complete = [\"${NOTIFY_WRAPPER}\"]" "$USER_TOML" && rm -f "${USER_TOML}.bak"
-  log_ok "Added agent-turn-complete hook to existing [hooks] section"
 fi
 
 # Also write project-local .codex/config.toml for portability
@@ -238,24 +238,25 @@ LOCAL_CODEX_DIR="${TARGET_DIR}/.codex"
 mkdir -p "$LOCAL_CODEX_DIR"
 LOCAL_TOML="${LOCAL_CODEX_DIR}/config.toml"
 
-# Bug 2 fix: Backup before writing, use write_atomic
+# Backup before writing
 if [[ -f "$LOCAL_TOML" ]]; then
   backup_file "$LOCAL_TOML"
 fi
 
+# IMPORTANT: In TOML, top-level keys must come BEFORE any [section] headers
+# The notify key must be at the very top, before [mcp_servers.mcp_agent_mail]
 write_atomic "$LOCAL_TOML" <<TOML
-# Project-local Codex MCP configuration
+# Project-local Codex configuration
+# NOTE: Top-level keys must appear BEFORE any [section] headers in TOML
+
+# Notify hook for agent inbox reminders (fires on agent-turn-complete)
+notify = ["${NOTIFY_WRAPPER}"]
+
+# MCP servers configuration
 [mcp_servers.mcp_agent_mail]
-transport = "http"
 url = "${_URL}"
 # headers can be added if needed; localhost allowed without Authorization
-
-# Hooks for agent notifications
-[hooks]
-agent-turn-complete = ["${NOTIFY_WRAPPER}"]
 TOML
-# Bug 1 fix: Ensure secure permissions
-# Bug #5 fix: set_secure_file logs its own warning, no need to duplicate
 set_secure_file "$LOCAL_TOML" || true
 
 log_ok "==> Done."
@@ -266,4 +267,3 @@ _print "Codex CLI should now be configured to use MCP Agent Mail."
 if [[ ${_SERVER_AVAILABLE} -eq 0 ]]; then
   _print "Remember to start the server: uv run python -m mcp_agent_mail.cli serve-http"
 fi
-

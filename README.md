@@ -2347,13 +2347,13 @@ The hook is configured as a `PostToolUse` hook that fires after `Bash` or `shell
 
 **Codex CLI:**
 
-Uses the `notify` configuration in `config.toml` to fire on `agent-turn-complete` events:
+Uses the top-level `notify` configuration in `config.toml` (must appear before any `[section]` headers) to fire on `agent-turn-complete` events:
 
 ```toml
 notify = ["/path/to/.codex/hooks/notify_wrapper.sh"]
 ```
 
-**Additional hooks installed:**
+**Additional hooks (Claude Code only):**
 
 | Event | What it does |
 |-------|-------------|
