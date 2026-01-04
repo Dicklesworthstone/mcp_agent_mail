@@ -7,6 +7,9 @@
 # Usage in ~/.codex/config.toml:
 #   notify = ["/path/to/codex_notify.sh"]
 #
+# JSON payload (passed as $1, but we don't parse it - just use invocation as trigger):
+#   {"type":"agent-turn-complete","thread-id":"...","turn-id":"...","cwd":"...","input-messages":[...],"last-assistant-message":"..."}
+#
 # Environment variables:
 #   AGENT_MAIL_PROJECT   - Project key (absolute path)
 #   AGENT_MAIL_AGENT     - Agent name
@@ -17,8 +20,9 @@
 # Don't use set -e because grep returns 1 when no match
 set -uo pipefail
 
-# Read the JSON notification from stdin (discard - we just use this as a trigger)
-cat >/dev/null 2>&1 || true
+# Codex CLI passes JSON notification as $1 (command-line argument), not stdin.
+# We don't need to parse it - we just use the notify invocation as a trigger to check inbox.
+# The argument is ignored; we simply proceed with rate-limited inbox checking.
 
 # Configuration with defaults
 PROJECT="${AGENT_MAIL_PROJECT:-}"
@@ -38,7 +42,7 @@ RATE_FILE="/tmp/mcp-mail-codex-${AGENT//[^a-zA-Z0-9]/_}"
 NOW=$(date +%s)
 
 if [[ -f "${RATE_FILE}" ]]; then
-  LAST_CHECK=$(cat "${RATE_FILE}" 2>/dev/null || echo 0)
+  LAST_CHECK=$(cat "${RATE_FILE}" 2>/dev/null | grep -E "^[0-9]+$" || echo 0)
   ELAPSED=$((NOW - LAST_CHECK))
   if [[ ${ELAPSED} -lt ${INTERVAL} ]]; then
     # Too soon, skip check
