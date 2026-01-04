@@ -190,13 +190,15 @@ else
   fi
 fi
 
-# If we still don't have an agent name, hooks that need it will be omitted
+# If we still don't have an agent name, use placeholder that hooks will detect
 if [[ -z "${_AGENT}" ]]; then
-  log_warn "No agent name available. Agent-specific hooks will need manual configuration."
+  _AGENT="YOUR_AGENT_NAME"
   _PROJ_DISPLAY=$(basename "$TARGET_DIR")
   _PROJ="${TARGET_DIR}"
   _MCP_DIR="${ROOT_DIR}"
-  log_warn "After starting the server, run: uv run python -m mcp_agent_mail.cli agents list ${_PROJ_DISPLAY}"
+  log_warn "No agent name available (server not running). Using placeholder '${_AGENT}'."
+  log_warn "Hooks with placeholder values will silently skip execution."
+  log_warn "After starting the server, reconfigure integration."
 fi
 
 log_step "Installing inbox check hook"

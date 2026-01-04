@@ -35,6 +35,15 @@ if [[ -z "${PROJECT}" || -z "${AGENT}" ]]; then
   exit 0
 fi
 
+# Detect placeholder values (indicates unconfigured settings)
+if [[ "${PROJECT}" == *"YOUR_"* || "${PROJECT}" == *"PLACEHOLDER"* || "${PROJECT}" == *"CONFIGURE"* ]]; then
+  # Silent exit - configuration not complete
+  exit 0
+fi
+if [[ "${AGENT}" == *"YOUR_"* || "${AGENT}" == *"PLACEHOLDER"* || "${AGENT}" == *"CONFIGURE"* ]]; then
+  exit 0
+fi
+
 # Rate limiting using temp file
 RATE_FILE="/tmp/mcp-mail-check-${AGENT//[^a-zA-Z0-9]/_}"
 NOW=$(date +%s)
