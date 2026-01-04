@@ -1419,6 +1419,34 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             data={"parameter": "project_key", "provided": repr(identifier)},
         )
 
+    # Detect common placeholder patterns - these indicate unconfigured hooks/settings
+    _placeholder_patterns = [
+        "YOUR_PROJECT",
+        "YOUR_PROJECT_PATH",
+        "YOUR_PROJECT_KEY",
+        "PLACEHOLDER",
+        "<PROJECT>",
+        "{PROJECT}",
+        "$PROJECT",
+    ]
+    identifier_upper = identifier.upper().strip()
+    for pattern in _placeholder_patterns:
+        if pattern in identifier_upper or identifier_upper == pattern:
+            raise ToolExecutionError(
+                "CONFIGURATION_ERROR",
+                f"Detected placeholder value '{identifier}' instead of a real project path. "
+                f"This typically means a hook or integration script hasn't been configured yet. "
+                f"Replace placeholder values in your .claude/settings.json or environment variables "
+                f"with actual project paths like '/Users/you/projects/myproject'.",
+                recoverable=True,
+                data={
+                    "parameter": "project_key",
+                    "provided": identifier,
+                    "detected_placeholder": pattern,
+                    "fix_hint": "Update AGENT_MAIL_PROJECT or project_key in your configuration",
+                },
+            )
+
     slug = slugify(identifier)
     async with get_session() as session:
         result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
@@ -2149,6 +2177,33 @@ async def _get_agent(project: Project, name: str) -> Agent:
             recoverable=True,
             data={"parameter": "agent_name", "provided": repr(name), "project": project.slug},
         )
+
+    # Detect placeholder values (indicates unconfigured hooks/settings)
+    _agent_placeholder_patterns = [
+        "YOUR_AGENT",
+        "YOUR_AGENT_NAME",
+        "AGENT_NAME",
+        "PLACEHOLDER",
+        "<AGENT>",
+        "{AGENT}",
+        "$AGENT",
+    ]
+    name_upper = name.upper().strip()
+    for pattern in _agent_placeholder_patterns:
+        if pattern in name_upper or name_upper == pattern:
+            raise ToolExecutionError(
+                "CONFIGURATION_ERROR",
+                f"Detected placeholder value '{name}' instead of a real agent name. "
+                f"This typically means a hook or integration script hasn't been configured yet. "
+                f"Replace placeholder values with your actual agent name (e.g., 'BlueMountain').",
+                recoverable=True,
+                data={
+                    "parameter": "agent_name",
+                    "provided": name,
+                    "detected_placeholder": pattern,
+                    "fix_hint": "Update AGENT_MAIL_AGENT or agent_name in your configuration",
+                },
+            )
 
     async with get_session() as session:
         result = await session.execute(
