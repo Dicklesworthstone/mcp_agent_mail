@@ -139,6 +139,18 @@ def _iso(dt: Optional[datetime]) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+def _ensure_utc_dt(dt: Optional[datetime]) -> Optional[datetime]:
+    """Ensure datetime is timezone-aware UTC.
+
+    Naive datetimes (from SQLite) are assumed to be UTC already.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 @products_app.command("ensure")
 def products_ensure(
     product_key: Annotated[Optional[str], typer.Argument(help="Product uid or name")] = None,
@@ -3390,7 +3402,7 @@ def file_reservations_active(
             file_reservation.path_pattern,
             "yes" if file_reservation.exclusive else "no",
             _iso(file_reservation.expires_ts),
-            _fmt_delta(file_reservation.expires_ts),
+            _fmt_delta(_ensure_utc_dt(file_reservation.expires_ts) or file_reservation.expires_ts),
         )
     console.print(table)
 
@@ -3429,7 +3441,7 @@ def file_reservations_soon(
 
     now = datetime.now(timezone.utc)
     cutoff = now + timedelta(minutes=minutes)
-    soon = [(c, a) for (c, a) in rows if c.expires_ts <= cutoff]
+    soon = [(c, a) for (c, a) in rows if (_ensure_utc_dt(c.expires_ts) or c.expires_ts) <= cutoff]
 
     table = Table(title=f"File Reservations expiring within {minutes}m — {project_record.human_key}", show_lines=False)
     table.add_column("ID")
@@ -3455,7 +3467,7 @@ def file_reservations_soon(
             file_reservation.path_pattern,
             "yes" if file_reservation.exclusive else "no",
             _iso(file_reservation.expires_ts),
-            _fmt_delta(file_reservation.expires_ts),
+            _fmt_delta(_ensure_utc_dt(file_reservation.expires_ts) or file_reservation.expires_ts),
         )
     console.print(table)
 

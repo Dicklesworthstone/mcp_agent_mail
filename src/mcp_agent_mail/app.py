@@ -515,6 +515,21 @@ def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _naive_utc(dt: Optional[datetime] = None) -> datetime:
+    """Return a naive UTC datetime for SQLite comparisons.
+
+    SQLite stores datetimes without timezone info. When comparing Python
+    datetime objects with SQLite DATETIME columns via SQLAlchemy, both must
+    be naive to avoid 'can't compare offset-naive and offset-aware datetimes'.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is not None:
+        # Convert to UTC first, then strip timezone
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def _max_datetime(*timestamps: Optional[datetime]) -> Optional[datetime]:
     values = [ts for ts in timestamps if ts is not None]
     if not values:
@@ -2499,7 +2514,7 @@ async def _expire_stale_file_reservations(
             .where(
                 cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.released_ts).is_(None),
-                FileReservation.expires_ts < now,  # type: ignore[arg-type]
+                cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
             )
         )
         expired_pairs = [cast(tuple[FileReservation, Agent], row) for row in expired_rows.all()]
@@ -2509,7 +2524,7 @@ async def _expire_stale_file_reservations(
                 .where(
                     cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    FileReservation.expires_ts < now,  # type: ignore[arg-type]
+                    cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
                 )
                 .values(released_ts=now)
             )
@@ -3100,7 +3115,7 @@ def build_mcp_server() -> FastMCP:
                         .where(
                             cast(Any, FileReservation.project_id) == project.id,
                             cast(Any, FileReservation.released_ts).is_(None),
-                            cast(Any, FileReservation.expires_ts) > now_ts,
+                            cast(Any, FileReservation.expires_ts) > _naive_utc(now_ts),
                         )
                     )
                     active_file_reservations = rows.all()
@@ -3840,7 +3855,7 @@ def build_mcp_server() -> FastMCP:
                     file_reservation_rows = await s2.execute(
                         cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
                         .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
-                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > now_utc)
+                        .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > _naive_utc(now_utc))
                     )
                     name_to_file_reservations: dict[str, list[str]] = {}
                     for c, nm in file_reservation_rows.all():
@@ -5988,7 +6003,7 @@ def build_mcp_server() -> FastMCP:
                 .where(
                     cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    cast(Any, FileReservation.expires_ts) > datetime.now(timezone.utc),
+                    cast(Any, FileReservation.expires_ts) > _naive_utc(),
                 )
             )
             existing_reservations = existing_rows.all()
