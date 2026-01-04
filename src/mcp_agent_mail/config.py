@@ -173,6 +173,14 @@ class Settings:
     messaging_auto_register_recipients: bool
     # When true, attempt a contact handshake automatically if delivery is blocked
     messaging_auto_handshake_on_block: bool
+    # Tool filtering (FastMCP tag-based filtering)
+    # Comma-separated list of tags to include (empty = all tags)
+    # Available tags match cluster names: infrastructure, identity, messaging,
+    # contact, search, file_reservations, workflow_macros, build_slots, product_bus
+    # Plus: "core" (essential tools for basic TDD workflows)
+    tool_include_tags: list[str]
+    # Comma-separated list of tags to exclude (takes precedence over include)
+    tool_exclude_tags: list[str]
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -332,6 +340,8 @@ def get_settings() -> Settings:
         agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
         messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="true"), default=True),
         messaging_auto_handshake_on_block=_bool(_decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
+        tool_include_tags=_csv("TOOL_INCLUDE_TAGS", default=""),
+        tool_exclude_tags=_csv("TOOL_EXCLUDE_TAGS", default=""),
     )
 
 
