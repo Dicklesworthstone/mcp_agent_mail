@@ -3367,6 +3367,9 @@ def file_reservations_active(
     now = datetime.now(timezone.utc)
 
     def _fmt_delta(dt: datetime) -> str:
+        # Ensure dt is timezone-aware (assume UTC if naive)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = dt - now
         total = int(delta.total_seconds())
         sign = "-" if total < 0 else ""
@@ -3440,6 +3443,9 @@ def file_reservations_soon(
     table.add_column("In")
 
     def _fmt_delta(dt: datetime) -> str:
+        # Ensure dt is timezone-aware (assume UTC if naive)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         delta = dt - now
         total = int(delta.total_seconds())
         sign = "-" if total < 0 else ""
