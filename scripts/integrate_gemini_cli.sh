@@ -69,11 +69,12 @@ if [[ -n "${_TOKEN}" ]]; then
 else
   AUTH_HEADER_LINE=''
 fi
+# Gemini CLI uses "httpUrl" for Streamable HTTP transport (not "url" which is for SSE)
 write_atomic "$OUT_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
-      "url": "${_URL}",
+      "httpUrl": "${_URL}",
       "headers": {${AUTH_HEADER_LINE}}
     }
   }
@@ -122,11 +123,12 @@ if [[ -f "$HOME_GEMINI_JSON" ]]; then
   backup_file "$HOME_GEMINI_JSON"
 fi
 
+# Gemini CLI uses "httpUrl" for Streamable HTTP transport
 write_atomic "$HOME_GEMINI_JSON" <<JSON
 {
   "mcpServers": {
     "mcp-agent-mail": {
-      "url": "${_URL}"
+      "httpUrl": "${_URL}"
     }
   }
 }
@@ -215,15 +217,17 @@ _PROJ="${TARGET_DIR}"
 _MCP_DIR="${ROOT_DIR}"
 INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_INTERVAL='120' '${INBOX_HOOK}'"
 
-log_step "Updating ~/.gemini/settings.json with hooks"
+log_step "Updating ~/.gemini/settings.json with hooks and MCP config"
 HOME_SETTINGS="${HOME}/.gemini/settings.json"
 if [[ -f "$HOME_SETTINGS" ]]; then
   backup_file "$HOME_SETTINGS"
 fi
 
-# Use jq to merge hooks into existing settings if available
+# Use jq to merge hooks AND MCP server config into existing settings if available
+# IMPORTANT: Gemini CLI uses "httpUrl" for Streamable HTTP transport, NOT "url" (which is for SSE)
+# and does NOT use a "type" key at all
 if command -v jq >/dev/null 2>&1; then
-  # jq is available - merge hooks into existing or create new
+  # jq is available - merge hooks and MCP config into existing or create new
   if [[ ! -f "$HOME_SETTINGS" ]]; then
     # Create minimal starting point if file doesn't exist
     umask 077
@@ -232,8 +236,21 @@ if command -v jq >/dev/null 2>&1; then
   TMP_MERGE="${HOME_SETTINGS}.tmp.$$.$(date +%s)"
   trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
   umask 077
-  # Add hooks configuration using jq
-  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" --arg mcp_dir "$_MCP_DIR" '
+  # Add hooks configuration AND MCP server using jq
+  # Note: Use httpUrl for Streamable HTTP transport; do NOT include "type" key
+  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" --arg mcp_dir "$_MCP_DIR" --arg url "$_URL" --arg token "$_TOKEN" '
+    # Add MCP server config with httpUrl (Streamable HTTP transport)
+    .mcpServers = (.mcpServers // {}) |
+    .mcpServers["mcp-agent-mail"] = (
+      if $token != "" then
+        {"httpUrl": $url, "headers": {"Authorization": ("Bearer " + $token)}}
+      else
+        {"httpUrl": $url}
+      end
+    ) |
+    # Remove any existing "type" key that may have been added by older versions
+    .mcpServers["mcp-agent-mail"] |= del(.type) |
+    # Add hooks configuration
     .hooks = (.hooks // {}) |
     .hooks.SessionStart = [{"matcher": "", "hooks": [
       {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations active '" + $proj + "'")},
@@ -249,25 +266,34 @@ if command -v jq >/dev/null 2>&1; then
     ]
   ' "$HOME_SETTINGS" > "$TMP_MERGE"; then
     if mv "$TMP_MERGE" "$HOME_SETTINGS"; then
-      log_ok "Updated ${HOME_SETTINGS} with hooks"
+      log_ok "Updated ${HOME_SETTINGS} with hooks and MCP server config"
     else
       log_err "Failed to update ${HOME_SETTINGS}"
       rm -f "$TMP_MERGE" 2>/dev/null
     fi
   else
-    log_err "jq merge failed for hooks"
+    log_err "jq merge failed for hooks and MCP config"
     rm -f "$TMP_MERGE" 2>/dev/null
   fi
   trap - EXIT INT TERM
 else
   # No jq available - only create new file if it doesn't exist (to avoid overwriting)
   if [[ -f "$HOME_SETTINGS" ]]; then
-    log_warn "jq not found; cannot safely merge hooks into existing ${HOME_SETTINGS}"
-    log_warn "Please install jq or manually add hooks configuration"
+    log_warn "jq not found; cannot safely merge hooks and MCP config into existing ${HOME_SETTINGS}"
+    log_warn "Please install jq or manually add the configuration"
   else
-    log_warn "jq not found; creating new settings.json with hooks"
+    log_warn "jq not found; creating new settings.json with hooks and MCP config"
+    # Build auth header for JSON (conditionally include)
+    if [[ -n "${_TOKEN}" ]]; then
+      _MCP_SERVER_JSON='"mcp-agent-mail": {"httpUrl": "'"${_URL}"'", "headers": {"Authorization": "Bearer '"${_TOKEN}"'"}}'
+    else
+      _MCP_SERVER_JSON='"mcp-agent-mail": {"httpUrl": "'"${_URL}"'"}'
+    fi
     write_atomic "$HOME_SETTINGS" <<JSON
 {
+  "mcpServers": {
+    ${_MCP_SERVER_JSON}
+  },
   "hooks": {
     "SessionStart": [{"matcher": "", "hooks": [
       {"type": "command", "command": "cd '${_MCP_DIR}' && uv run python -m mcp_agent_mail.cli file_reservations active '${_PROJ}'"},
@@ -288,25 +314,16 @@ JSON
 fi
 set_secure_file "$HOME_SETTINGS" || true
 
-log_step "Registering MCP server in Gemini (user scope)"
+# Skip the `gemini mcp add` command - it creates invalid config with "type": "http" key
+# which Gemini CLI doesn't recognize. We've already written the correct config via jq above.
+log_ok "MCP server config written directly to settings.json (using httpUrl for Streamable HTTP transport)"
 if command -v gemini >/dev/null 2>&1; then
+  # Clean up any invalid config that may have been added by older versions of this script
+  log_step "Cleaning up any invalid MCP config from previous runs"
   set +e
   gemini mcp remove -s user mcp-agent-mail >/dev/null 2>&1
   set -e
-  _add_rc=1
-  if [[ -n "${_TOKEN}" ]]; then
-    # Prefer placing required positionals first; some yargs parsers are strict about ordering
-    if gemini mcp add -s user -t http mcp-agent-mail "${_URL}" -H "Authorization: Bearer ${_TOKEN}"; then
-      _add_rc=0
-    else
-      log_warn "Gemini MCP add with header failed; retrying without header (server may allow anonymous)."
-    fi
-  fi
-  if [[ ${_add_rc} -ne 0 ]]; then
-    gemini mcp add -s user -t http mcp-agent-mail "${_URL}" || true
-  fi
-  log_ok "Gemini MCP registration attempted for mcp-agent-mail -> ${_URL}."
+  log_ok "Gemini MCP cleanup complete. Config is now in ${HOME_SETTINGS}"
 else
-  log_warn "Gemini CLI not found in PATH; skipped automatic registration."; _print "Run: gemini mcp add -s user -t http mcp-agent-mail ${_URL}"
+  log_warn "Gemini CLI not found in PATH; config written to ${HOME_SETTINGS}"
 fi
-
