@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
-from .config import DatabaseSettings, Settings, get_settings
+from .config import DatabaseSettings, Settings, clear_settings_cache, get_settings
 
 T = TypeVar("T")
 
@@ -90,12 +90,22 @@ def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: f
 def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     """Build async SQLAlchemy engine with SQLite-optimized settings for concurrency."""
     from sqlalchemy import event
+    from sqlalchemy.engine import make_url
 
     # For SQLite, enable WAL mode and set timeout for better concurrent access
     connect_args = {}
     is_sqlite = "sqlite" in settings.url.lower()
 
     if is_sqlite:
+        # Ensure parent directory exists for file-backed SQLite URLs.
+        # SQLite returns "unable to open database file" when the directory is missing.
+        try:
+            parsed = make_url(settings.url)
+            if parsed.database and parsed.database != ":memory:":
+                Path(parsed.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
         # Register datetime adapters ONCE globally for Python 3.12+ compatibility
         # These are module-level registrations, not per-connection
         import datetime as dt_module
@@ -134,13 +144,17 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
             "check_same_thread": False,  # Required for async SQLite
         }
 
+    # SQLite has low write concurrency; large pools can exhaust FDs under stress tests.
+    pool_size = 5 if is_sqlite else 25
+    max_overflow = 5 if is_sqlite else 25
+
     engine = create_async_engine(
         settings.url,
         echo=settings.echo,
         future=True,
         pool_pre_ping=True,
-        pool_size=25,  # Increased for high-concurrency workloads
-        max_overflow=25,  # Allow up to 50 total connections under load
+        pool_size=pool_size,
+        max_overflow=max_overflow,
         pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
         connect_args=connect_args,
@@ -229,10 +243,38 @@ async def ensure_schema(settings: Settings | None = None) -> None:
 def reset_database_state() -> None:
     """Test helper to reset global engine/session state."""
     global _engine, _session_factory, _schema_ready, _schema_lock
+    # Dispose any existing engine/pool first to avoid leaking file descriptors across tests.
+    if _engine is not None:
+        engine = _engine
+        try:
+            # Prefer a full async dispose when possible (aiosqlite uses background threads).
+            try:
+                running = asyncio.get_running_loop()
+            except RuntimeError:
+                running = None
+
+            if running is not None and running.is_running():
+                # Can't block; fall back to sync pool disposal (best effort).
+                engine.sync_engine.dispose()
+            else:
+                try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and not loop.is_running():
+                    loop.run_until_complete(engine.dispose())
+                else:
+                    asyncio.run(engine.dispose())
+        except Exception:
+            # Last resort: sync pool disposal.
+            with suppress(Exception):
+                engine.sync_engine.dispose()
     _engine = None
     _session_factory = None
     _schema_ready = False
     _schema_lock = None
+    # Tests frequently mutate env vars; keep settings cache in sync with DB resets.
+    clear_settings_cache()
 
 
 def _setup_fts(connection: Any) -> None:
