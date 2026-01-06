@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import random
 import string
-from collections import Counter
 
 import pytest
 from fastmcp import Client
@@ -31,7 +30,6 @@ from sqlalchemy import text
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema, get_session
-
 
 # ============================================================================
 # Helper functions
@@ -528,7 +526,7 @@ class TestConcurrentArchiveWrites:
             # Under high concurrency some registrations may fail due to transient async issues.
             # The key test is: no duplicates among successful registrations.
             successful_names = [r for r in results if isinstance(r, str)]
-            failed_count = sum(1 for r in results if isinstance(r, Exception))
+            sum(1 for r in results if isinstance(r, Exception))
 
             # At least 70% should succeed
             min_success = int(num_agents * 0.7)
@@ -585,7 +583,7 @@ class TestConcurrentArchiveWrites:
             # Under high concurrency some sends may fail due to transient async issues.
             # The key test is: messages that succeeded have data integrity.
             successful_subjects = []
-            for i, r in enumerate(results):
+            for _i, r in enumerate(results):
                 if not isinstance(r, Exception):
                     successful_subjects.append(r)
 
@@ -752,7 +750,7 @@ class TestNoDeadlocks:
             # The key test is: successful agents have data integrity.
             successful_subjects = []
             failed_agents = 0
-            for i, r in enumerate(results):
+            for _i, r in enumerate(results):
                 if isinstance(r, Exception):
                     failed_agents += 1
                 else:
