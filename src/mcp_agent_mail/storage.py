@@ -2063,25 +2063,26 @@ async def create_diagnostic_backup(
         def _create_bundles() -> list[str]:
             bundles: list[str] = []
             repo = Repo(repo_path)
-            repo_path / "projects"
-
-            if project_slug:
-                # Single project bundle
-                bundle_path = backup_path / f"{project_slug}.bundle"
-                try:
-                    # Create bundle of the entire repo (includes all history)
-                    repo.git.bundle("create", str(bundle_path), "--all")
-                    bundles.append(str(bundle_path))
-                except Exception:
-                    pass  # Skip if bundle creation fails
-            else:
-                # Bundle entire archive
-                bundle_path = backup_path / "archive.bundle"
-                try:
-                    repo.git.bundle("create", str(bundle_path), "--all")
-                    bundles.append(str(bundle_path))
-                except Exception:
-                    pass
+            try:
+                if project_slug:
+                    # Single project bundle
+                    bundle_path = backup_path / f"{project_slug}.bundle"
+                    try:
+                        # Create bundle of the entire repo (includes all history)
+                        repo.git.bundle("create", str(bundle_path), "--all")
+                        bundles.append(str(bundle_path))
+                    except Exception:
+                        pass  # Skip if bundle creation fails
+                else:
+                    # Bundle entire archive
+                    bundle_path = backup_path / "archive.bundle"
+                    try:
+                        repo.git.bundle("create", str(bundle_path), "--all")
+                        bundles.append(str(bundle_path))
+                    except Exception:
+                        pass
+            finally:
+                repo.close()
 
             return bundles
 
