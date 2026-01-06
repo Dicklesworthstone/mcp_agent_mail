@@ -201,6 +201,11 @@ class _LRURepoCache:
 _REPO_CACHE: _LRURepoCache = _LRURepoCache()  # Uses default maxsize=16
 _REPO_CACHE_LOCK: asyncio.Lock | None = None
 
+# Semaphore to limit concurrent repo operations (prevents FD exhaustion under high concurrency)
+# This acts as a second line of defense beyond the LRU cache
+_REPO_SEMAPHORE: asyncio.Semaphore | None = None
+_REPO_SEMAPHORE_LIMIT: int = 32  # Max concurrent repo operations
+
 
 def _get_repo_cache_lock() -> asyncio.Lock:
     """Get or create the repo cache lock (must be called from async context)."""
@@ -208,6 +213,70 @@ def _get_repo_cache_lock() -> asyncio.Lock:
     if _REPO_CACHE_LOCK is None:
         _REPO_CACHE_LOCK = asyncio.Lock()
     return _REPO_CACHE_LOCK
+
+
+def _get_repo_semaphore() -> asyncio.Semaphore:
+    """Get or create the repo semaphore (must be called from async context)."""
+    global _REPO_SEMAPHORE
+    if _REPO_SEMAPHORE is None:
+        _REPO_SEMAPHORE = asyncio.Semaphore(_REPO_SEMAPHORE_LIMIT)
+    return _REPO_SEMAPHORE
+
+
+def get_fd_usage() -> tuple[int, int]:
+    """Get current and maximum file descriptor counts.
+
+    Returns (current_count, max_limit) tuple.
+    On platforms where this isn't available, returns (-1, -1).
+    """
+    try:
+        import resource
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Count open file descriptors by checking /proc/self/fd (Linux) or /dev/fd (macOS)
+        fd_dir = Path("/dev/fd") if sys.platform == "darwin" else Path("/proc/self/fd")
+        if fd_dir.exists():
+            current = len(list(fd_dir.iterdir()))
+            return (current, soft_limit)
+        return (-1, soft_limit)
+    except (ImportError, OSError, AttributeError):
+        return (-1, -1)
+
+
+def get_fd_headroom() -> int:
+    """Get remaining file descriptor headroom before hitting the limit.
+
+    Returns -1 if unable to determine.
+    """
+    current, limit = get_fd_usage()
+    if current < 0 or limit < 0:
+        return -1
+    return max(0, limit - current)
+
+
+def proactive_fd_cleanup(*, threshold: int = 100) -> int:
+    """Proactively cleanup resources if file descriptor headroom is low.
+
+    Args:
+        threshold: Minimum headroom required; cleanup runs if below this.
+
+    Returns:
+        Number of repos freed (0 if no cleanup needed or unable to check).
+    """
+    headroom = get_fd_headroom()
+    if headroom < 0:
+        # Can't determine headroom, skip cleanup
+        return 0
+    if headroom >= threshold:
+        # Sufficient headroom, no cleanup needed
+        return 0
+    # Low headroom - force cleanup of evicted repos
+    freed = _REPO_CACHE._cleanup_evicted()
+    # If still low, clear some cached repos too
+    new_headroom = get_fd_headroom()
+    if new_headroom >= 0 and new_headroom < threshold // 2:
+        # Critical: clear all cached repos
+        freed += _REPO_CACHE.clear()
+    return freed
 
 
 def clear_repo_cache() -> int:

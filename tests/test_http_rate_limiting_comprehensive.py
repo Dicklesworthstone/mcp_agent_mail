@@ -387,7 +387,7 @@ class TestRedisBackend:
                 return 1 if len(lua_calls) <= 2 else 0
 
         fake_pkg = SimpleNamespace(Redis=FakeRedis)
-        sys.modules["redis.asyncio"] = fake_pkg
+        sys.modules["redis.asyncio"] = fake_pkg  # type: ignore[assignment]
 
         server = build_mcp_server()
         app = build_http_app(settings, server)
@@ -440,7 +440,7 @@ class TestRedisBackend:
                 raise ConnectionError("Redis connection failed")
 
         fake_pkg = SimpleNamespace(Redis=FakeRedis)
-        sys.modules["redis.asyncio"] = fake_pkg
+        sys.modules["redis.asyncio"] = fake_pkg  # type: ignore[assignment]
 
         server = build_mcp_server()
         app = build_http_app(settings, server)

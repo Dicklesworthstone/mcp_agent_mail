@@ -575,6 +575,7 @@ async def test_release_specific_paths(isolated_env):
         )
 
         project_id = await get_project_id(project_key)
+        assert project_id is not None, "Project should exist"
         initial_count = await count_active_reservations(project_id)
 
         # Release only path_a

@@ -21,6 +21,7 @@ Reference: mcp_agent_mail-hqk
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from fastmcp import Client
@@ -32,7 +33,7 @@ from mcp_agent_mail.app import build_mcp_server
 # ============================================================================
 
 
-def parse_resource_json(blocks) -> dict | list | None:
+def parse_resource_json(blocks) -> Any:
     """Parse JSON from resource content blocks."""
     if not blocks:
         return None
@@ -70,6 +71,7 @@ async def test_project_resource_returns_project_details(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None, "Project resource should return JSON"
+        assert isinstance(data, dict), "Project resource should be a dict"
         assert "human_key" in data, "Should include human_key"
         assert "slug" in data, "Should include slug"
         assert "agents" in data, "Should include agents list"
@@ -134,6 +136,7 @@ async def test_agents_resource_returns_agent_list(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None, "Agents resource should return JSON"
+        assert isinstance(data, dict), "Agents resource should be a dict"
         assert "project" in data, "Should include project info"
         assert "agents" in data, "Should include agents list"
         assert isinstance(data["agents"], list), "Agents should be a list"
@@ -187,6 +190,7 @@ async def test_agents_resource_shows_unread_count(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, dict), "Agents resource should be a dict"
         receiver_agent = next((a for a in data["agents"] if a["name"] == receiver_name), None)
         assert receiver_agent is not None, f"Should find {receiver_name} agent"
         # At least 3 from the test messages (may be more due to contact request flow)
@@ -228,6 +232,7 @@ async def test_inbox_resource_returns_messages(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None, "Inbox resource should return JSON"
+        assert isinstance(data, dict), "Inbox resource should be a dict"
         assert "project" in data, "Should include project"
         assert "agent" in data, "Should include agent"
         assert "count" in data, "Should include count"
@@ -267,6 +272,7 @@ async def test_inbox_resource_with_limit_param(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, dict), "Inbox resource should be a dict"
         assert len(data["messages"]) <= 2, "Should respect limit parameter"
 
 
@@ -299,6 +305,7 @@ async def test_inbox_resource_with_include_bodies(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, dict), "Inbox resource should be a dict"
         assert len(data["messages"]) >= 1
         msg = data["messages"][0]
         assert "body_md" in msg, "Should include body when requested"
@@ -346,6 +353,7 @@ async def test_outbox_resource_returns_sent_messages(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None, "Outbox resource should return JSON"
+        assert isinstance(data, dict), "Outbox resource should be a dict"
         assert "project" in data, "Should include project"
         assert "agent" in data, "Should include agent"
         assert "count" in data, "Should include count"
@@ -391,6 +399,7 @@ async def test_outbox_resource_with_limit(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, dict), "Outbox resource should be a dict"
         assert len(data["messages"]) <= 3, "Should respect limit"
 
 
@@ -617,6 +626,7 @@ async def test_file_reservations_resource_active_only(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, list), "File reservations should be a list"
         # Should only have the active reservation
         active_patterns = [r["path_pattern"] for r in data]
         assert "active.py" in active_patterns, "Should include active reservation"
@@ -650,6 +660,7 @@ async def test_file_reservations_resource_includes_metadata(isolated_env):
         data = parse_resource_json(blocks)
 
         assert data is not None
+        assert isinstance(data, list), "File reservations should be a list"
         assert len(data) >= 1
         reservation = data[0]
         assert "created_ts" in reservation, "Should have created_ts"
