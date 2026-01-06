@@ -588,24 +588,56 @@ async def uninstall_guard(repo_path: Path) -> bool:
 
     hooks_dir = _resolve_hooks_dir(repo_path)
     removed = False
+
+    def _has_other_plugins(run_dir: Path) -> bool:
+        """Check if there are any plugins remaining after removing ours."""
+        if not run_dir.exists() or not run_dir.is_dir():
+            return False
+        # List all files, excluding our plugin
+        return any(item.is_file() and item.name != "50-agent-mail.py" for item in run_dir.iterdir())
+
     # Remove our hooks.d plugins if present
     for sub in ("pre-commit", "pre-push"):
         plugin = hooks_dir / "hooks.d" / sub / "50-agent-mail.py"
         if plugin.exists():
             await asyncio.to_thread(plugin.unlink)
             removed = True
+
     # Legacy top-level single-file uninstall (pre-chain-runner installs)
+    # Only remove chain-runner if no other plugins depend on it
     pre_commit = hooks_dir / "pre-commit"
     pre_push = hooks_dir / "pre-push"
     SENTINELS = ("mcp-agent-mail guard hook", "AGENT_NAME environment variable is required.")
-    for hook_path in (pre_commit, pre_push):
+    for hook_name, hook_path in [("pre-commit", pre_commit), ("pre-push", pre_push)]:
         if hook_path.exists():
             try:
                 content = (await asyncio.to_thread(hook_path.read_text, "utf-8")).strip()
             except Exception:
                 content = ""
-            # Remove our chain-runner files (leave other hooks intact)
-            if "mcp-agent-mail chain-runner" in content or any(s in content for s in SENTINELS):
+
+            is_our_chain_runner = "mcp-agent-mail chain-runner" in content
+            is_legacy_hook = any(s in content for s in SENTINELS)
+
+            if is_our_chain_runner:
+                # Check if other plugins exist that need the chain-runner
+                run_dir = hooks_dir / "hooks.d" / hook_name
+                orig_path = hooks_dir / f"{hook_name}.orig"
+
+                if _has_other_plugins(run_dir):
+                    # Other plugins exist - keep the chain-runner so they continue to work
+                    pass
+                elif orig_path.exists():
+                    # No other plugins, but .orig exists - restore original hook
+                    await asyncio.to_thread(hook_path.unlink)
+                    await asyncio.to_thread(orig_path.replace, hook_path)
+                    removed = True
+                else:
+                    # No other plugins and no .orig - safe to remove chain-runner
+                    await asyncio.to_thread(hook_path.unlink)
+                    removed = True
+            elif is_legacy_hook:
+                # Legacy single-file hook (not chain-runner) - safe to remove
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
+
     return removed
