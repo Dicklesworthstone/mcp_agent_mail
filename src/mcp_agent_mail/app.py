@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[misc,assignment]
     GitWildMatchPattern = None  # type: ignore[misc,assignment]
 from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
-from sqlalchemy.exc import IntegrityError, NoResultFound
+from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
@@ -102,6 +102,22 @@ TOOL_CLUSTER_MAP: dict[str, str] = {}
 TOOL_METADATA: dict[str, dict[str, Any]] = {}
 
 RECENT_TOOL_USAGE: deque[tuple[datetime, str, Optional[str], Optional[str]]] = deque(maxlen=4096)
+
+# Tools that are safe to auto-retry after transient OS-level FD exhaustion (EMFILE).
+# Keep this list conservative: do NOT include tools like send_message that can create
+# duplicate side effects if re-run after a partial success.
+_EMFILE_RETRY_TOOLS: frozenset[str] = frozenset(
+    {
+        "ensure_project",
+        "register_agent",
+        "create_agent_identity",
+        "fetch_inbox",
+        "search_messages",
+        "search_messages_product",
+        "list_contacts",
+        "whois",
+    }
+)
 
 CLUSTER_SETUP = "infrastructure"
 CLUSTER_IDENTITY = "identity"
@@ -245,7 +261,23 @@ def _instrument_tool(
             result = None
             error = None
             try:
-                result = await func(*args, **kwargs)
+                try:
+                    result = await func(*args, **kwargs)
+                except OSError as exc:
+                    # Best-effort recovery for EMFILE on safe/idempotent tools.
+                    import errno
+
+                    if exc.errno == errno.EMFILE and tool_name in _EMFILE_RETRY_TOOLS:
+                        with suppress(Exception):
+                            clear_repo_cache()
+                        with suppress(Exception):
+                            import gc
+
+                            gc.collect()
+                        await asyncio.sleep(0.05)
+                        result = await func(*args, **kwargs)
+                    else:
+                        raise
             except ToolExecutionError as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
@@ -487,12 +519,12 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[N
                     await asyncio.shield(dispose_task)
                 except asyncio.CancelledError as exc:
                     cancelled = exc
-                    with suppress(Exception):
+                    with suppress(BaseException):
                         await dispose_task
                 except Exception:
-                    with suppress(Exception):
+                    with suppress(BaseException):
                         await dispose_task
-            with suppress(Exception):
+            with suppress(BaseException):
                 clear_repo_cache()
             if cancelled is not None:
                 raise cancelled
@@ -1142,6 +1174,29 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     mode_used = "dir" if not settings_local.worktrees_enabled else mode_config
     target_path = str(Path(human_key).expanduser().resolve())
 
+    if not settings_local.worktrees_enabled:
+        # Keep default behavior lightweight when worktree features are disabled.
+        # (Avoid touching GitPython / spawning git subprocesses unnecessarily.)
+        slug_value = slugify(human_key)
+        try:
+            project_uid = hashlib.sha1(target_path.encode("utf-8")).hexdigest()[:20]
+        except Exception:
+            project_uid = str(uuid.uuid4())
+        return {
+            "slug": slug_value,
+            "identity_mode_used": "dir",
+            "canonical_path": target_path,
+            "human_key": human_key,
+            "repo_root": None,
+            "git_common_dir": None,
+            "branch": None,
+            "worktree_name": None,
+            "core_ignorecase": None,
+            "normalized_remote": None,
+            "project_uid": project_uid,
+            "discovery": None,
+        }
+
     repo_root: Optional[str] = None
     git_common_dir: Optional[str] = None
     branch: Optional[str] = None
@@ -1383,25 +1438,35 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
     slug = _compute_project_slug(human_key)
-    async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
-        project = result.scalars().first()
-        if project:
-            return project
-        project = Project(slug=slug, human_key=human_key)
-        session.add(project)
+    for attempt in range(6):
         try:
-            await session.commit()
-        except IntegrityError:
-            # Concurrent ensure_project: another caller created the row. Treat as idempotent.
-            await session.rollback()
-            result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
-            project = result.scalars().first()
-            if project:
+            async with get_session() as session:
+                result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+                project = result.scalars().first()
+                if project:
+                    return project
+                project = Project(slug=slug, human_key=human_key)
+                session.add(project)
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    # Concurrent ensure_project: another caller created the row. Treat as idempotent.
+                    await session.rollback()
+                    result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+                    project = result.scalars().first()
+                    if project:
+                        return project
+                    raise
+                await session.refresh(project)  # type: ignore[arg-type]
                 return project
-            raise
-        await session.refresh(project)  # type: ignore[arg-type]
-        return project
+        except OperationalError as exc:
+            error_msg = str(exc).lower()
+            is_lock_error = any(phrase in error_msg for phrase in ("database is locked", "database is busy", "locked"))
+            if not is_lock_error or attempt >= 5:
+                raise
+            await asyncio.sleep(min(0.05 * (2**attempt), 0.5))
+
+    raise RuntimeError("ensure_project retry loop exited unexpectedly")
 
     # -- Identity inspection resource is registered inside build_mcp_server below
 
@@ -3490,10 +3555,10 @@ def build_mcp_server() -> FastMCP:
         await _ctx_info_safe(ctx, f"Ensuring project for key '{human_key}'.")
         project = await _ensure_project(human_key)
         await ensure_archive(settings, project.slug)
-        # Compose identity metadata similar to resource://identity
-        ident = _resolve_project_identity(human_key)
         payload = _project_to_dict(project)
-        payload.update(ident)
+        # Worktree identity metadata is opt-in to keep default calls lightweight and stable.
+        if settings.worktrees_enabled:
+            payload.update(_resolve_project_identity(human_key))
         return payload
 
     @mcp.tool(name="register_agent")
