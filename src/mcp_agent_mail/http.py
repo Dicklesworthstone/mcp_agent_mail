@@ -237,7 +237,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 params = payload.get("params", {}) or {}
                 tool_name = params.get("name")
                 return "tools", tool_name if isinstance(tool_name, str) else None
-            if rpc_method == "resources/read":
+            if rpc_method.startswith("resources/"):
                 return "resources", None
             return "other", None
         return "other", None
@@ -277,7 +277,10 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                     "local delta = now - ts\n"
                     "tokens = math.min(burst, tokens + delta * rate)\n"
                     "local allowed = 0\n"
-                    "if tokens >= 1 then tokens = tokens - 1 allowed = 1 end\n"
+                    "if tokens >= 1 then\n"
+                    "  tokens = tokens - 1\n"
+                    "  allowed = 1\n"
+                    "end\n"
                     "redis.call('HMSET', key, 'tokens', tokens, 'ts', now)\n"
                     "redis.call('EXPIRE', key, math.ceil(burst / math.max(rate, 0.001)))\n"
                     "return allowed\n"
