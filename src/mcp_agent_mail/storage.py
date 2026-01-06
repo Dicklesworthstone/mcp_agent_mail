@@ -1975,3 +1975,300 @@ async def get_historical_inbox_snapshot(
 
     result: dict[str, Any] = await _to_thread(_get_snapshot)
     return result
+
+
+# =============================================================================
+# Doctor Backup Infrastructure
+# =============================================================================
+
+
+@dataclass(slots=True)
+class BackupManifest:
+    """Manifest describing a diagnostic backup."""
+
+    version: int
+    created_at: str
+    reason: str
+    database_path: str | None
+    project_bundles: list[str]
+    storage_root: str
+    restore_instructions: str
+
+
+async def create_diagnostic_backup(
+    settings: Settings,
+    project_slug: str | None = None,
+    backup_dir: Path | None = None,
+    reason: str = "doctor-repair",
+) -> Path:
+    """Create a timestamped backup before repair operations.
+
+    Format: Git bundle + SQLite copy (fast, complete, restorable)
+
+    Args:
+        settings: Application settings
+        project_slug: Specific project to backup, or None for all projects
+        backup_dir: Directory to store backup, or None for default
+        reason: Reason for backup (included in manifest)
+
+    Returns:
+        Path to backup directory containing:
+        - {project_slug}.bundle (git bundle of project archive)
+        - database.sqlite3 (copy of full database)
+        - manifest.json (what was backed up, when, why, restore instructions)
+    """
+    import shutil
+
+    from .db import get_database_path
+
+    # Create backup directory
+    if backup_dir is None:
+        backup_dir = Path(settings.storage.root) / "backups"
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    backup_path = backup_dir / f"{timestamp}_{reason}"
+    backup_path.mkdir(parents=True, exist_ok=True)
+
+    project_bundles: list[str] = []
+    database_copied: str | None = None
+
+    # Get the archive repo
+    archive_root = Path(settings.storage.root)
+    if not archive_root.exists():
+        raise ValueError(f"Storage root does not exist: {archive_root}")
+
+    # Copy database
+    db_path = get_database_path(settings)
+    if db_path and db_path.exists():
+        db_backup = backup_path / "database.sqlite3"
+
+        def _copy_db() -> None:
+            # Use shutil.copy2 to preserve metadata
+            shutil.copy2(db_path, db_backup)
+            # Also copy WAL and SHM files if they exist
+            wal_path = db_path.with_suffix(".sqlite3-wal")
+            shm_path = db_path.with_suffix(".sqlite3-shm")
+            if wal_path.exists():
+                shutil.copy2(wal_path, backup_path / wal_path.name)
+            if shm_path.exists():
+                shutil.copy2(shm_path, backup_path / shm_path.name)
+
+        await _to_thread(_copy_db)
+        database_copied = str(db_backup)
+
+    # Create git bundles for projects
+    repo_path = archive_root
+    if repo_path.exists() and (repo_path / ".git").exists():
+
+        def _create_bundles() -> list[str]:
+            bundles: list[str] = []
+            repo = Repo(repo_path)
+            repo_path / "projects"
+
+            if project_slug:
+                # Single project bundle
+                bundle_path = backup_path / f"{project_slug}.bundle"
+                try:
+                    # Create bundle of the entire repo (includes all history)
+                    repo.git.bundle("create", str(bundle_path), "--all")
+                    bundles.append(str(bundle_path))
+                except Exception:
+                    pass  # Skip if bundle creation fails
+            else:
+                # Bundle entire archive
+                bundle_path = backup_path / "archive.bundle"
+                try:
+                    repo.git.bundle("create", str(bundle_path), "--all")
+                    bundles.append(str(bundle_path))
+                except Exception:
+                    pass
+
+            return bundles
+
+        project_bundles = await _to_thread(_create_bundles)
+
+    # Write manifest
+    manifest = BackupManifest(
+        version=1,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        reason=reason,
+        database_path=database_copied,
+        project_bundles=project_bundles,
+        storage_root=str(archive_root),
+        restore_instructions=(
+            "To restore:\n"
+            "1. Stop any running MCP Agent Mail processes\n"
+            "2. Copy database.sqlite3 back to original location\n"
+            "3. Use 'git clone --bare <bundle> <target>' to restore archive\n"
+            "4. Restart MCP Agent Mail"
+        ),
+    )
+
+    manifest_path = backup_path / "manifest.json"
+
+    def _write_manifest() -> None:
+        with manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": manifest.version,
+                    "created_at": manifest.created_at,
+                    "reason": manifest.reason,
+                    "database_path": manifest.database_path,
+                    "project_bundles": manifest.project_bundles,
+                    "storage_root": manifest.storage_root,
+                    "restore_instructions": manifest.restore_instructions,
+                },
+                f,
+                indent=2,
+            )
+
+    await _to_thread(_write_manifest)
+
+    return backup_path
+
+
+async def list_backups(settings: Settings) -> list[dict[str, Any]]:
+    """List all available diagnostic backups.
+
+    Returns:
+        List of backup info dicts with path, created_at, reason, size
+    """
+    backup_dir = Path(settings.storage.root) / "backups"
+    if not backup_dir.exists():
+        return []
+
+    backups: list[dict[str, Any]] = []
+
+    def _scan_backups() -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for entry in sorted(backup_dir.iterdir(), reverse=True):
+            if entry.is_dir():
+                manifest_path = entry / "manifest.json"
+                if manifest_path.exists():
+                    try:
+                        with manifest_path.open(encoding="utf-8") as f:
+                            manifest_data = json.load(f)
+                        # Calculate total size
+                        total_size = sum(
+                            p.stat().st_size for p in entry.rglob("*") if p.is_file()
+                        )
+                        results.append({
+                            "path": str(entry),
+                            "created_at": manifest_data.get("created_at"),
+                            "reason": manifest_data.get("reason"),
+                            "size_bytes": total_size,
+                            "has_database": manifest_data.get("database_path") is not None,
+                            "bundle_count": len(manifest_data.get("project_bundles", [])),
+                        })
+                    except (json.JSONDecodeError, OSError):
+                        pass
+        return results
+
+    backups = await _to_thread(_scan_backups)
+    return backups
+
+
+async def restore_from_backup(
+    settings: Settings,
+    backup_path: Path,
+    target_project: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Restore from a diagnostic backup.
+
+    Args:
+        settings: Application settings
+        backup_path: Path to backup directory
+        target_project: Specific project to restore, or None for all
+        dry_run: If True, only report what would be restored
+
+    Returns:
+        Dict with restoration results
+    """
+    import shutil
+
+    from .db import get_database_path
+
+    manifest_path = backup_path / "manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(f"No manifest.json found in {backup_path}")
+
+    def _read_manifest() -> dict[str, Any]:
+        with manifest_path.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    manifest_data = await _to_thread(_read_manifest)
+
+    results: dict[str, Any] = {
+        "backup_path": str(backup_path),
+        "created_at": manifest_data.get("created_at"),
+        "reason": manifest_data.get("reason"),
+        "dry_run": dry_run,
+        "database_restored": False,
+        "bundles_restored": [],
+        "errors": [],
+    }
+
+    if dry_run:
+        results["would_restore_database"] = manifest_data.get("database_path") is not None
+        results["would_restore_bundles"] = manifest_data.get("project_bundles", [])
+        return results
+
+    # Restore database
+    db_backup = backup_path / "database.sqlite3"
+    if db_backup.exists():
+        db_path = get_database_path(settings)
+        if db_path:
+            try:
+
+                def _restore_db() -> None:
+                    # Backup current DB first (safety)
+                    if db_path.exists():
+                        shutil.copy2(db_path, db_path.with_suffix(".sqlite3.pre-restore"))
+                    shutil.copy2(db_backup, db_path)
+                    # Also restore WAL and SHM if present in backup
+                    for suffix in ["-wal", "-shm"]:
+                        backup_file = backup_path / f"database.sqlite3{suffix}"
+                        target_file = db_path.with_suffix(f".sqlite3{suffix}")
+                        if backup_file.exists():
+                            shutil.copy2(backup_file, target_file)
+
+                await _to_thread(_restore_db)
+                results["database_restored"] = True
+            except Exception as e:
+                results["errors"].append(f"Database restore failed: {e}")
+
+    # Restore git bundles
+    bundles = manifest_data.get("project_bundles", [])
+    archive_root = Path(settings.storage.root)
+
+    def _restore_bundle(bundle_to_restore: Path, target_root: Path) -> None:
+        """Restore a git bundle to target directory."""
+        # Backup current archive
+        if target_root.exists():
+            backup_archive = target_root.with_suffix(".pre-restore")
+            if backup_archive.exists():
+                shutil.rmtree(backup_archive)
+            shutil.copytree(target_root, backup_archive)
+            shutil.rmtree(target_root)
+
+        # Clone from bundle
+        Repo.clone_from(str(bundle_to_restore), str(target_root))
+
+    for bundle_path_str in bundles:
+        bundle_path = Path(bundle_path_str)
+        if not bundle_path.exists():
+            # Try relative to backup_path
+            bundle_path = backup_path / bundle_path.name
+        if not bundle_path.exists():
+            results["errors"].append(f"Bundle not found: {bundle_path_str}")
+            continue
+
+        try:
+            await _to_thread(_restore_bundle, bundle_path, archive_root)
+            results["bundles_restored"].append(str(bundle_path))
+        except Exception as e:
+            results["errors"].append(f"Bundle restore failed for {bundle_path}: {e}")
+
+    return results

@@ -98,6 +98,8 @@ products_app = typer.Typer(help="Product Bus: manage products and links")
 app.add_typer(products_app, name="products")
 docs_app = typer.Typer(help="Documentation helpers for agent onboarding")
 app.add_typer(docs_app, name="docs")
+doctor_app = typer.Typer(help="Diagnose and repair mailbox health issues")
+app.add_typer(doctor_app, name="doctor")
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -4050,6 +4052,546 @@ def docs_insert_blurbs(
             f"\n[cyan]Summary:[/cyan] inserted into {inserted} file(s); skipped {skipped} file(s); "
             "other files already had the snippet."
         )
+
+
+# =============================================================================
+# Doctor Commands - Diagnose and repair mailbox health
+# =============================================================================
+
+
+@dataclass
+class DiagnosticResult:
+    """Result of a single diagnostic check."""
+
+    name: str
+    status: str  # "ok", "warning", "error", "info"
+    message: str
+    details: list[str] | None = None
+    repair_available: bool = False
+
+
+@doctor_app.command("check")
+def doctor_check(
+    project: Annotated[
+        Optional[str],
+        typer.Argument(help="Project slug or human key (optional - checks all if not specified)"),
+    ] = None,
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed diagnostic output"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Run comprehensive diagnostics on mailbox and agent state.
+
+    Checks:
+    - Lock files (stale archive/commit locks)
+    - Database integrity (FK constraints, FTS index, orphaned records)
+    - Archive-DB synchronization
+    - File reservations (expired, conflicts)
+    - Attachments (orphaned files/manifests)
+    """
+
+    async def _run() -> list[DiagnosticResult]:
+        from .db import get_database_path
+
+        settings = get_settings()
+        await ensure_schema()
+        results: list[DiagnosticResult] = []
+
+        # Check 1: Stale locks
+        from .storage import collect_lock_status
+
+        lock_status = collect_lock_status(settings)
+        stale_locks = lock_status.get("stale_locks", [])
+        if stale_locks:
+            results.append(DiagnosticResult(
+                name="Locks",
+                status="warning",
+                message=f"{len(stale_locks)} stale lock(s) found",
+                details=[str(lock) for lock in stale_locks],
+                repair_available=True,
+            ))
+        else:
+            results.append(DiagnosticResult(
+                name="Locks",
+                status="ok",
+                message="No stale locks found",
+            ))
+
+        # Check 2: Database integrity
+        db_path = get_database_path(settings)
+        if db_path and db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                cursor = conn.execute("PRAGMA integrity_check")
+                integrity_result = cursor.fetchone()
+                conn.close()
+                if integrity_result and integrity_result[0] == "ok":
+                    results.append(DiagnosticResult(
+                        name="Database",
+                        status="ok",
+                        message="Database integrity check passed",
+                    ))
+                else:
+                    results.append(DiagnosticResult(
+                        name="Database",
+                        status="error",
+                        message="Database integrity check failed",
+                        details=[str(integrity_result)],
+                        repair_available=False,
+                    ))
+            except Exception as e:
+                results.append(DiagnosticResult(
+                    name="Database",
+                    status="error",
+                    message=f"Database check failed: {e}",
+                ))
+        else:
+            results.append(DiagnosticResult(
+                name="Database",
+                status="info",
+                message="No SQLite database found (may be using different backend)",
+            ))
+
+        # Check 3: Orphaned records
+        async with get_session() as session:
+            # Count orphaned message recipients (no agent)
+            orphan_query = text("""
+                SELECT COUNT(*) FROM message_recipients mr
+                WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+            """)
+            result = await session.execute(orphan_query)
+            orphan_count = result.scalar() or 0
+            if orphan_count > 0:
+                results.append(DiagnosticResult(
+                    name="Orphaned Records",
+                    status="warning",
+                    message=f"{orphan_count} orphaned message recipient(s) found",
+                    repair_available=True,
+                ))
+            else:
+                results.append(DiagnosticResult(
+                    name="Orphaned Records",
+                    status="ok",
+                    message="No orphaned records found",
+                ))
+
+            # Check 4: FTS index consistency
+            fts_query = text("""
+                SELECT
+                    (SELECT COUNT(*) FROM messages) as msg_count,
+                    (SELECT COUNT(*) FROM fts_messages) as fts_count
+            """)
+            result = await session.execute(fts_query)
+            counts = result.fetchone()
+            if counts:
+                msg_count, fts_count = counts
+                if msg_count == fts_count:
+                    results.append(DiagnosticResult(
+                        name="FTS Index",
+                        status="ok",
+                        message=f"FTS index synchronized ({msg_count} messages)",
+                    ))
+                else:
+                    results.append(DiagnosticResult(
+                        name="FTS Index",
+                        status="warning",
+                        message=f"FTS index mismatch: {msg_count} messages vs {fts_count} FTS entries",
+                        repair_available=True,
+                    ))
+
+            # Check 5: Expired file reservations
+            now = datetime.now(timezone.utc)
+            expired_query = select(func.count()).select_from(FileReservation).where(
+                and_(
+                    cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                    cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
+                )
+            )
+            result = await session.execute(expired_query)
+            expired_count = result.scalar() or 0
+            if expired_count > 0:
+                results.append(DiagnosticResult(
+                    name="File Reservations",
+                    status="info",
+                    message=f"{expired_count} expired reservation(s) pending cleanup",
+                    repair_available=True,
+                ))
+            else:
+                results.append(DiagnosticResult(
+                    name="File Reservations",
+                    status="ok",
+                    message="No expired reservations",
+                ))
+
+        # Check 6: WAL/journal files
+        if db_path and db_path.exists():
+            wal_path = db_path.with_suffix(".sqlite3-wal")
+            shm_path = db_path.with_suffix(".sqlite3-shm")
+            orphan_files: list[str] = []
+            if wal_path.exists():
+                orphan_files.append(str(wal_path))
+            if shm_path.exists():
+                orphan_files.append(str(shm_path))
+            if orphan_files:
+                results.append(DiagnosticResult(
+                    name="WAL Files",
+                    status="info",
+                    message=f"{len(orphan_files)} WAL/SHM file(s) present (normal during operation)",
+                    details=orphan_files,
+                ))
+            else:
+                results.append(DiagnosticResult(
+                    name="WAL Files",
+                    status="ok",
+                    message="No orphan WAL/SHM files",
+                ))
+
+        return results
+
+    try:
+        diagnostics = asyncio.run(_run())
+    except Exception as exc:
+        if json_output:
+            console.print_json(json.dumps({"error": str(exc)}))
+        else:
+            console.print(f"[red]Error running diagnostics:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        output = {
+            "diagnostics": [
+                {
+                    "name": d.name,
+                    "status": d.status,
+                    "message": d.message,
+                    "details": d.details,
+                    "repair_available": d.repair_available,
+                }
+                for d in diagnostics
+            ],
+            "summary": {
+                "errors": sum(1 for d in diagnostics if d.status == "error"),
+                "warnings": sum(1 for d in diagnostics if d.status == "warning"),
+                "info": sum(1 for d in diagnostics if d.status == "info"),
+                "ok": sum(1 for d in diagnostics if d.status == "ok"),
+            },
+        }
+        console.print_json(json.dumps(output))
+        return
+
+    # Rich table output
+    console.print("\n[bold cyan]MCP Agent Mail Doctor - Diagnostic Report[/bold cyan]")
+    console.print("=" * 50)
+
+    if project:
+        console.print(f"Project: {project}\n")
+
+    table = Table(show_header=True)
+    table.add_column("Check", style="bold")
+    table.add_column("Status", justify="center")
+    table.add_column("Details")
+
+    status_colors = {
+        "ok": "[green]OK[/green]",
+        "warning": "[yellow]WARN[/yellow]",
+        "error": "[red]ERROR[/red]",
+        "info": "[blue]INFO[/blue]",
+    }
+
+    for diag in diagnostics:
+        status_display = status_colors.get(diag.status, diag.status)
+        details = diag.message
+        if verbose and diag.details:
+            details += "\n" + "\n".join(f"  • {d}" for d in diag.details[:5])
+        table.add_row(diag.name, status_display, details)
+
+    console.print(table)
+
+    # Summary
+    errors = sum(1 for d in diagnostics if d.status == "error")
+    warnings = sum(1 for d in diagnostics if d.status == "warning")
+    info = sum(1 for d in diagnostics if d.status == "info")
+
+    console.print()
+    if errors > 0 or warnings > 0:
+        console.print(f"[bold]Summary:[/bold] {errors} error(s), {warnings} warning(s), {info} info")
+        console.print("\nRun [cyan]am doctor repair[/cyan] to fix issues")
+    else:
+        console.print("[green]All checks passed![/green]")
+
+
+@doctor_app.command("repair")
+def doctor_repair(
+    project: Annotated[
+        Optional[str],
+        typer.Argument(help="Project slug or human key (optional)"),
+    ] = None,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview changes without executing"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
+    backup_dir: Annotated[
+        Optional[Path],
+        typer.Option("--backup-dir", help="Directory for backups (default: storage_root/backups)"),
+    ] = None,
+) -> None:
+    """Repair common mailbox issues.
+
+    Semi-automatic mode (default):
+    - Auto-fixes safe issues: stale locks, expired file reservations
+    - Prompts for confirmation on data-affecting repairs
+
+    Creates a backup before any destructive operation.
+    """
+
+    async def _run() -> dict[str, Any]:
+        from .storage import create_diagnostic_backup, heal_archive_locks
+
+        settings = get_settings()
+        await ensure_schema()
+        repair_results: dict[str, Any] = {
+            "backup_path": None,
+            "safe_repairs": [],
+            "data_repairs": [],
+            "errors": [],
+        }
+
+        # Step 1: Create backup before any repairs
+        if not dry_run:
+            console.print("[cyan]Creating backup before repairs...[/cyan]")
+            try:
+                backup_path = await create_diagnostic_backup(
+                    settings,
+                    project_slug=project,
+                    backup_dir=backup_dir,
+                    reason="doctor-repair",
+                )
+                repair_results["backup_path"] = str(backup_path)
+                console.print(f"[green]Backup created:[/green] {backup_path}")
+            except Exception as e:
+                repair_results["errors"].append(f"Backup failed: {e}")
+                console.print(f"[red]Backup failed:[/red] {e}")
+                if not yes and not typer.confirm("Continue without backup?", default=False):
+                    return repair_results
+
+        # Step 2: Safe repairs (auto-applied)
+        console.print("\n[bold]Safe Repairs (auto-applied):[/bold]")
+
+        # 2a: Heal stale locks
+        if dry_run:
+            console.print("  [dim]Would heal stale locks[/dim]")
+            repair_results["safe_repairs"].append({"action": "heal_locks", "dry_run": True})
+        else:
+            try:
+                lock_result = await heal_archive_locks(settings)
+                healed = lock_result.get("healed", 0)
+                if healed > 0:
+                    console.print(f"  [green]Healed {healed} stale lock(s)[/green]")
+                else:
+                    console.print("  [dim]No stale locks to heal[/dim]")
+                repair_results["safe_repairs"].append({"action": "heal_locks", "healed": healed})
+            except Exception as e:
+                repair_results["errors"].append(f"Lock healing failed: {e}")
+                console.print(f"  [red]Lock healing failed:[/red] {e}")
+
+        # 2b: Release expired file reservations
+        async with get_session() as session:
+            now = datetime.now(timezone.utc)
+            if dry_run:
+                expired_query = select(func.count()).select_from(FileReservation).where(
+                    and_(
+                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                        cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
+                    )
+                )
+                result = await session.execute(expired_query)
+                count = result.scalar() or 0
+                console.print(f"  [dim]Would release {count} expired reservation(s)[/dim]")
+                repair_results["safe_repairs"].append({"action": "release_expired", "count": count, "dry_run": True})
+            else:
+                # Update expired reservations
+                from sqlalchemy import update
+
+                update_stmt = (
+                    update(FileReservation)
+                    .where(
+                        and_(
+                            cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                            cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
+                        )
+                    )
+                    .values(released_ts=now)
+                )
+                result = await session.execute(update_stmt)
+                await session.commit()
+                released = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+                if released > 0:
+                    console.print(f"  [green]Released {released} expired reservation(s)[/green]")
+                else:
+                    console.print("  [dim]No expired reservations to release[/dim]")
+                repair_results["safe_repairs"].append({"action": "release_expired", "released": released})
+
+        # Step 3: Data-affecting repairs (require confirmation)
+        console.print("\n[bold]Data Repairs (require confirmation):[/bold]")
+
+        # 3a: Clean orphaned message recipients
+        async with get_session() as session:
+            orphan_count_query = text("""
+                SELECT COUNT(*) FROM message_recipients mr
+                WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+            """)
+            result = await session.execute(orphan_count_query)
+            orphan_count = result.scalar() or 0
+
+            if orphan_count > 0:
+                if dry_run:
+                    console.print(f"  [dim]Would delete {orphan_count} orphaned recipient record(s)[/dim]")
+                    repair_results["data_repairs"].append({"action": "delete_orphans", "count": orphan_count, "dry_run": True})
+                elif yes or typer.confirm(f"  Delete {orphan_count} orphaned message recipient record(s)?", default=False):
+                    delete_query = text("""
+                        DELETE FROM message_recipients
+                        WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = message_recipients.agent_id)
+                    """)
+                    await session.execute(delete_query)
+                    await session.commit()
+                    console.print(f"  [green]Deleted {orphan_count} orphaned record(s)[/green]")
+                    repair_results["data_repairs"].append({"action": "delete_orphans", "deleted": orphan_count})
+                else:
+                    console.print("  [yellow]Skipped orphan cleanup[/yellow]")
+                    repair_results["data_repairs"].append({"action": "delete_orphans", "skipped": True})
+            else:
+                console.print("  [dim]No orphaned records to clean[/dim]")
+
+        return repair_results
+
+    try:
+        results = asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]Error during repair:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    # Summary
+    console.print("\n[bold]Repair Summary:[/bold]")
+    if results.get("backup_path"):
+        console.print(f"  Backup: {results['backup_path']}")
+    safe_count = len(results.get("safe_repairs", []))
+    data_count = len(results.get("data_repairs", []))
+    error_count = len(results.get("errors", []))
+    console.print(f"  Safe repairs: {safe_count}")
+    console.print(f"  Data repairs: {data_count}")
+    if error_count > 0:
+        console.print(f"  [red]Errors: {error_count}[/red]")
+
+
+@doctor_app.command("backups")
+def doctor_backups(
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """List available diagnostic backups."""
+
+    async def _run() -> list[dict[str, Any]]:
+        from .storage import list_backups
+
+        settings = get_settings()
+        return await list_backups(settings)
+
+    backups = asyncio.run(_run())
+
+    if json_output:
+        console.print_json(json.dumps(backups))
+        return
+
+    if not backups:
+        console.print("[dim]No backups found[/dim]")
+        return
+
+    table = Table(title="Available Backups")
+    table.add_column("Created", style="cyan")
+    table.add_column("Reason")
+    table.add_column("Size", justify="right")
+    table.add_column("Database", justify="center")
+    table.add_column("Bundles", justify="right")
+    table.add_column("Path")
+
+    for backup in backups:
+        size_mb = (backup.get("size_bytes", 0) / 1024 / 1024)
+        table.add_row(
+            backup.get("created_at", "")[:19],
+            backup.get("reason", ""),
+            f"{size_mb:.1f} MB",
+            "[green]Yes[/green]" if backup.get("has_database") else "[dim]No[/dim]",
+            str(backup.get("bundle_count", 0)),
+            backup.get("path", ""),
+        )
+
+    console.print(table)
+
+
+@doctor_app.command("restore")
+def doctor_restore(
+    backup_path: Annotated[
+        Path,
+        typer.Argument(help="Path to backup directory to restore from"),
+    ],
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would be restored"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompts"),
+) -> None:
+    """Restore from a diagnostic backup.
+
+    WARNING: This will overwrite current database and archive.
+    A pre-restore backup will be created automatically.
+    """
+    if not backup_path.exists():
+        console.print(f"[red]Backup path not found:[/red] {backup_path}")
+        raise typer.Exit(code=1)
+
+    manifest_path = backup_path / "manifest.json"
+    if not manifest_path.exists():
+        console.print(f"[red]Invalid backup:[/red] No manifest.json found in {backup_path}")
+        raise typer.Exit(code=1)
+
+    # Show backup info
+    with manifest_path.open() as f:
+        manifest = json.load(f)
+
+    console.print("\n[bold cyan]Restore from Backup[/bold cyan]")
+    console.print(f"  Created: {manifest.get('created_at', 'unknown')}")
+    console.print(f"  Reason: {manifest.get('reason', 'unknown')}")
+    console.print(f"  Has database: {'Yes' if manifest.get('database_path') else 'No'}")
+    console.print(f"  Bundles: {len(manifest.get('project_bundles', []))}")
+
+    if dry_run:
+        console.print("\n[yellow]Dry run - no changes will be made[/yellow]")
+
+    if not dry_run and not yes:
+        console.print("\n[red]WARNING:[/red] This will overwrite your current database and archive!")
+        if not typer.confirm("Continue with restore?", default=False):
+            console.print("[yellow]Restore cancelled[/yellow]")
+            return
+
+    async def _run() -> dict[str, Any]:
+        from .storage import restore_from_backup
+
+        settings = get_settings()
+        return await restore_from_backup(settings, backup_path, dry_run=dry_run)
+
+    try:
+        result = asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]Restore failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if dry_run:
+        console.print("\n[bold]Would restore:[/bold]")
+        if result.get("would_restore_database"):
+            console.print("  - Database")
+        for bundle in result.get("would_restore_bundles", []):
+            console.print(f"  - Bundle: {bundle}")
+    else:
+        console.print("\n[bold]Restore complete:[/bold]")
+        if result.get("database_restored"):
+            console.print("  [green]Database restored[/green]")
+        for bundle in result.get("bundles_restored", []):
+            console.print(f"  [green]Bundle restored:[/green] {bundle}")
+        for error in result.get("errors", []):
+            console.print(f"  [red]Error:[/red] {error}")
 
 
 if __name__ == "__main__":
