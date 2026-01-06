@@ -19,8 +19,6 @@ from zipfile import ZipFile
 from typer.testing import CliRunner
 
 from mcp_agent_mail.cli import app
-from mcp_agent_mail.db import ensure_schema, get_session
-from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
 
 runner = CliRunner()
 
