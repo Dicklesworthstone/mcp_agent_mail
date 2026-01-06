@@ -4199,7 +4199,8 @@ def doctor_check(
                     ))
 
             # Check 5: Expired file reservations
-            now = datetime.now(timezone.utc)
+            # Use naive UTC datetime for consistency with how FileReservation stores timestamps
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             expired_query = select(func.count()).select_from(FileReservation).where(
                 and_(
                     cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
@@ -4393,7 +4394,8 @@ def doctor_repair(
 
         # 2b: Release expired file reservations
         async with get_session() as session:
-            now = datetime.now(timezone.utc)
+            # Use naive UTC datetime for consistency with how FileReservation stores timestamps
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             if dry_run:
                 expired_query = select(func.count()).select_from(FileReservation).where(
                     and_(
