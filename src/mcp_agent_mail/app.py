@@ -1104,6 +1104,7 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     repo_root: Optional[str] = None
     git_common_dir: Optional[str] = None
     branch: Optional[str] = None
+    default_branch: Optional[str] = None
     worktree_name: Optional[str] = None
     core_ignorecase: Optional[bool] = None
     normalized_remote: Optional[str] = None
@@ -1219,6 +1220,14 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
                 except Exception:
                     remote_url_local = None
             normalized_remote = _norm_remote(remote_url_local)
+            try:
+                sym = repo.git.symbolic_ref(
+                    f"refs/remotes/{settings_local.project_identity_remote or 'origin'}/HEAD"
+                ).strip()
+                if sym.startswith("refs/remotes/"):
+                    default_branch = sym.rsplit("/", 1)[-1]
+            except Exception:
+                default_branch = "main"
     except (InvalidGitRepositoryError, NoSuchPathError, Exception):
         pass  # Non-git directory; continue with fallback values
 
@@ -1264,14 +1273,6 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
         # Remote fingerprint
         remote_uid: Optional[str] = None
         try:
-            default_branch = None
-            if repo is not None:
-                try:
-                    sym = repo.git.symbolic_ref(f"refs/remotes/{settings_local.project_identity_remote or 'origin'}/HEAD").strip()
-                    if sym.startswith("refs/remotes/"):
-                        default_branch = sym.rsplit("/", 1)[-1]
-                except Exception:
-                    default_branch = "main"
             if normalized_remote:
                 fingerprint = f"{normalized_remote}@{default_branch or 'main'}"
                 remote_uid = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:20]
