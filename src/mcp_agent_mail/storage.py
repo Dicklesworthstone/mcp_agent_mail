@@ -1622,7 +1622,12 @@ async def get_file_content(
             # Check size before reading
             if obj.size > max_size_bytes:
                 raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
-            return str(obj.data_stream.read().decode("utf-8", errors="replace"))
+
+            stream = obj.data_stream
+            try:
+                return str(stream.read().decode("utf-8", errors="replace"))
+            finally:
+                stream.close()
         except KeyError:
             return None
 
