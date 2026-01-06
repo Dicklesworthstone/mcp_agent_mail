@@ -11,6 +11,7 @@ Reference: mcp_agent_mail-enu
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,14 @@ from typer.testing import CliRunner
 from mcp_agent_mail.cli import app
 
 runner = CliRunner()
+
+# ANSI escape code pattern for stripping colors from CLI output
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text for reliable assertion matching."""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 # ============================================================================
@@ -150,7 +159,9 @@ def test_archive_list_empty_directory(isolated_env, tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["archive", "list"])
     assert result.exit_code == 0
-    assert "does not exist" in result.stdout or "No saved" in result.stdout
+    # Strip ANSI codes for reliable matching in CI
+    stdout = strip_ansi(result.stdout)
+    assert "does not exist" in stdout or "No saved" in stdout
 
 
 def test_archive_list_nonexistent_directory(isolated_env, tmp_path, monkeypatch):
@@ -400,31 +411,39 @@ def test_archive_commands_help_text(isolated_env):
     """archive commands show helpful usage information."""
     result = runner.invoke(app, ["archive", "--help"])
     assert result.exit_code == 0
-    assert "save" in result.stdout
-    assert "list" in result.stdout
-    assert "restore" in result.stdout
+    # Strip ANSI codes for reliable matching in CI
+    stdout = strip_ansi(result.stdout)
+    assert "save" in stdout
+    assert "list" in stdout
+    assert "restore" in stdout
 
 
 def test_archive_save_help_text(isolated_env):
     """archive save shows its options in help."""
     result = runner.invoke(app, ["archive", "save", "--help"])
     assert result.exit_code == 0
-    assert "--project" in result.stdout or "-p" in result.stdout
-    assert "--label" in result.stdout or "-l" in result.stdout
-    assert "--scrub-preset" in result.stdout
+    # Strip ANSI codes for reliable matching in CI
+    stdout = strip_ansi(result.stdout)
+    assert "--project" in stdout or "-p" in stdout
+    assert "--label" in stdout or "-l" in stdout
+    assert "--scrub-preset" in stdout
 
 
 def test_archive_list_help_text(isolated_env):
     """archive list shows its options in help."""
     result = runner.invoke(app, ["archive", "list", "--help"])
     assert result.exit_code == 0
-    assert "--limit" in result.stdout or "-n" in result.stdout
-    assert "--json" in result.stdout
+    # Strip ANSI codes for reliable matching in CI
+    stdout = strip_ansi(result.stdout)
+    assert "--limit" in stdout or "-n" in stdout
+    assert "--json" in stdout
 
 
 def test_archive_restore_help_text(isolated_env):
     """archive restore shows its options in help."""
     result = runner.invoke(app, ["archive", "restore", "--help"])
     assert result.exit_code == 0
-    assert "--force" in result.stdout or "-f" in result.stdout
-    assert "--dry-run" in result.stdout
+    # Strip ANSI codes for reliable matching in CI
+    stdout = strip_ansi(result.stdout)
+    assert "--force" in stdout or "-f" in stdout
+    assert "--dry-run" in stdout
