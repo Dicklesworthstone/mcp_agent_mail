@@ -168,6 +168,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
 
         self._monotonic = monotonic
         self._buckets: dict[str, tuple[float, float]] = {}
+        self._last_cleanup = monotonic()
         # Redis client (optional)
         self._redis = None
         if getattr(settings.http, "rate_limit_backend", "memory") == "redis" and getattr(
@@ -179,6 +180,16 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 self._redis = Redis.from_url(settings.http.rate_limit_redis_url)
             except Exception:
                 self._redis = None
+
+    def _cleanup_buckets(self, now: float) -> None:
+        """Remove stale buckets to prevent memory leaks."""
+        # Evict buckets not accessed in the last hour
+        expiration = 3600.0
+        cutoff = now - expiration
+        # Create list of keys to remove to avoid runtime modification errors during iteration
+        to_remove = [k for k, (_, ts) in self._buckets.items() if ts < cutoff]
+        for k in to_remove:
+            self._buckets.pop(k, None)
 
     async def _decode_jwt(self, token: str) -> dict | None:
         """Validate and decode JWT, returning claims or None on failure."""
@@ -303,6 +314,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         return True
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+        # Perform periodic cleanup of in-memory rate limit buckets
+        if self._redis is None:
+            now = self._monotonic()
+            if now - self._last_cleanup > 60.0:
+                self._cleanup_buckets(now)
+                self._last_cleanup = now
+
         # Allow CORS preflight and health endpoints
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
@@ -488,6 +506,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                         )
                         rows = result.fetchall()
                     now = _dt.datetime.now(_dt.timezone.utc)
+                    now_naive = now.replace(tzinfo=None)
                     for mid, project_id, created_ts, agent_id in rows:
                         # Normalize to timezone-aware UTC before arithmetic; SQLite may yield naive datetimes
                         ts = created_ts
@@ -553,8 +572,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                             if recipient_name != "*"
                                             else f"agents/*/inbox/{y_dir}/{m_dir}/*.md"
                                         )
+                                        project_slug = await _project_slug_from_id(project_id)
                                         holder_agent_id = int(agent_id)
+                                        holder_agent_name = recipient_name
                                         if settings.ack_escalation_claim_holder_name:
+                                            claim_name = settings.ack_escalation_claim_holder_name
                                             async with get_session() as s_holder:
                                                 hid_row = await s_holder.execute(
                                                     text(
@@ -562,25 +584,28 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                     ),
                                                     {
                                                         "pid": project_id,
-                                                        "name": settings.ack_escalation_claim_holder_name,
+                                                        "name": claim_name,
                                                     },
                                                 )
                                                 hid = hid_row.scalar_one_or_none()
                                                 if isinstance(hid, int):
                                                     holder_agent_id = hid
+                                                    holder_agent_name = claim_name
                                                 else:
                                                     # Auto-create ops holder in DB and write profile.json
                                                     await s_holder.execute(
                                                         text(
-                                                            "INSERT INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts) VALUES (:pid, :name, :program, :model, :task, :ts, :ts)"
+                                                            "INSERT OR IGNORE INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) VALUES (:pid, :name, :program, :model, :task, :ts, :ts, :attachments_policy, :contact_policy)"
                                                         ),
                                                         {
                                                             "pid": project_id,
-                                                            "name": settings.ack_escalation_claim_holder_name,
+                                                            "name": claim_name,
                                                             "program": "ops",
                                                             "model": "system",
                                                             "task": "ops-escalation",
-                                                            "ts": now,
+                                                            "ts": now_naive,
+                                                            "attachments_policy": "auto",
+                                                            "contact_policy": "auto",
                                                         },
                                                     )
                                                     await s_holder.commit()
@@ -590,33 +615,32 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                         ),
                                                         {
                                                             "pid": project_id,
-                                                            "name": settings.ack_escalation_claim_holder_name,
+                                                            "name": claim_name,
                                                         },
                                                     )
                                                     hid2 = hid_row2.scalar_one_or_none()
                                                     if isinstance(hid2, int):
                                                         holder_agent_id = hid2
+                                                        holder_agent_name = claim_name
                                                         # Write profile.json to archive
-                                                        archive = await ensure_archive(
-                                                            settings, (await _project_slug_from_id(project_id)) or ""
-                                                        )
-                                                        async with archive_write_lock(archive):
-                                                            await write_agent_profile(
-                                                                archive,
-                                                                {
-                                                                    "id": holder_agent_id,
-                                                                    "name": settings.ack_escalation_claim_holder_name,
-                                                                    "program": "ops",
-                                                                    "model": "system",
-                                                                    "project_slug": (
-                                                                        await _project_slug_from_id(project_id)
-                                                                    )
-                                                                    or "",
-                                                                    "inception_ts": now.astimezone().isoformat(),
-                                                                    "inception_iso": now.astimezone().isoformat(),
-                                                                    "task": "ops-escalation",
-                                                                },
-                                                            )
+                                                        if project_slug:
+                                                            archive = await ensure_archive(settings, project_slug)
+                                                            async with archive_write_lock(archive):
+                                                                await write_agent_profile(
+                                                                    archive,
+                                                                    {
+                                                                        "id": holder_agent_id,
+                                                                        "name": holder_agent_name,
+                                                                        "program": "ops",
+                                                                        "model": "system",
+                                                                        "task_description": "ops-escalation",
+                                                                        "inception_ts": now.isoformat(),
+                                                                        "last_active_ts": now.isoformat(),
+                                                                        "project_id": project_id,
+                                                                        "attachments_policy": "auto",
+                                                                        "contact_policy": "auto",
+                                                                    },
+                                                                )
                                         async with get_session() as s2:
                                             await s2.execute(
                                                 text(
@@ -631,14 +655,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                     "pattern": pattern,
                                                     "exclusive": 1 if settings.ack_escalation_claim_exclusive else 0,
                                                     "reason": "ack-overdue",
-                                                    "cts": now,
-                                                    "ets": now
+                                                    "cts": now_naive,
+                                                    "ets": now_naive
                                                     + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds),
                                                 },
                                             )
                                             await s2.commit()
                                         # Also write JSON artifact to archive
-                                        project_slug = (await _project_slug_from_id(project_id)) or ""
+                                        if not project_slug:
+                                            raise ValueError(f"Project id {project_id} has no slug; cannot write archive artifacts.")
                                         archive = await ensure_archive(settings, project_slug)
                                         expires_at = now + _dt.timedelta(
                                             seconds=settings.ack_escalation_claim_ttl_seconds
@@ -648,12 +673,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                 archive,
                                                 {
                                                     "project": project_slug,
-                                                    "agent": settings.ack_escalation_claim_holder_name or "ops",
+                                                    "agent": holder_agent_name,
                                                     "path_pattern": pattern,
                                                     "exclusive": settings.ack_escalation_claim_exclusive,
                                                     "reason": "ack-overdue",
-                                                    "created_ts": now.astimezone().isoformat(),
-                                                    "expires_ts": expires_at.astimezone().isoformat(),
+                                                    "created_ts": now.isoformat(),
+                                                    "expires_ts": expires_at.isoformat(),
                                                 },
                                             )
                                     except Exception:
