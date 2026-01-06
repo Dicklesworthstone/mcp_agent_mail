@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import gc
 from pathlib import Path
@@ -7,6 +8,52 @@ import pytest
 from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.db import reset_database_state
 from mcp_agent_mail.storage import clear_repo_cache
+
+
+@pytest.fixture(scope="function")
+def event_loop():
+    """Create a new event loop for each test function.
+
+    This fixture ensures proper event loop cleanup on all platforms,
+    particularly macOS where the default event loop policy can cause
+    'Event loop is closed' errors if not handled properly.
+
+    The fixture:
+    1. Creates a fresh event loop for each test
+    2. Properly shuts down async generators
+    3. Cancels any pending tasks
+    4. Closes the loop cleanly
+
+    Note: In Python 3.14+, event loop policy management is deprecated.
+    asyncio.new_event_loop() creates the appropriate loop type automatically.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    yield loop
+
+    # Proper cleanup sequence
+    try:
+        # Cancel all pending tasks
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+
+        # Allow cancelled tasks to complete
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+
+        # Shutdown async generators (Python 3.6+)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+
+        # Shutdown default executor (Python 3.9+)
+        if hasattr(loop, "shutdown_default_executor"):
+            loop.run_until_complete(loop.shutdown_default_executor())
+    except Exception:
+        pass  # Ignore cleanup errors
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 @pytest.fixture

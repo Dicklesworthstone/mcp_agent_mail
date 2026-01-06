@@ -121,6 +121,7 @@ plugins = []
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = [
   "--strict-markers",
   "--cov=mcp_agent_mail",
@@ -129,6 +130,8 @@ addopts = [
 pythonpath = ["src"]
 filterwarnings = [
   "ignore:coroutine 'FastMCP.get_tool' was never awaited:RuntimeWarning",
+  "ignore:Exception in thread:pytest.PytestUnhandledThreadExceptionWarning",
+  "ignore:Event loop is closed:RuntimeWarning",
 ]
 markers = [
   "slow: marks tests as slow (deselect with '-m \"not slow\"')",
