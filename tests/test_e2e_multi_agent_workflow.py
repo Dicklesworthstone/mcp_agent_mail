@@ -927,17 +927,17 @@ async def test_concurrent_reservation_safety(isolated_env):
             try_claim(red_stone),
         )
 
-        # Exactly one should succeed (granted=1), others should have conflicts
-        granted_count = sum(1 for r in results if r.get("granted", 0) == 1)
-        conflict_count = sum(1 for r in results if r.get("conflicts", 0) >= 1)
+        errors = [r for r in results if "error" in r]
+        assert not errors, f"Unexpected errors: {errors}"
 
-        # At least one should have been granted
-        assert granted_count >= 1, "At least one agent should get the reservation"
-        # The rest should have conflicts (unless there was an error)
-        # Total should be 3
-        assert granted_count + conflict_count + sum(
-            1 for r in results if "error" in r
-        ) == 3
+        # Advisory model: overlapping exclusive reservations are still granted,
+        # but conflicts are surfaced to coordinate between agents.
+        assert all(r.get("granted") == 1 for r in results)
+
+        zero_conflict = sum(1 for r in results if r.get("conflicts") == 0)
+        has_conflicts = sum(1 for r in results if r.get("conflicts", 0) >= 1)
+        assert zero_conflict == 1
+        assert has_conflicts == 2
 
 
 # ============================================================================
