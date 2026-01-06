@@ -1811,7 +1811,7 @@ def _build_viewer_sri(bundle_root: Path) -> dict[str, str]:
     for path in viewer_root.rglob("*"):
         if not path.is_file():
             continue
-        if path.suffix not in {".js", ".css", ".wasm", ".html"}:
+        if path.suffix not in {".js", ".css", ".wasm"}:
             continue
         relative = path.relative_to(bundle_root).as_posix()
         sri_map[relative] = _compute_sri(path)
