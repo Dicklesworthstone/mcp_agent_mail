@@ -711,10 +711,9 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
                 _REPO_CACHE.put(cache_key, repo)
                 return repo
 
-            # Initialize new repo and put in cache while holding the lock
-            # This prevents race conditions where multiple callers could create duplicate Repo objects
-            repo_result = await _to_thread(Repo.init, str(root))
-            repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
+            # Initialize new repo and put in cache while holding the lock.
+            # Keep the returned Repo instance to avoid leaking an extra Repo handle.
+            repo = await _to_thread(Repo.init, str(root))
             _REPO_CACHE.put(cache_key, repo)
             # Flag that this is a newly created repo needing initialization
             needs_init = True
@@ -1183,9 +1182,9 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
         return
     actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
 
-    def _perform_commit() -> None:
-        repo.index.add(rel_paths)
-        if repo.is_dirty(index=True, working_tree=True):
+    def _perform_commit(target_repo: Repo) -> None:
+        target_repo.index.add(rel_paths)
+        if target_repo.is_dirty(index=True, working_tree=True):
             # Append commit trailers with Agent and optional Thread if present in message text
             trailers: list[str] = []
             # Extract simple Agent/Thread heuristics from the message subject line
@@ -1211,14 +1210,40 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             final_message = message
             if trailers:
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
-            repo.index.commit(final_message, author=actor, committer=actor)
+            target_repo.index.commit(final_message, author=actor, committer=actor)
     # Serialize commits across all projects sharing the same Git repo to avoid index races
     working_tree = repo.working_tree_dir
     if working_tree is None:
         raise ValueError("Repository has no working tree directory")
     commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
     async with AsyncFileLock(commit_lock_path):
-        await _to_thread(_perform_commit)
+        import errno
+
+        attempt_repo = repo
+        for attempt in range(2):
+            try:
+                await _to_thread(_perform_commit, attempt_repo)
+                break
+            except OSError as exc:
+                if exc.errno != errno.EMFILE or attempt >= 1:
+                    raise
+                # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
+                # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
+                with contextlib.suppress(Exception):
+                    clear_repo_cache()
+                with contextlib.suppress(Exception):
+                    import gc
+
+                    gc.collect()
+                await asyncio.sleep(0.05)
+                with contextlib.suppress(Exception):
+                    attempt_repo.close()
+                attempt_repo = Repo(str(Path(working_tree).resolve()))
+        else:
+            raise RuntimeError("git commit failed after EMFILE recovery attempts")
+        if attempt_repo is not repo:
+            with contextlib.suppress(Exception):
+                attempt_repo.close()
 
 
 async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
