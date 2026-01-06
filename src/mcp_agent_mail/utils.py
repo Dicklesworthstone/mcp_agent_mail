@@ -163,6 +163,7 @@ NOUNS: Iterable[str] = (
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _AGENT_NAME_RE = re.compile(r"[^A-Za-z0-9]+")
+_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 # Pre-built frozenset of all valid agent names (lowercase) for O(1) validation lookup.
 # This is computed once at module load time rather than O(n*m) per validation call.
@@ -215,3 +216,18 @@ def sanitize_agent_name(value: str) -> Optional[str]:
     if not cleaned:
         return None
     return cleaned[:128]
+
+
+def validate_thread_id_format(thread_id: str) -> bool:
+    """Validate that a thread_id is safe for filenames and indexing.
+
+    Thread IDs are used as human-facing keys and may also be used in filesystem
+    paths for thread digests. For safety and portability, enforce:
+    - ASCII alphanumerics plus '.', '_', '-'
+    - Must start with an alphanumeric character
+    - Max length 128
+    """
+    candidate = (thread_id or "").strip()
+    if not candidate:
+        return False
+    return _THREAD_ID_RE.fullmatch(candidate) is not None
