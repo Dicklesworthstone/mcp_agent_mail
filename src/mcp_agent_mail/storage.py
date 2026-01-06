@@ -99,6 +99,10 @@ class _LRURepoCache:
 
         Should only be called while holding the external lock.
         Evicted repos are added to a pending list for later cleanup.
+
+        Note: If the key already exists, only the LRU order is updated;
+        the cached repo value is NOT replaced. This is intentional since
+        the cache is only used by _ensure_repo which checks existence first.
         """
         if key in self._cache:
             # Already exists, just update LRU order

@@ -99,14 +99,19 @@ class TestLRURepoCacheEviction:
 
         cache.put("repo1", repo1)
         cache.put("repo2", repo2)
+
+        # Verify repo1 is in cache before eviction
+        assert "repo1" in cache
+        assert len(cache) == 2
+
         cache.put("repo3", repo3)  # This should evict repo1
 
         assert len(cache) == 2
-        assert "repo1" not in cache
+        assert "repo1" not in cache  # Evicted from cache
         assert "repo2" in cache
         assert "repo3" in cache
-        # repo1 should be in evicted list
-        assert repo1 in cache._evicted
+        # repo1 was evicted - it's either in _evicted list or was cleaned up
+        # (depending on refcount at cleanup time). Key assertion is it's no longer in cache.
 
     def test_evicted_repos_added_to_evicted_list(self):
         """Evicted repos should be tracked for later cleanup."""
@@ -115,12 +120,22 @@ class TestLRURepoCacheEviction:
         repo2 = MagicMock()
 
         cache.put("repo1", repo1)
+
+        # Mock cleanup to prevent immediate cleanup and verify eviction mechanism
+        evicted_during_put: list[MagicMock] = []
+        original_cleanup = cache._cleanup_evicted
+        def tracking_cleanup() -> int:
+            # Record what's in evicted list before cleanup runs
+            evicted_during_put.extend(cache._evicted)
+            return original_cleanup()
+        cache._cleanup_evicted = tracking_cleanup  # type: ignore[method-assign]
+
         cache.put("repo2", repo2)  # Evicts repo1
 
-        # repo1 should be in evicted list (might be cleaned up immediately if refcount is low)
-        # We check that the eviction mechanism was triggered
         assert len(cache) == 1
         assert "repo2" in cache
+        # Verify repo1 was added to evicted list (captured before cleanup ran)
+        assert repo1 in evicted_during_put
 
     def test_duplicate_put_updates_lru_order(self):
         """Putting same key again should update LRU order without eviction."""
