@@ -243,3 +243,6 @@ AGENTS.md.backup
 # SQLite WAL/SHM temp files (test databases)
 test.sqlite3-shm
 test.sqlite3-wal
+
+# bv (beads viewer) local config and caches
+.bv/

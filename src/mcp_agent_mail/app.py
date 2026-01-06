@@ -1814,6 +1814,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
             existing_map[pair] = suggestion
 
         now = datetime.now(timezone.utc)
+        naive_now = _naive_utc(now)
         to_evaluate: list[tuple[Project, Project, ProjectSiblingSuggestion | None]] = []
         for idx, project_a in enumerate(projects):
             if project_a.id is None:
@@ -1877,7 +1878,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                 # Preserve user decisions
                 if record.status not in {"confirmed", "dismissed"}:
                     record.status = "suggested"
-            record.evaluated_ts = now
+            record.evaluated_ts = naive_now
             updated = True
 
         if updated:
@@ -1974,13 +1975,14 @@ async def update_project_sibling_status(project_id: int, other_id: int, status: 
             await session.flush()
 
         now = datetime.now(timezone.utc)
+        naive_now = _naive_utc(now)
         suggestion.status = normalized_status
-        suggestion.evaluated_ts = now
+        suggestion.evaluated_ts = naive_now
         if normalized_status == "confirmed":
-            suggestion.confirmed_ts = now
+            suggestion.confirmed_ts = naive_now
             suggestion.dismissed_ts = None
         elif normalized_status == "dismissed":
-            suggestion.dismissed_ts = now
+            suggestion.dismissed_ts = naive_now
             suggestion.confirmed_ts = None
 
         await session.commit()
@@ -2144,7 +2146,7 @@ async def _get_or_create_agent(
             agent.program = program
             agent.model = model
             agent.task_description = task_description
-            agent.last_active_ts = datetime.now(timezone.utc)  # type: ignore[arg-type]
+            agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
             session.add(agent)
             await session.commit()
             await session.refresh(agent)
@@ -2300,7 +2302,7 @@ async def _create_message(
         for recipient, kind in recipients:
             entry = MessageRecipient(message_id=message.id, agent_id=recipient.id, kind=kind)
             session.add(entry)
-        sender.last_active_ts = datetime.now(timezone.utc)
+        sender.last_active_ts = _naive_utc()
         session.add(sender)
         await session.commit()
         await session.refresh(message)
@@ -2317,7 +2319,7 @@ async def _create_file_reservation(
 ) -> FileReservation:
     if project.id is None or agent.id is None:
         raise ValueError("Project and agent must have ids before creating file_reservations.")
-    expires = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    expires = _naive_utc() + timedelta(seconds=ttl_seconds)
     await ensure_schema()
     async with get_session() as session:
         file_reservation = FileReservation(
@@ -2553,6 +2555,7 @@ async def _expire_stale_file_reservations(
 ) -> list[FileReservationStatus]:
     await ensure_schema()
     now = datetime.now(timezone.utc)
+    naive_now = _naive_utc(now)  # Compute once for consistency and efficiency
 
     project: Optional[Project] = None
     async with get_session() as session:
@@ -2569,7 +2572,7 @@ async def _expire_stale_file_reservations(
             .where(
                 cast(Any, FileReservation.project_id) == project_id,
                 cast(Any, FileReservation.released_ts).is_(None),
-                cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
+                cast(Any, FileReservation.expires_ts) < naive_now,  # SQLite needs naive datetime
             )
         )
         expired_pairs = [cast(tuple[FileReservation, Agent], row) for row in expired_rows.all()]
@@ -2579,9 +2582,9 @@ async def _expire_stale_file_reservations(
                 .where(
                     cast(Any, FileReservation.project_id) == project_id,
                     cast(Any, FileReservation.released_ts).is_(None),
-                    cast(Any, FileReservation.expires_ts) < _naive_utc(now),  # SQLite needs naive datetime
+                    cast(Any, FileReservation.expires_ts) < naive_now,  # SQLite needs naive datetime
                 )
-                .values(released_ts=now)
+                .values(released_ts=naive_now)  # Use naive UTC for SQLite compatibility
             )
             await session.commit()
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
@@ -2596,15 +2599,15 @@ async def _expire_stale_file_reservations(
                     cast(Any, FileReservation.id).in_(stale_ids),
                     cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .values(released_ts=now)
+                .values(released_ts=naive_now)  # Use naive UTC for SQLite compatibility
             )
             await session.commit()
 
         for status in stale_statuses:
-            status.reservation.released_ts = now
+            status.reservation.released_ts = naive_now
 
     for reservation, _agent in expired_pairs:
-        reservation.released_ts = now
+        reservation.released_ts = naive_now
 
     released_pairs: list[tuple[FileReservation, Agent]] = []
     seen_ids: set[int] = set()
@@ -3053,6 +3056,7 @@ async def _update_recipient_timestamp(
     if agent.id is None:
         raise ValueError("Agent must have an id before updating message state.")
     now = datetime.now(timezone.utc)
+    naive_now = _naive_utc(now)  # Use naive UTC for SQLite compatibility
     async with get_session() as session:
         # Read current value first
         result_sel = await session.execute(
@@ -3069,11 +3073,11 @@ async def _update_recipient_timestamp(
         stmt = (
             update(MessageRecipient)
             .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)  # type: ignore[arg-type]
-            .values({field: now})
+            .values({field: naive_now})
         )
         await session.execute(stmt)
         await session.commit()
-    return now
+    return naive_now
 
 
 def build_mcp_server() -> FastMCP:
@@ -4871,7 +4875,8 @@ def build_mcp_server() -> FastMCP:
                 f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
             )
         now = datetime.now(timezone.utc)
-        exp = now + timedelta(seconds=max(60, ttl_seconds))
+        naive_now = _naive_utc(now)
+        exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
         async with get_session() as s:
             # upsert link
             existing = await s.execute(
@@ -4886,7 +4891,7 @@ def build_mcp_server() -> FastMCP:
             if link:
                 link.status = "pending"
                 link.reason = reason
-                link.updated_ts = now
+                link.updated_ts = naive_now
                 link.expires_ts = exp
                 s.add(link)
             else:
@@ -4897,8 +4902,8 @@ def build_mcp_server() -> FastMCP:
                     b_agent_id=b.id or 0,
                     status="pending",
                     reason=reason,
-                    created_ts=now,
-                    updated_ts=now,
+                    created_ts=naive_now,
+                    updated_ts=naive_now,
                     expires_ts=exp,
                 )
                 s.add(link)
@@ -4953,7 +4958,8 @@ def build_mcp_server() -> FastMCP:
                 f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
             )
         now = datetime.now(timezone.utc)
-        exp = now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
+        naive_now = _naive_utc(now)
+        exp = naive_now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
         updated = 0
         async with get_session() as s:
             existing = await s.execute(
@@ -4967,7 +4973,7 @@ def build_mcp_server() -> FastMCP:
             link = existing.scalars().first()
             if link:
                 link.status = "approved" if accept else "blocked"
-                link.updated_ts = now
+                link.updated_ts = naive_now
                 link.expires_ts = exp
                 s.add(link)
                 updated = 1
@@ -4980,8 +4986,8 @@ def build_mcp_server() -> FastMCP:
                         b_agent_id=b.id or 0,
                         status="approved",
                         reason="",
-                        created_ts=now,
-                        updated_ts=now,
+                        created_ts=naive_now,
+                        updated_ts=naive_now,
                         expires_ts=exp,
                     ))
                     updated = 1
@@ -6186,6 +6192,7 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("Project and agent must have ids before releasing file_reservations.")
             await ensure_schema()
             now = datetime.now(timezone.utc)
+            naive_now = _naive_utc(now)  # Compute once for consistency
             reservations: list[FileReservation] = []
             async with get_session() as session:
                 select_stmt = (
@@ -6213,12 +6220,12 @@ def build_mcp_server() -> FastMCP:
                                 cast(Any, FileReservation.released_ts).is_(None),
                                 cast(Any, FileReservation.id).in_(ids),
                             )
-                            .values(released_ts=now)
+                            .values(released_ts=naive_now)  # Use naive UTC for SQLite compatibility
                         )
                         await session.commit()
             affected = len(reservations)
             for reservation in reservations:
-                reservation.released_ts = now
+                reservation.released_ts = naive_now
             if reservations:
                 await _write_file_reservation_records(
                     project,
@@ -6316,6 +6323,7 @@ def build_mcp_server() -> FastMCP:
             )
 
         now = datetime.now(timezone.utc)
+        naive_now = _naive_utc(now)
         async with get_session() as session:
             await session.execute(
                 update(FileReservation)
@@ -6323,11 +6331,11 @@ def build_mcp_server() -> FastMCP:
                     cast(Any, FileReservation.id) == file_reservation_id,
                     cast(Any, FileReservation.released_ts).is_(None),
                 )
-                .values(released_ts=now)
+                .values(released_ts=naive_now)  # Use naive UTC for SQLite compatibility
             )
-        await session.commit()
+            await session.commit()
 
-        reservation.released_ts = now
+        reservation.released_ts = naive_now
         await _write_file_reservation_records(
             project,
             [(reservation, holder)],
@@ -6494,7 +6502,8 @@ def build_mcp_server() -> FastMCP:
                     from datetime import timezone as _tz
                     old_exp = old_exp.replace(tzinfo=_tz.utc)
                 base = old_exp if old_exp > now else now
-                file_reservation.expires_ts = base + timedelta(seconds=bump)
+                # Convert to naive UTC for SQLite compatibility
+                file_reservation.expires_ts = _naive_utc(base + timedelta(seconds=bump))
                 session.add(file_reservation)
                 updated.append(
                     {
