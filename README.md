@@ -703,6 +703,163 @@ Every archive writes a `metadata.json` manifest describing the projects captured
 
 `clear-and-reset-everything` now offers to create one of these archives before deleting anything. By default it prompts interactively; pass `--archive/--no-archive` to force a choice, and pair with `--force --no-archive` for non-interactive automation. When an archive is created successfully, the CLI prints both the path and the restore command so you can undo the reset later.
 
+## Mailbox Health: `am doctor`
+
+The `doctor` command group provides comprehensive diagnostics and repair capabilities for maintaining mailbox health. It emphasizes **data safety**—creating backups before any destructive operation and using semi-automatic repair to prevent accidental data loss.
+
+### Why `am doctor`?
+
+Over time, mailbox state can drift:
+- **Stale locks**: Process crashes leave behind `.archive.lock` or `.commit.lock` files that block operations
+- **Orphaned records**: Agents get deleted but their message recipients remain in the database
+- **FTS index desync**: Full-text search index falls out of sync with actual messages
+- **Expired file reservations**: Reservations expire but aren't cleaned up
+- **WAL files**: SQLite WAL/SHM files accumulate (normal during operation, but worth monitoring)
+
+The doctor commands detect these issues and offer safe, automatic repair.
+
+### Diagnostic checks
+
+Run comprehensive diagnostics on your mailbox:
+
+```bash
+# Check all projects
+uv run python -m mcp_agent_mail.cli doctor check
+
+# Check with verbose output
+uv run python -m mcp_agent_mail.cli doctor check --verbose
+
+# JSON output for automation
+uv run python -m mcp_agent_mail.cli doctor check --json
+```
+
+**What it checks:**
+
+| Check | Status | Description |
+|-------|--------|-------------|
+| Locks | OK/WARN | Detects stale archive and commit locks from crashed processes |
+| Database | OK/ERROR | Runs `PRAGMA integrity_check` for SQLite corruption |
+| Orphaned Records | OK/WARN | Finds message recipients without corresponding agents |
+| FTS Index | OK/WARN | Compares message count vs FTS index entries |
+| File Reservations | OK/INFO | Counts expired reservations pending cleanup |
+| WAL Files | OK/INFO | Reports presence of SQLite WAL/SHM files |
+
+**Example output:**
+
+```
+MCP Agent Mail Doctor - Diagnostic Report
+==================================================
+
+Check         Status    Details
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Locks         OK        No stale locks found
+Database      OK        Database integrity check passed
+Orphaned      OK        No orphaned records found
+FTS Index     OK        FTS index synchronized (1,234 messages)
+File Res.     INFO      4 expired reservation(s) pending cleanup
+WAL Files     OK        No orphan WAL/SHM files
+
+All checks passed!
+```
+
+### Semi-automatic repair
+
+The repair command uses a **semi-automatic approach**:
+- **Safe repairs** (locks, expired reservations) are applied automatically
+- **Data-affecting repairs** (orphan cleanup) require confirmation
+- A **backup is created before any changes**
+
+```bash
+# Preview what would be repaired (dry-run)
+uv run python -m mcp_agent_mail.cli doctor repair --dry-run
+
+# Run repairs with prompts for data changes
+uv run python -m mcp_agent_mail.cli doctor repair
+
+# Auto-confirm all repairs (for automation)
+uv run python -m mcp_agent_mail.cli doctor repair --yes
+
+# Specify custom backup location
+uv run python -m mcp_agent_mail.cli doctor repair --backup-dir /path/to/backups
+```
+
+**Repair workflow:**
+
+1. **Create backup** — Git bundle + SQLite copy created before any changes
+2. **Safe repairs** (auto-applied):
+   - Heal stale locks (removes orphaned `.archive.lock`, `.commit.lock` files)
+   - Release expired file reservations (marks `released_ts` in database)
+3. **Data repairs** (require confirmation):
+   - Delete orphaned message recipients
+   - Rebuild FTS index (if needed)
+
+### Backup management
+
+Doctor creates timestamped backups before repairs. You can also manage backups directly:
+
+```bash
+# List all available backups
+uv run python -m mcp_agent_mail.cli doctor backups
+
+# JSON output for scripting
+uv run python -m mcp_agent_mail.cli doctor backups --json
+```
+
+**Backup contents:**
+
+Each backup includes:
+- `database.sqlite3` — Complete SQLite database copy
+- `database.sqlite3-wal`, `database.sqlite3-shm` — WAL files if present
+- `archive.bundle` or `{project}.bundle` — Git bundle of the archive repository
+- `manifest.json` — Metadata: when created, why, what's included, restore instructions
+
+**Directory structure:**
+
+```
+{storage_root}/backups/
+  2026-01-06T12-30-45_doctor-repair/
+    manifest.json
+    database.sqlite3
+    archive.bundle
+```
+
+### Restore from backup
+
+If something goes wrong, restore from any backup:
+
+```bash
+# Preview what would be restored
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --dry-run
+
+# Restore (prompts for confirmation)
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup
+
+# Skip confirmation prompt
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --yes
+```
+
+**Restore process:**
+
+1. Validates backup manifest exists and is readable
+2. Shows backup metadata (creation time, reason, contents)
+3. **Creates a pre-restore backup** of current state (safety net)
+4. Restores SQLite database from backup
+5. Restores Git archive from bundle
+6. Reports any errors encountered
+
+**Safety features:**
+
+- Current database saved as `*.sqlite3.pre-restore` before overwrite
+- Current archive saved as `*.pre-restore` directory before overwrite
+- Errors during restore are captured and reported
+
+### Best practices
+
+1. **Run diagnostics regularly**: `am doctor check` is fast and non-destructive
+2. **Review before repair**: Use `--dry-run` first to see what would change
+3. **Keep backups**: Don't delete old backups until you've verified the system is healthy
+4. **Automate checks**: Include `am doctor check --json` in your CI/monitoring for early warning
+
 ### Quick Start: Interactive Deployment Wizard
 
 The easiest way to export and deploy is the interactive wizard, which supports both GitHub Pages and Cloudflare Pages:
@@ -2261,6 +2418,10 @@ The project exposes a developer CLI for common operations:
 - `file_reservations list <project> [--active-only/--no-active-only]`: list file reservations
 - `file_reservations active <project> [--limit N]`: list active file reservations
 - `file_reservations soon <project> [--minutes N]`: show file reservations expiring soon
+- `doctor check [PROJECT] [--verbose] [--json]`: run comprehensive diagnostics on mailbox health
+- `doctor repair [PROJECT] [--dry-run] [--yes] [--backup-dir PATH]`: semi-automatic repair with backup before changes
+- `doctor backups [--json]`: list available diagnostic backups
+- `doctor restore <backup_path> [--dry-run] [--yes]`: restore from a diagnostic backup
 
 Examples:
 
@@ -2291,6 +2452,21 @@ uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/ba
 
 # List pending acknowledgements for an agent
 uv run python -m mcp_agent_mail.cli acks pending /abs/path/backend BlueLake --limit 10
+
+# Run mailbox health diagnostics
+uv run python -m mcp_agent_mail.cli doctor check
+
+# Preview repairs without making changes
+uv run python -m mcp_agent_mail.cli doctor repair --dry-run
+
+# Run repairs (creates backup first, prompts for data changes)
+uv run python -m mcp_agent_mail.cli doctor repair
+
+# List available backups
+uv run python -m mcp_agent_mail.cli doctor backups
+
+# Restore from a backup
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --dry-run
 
 # WARNING: Destructive reset (clean slate)
 uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
