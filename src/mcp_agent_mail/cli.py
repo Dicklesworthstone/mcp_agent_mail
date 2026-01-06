@@ -167,7 +167,7 @@ def products_ensure(
     # Prefer server tool to ensure consistent uid policy
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
-    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    bearer = settings.http.bearer_token or ""
     resp_data: dict[str, Any] = {}
     try:
         with httpx.Client(timeout=5.0) as client:
@@ -387,7 +387,7 @@ def products_inbox(
     """
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
-    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    bearer = settings.http.bearer_token or ""
     # Try server first
     try:
         with httpx.Client(timeout=5.0) as client:
@@ -509,7 +509,7 @@ def products_summarize_thread(
     """
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
-    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    bearer = settings.http.bearer_token or ""
     # Try server
     try:
         with httpx.Client(timeout=8.0) as client:
@@ -2666,7 +2666,7 @@ def am_run(
     guard_mode = (os.environ.get("AGENT_MAIL_GUARD_MODE", "block") or "block").strip().lower()
     worktrees_enabled = bool(settings.worktrees_enabled)
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
-    bearer = settings.http.bearer_token or os.environ.get("HTTP_BEARER_TOKEN", "")
+    bearer = settings.http.bearer_token or ""
 
     def _safe_component(value: str) -> str:
         s = value.strip()
