@@ -267,7 +267,7 @@ def get_settings() -> Settings:
 
     llm_settings = LlmSettings(
         enabled=_bool(_decouple_config("LLM_ENABLED", default="true"), default=True),
-        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-5-mini"),
+        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-4o-mini"),
         temperature=_float(_decouple_config("LLM_TEMPERATURE", default="0.2"), default=0.2),
         max_tokens=_int(_decouple_config("LLM_MAX_TOKENS", default="512"), default=512),
         cache_enabled=_bool(_decouple_config("LLM_CACHE_ENABLED", default="true"), default=True),

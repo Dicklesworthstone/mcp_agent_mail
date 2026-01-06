@@ -105,8 +105,8 @@ def render_precommit_script(archive: ProjectArchive) -> str:
     Construct with explicit lines at column 0 to avoid indentation errors.
     """
 
-    file_reservations_dir = str((archive.root / "file_reservations").resolve())
-    storage_root = str(archive.root.resolve())
+    file_reservations_dir = str((archive.root / "file_reservations").resolve()).replace("\\", "/")
+    storage_root = str(archive.root.resolve()).replace("\\", "/")
     lines = [
         "#!/usr/bin/env python3",
         "# mcp-agent-mail guard hook (pre-commit)",
@@ -248,7 +248,7 @@ def render_prepush_script(archive: ProjectArchive) -> str:
 
     Python script to avoid external shell assumptions; NUL-safe and respects gate/advisory mode.
     """
-    file_reservations_dir = str((archive.root / "file_reservations").resolve())
+    file_reservations_dir = str((archive.root / "file_reservations").resolve()).replace("\\", "/")
     lines = [
         "#!/usr/bin/env python3",
         "# mcp-agent-mail guard hook (pre-push)",

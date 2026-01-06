@@ -2709,7 +2709,7 @@ async def _list_inbox(
         if since_ts:  # type: ignore[arg-type]
             since_dt = _parse_iso(since_ts)
             if since_dt:  # type: ignore[arg-type]
-                stmt = stmt.where(Message.created_ts > since_dt)
+                stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
@@ -2743,7 +2743,7 @@ async def _list_outbox(
         if since_ts:
             since_dt = _parse_iso(since_ts)
             if since_dt:
-                stmt = stmt.where(Message.created_ts > since_dt)  # type: ignore[arg-type]
+                stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))  # type: ignore[arg-type]
         result = await session.execute(stmt)  # type: ignore[arg-type]
         message_rows = result.scalars().all()
 
@@ -4016,14 +4016,17 @@ def build_mcp_server() -> FastMCP:
                         handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
                         for nm in blocked_recipients:
                             try:
-                                await handshake.run({
-                                    "project_key": project.human_key,
-                                    "requester": sender.name,
-                                    "target": nm,
-                                    "reason": "auto-handshake by send_message",
-                                    "auto_accept": True,
-                                    "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                })
+                                await handshake.run(
+                                    {
+                                        "ctx": ctx,
+                                        "project_key": project.human_key,
+                                        "requester": sender.name,
+                                        "target": nm,
+                                        "reason": "auto-handshake by send_message",
+                                        "auto_accept": True,
+                                        "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                    }
+                                )
                                 attempted.append(nm)
                             except Exception:
                                 pass
@@ -4344,6 +4347,7 @@ def build_mcp_server() -> FastMCP:
                                 try:
                                     await handshake.run(
                                         {
+                                            "ctx": ctx,
                                             "project_key": project.human_key,
                                             "requester": sender.name,
                                             "target": nm,
@@ -5313,15 +5317,19 @@ def build_mcp_server() -> FastMCP:
         if file_reservation_paths:
             # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
             from fastmcp.tools.tool import FunctionTool
+
             _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
-            _file_reservation_run = await _file_reservation_tool.run({
-                "project_key": project.human_key,
-                "agent_name": agent.name,
-                "paths": file_reservation_paths,
-                "ttl_seconds": file_reservation_ttl_seconds,
-                "exclusive": True,
-                "reason": file_reservation_reason,
-            })
+            _file_reservation_run = await _file_reservation_tool.run(
+                {
+                    "ctx": ctx,
+                    "project_key": project.human_key,
+                    "agent_name": agent.name,
+                    "paths": file_reservation_paths,
+                    "ttl_seconds": file_reservation_ttl_seconds,
+                    "exclusive": True,
+                    "reason": file_reservation_reason,
+                }
+            )
             file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
 
         inbox_items = await _list_inbox(
@@ -5428,25 +5436,32 @@ def build_mcp_server() -> FastMCP:
 
         # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
         from fastmcp.tools.tool import FunctionTool
+
         file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
-        file_reservations_tool_result = await file_reservations_tool.run({
-            "project_key": project_key,
-            "agent_name": agent_name,
-            "paths": paths,
-            "ttl_seconds": ttl_seconds,
-            "exclusive": exclusive,
-            "reason": reason,
-        })
+        file_reservations_tool_result = await file_reservations_tool.run(
+            {
+                "ctx": ctx,
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": paths,
+                "ttl_seconds": ttl_seconds,
+                "exclusive": exclusive,
+                "reason": reason,
+            }
+        )
         file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
 
         release_result = None
         if auto_release:
             release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
-            release_tool_result = await release_tool.run({
-                "project_key": project_key,
-                "agent_name": agent_name,
-                "paths": paths,
-            })
+            release_tool_result = await release_tool.run(
+                {
+                    "ctx": ctx,
+                    "project_key": project_key,
+                    "agent_name": agent_name,
+                    "paths": paths,
+                }
+            )
             release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
 
         await ctx.info(
@@ -5538,8 +5553,10 @@ def build_mcp_server() -> FastMCP:
             )
 
         from fastmcp.tools.tool import FunctionTool
+
         request_tool = cast(FunctionTool, cast(Any, request_contact))
         request_payload: dict[str, Any] = {
+            "ctx": ctx,
             "project_key": project_key,
             "from_agent": real_requester,
             "to_agent": real_target,
@@ -5563,6 +5580,7 @@ def build_mcp_server() -> FastMCP:
         if auto_accept:
             respond_tool = cast(FunctionTool, cast(Any, respond_contact))
             respond_payload: dict[str, Any] = {
+                "ctx": ctx,
                 "project_key": target_project_key or project_key,
                 "to_agent": real_target,
                 "from_agent": real_requester,
@@ -5578,14 +5596,17 @@ def build_mcp_server() -> FastMCP:
         if welcome_subject and welcome_body and not target_project_key:
             try:
                 send_tool = cast(FunctionTool, cast(Any, send_message))
-                send_tool_result = await send_tool.run({
-                    "project_key": project_key,
-                    "sender_name": real_requester,
-                    "to": [real_target],
-                    "subject": welcome_subject,
-                    "body_md": welcome_body,
-                    "thread_id": thread_id,
-                })
+                send_tool_result = await send_tool.run(
+                    {
+                        "ctx": ctx,
+                        "project_key": project_key,
+                        "sender_name": real_requester,
+                        "to": [real_target],
+                        "subject": welcome_subject,
+                        "body_md": welcome_body,
+                        "thread_id": thread_id,
+                    }
+                )
                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
             except ToolExecutionError as exc:
                 # surface but do not abort handshake
@@ -6409,6 +6430,7 @@ def build_mcp_server() -> FastMCP:
                 send_tool = cast(FunctionTool, cast(Any, send_message))
                 await send_tool.run(
                     {
+                        "ctx": ctx,
                         "project_key": project_key,
                         "sender_name": agent_name,
                         "to": [holder.name],
