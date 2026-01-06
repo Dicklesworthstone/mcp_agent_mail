@@ -1779,7 +1779,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     aid = int(arow[0])
 
                     # Mark specific messages as read
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
                     # Use IN clause with parameter binding
                     placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
@@ -1849,7 +1850,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     aid = int(arow[0])
 
                     # Mark all unread messages as read
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
                     result = await session.execute(
                         text(
                             """
@@ -2271,7 +2273,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 "task": "Human operator providing guidance and oversight to agents",
                                 "policy": "open",
                                 "attachments_policy": "auto",
-                                "ts": datetime.now(timezone.utc),
+                                # Use naive UTC datetime for SQLite compatibility
+                                "ts": datetime.now(timezone.utc).replace(tzinfo=None),
                             },
                         )
                         # Don't commit yet - wait until message is successfully created and written to Git
@@ -2291,7 +2294,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     overseer_id = overseer_row[0]
                     # Insert message into database
                     message_id = None
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
                     result = await session.execute(
                         text("""
