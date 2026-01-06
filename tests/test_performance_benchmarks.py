@@ -529,3 +529,448 @@ def test_export_scales_linearly(tmp_path: Path, num_messages: int) -> None:
 
     # Snapshot should handle at least 50 messages/second
     assert throughput > 50, f"Snapshot throughput too low: {throughput:.0f} msg/s"
+
+
+# ============================================================================
+# MCP Tool Latency Benchmarks
+# ============================================================================
+# Reference: mcp_agent_mail-4em (testing-tasks-v2.md)
+# Targets:
+# - Message send: < 100ms p95
+# - Inbox fetch: < 200ms p95
+# - Search: < 500ms p95
+
+
+def percentile(data: list[float], p: int) -> float:
+    """Calculate the p-th percentile of data."""
+    if not data:
+        return 0.0
+    sorted_data = sorted(data)
+    k = (len(sorted_data) - 1) * p / 100
+    f = int(k)
+    c = f + 1 if f + 1 < len(sorted_data) else f
+    if f == c:
+        return sorted_data[int(k)]
+    return sorted_data[f] * (c - k) + sorted_data[c] * (k - f)
+
+
+def print_latency_stats(name: str, latencies_ms: list[float]) -> dict[str, float]:
+    """Print and return latency statistics."""
+    import statistics
+
+    if not latencies_ms:
+        return {}
+    stats = {
+        "count": len(latencies_ms),
+        "min": min(latencies_ms),
+        "max": max(latencies_ms),
+        "mean": statistics.mean(latencies_ms),
+        "p50": percentile(latencies_ms, 50),
+        "p95": percentile(latencies_ms, 95),
+        "p99": percentile(latencies_ms, 99),
+    }
+    print(f"\n{name} Latency (ms):")
+    print(f"  Count: {stats['count']}")
+    print(f"  Min: {stats['min']:.2f}")
+    print(f"  Max: {stats['max']:.2f}")
+    print(f"  Mean: {stats['mean']:.2f}")
+    print(f"  P50: {stats['p50']:.2f}")
+    print(f"  P95: {stats['p95']:.2f}")
+    print(f"  P99: {stats['p99']:.2f}")
+    return stats
+
+
+class TestMessageSendLatency:
+    """Benchmark message send latency."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_message_send_latency_baseline(self, isolated_env):
+        """Establish baseline for message send latency. Target: < 100ms p95."""
+        import uuid
+
+        from fastmcp import Client
+
+        from mcp_agent_mail.app import build_mcp_server
+
+        server = build_mcp_server()
+        latencies: list[float] = []
+        num_iterations = 20
+
+        # Use unique project key to avoid cross-test pollution
+        project_key = f"/perf-test-{uuid.uuid4().hex[:8]}"
+
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": project_key})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "name": "BlueLake",
+                },
+            )
+
+            for i in range(num_iterations):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "project_key": project_key,
+                        "sender_name": "BlueLake",
+                        "to": ["BlueLake"],
+                        "subject": f"Benchmark message {i}",
+                        "body_md": f"Benchmark message {i} for latency testing.",
+                    },
+                )
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                latencies.append(elapsed_ms)
+
+        stats = print_latency_stats("Message Send", latencies)
+        # Target: < 100ms p95, allow 500ms for test environment overhead
+        assert stats["p95"] < 500, f"Message send p95 ({stats['p95']:.2f}ms) exceeds threshold"
+
+
+class TestInboxFetchLatency:
+    """Benchmark inbox fetch latency."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_inbox_fetch_with_100_messages(self, isolated_env):
+        """Benchmark inbox fetch with 100 messages. Target: < 200ms p95."""
+        import uuid
+
+        from fastmcp import Client
+
+        from mcp_agent_mail.app import build_mcp_server
+
+        server = build_mcp_server()
+        num_messages = 100
+        fetch_iterations = 10
+        latencies: list[float] = []
+
+        # Use unique project key to avoid cross-test pollution
+        project_key = f"/perf-inbox-{uuid.uuid4().hex[:8]}"
+
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": project_key})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "name": "RedStone",
+                },
+            )
+
+            # Populate inbox
+            print(f"\nPopulating inbox with {num_messages} messages...")
+            for i in range(num_messages):
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "project_key": project_key,
+                        "sender_name": "RedStone",
+                        "to": ["RedStone"],
+                        "subject": f"Message {i}",
+                        "body_md": f"Content for message {i}",
+                    },
+                )
+
+            # Measure fetch latency
+            for _ in range(fetch_iterations):
+                start = time.perf_counter()
+                result = await client.call_tool(
+                    "fetch_inbox",
+                    {
+                        "project_key": project_key,
+                        "agent_name": "RedStone",
+                        "limit": 100,
+                    },
+                )
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                latencies.append(elapsed_ms)
+                assert len(result.data) > 0
+
+        stats = print_latency_stats("Inbox Fetch (100 msgs)", latencies)
+        # Target: < 200ms p95, allow 500ms for overhead
+        assert stats["p95"] < 500, f"Inbox fetch p95 ({stats['p95']:.2f}ms) exceeds threshold"
+
+
+class TestSearchLatency:
+    """Benchmark search latency."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_search_with_many_messages(self, isolated_env):
+        """Benchmark search latency. Target: < 500ms p95."""
+        import uuid
+
+        from fastmcp import Client
+
+        from mcp_agent_mail.app import build_mcp_server
+
+        server = build_mcp_server()
+        num_messages = 100  # Reduced for speed; scale up for production
+        search_iterations = 10
+        latencies: list[float] = []
+
+        # Use unique project key to avoid cross-test pollution
+        project_key = f"/perf-search-{uuid.uuid4().hex[:8]}"
+
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": project_key})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "name": "SilverFox",
+                },
+            )
+
+            # Populate with searchable messages
+            print(f"\nPopulating with {num_messages} messages for search...")
+            for i in range(num_messages):
+                keyword = ["alpha", "beta", "gamma", "delta"][i % 4]
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "project_key": project_key,
+                        "sender_name": "SilverFox",
+                        "to": ["SilverFox"],
+                        "subject": f"Report {keyword} {i}",
+                        "body_md": f"This is a {keyword} report number {i}.",
+                    },
+                )
+
+            # Measure search latency
+            for _ in range(search_iterations):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "search_messages",
+                    {
+                        "project_key": project_key,
+                        "query": "alpha OR beta",
+                        "limit": 50,
+                    },
+                )
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                latencies.append(elapsed_ms)
+
+        stats = print_latency_stats("Search (FTS)", latencies)
+        # Target: < 500ms p95, allow 1000ms for overhead
+        assert stats["p95"] < 1000, f"Search p95 ({stats['p95']:.2f}ms) exceeds threshold"
+
+
+class TestFileReservationLatency:
+    """Benchmark file reservation operations."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_reservation_conflict_check_with_100(self, isolated_env):
+        """Benchmark conflict check with many existing reservations."""
+        import uuid
+
+        from fastmcp import Client
+
+        from mcp_agent_mail.app import build_mcp_server
+
+        server = build_mcp_server()
+        num_reservations = 50
+        check_iterations = 10
+        latencies: list[float] = []
+
+        # Use unique project key to avoid cross-test pollution
+        project_key = f"/perf-conflict-{uuid.uuid4().hex[:8]}"
+
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": project_key})
+
+            # Use create_agent_identity instead of register_agent to get guaranteed unique names
+            agent1_result = await client.call_tool(
+                "create_agent_identity",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "task_description": "Reserving agent",
+                },
+            )
+            agent1_name = agent1_result.data.get("name")
+
+            agent2_result = await client.call_tool(
+                "create_agent_identity",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "task_description": "Conflict checking agent",
+                },
+            )
+            agent2_name = agent2_result.data.get("name")
+
+            # Create many reservations
+            print(f"\nCreating {num_reservations} reservations with {agent1_name}...")
+            for i in range(num_reservations):
+                await client.call_tool(
+                    "file_reservation_paths",
+                    {
+                        "project_key": project_key,
+                        "agent_name": agent1_name,
+                        "paths": [f"lib/component_{i}/**"],
+                        "ttl_seconds": 3600,
+                        "exclusive": True,
+                    },
+                )
+
+            # Measure conflict check time using agent2
+            print(f"Measuring conflict checks with {agent2_name}...")
+            for i in range(check_iterations):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "file_reservation_paths",
+                    {
+                        "project_key": project_key,
+                        "agent_name": agent2_name,
+                        "paths": [f"lib/component_{i % num_reservations}/**"],
+                        "ttl_seconds": 3600,
+                        "exclusive": True,
+                    },
+                )
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                latencies.append(elapsed_ms)
+
+        stats = print_latency_stats("Conflict Check (50 reservations)", latencies)
+        assert stats["p95"] < 500, "Conflict check p95 exceeds threshold"
+
+
+class TestArchiveWriteLatency:
+    """Benchmark Git archive write operations."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_archive_ensure_latency(self, isolated_env):
+        """Benchmark archive initialization latency."""
+        from mcp_agent_mail.config import get_settings
+        from mcp_agent_mail.storage import ensure_archive
+
+        settings = get_settings()
+        latencies: list[float] = []
+        num_iterations = 10
+
+        for i in range(num_iterations):
+            start = time.perf_counter()
+            await ensure_archive(settings, f"perf-archive-{i}")
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            latencies.append(elapsed_ms)
+
+        stats = print_latency_stats("Archive Ensure", latencies)
+        assert stats["p95"] < 1000, "Archive ensure p95 exceeds threshold"
+
+
+class TestPerformanceSummary:
+    """Generate performance summary report."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.benchmark
+    async def test_generate_summary_report(self, isolated_env):
+        """Run minimal benchmark suite and print summary."""
+        import uuid
+
+        from fastmcp import Client
+
+        from mcp_agent_mail.app import build_mcp_server
+
+        server = build_mcp_server()
+        results: dict[str, dict[str, float]] = {}
+
+        # Use unique project key to avoid cross-test pollution
+        project_key = f"/perf-summary-{uuid.uuid4().hex[:8]}"
+
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": project_key})
+
+            # Use create_agent_identity to get guaranteed unique name
+            agent_result = await client.call_tool(
+                "create_agent_identity",
+                {
+                    "project_key": project_key,
+                    "program": "benchmark",
+                    "model": "test",
+                    "task_description": "Summary benchmark agent",
+                },
+            )
+            agent_name = agent_result.data.get("name")
+
+            # Message send
+            latencies = []
+            for i in range(5):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "project_key": project_key,
+                        "sender_name": agent_name,
+                        "to": [agent_name],
+                        "subject": f"Summary test {i}",
+                        "body_md": "Quick benchmark",
+                    },
+                )
+                latencies.append((time.perf_counter() - start) * 1000)
+            results["Message Send"] = {
+                "p50": percentile(latencies, 50),
+                "p95": percentile(latencies, 95),
+            }
+
+            # Inbox fetch
+            latencies = []
+            for _ in range(5):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "fetch_inbox",
+                    {
+                        "project_key": project_key,
+                        "agent_name": agent_name,
+                    },
+                )
+                latencies.append((time.perf_counter() - start) * 1000)
+            results["Inbox Fetch"] = {
+                "p50": percentile(latencies, 50),
+                "p95": percentile(latencies, 95),
+            }
+
+            # File reservation
+            latencies = []
+            for i in range(5):
+                start = time.perf_counter()
+                await client.call_tool(
+                    "file_reservation_paths",
+                    {
+                        "project_key": project_key,
+                        "agent_name": agent_name,
+                        "paths": [f"summary/file_{i}.py"],
+                        "ttl_seconds": 3600,
+                    },
+                )
+                latencies.append((time.perf_counter() - start) * 1000)
+            results["File Reservation"] = {
+                "p50": percentile(latencies, 50),
+                "p95": percentile(latencies, 95),
+            }
+
+        # Print summary table
+        print("\n" + "=" * 60)
+        print("PERFORMANCE SUMMARY REPORT")
+        print("=" * 60)
+        print(f"{'Operation':<25} {'P50 (ms)':<15} {'P95 (ms)':<15}")
+        print("-" * 60)
+        for op, stats in results.items():
+            print(f"{op:<25} {stats['p50']:<15.2f} {stats['p95']:<15.2f}")
+        print("=" * 60)
+
+        for op, stats in results.items():
+            assert stats["p95"] < 1000, f"{op} p95 ({stats['p95']:.2f}ms) too slow"
