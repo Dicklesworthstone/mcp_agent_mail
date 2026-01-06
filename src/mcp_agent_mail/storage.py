@@ -645,7 +645,13 @@ async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
 
 
 async def _ensure_repo(root: Path, settings: Settings) -> Repo:
-    """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
+    """Get or create a Repo for the given root, with caching to prevent file handle leaks.
+
+    This function implements multiple layers of protection against file descriptor exhaustion:
+    1. LRU cache limits total cached repos
+    2. Semaphore limits concurrent repo operations
+    3. Proactive cleanup runs before creating new repos when FD headroom is low
+    """
     cache_key = str(root.resolve())
 
     # Fast path: check cache without lock using peek() which doesn't modify LRU order
@@ -653,20 +659,27 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     if cached is not None:
         return cached
 
-    # Slow path: acquire lock and check/create
-    async with _get_repo_cache_lock():
-        # Double-check after acquiring lock, use get() to update LRU order
-        cached = _REPO_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+    # Acquire semaphore to limit concurrent repo operations
+    semaphore = _get_repo_semaphore()
+    async with semaphore:
+        # Slow path: acquire lock and check/create
+        async with _get_repo_cache_lock():
+            # Double-check after acquiring lock, use get() to update LRU order
+            cached = _REPO_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
 
-        git_dir = root / ".git"
-        if git_dir.exists():
-            repo = Repo(str(root))
-            _REPO_CACHE.put(cache_key, repo)
-            return repo
+            # Proactive cleanup: ensure we have headroom before creating a new repo
+            # This prevents hitting EMFILE by cleaning up before it's too late
+            proactive_fd_cleanup(threshold=100)
 
-        repo_result = await _to_thread(Repo.init, str(root))
+            git_dir = root / ".git"
+            if git_dir.exists():
+                repo = Repo(str(root))
+                _REPO_CACHE.put(cache_key, repo)
+                return repo
+
+            repo_result = await _to_thread(Repo.init, str(root))
         repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
         # Ensure deterministic, non-interactive commits (disable GPG signing)
         try:
