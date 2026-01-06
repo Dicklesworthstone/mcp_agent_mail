@@ -679,21 +679,27 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
                 _REPO_CACHE.put(cache_key, repo)
                 return repo
 
+            # Initialize new repo and put in cache while holding the lock
+            # This prevents race conditions where multiple callers could create duplicate Repo objects
             repo_result = await _to_thread(Repo.init, str(root))
-        repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
-        # Ensure deterministic, non-interactive commits (disable GPG signing)
-        try:
-            def _configure_repo() -> None:
-                with repo.config_writer() as cw:
-                    cw.set_value("commit", "gpgsign", "false")
-            await _to_thread(_configure_repo)
-        except Exception:
-            pass
-        attributes_path = root / ".gitattributes"
-        if not attributes_path.exists():
-            await _write_text(attributes_path, "*.json text\n*.md text\n")
-        await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
-        _REPO_CACHE.put(cache_key, repo)
+            repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
+            _REPO_CACHE.put(cache_key, repo)
+            # Flag that this is a newly created repo needing initialization
+            needs_init = True
+
+        # Configure the repo outside the lock (idempotent operations)
+        if needs_init:
+            try:
+                def _configure_repo() -> None:
+                    with repo.config_writer() as cw:
+                        cw.set_value("commit", "gpgsign", "false")
+                await _to_thread(_configure_repo)
+            except Exception:
+                pass
+            attributes_path = root / ".gitattributes"
+            if not attributes_path.exists():
+                await _write_text(attributes_path, "*.json text\n*.md text\n")
+            await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
         return repo
 
 
