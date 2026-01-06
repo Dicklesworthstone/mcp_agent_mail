@@ -15,11 +15,9 @@ Reference: mcp_agent_mail-9z5
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
-import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient

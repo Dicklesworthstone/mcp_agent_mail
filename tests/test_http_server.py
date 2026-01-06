@@ -14,9 +14,7 @@ Reference: mcp_agent_mail-9z6
 from __future__ import annotations
 
 import contextlib
-import json
 from typing import Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient

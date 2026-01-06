@@ -16,9 +16,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
-import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
