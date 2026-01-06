@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[misc,assignment]
     GitWildMatchPattern = None  # type: ignore[misc,assignment]
 from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
-from sqlalchemy.exc import NoResultFound
+from sqlalchemy.exc import IntegrityError, NoResultFound
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
@@ -64,7 +64,13 @@ from .storage import (
     write_file_reservation_record,
     write_message_bundle,
 )
-from .utils import generate_agent_name, sanitize_agent_name, slugify, validate_agent_name_format
+from .utils import (
+    generate_agent_name,
+    sanitize_agent_name,
+    slugify,
+    validate_agent_name_format,
+    validate_thread_id_format,
+)
 import contextlib
 
 logger = logging.getLogger(__name__)
@@ -471,11 +477,25 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[N
         try:
             yield
         finally:
+            cancelled: BaseException | None = None
+            dispose_task: asyncio.Task[None] | None = None
             with suppress(Exception):
                 engine = get_engine()
-                await engine.dispose()
+                dispose_task = asyncio.create_task(engine.dispose())
+            if dispose_task is not None:
+                try:
+                    await asyncio.shield(dispose_task)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+                    with suppress(Exception):
+                        await dispose_task
+                except Exception:
+                    with suppress(Exception):
+                        await dispose_task
             with suppress(Exception):
                 clear_repo_cache()
+            if cancelled is not None:
+                raise cancelled
 
     return lifespan  # type: ignore[return-value]
 
@@ -797,6 +817,27 @@ def _validate_program_model(program: str, model: str) -> None:
             recoverable=True,
             data={"provided": model},
         )
+
+
+def _validate_thread_id(raw_value: Optional[str]) -> Optional[str]:
+    """Normalize and validate a thread_id used for DB indexing and thread digests."""
+    if raw_value is None:
+        return None
+    thread = raw_value.strip()
+    if not thread:
+        return None
+    if not validate_thread_id_format(thread):
+        raise ToolExecutionError(
+            error_type="INVALID_THREAD_ID",
+            message=(
+                f"Invalid thread_id: '{raw_value}'. Thread IDs must start with an alphanumeric character and "
+                "contain only letters, numbers, '.', '_', or '-' (max 128). "
+                "Examples: 'TKT-123', 'bd-42', 'feature-xyz'."
+            ),
+            recoverable=True,
+            data={"provided": raw_value, "examples": ["TKT-123", "bd-42", "feature-xyz"]},
+        )
+    return thread
 
 
 # Patterns that are unsearchable in FTS5 - return None to signal "no results"
@@ -1349,7 +1390,16 @@ async def _ensure_project(human_key: str) -> Project:
             return project
         project = Project(slug=slug, human_key=human_key)
         session.add(project)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Concurrent ensure_project: another caller created the row. Treat as idempotent.
+            await session.rollback()
+            result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+            project = result.scalars().first()
+            if project:
+                return project
+            raise
         await session.refresh(project)  # type: ignore[arg-type]
         return project
 
@@ -2103,6 +2153,7 @@ async def _get_or_create_agent(
     if project.id is None:
         raise ValueError("Project must have an id before creating agents.")
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
+    explicit_name_used = False
     if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
     else:
@@ -2114,6 +2165,7 @@ async def _get_or_create_agent(
         else:
             if validate_agent_name_format(sanitized):
                 desired_name = sanitized
+                explicit_name_used = True
             else:
                 if mode == "strict":
                     # Check for common mistakes and provide specific guidance
@@ -2138,30 +2190,68 @@ async def _get_or_create_agent(
                 desired_name = await _generate_unique_agent_name(project, settings, None)
     await ensure_schema()
     async with get_session() as session:
-        # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
-        result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == desired_name.lower())  # type: ignore[arg-type]
-        )
-        agent = result.scalars().first()
-        if agent:
-            agent.program = program
-            agent.model = model
-            agent.task_description = task_description
-            agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
-            session.add(agent)
-            await session.commit()
-            await session.refresh(agent)
-        else:
-            agent = Agent(
+        for _attempt in range(5):
+            # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
+            result = await session.execute(
+                select(Agent).where(  # type: ignore[arg-type]
+                    Agent.project_id == project.id,
+                    func.lower(Agent.name) == desired_name.lower(),
+                )
+            )
+            agent = result.scalars().first()
+            if agent:
+                agent.program = program
+                agent.model = model
+                agent.task_description = task_description
+                agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
+                session.add(agent)
+                await session.commit()
+                await session.refresh(agent)
+                break
+
+            candidate = Agent(
                 project_id=project.id,
                 name=desired_name,
                 program=program,
                 model=model,
                 task_description=task_description,
             )
-            session.add(agent)
-            await session.commit()
-            await session.refresh(agent)
+            session.add(candidate)
+            try:
+                await session.commit()
+                await session.refresh(candidate)
+                agent = candidate
+                break
+            except IntegrityError:
+                await session.rollback()
+                with suppress(Exception):
+                    session.expunge(candidate)
+
+                if explicit_name_used:
+                    # Another concurrent call created this identity; treat as idempotent update.
+                    result = await session.execute(
+                        select(Agent).where(  # type: ignore[arg-type]
+                            Agent.project_id == project.id,
+                            func.lower(Agent.name) == desired_name.lower(),
+                        )
+                    )
+                    agent = result.scalars().first()
+                    if agent is None:
+                        raise
+                    agent.program = program
+                    agent.model = model
+                    agent.task_description = task_description
+                    agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
+                    session.add(agent)
+                    await session.commit()
+                    await session.refresh(agent)
+                    break
+
+                # Auto-generated name collision under concurrency: pick a new name and retry.
+                desired_name = await _generate_unique_agent_name(project, settings, None)
+                continue
+        else:
+            raise RuntimeError("Failed to create a unique agent after multiple retries.")
     archive = await ensure_archive(settings, project.slug)
     async with _archive_write_lock(archive):
         await write_agent_profile(archive, _agent_to_dict(agent))
@@ -3857,6 +3947,8 @@ def build_mcp_server() -> FastMCP:
             )
             subject = subject[:200]
 
+        thread_id = _validate_thread_id(thread_id)
+
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -4882,6 +4974,7 @@ def build_mcp_server() -> FastMCP:
         now = datetime.now(timezone.utc)
         naive_now = _naive_utc(now)
         exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
+        should_notify = False
         async with get_session() as s:
             # upsert link
             existing = await s.execute(
@@ -4894,11 +4987,13 @@ def build_mcp_server() -> FastMCP:
             )
             link = existing.scalars().first()
             if link:
+                previous_status = link.status
                 link.status = "pending"
                 link.reason = reason
                 link.updated_ts = naive_now
                 link.expires_ts = exp
                 s.add(link)
+                should_notify = previous_status != "pending"
             else:
                 link = AgentLink(
                     a_project_id=project.id or 0,
@@ -4912,26 +5007,51 @@ def build_mcp_server() -> FastMCP:
                     expires_ts=exp,
                 )
                 s.add(link)
-            await s.commit()
-        # Send an intro message with ack_required
-        subject = f"Contact request from {a.name}"
-        body = reason or f"{a.name} requests permission to contact {b.name}."
-        await _deliver_message(
-            ctx,
-            "request_contact",
-            target_project,
-            a,
-            [b.name],
-            [],
-            [],
-            subject,
-            body,
-            None,
-            None,
-            importance="normal",
-            ack_required=True,
-            thread_id=None,
-        )
+                should_notify = True
+            try:
+                await s.commit()
+            except IntegrityError:
+                # Another concurrent request created the link. Treat this as an idempotent refresh.
+                await s.rollback()
+                existing = await s.execute(
+                    select(AgentLink).where(
+                        cast(Any, AgentLink.a_project_id) == project.id,
+                        cast(Any, AgentLink.a_agent_id) == a.id,
+                        cast(Any, AgentLink.b_project_id) == target_project.id,
+                        cast(Any, AgentLink.b_agent_id) == b.id,
+                    )
+                )
+                link = existing.scalars().first()
+                if link is None:
+                    raise
+                link.status = "pending"
+                link.reason = reason
+                link.updated_ts = naive_now
+                link.expires_ts = exp
+                s.add(link)
+                await s.commit()
+                should_notify = False
+
+        if should_notify:
+            # Send an intro message with ack_required.
+            subject = f"Contact request from {a.name}"
+            body = reason or f"{a.name} requests permission to contact {b.name}."
+            await _deliver_message(
+                ctx,
+                "request_contact",
+                target_project,
+                a,
+                [b.name],
+                [],
+                [],
+                subject,
+                body,
+                None,
+                None,
+                importance="normal",
+                ack_required=True,
+                thread_id=None,
+            )
         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
     @mcp.tool(name="respond_contact")
@@ -5552,6 +5672,100 @@ def build_mcp_server() -> FastMCP:
                 },
             )
 
+        # Fast path: for same-project auto-accept handshakes (used heavily by send_message),
+        # approve the AgentLink directly without generating extra "intro" messages.
+        if auto_accept and not target_project_key and not (welcome_subject and welcome_body):
+            project = await _get_project_by_identifier(project_key)
+            a = await _get_agent(project, real_requester)
+            try:
+                b = await _get_agent(project, real_target)
+            except (NoResultFound, ToolExecutionError) as exc:
+                is_not_found = isinstance(exc, NoResultFound) or (
+                    isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
+                )
+                if is_not_found and register_if_missing and validate_agent_name_format(real_target):
+                    settings = get_settings()
+                    b = await _get_or_create_agent(
+                        project,
+                        real_target,
+                        program or "unknown",
+                        model or "unknown",
+                        task_description or "",
+                        settings,
+                    )
+                else:
+                    raise
+
+            if ttl_seconds < 60:
+                await ctx.info(
+                    f"[warn] ttl_seconds={ttl_seconds} is below minimum (60s); auto-correcting to 60 seconds."
+                )
+            now = datetime.now(timezone.utc)
+            naive_now = _naive_utc(now)
+            exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
+
+            async with get_session() as s:
+                existing = await s.execute(
+                    select(AgentLink).where(
+                        cast(Any, AgentLink.a_project_id) == project.id,
+                        cast(Any, AgentLink.a_agent_id) == a.id,
+                        cast(Any, AgentLink.b_project_id) == project.id,
+                        cast(Any, AgentLink.b_agent_id) == b.id,
+                    )
+                )
+                link = existing.scalars().first()
+                if link:
+                    link.status = "approved"
+                    link.reason = reason
+                    link.updated_ts = naive_now
+                    link.expires_ts = exp
+                    s.add(link)
+                else:
+                    link = AgentLink(
+                        a_project_id=project.id or 0,
+                        a_agent_id=a.id or 0,
+                        b_project_id=project.id or 0,
+                        b_agent_id=b.id or 0,
+                        status="approved",
+                        reason=reason,
+                        created_ts=naive_now,
+                        updated_ts=naive_now,
+                        expires_ts=exp,
+                    )
+                    s.add(link)
+                try:
+                    await s.commit()
+                except IntegrityError:
+                    # Another concurrent handshake created the link; treat as idempotent approval.
+                    await s.rollback()
+                    existing = await s.execute(
+                        select(AgentLink).where(
+                            cast(Any, AgentLink.a_project_id) == project.id,
+                            cast(Any, AgentLink.a_agent_id) == a.id,
+                            cast(Any, AgentLink.b_project_id) == project.id,
+                            cast(Any, AgentLink.b_agent_id) == b.id,
+                        )
+                    )
+                    link = existing.scalars().first()
+                    if link is None:
+                        raise
+                    link.status = "approved"
+                    link.reason = reason
+                    link.updated_ts = naive_now
+                    link.expires_ts = exp
+                    s.add(link)
+                    await s.commit()
+
+            approved_payload = {
+                "from": a.name,
+                "from_project": project.human_key,
+                "to": b.name,
+                "to_project": project.human_key,
+                "status": "approved",
+                "expires_ts": _iso(exp),
+            }
+            return {"request": approved_payload, "response": approved_payload, "welcome_message": None}
+
         from fastmcp.tools.tool import FunctionTool
 
         request_tool = cast(FunctionTool, cast(Any, request_contact))
@@ -6081,22 +6295,22 @@ def build_mcp_server() -> FastMCP:
             warning = _detect_suspicious_file_reservation(pattern)
             if warning:
                 await ctx.info(f"[warn] {warning}")
-        async with get_session() as session:
-            existing_rows = await session.execute(
-                cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
-                .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
-                .where(
-                    cast(Any, FileReservation.project_id) == project_id,
-                    cast(Any, FileReservation.released_ts).is_(None),
-                    cast(Any, FileReservation.expires_ts) > _naive_utc(),
-                )
-            )
-            existing_reservations = existing_rows.all()
 
         granted: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
         archive = await ensure_archive(settings, project.slug)
         async with _archive_write_lock(archive):
+            async with get_session() as session:
+                existing_rows = await session.execute(
+                    cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                    .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+                    .where(
+                        cast(Any, FileReservation.project_id) == project_id,
+                        cast(Any, FileReservation.released_ts).is_(None),
+                        cast(Any, FileReservation.expires_ts) > _naive_utc(),
+                    )
+                )
+                existing_reservations = existing_rows.all()
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
                 for file_reservation_record, holder_name in existing_reservations:
