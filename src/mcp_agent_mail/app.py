@@ -2193,9 +2193,9 @@ async def _get_or_create_agent(
         for _attempt in range(5):
             # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
             result = await session.execute(
-                select(Agent).where(  # type: ignore[arg-type]
-                    Agent.project_id == project.id,
-                    func.lower(Agent.name) == desired_name.lower(),
+                select(Agent).where(
+                    cast(Any, Agent.project_id == project.id),
+                    cast(Any, func.lower(Agent.name) == desired_name.lower()),
                 )
             )
             agent = result.scalars().first()
@@ -2230,9 +2230,9 @@ async def _get_or_create_agent(
                 if explicit_name_used:
                     # Another concurrent call created this identity; treat as idempotent update.
                     result = await session.execute(
-                        select(Agent).where(  # type: ignore[arg-type]
-                            Agent.project_id == project.id,
-                            func.lower(Agent.name) == desired_name.lower(),
+                        select(Agent).where(
+                            cast(Any, Agent.project_id == project.id),
+                            cast(Any, func.lower(Agent.name) == desired_name.lower()),
                         )
                     )
                     agent = result.scalars().first()
