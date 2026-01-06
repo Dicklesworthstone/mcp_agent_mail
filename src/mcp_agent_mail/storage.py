@@ -52,18 +52,21 @@ class _LRURepoCache:
     """LRU cache for Git Repo objects with size limit.
 
     This prevents file descriptor leaks by:
-    1. Limiting the number of cached repos (default: 8)
-    2. Evicting oldest repos when at capacity (they will be GC'd when no longer referenced)
+    1. Limiting the number of cached repos (default: 16)
+    2. Evicting oldest repos when at capacity
+    3. Aggressively cleaning up evicted repos when reference counts drop
 
     IMPORTANT: Evicted repos are NOT closed immediately because they may still be in use
     by other coroutines. They will be closed when garbage collected or when clear() is called.
+    Cleanup runs opportunistically on both get() and put() operations.
     """
 
-    def __init__(self, maxsize: int = 8) -> None:
+    def __init__(self, maxsize: int = 16) -> None:
         self._maxsize = max(1, maxsize)
         self._cache: dict[str, Repo] = {}
         self._order: list[str] = []  # LRU order: oldest first
         self._evicted: list[Repo] = []  # Evicted repos pending close
+        self._cleanup_counter: int = 0  # Track operations for periodic cleanup
 
     def peek(self, key: str) -> Repo | None:
         """Check if key exists and return value WITHOUT updating LRU order.
@@ -76,12 +79,18 @@ class _LRURepoCache:
         """Get a repo from cache, updating LRU order.
 
         Should only be called while holding the external lock.
+        Also performs opportunistic cleanup of evicted repos.
         """
         if key in self._cache:
             # Move to end (most recently used)
             with contextlib.suppress(ValueError):
                 self._order.remove(key)
             self._order.append(key)
+            # Opportunistically try to clean up evicted repos every 4th access
+            self._cleanup_counter += 1
+            if self._cleanup_counter >= 4:
+                self._cleanup_counter = 0
+                self._cleanup_evicted()
             return self._cache[key]
         return None
 
@@ -116,9 +125,8 @@ class _LRURepoCache:
     def _cleanup_evicted(self) -> int:
         """Try to close evicted repos that have only one reference (ours).
 
-        Returns count of repos closed.
+        Returns count of repos closed. Logs warning if evicted list grows large.
         """
-        import sys
         still_in_use: list[Repo] = []
         closed = 0
         for repo in self._evicted:
@@ -131,7 +139,28 @@ class _LRURepoCache:
             else:
                 still_in_use.append(repo)
         self._evicted = still_in_use
+        # Warn if evicted list is growing large (potential file handle pressure)
+        if len(still_in_use) > self._maxsize:
+            import logging
+            logging.getLogger(__name__).warning(
+                "repo_cache.evicted_backlog",
+                extra={"evicted_count": len(still_in_use), "maxsize": self._maxsize},
+            )
         return closed
+
+    @property
+    def evicted_count(self) -> int:
+        """Number of evicted repos waiting to be closed."""
+        return len(self._evicted)
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return cache statistics for monitoring."""
+        return {
+            "cached": len(self._cache),
+            "evicted": len(self._evicted),
+            "maxsize": self._maxsize,
+        }
 
     def __contains__(self, key: str) -> bool:
         return key in self._cache
@@ -163,8 +192,9 @@ class _LRURepoCache:
 
 
 # LRU cache for Repo objects with automatic cleanup
-# Limits to 8 concurrent repos to prevent file handle exhaustion
-_REPO_CACHE: _LRURepoCache = _LRURepoCache(maxsize=8)
+# Limits to 16 concurrent repos to prevent file handle exhaustion under heavy load
+# Increased from 8 to handle multi-project scenarios better (GitHub issue #59)
+_REPO_CACHE: _LRURepoCache = _LRURepoCache()  # Uses default maxsize=16
 _REPO_CACHE_LOCK: asyncio.Lock | None = None
 
 
@@ -183,6 +213,15 @@ def clear_repo_cache() -> int:
     Should be called during shutdown or between tests.
     """
     return _REPO_CACHE.clear()
+
+
+def get_repo_cache_stats() -> dict[str, int]:
+    """Get repository cache statistics for monitoring.
+
+    Returns dict with 'cached', 'evicted', and 'maxsize' counts.
+    Useful for diagnosing file handle pressure.
+    """
+    return _REPO_CACHE.stats
 
 
 class AsyncFileLock:
