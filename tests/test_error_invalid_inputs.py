@@ -4,22 +4,26 @@ Test error handling for invalid inputs across MCP tools.
 Verifies clear error messages and appropriate exception types.
 
 Test Cases:
-1. Invalid project_key format
-2. Non-existent project
-3. Invalid agent name format
-4. Non-existent agent
-5. Agent name placeholder detection
-6. Empty message body
-7. Invalid importance level
-8. Invalid contact policy
-9. Invalid file reservation pattern
-10. TTL below minimum (< 60s)
-11. Missing required parameters
+1. Invalid project_key format (relative path rejected)
+2. Non-existent project (register_agent, whois, fetch_inbox, search_messages)
+3. Invalid agent name format (single word, spaces)
+4. Non-existent agent (send_message sender/recipient, file_reservation, whois, fetch_inbox, etc.)
+5. Placeholder detection (YOUR_PROJECT, YOUR_AGENT_NAME)
+6. Empty recipients list (API allows, returns 0 deliveries)
+7. Empty subject (API allows)
+8. Invalid contact policy (API normalizes to 'auto')
+9. Empty file reservation paths (rejected)
+10. TTL below minimum (API warns but allows)
+11. Non-existent message (mark_read, acknowledge, reply)
+12. Non-existent agent for release/renew reservations
+13. Non-existent agent for contact request/respond
 
 Reference: mcp_agent_mail-mj0
 """
 
 from __future__ import annotations
+
+import contextlib
 
 import pytest
 from fastmcp import Client
@@ -43,7 +47,8 @@ async def test_ensure_project_requires_absolute_path(isolated_env):
             pytest.fail("Should reject relative path")
         except ToolError as e:
             error_str = str(e).lower()
-            assert "absolute" in error_str or "path" in error_str or "/" in error_str
+            # Must mention 'absolute' or 'path' (but not just "/" which is too loose)
+            assert "absolute" in error_str or "path" in error_str
 
 
 @pytest.mark.asyncio
@@ -69,27 +74,32 @@ async def test_register_agent_nonexistent_project(isolated_env):
 
 @pytest.mark.asyncio
 async def test_register_agent_invalid_name_format(isolated_env):
-    """register_agent should reject invalid agent name formats."""
+    """register_agent should reject invalid agent name formats or auto-generate valid ones."""
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/invalidname"})
 
-        # Single word name (not adjective+noun) - may be rejected or auto-generate
-        import contextlib
-
+        # Single word name (not adjective+noun) - API may reject or auto-generate
+        # Either behavior is acceptable; we just verify no crash
         with contextlib.suppress(ToolError):
-            await client.call_tool(
+            result = await client.call_tool(
                 "register_agent",
                 {"project_key": "InvalidName", "program": "test", "model": "test", "name": "SingleWord"},
             )
+            # If it succeeded, it should have auto-generated a valid name
+            if result and result.data:
+                assert "name" in result.data  # Should return the (possibly auto-generated) name
 
-        # Name with spaces
+        # Name with spaces - should be rejected (spaces are clearly invalid)
         try:
             await client.call_tool(
                 "register_agent",
                 {"project_key": "InvalidName", "program": "test", "model": "test", "name": "Has Spaces"},
             )
+            # If we get here, spaces were somehow allowed - note this but don't fail
+            # as the API may sanitize the name
         except ToolError as e:
+            # Expected: error for name with spaces
             error_str = str(e).lower()
             assert "name" in error_str or "invalid" in error_str or "format" in error_str
 
@@ -154,26 +164,31 @@ async def test_send_message_nonexistent_recipient(isolated_env):
 
 @pytest.mark.asyncio
 async def test_placeholder_detection_your_project(isolated_env):
-    """Should detect and reject placeholder values like YOUR_PROJECT."""
+    """Should detect placeholder values like YOUR_PROJECT - either reject or warn."""
     server = build_mcp_server()
     async with Client(server) as client:
         try:
-            await client.call_tool("ensure_project", {"human_key": "/YOUR_PROJECT"})
-            # May succeed with warning or may fail
+            result = await client.call_tool("ensure_project", {"human_key": "/YOUR_PROJECT"})
+            # If it succeeded, project was created (placeholder detection may just warn)
+            # Verify we at least got a valid response
+            assert result.data is not None
+            assert "slug" in result.data or "id" in result.data
         except ToolError as e:
+            # Placeholder was rejected - verify error message is appropriate
             error_str = str(e).lower()
             assert "placeholder" in error_str or "your_" in error_str or "template" in error_str
+        # Test passes whether rejected or allowed with warning - documents actual behavior
 
 
 @pytest.mark.asyncio
 async def test_placeholder_detection_your_agent_name(isolated_env):
-    """Should detect and reject placeholder agent names like YOUR_AGENT_NAME."""
+    """Should detect placeholder agent names like YOUR_AGENT_NAME - either reject or warn."""
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/placeholderagent"})
 
         try:
-            await client.call_tool(
+            result = await client.call_tool(
                 "register_agent",
                 {
                     "project_key": "PlaceholderAgent",
@@ -182,9 +197,13 @@ async def test_placeholder_detection_your_agent_name(isolated_env):
                     "name": "YOUR_AGENT_NAME",
                 },
             )
+            # If succeeded, verify we got a response (may have auto-generated name)
+            assert result.data is not None
         except ToolError as e:
+            # Placeholder was rejected - verify error message is appropriate
             error_str = str(e).lower()
             assert "placeholder" in error_str or "your_" in error_str or "invalid" in error_str
+        # Test passes whether rejected or allowed - documents actual behavior
 
 
 # ============================================================================
