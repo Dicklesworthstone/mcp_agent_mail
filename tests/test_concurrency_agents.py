@@ -270,7 +270,7 @@ class TestConcurrentFileReservations:
 
     @pytest.mark.asyncio
     async def test_multiple_agents_claim_same_file(self, isolated_env):
-        """Multiple agents try to claim the same file - only one succeeds exclusively."""
+        """Multiple agents try to claim the same file - conflicts are reported (advisory)."""
         await ensure_schema()
         project_key = f"/test/concurrent/file-claim/{random_id()}"
         num_agents = 5
@@ -319,10 +319,10 @@ class TestConcurrentFileReservations:
             successes = [r for r in valid_results if r["granted"]]
             conflicts = [r for r in valid_results if r["conflicts"]]
 
-            # At least one should succeed
-            assert len(successes) >= 1, "At least one agent should get the reservation"
-            # Others should get conflicts
-            assert len(successes) + len(conflicts) == num_agents
+            # In this system, file reservations are advisory:
+            # requests are granted even if they conflict; conflicts are returned alongside grants.
+            assert len(successes) == num_agents, "All agents should receive a reservation record"
+            assert len(conflicts) >= 1, "At least one agent should observe a conflict"
 
     @pytest.mark.asyncio
     async def test_concurrent_non_overlapping_claims(self, isolated_env):
@@ -818,6 +818,42 @@ class TestRaceConditions:
         # All should return the same project
         project_ids = [r["id"] for r in results if isinstance(r, dict)]
         assert len(set(project_ids)) == 1, "All should get same project ID"
+
+    @pytest.mark.asyncio
+    async def test_simultaneous_agent_registration_same_name(self, isolated_env):
+        """Multiple clients try to register the same agent name - idempotent."""
+        await ensure_schema()
+        project_key = f"/test/concurrent/agent-register/{random_id()}"
+        num_attempts = 10
+
+        server = build_mcp_server()
+        async with Client(server) as bootstrap:
+            await bootstrap.call_tool("ensure_project", {"human_key": project_key})
+
+        async def register_agent_same_name():
+            async with Client(server) as client:
+                result = await client.call_tool(
+                    "register_agent",
+                    {
+                        "project_key": project_key,
+                        "program": "test",
+                        "model": "test",
+                        "name": "GreenLake",
+                        "task_description": "simultaneous registration",
+                    },
+                )
+                return result.data
+
+        results = await asyncio.gather(
+            *[register_agent_same_name() for _ in range(num_attempts)],
+            return_exceptions=True,
+        )
+
+        for i, r in enumerate(results):
+            assert not isinstance(r, Exception), f"Attempt {i} failed: {r}"
+
+        agent_ids = [r["id"] for r in results if isinstance(r, dict)]
+        assert len(set(agent_ids)) == 1, "All should get the same agent ID"
 
     @pytest.mark.asyncio
     async def test_simultaneous_mark_read(self, isolated_env):

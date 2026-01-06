@@ -337,8 +337,9 @@ class TestAttachmentPathTraversal:
                         "convert_images": False,
                     },
                 )
-            # Verify the error is about the file not found (correct rejection)
-            assert "No such file" in str(exc_info.value) or "not found" in str(exc_info.value).lower()
+            # Verify the error is a safe rejection (either traversal blocked or file missing)
+            err = str(exc_info.value).lower()
+            assert ("directory traversal" in err) or ("no such file" in err) or ("not found" in err)
 
     @pytest.mark.asyncio
     async def test_attachment_markdown_image_traversal_handled(self, isolated_env, monkeypatch):
