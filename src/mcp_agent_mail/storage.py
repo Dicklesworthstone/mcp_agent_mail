@@ -23,6 +23,7 @@ from git.objects.tree import Tree
 from PIL import Image
 
 from .config import Settings
+from .utils import validate_thread_id_format
 
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 
@@ -353,7 +354,28 @@ class AsyncFileLock:
                         f"Timed out acquiring lock {self._path} after {self._timeout:.2f}s "
                         "and no stale owner detected."
                     ) from None
-        except Exception:
+        except BaseException:
+            # Best-effort cleanup on any failure (including cancellation) to avoid leaking
+            # lock file handles and process-level locks.
+            if self._held:
+                task = asyncio.create_task(_to_thread(self._lock.release))
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await task
+                self._held = False
+                for cleanup_coro in (
+                    _to_thread(self._metadata_path.unlink, missing_ok=True),
+                    _to_thread(self._path.unlink, missing_ok=True),
+                ):
+                    task = asyncio.create_task(cleanup_coro)
+                    try:
+                        await asyncio.shield(task)
+                    except BaseException:
+                        with contextlib.suppress(Exception):
+                            await task
+
             if self._loop_key is not None:
                 _PROCESS_LOCK_OWNERS.pop(self._loop_key, None)
             if self._process_lock_held and self._process_lock:
@@ -432,22 +454,22 @@ class AsyncFileLock:
 
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         if self._held:
-            # Release the file lock first
-            with contextlib.suppress(Exception):
-                await _to_thread(self._lock.release)
-
-            # Small delay on Windows to ensure file handles are released
-            if sys.platform == 'win32':
-                await asyncio.sleep(0.01)
-
-            # Delete metadata file
-            with contextlib.suppress(Exception):
-                await _to_thread(self._metadata_path.unlink, missing_ok=True)
-
-            # Delete lock file
-            with contextlib.suppress(Exception):
-                await _to_thread(self._path.unlink, missing_ok=True)
-
+            # Release/unlink must be cancellation-safe; otherwise cancelled tasks can leak
+            # lock file handles and wedge subsequent operations.
+            for cleanup_coro in (
+                _to_thread(self._lock.release),
+                asyncio.sleep(0.01) if sys.platform == "win32" else None,
+                _to_thread(self._metadata_path.unlink, missing_ok=True),
+                _to_thread(self._path.unlink, missing_ok=True),
+            ):
+                if cleanup_coro is None:
+                    continue
+                task = asyncio.create_task(cleanup_coro)
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await task
             self._held = False
 
         # Clean up process-level locks
@@ -513,16 +535,26 @@ class AsyncFileLock:
 @asynccontextmanager
 async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     """Context manager for safely mutating archive surfaces."""
-
     lock = AsyncFileLock(archive.lock_path, timeout_seconds=timeout_seconds)
     await lock.__aenter__()
+    exc_type: type[BaseException] | None = None
+    exc: BaseException | None = None
+    tb: object | None = None
     try:
         yield
-    except Exception as exc:
-        await lock.__aexit__(type(exc), exc, exc.__traceback__)
+    except BaseException as raised:
+        exc_type = type(raised)
+        exc = raised
+        tb = raised.__traceback__
         raise
-    else:
-        await lock.__aexit__(None, None, None)
+    finally:
+        # Ensure lock release even under task cancellation (Python 3.14: CancelledError is BaseException).
+        task = asyncio.create_task(lock.__aexit__(exc_type, exc, tb))
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await task
 
 
 T = TypeVar('T')
@@ -833,6 +865,11 @@ async def _update_thread_digest(
     The digest lives at messages/threads/{thread_id}.md and contains an
     append-only sequence of sections linking to canonical messages.
     """
+    if not validate_thread_id_format(thread_id):
+        raise ValueError(
+            "Invalid thread_id: must start with an alphanumeric character and contain only "
+            "letters, numbers, '.', '_', or '-' (max 128)."
+        )
     digest_dir = archive.root / "messages" / "threads"
     await _to_thread(digest_dir.mkdir, parents=True, exist_ok=True)
     digest_path = digest_dir / f"{thread_id}.md"
@@ -871,6 +908,33 @@ async def _update_thread_digest(
     return digest_path.relative_to(archive.repo_root).as_posix()
 
 
+def _resolve_archive_relative_path(archive: ProjectArchive, raw_path: str) -> Path:
+    """Resolve a relative path safely inside the project archive root.
+
+    Rejects directory traversal and ensures the resolved path stays within
+    the project's archive root (defense-in-depth against symlink escapes).
+    """
+    normalized = (raw_path or "").strip().replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or normalized.startswith("..")
+        or "/../" in normalized
+        or normalized.endswith("/..")
+        or normalized == ".."
+    ):
+        raise ValueError("Invalid path: directory traversal not allowed")
+
+    safe_rel = normalized.lstrip("/")
+    root = archive.root.resolve()
+    candidate = (archive.root / safe_rel).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Invalid path: directory traversal not allowed") from exc
+    return candidate
+
+
 async def process_attachments(
     archive: ProjectArchive,
     body_md: str,
@@ -905,9 +969,8 @@ async def process_attachments(
     if attachment_paths:
         for path in attachment_paths:
             p = Path(path)
-            if not p.is_absolute():
-                p = (archive.root / path).resolve()
-            meta, rel_path = await _store_image(archive, p, embed_policy=embed_policy)
+            resolved = p.expanduser().resolve() if p.is_absolute() else _resolve_archive_relative_path(archive, path)
+            meta, rel_path = await _store_image(archive, resolved, embed_policy=embed_policy)
             attachments_meta.append(meta)
             if rel_path:
                 commit_paths.append(rel_path)
@@ -951,8 +1014,15 @@ async def _convert_markdown_images(
             last_idx = path_end
             continue
         file_path = Path(normalized_path)
-        if not file_path.is_absolute():
-            file_path = (archive.root / raw_path).resolve()
+        if file_path.is_absolute():
+            file_path = file_path.expanduser().resolve()
+        else:
+            try:
+                file_path = _resolve_archive_relative_path(archive, normalized_path)
+            except ValueError:
+                result_parts.append(raw_path)
+                last_idx = path_end
+                continue
         if not file_path.is_file():
             result_parts.append(raw_path)
             last_idx = path_end
