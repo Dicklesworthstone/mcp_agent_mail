@@ -125,3 +125,35 @@ def isolated_env(tmp_path, monkeypatch):
                     path.rmdir()
             if storage_root.exists():
                 storage_root.rmdir()
+
+
+@pytest.fixture(autouse=True)
+def _global_resource_cleanup():
+    """Best-effort global cleanup to avoid FD leaks under low ulimit.
+
+    Some tests don't opt into `isolated_env` but still touch the global engine/repo cache.
+    With RLIMIT_NOFILE=256 (common on macOS), a small amount of leakage can cascade into
+    EMFILE failures later in the suite.
+    """
+    yield
+
+    # Close cached repo handles first.
+    with contextlib.suppress(Exception):
+        clear_repo_cache()
+
+    # Dispose engine/pool state across tests.
+    with contextlib.suppress(Exception):
+        reset_database_state()
+
+    with contextlib.suppress(Exception):
+        clear_settings_cache()
+
+    # Extra safety: close any Repo objects that escaped caching.
+    with contextlib.suppress(Exception):
+        from git import Repo
+
+        gc.collect()
+        for obj in gc.get_objects():
+            if isinstance(obj, Repo):
+                with contextlib.suppress(Exception):
+                    obj.close()
