@@ -761,7 +761,7 @@ class TestStorageRepoIntegrity:
         if storage_path.exists():
             for root, _dirs, files in os.walk(storage_path):
                 for f in files:
-                    rel_path = os.path.relpath(os.path.join(root, f), storage_path)
+                    rel_path = os.path.relpath(Path(root) / f, storage_path)
                     pre_archive_files.add(rel_path)
 
         # Save archive
@@ -788,7 +788,7 @@ class TestStorageRepoIntegrity:
         restored_files = set()
         for root, _dirs, files in os.walk(storage_path):
             for f in files:
-                rel_path = os.path.relpath(os.path.join(root, f), storage_path)
+                rel_path = os.path.relpath(Path(root) / f, storage_path)
                 restored_files.add(rel_path)
 
         # Should have restored the same files (or more)
