@@ -91,6 +91,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     """Build async SQLAlchemy engine with SQLite-optimized settings for concurrency."""
     from sqlalchemy import event
     from sqlalchemy.engine import make_url
+    from sqlalchemy.pool import NullPool
 
     # For SQLite, enable WAL mode and set timeout for better concurrent access
     connect_args = {}
@@ -144,21 +145,25 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
             "check_same_thread": False,  # Required for async SQLite
         }
 
-    # SQLite has low write concurrency; large pools can exhaust FDs under stress tests.
-    pool_size = 5 if is_sqlite else 25
-    max_overflow = 5 if is_sqlite else 25
+    engine_kwargs: dict[str, Any] = {
+        "echo": settings.echo,
+        "future": True,
+        "pool_pre_ping": True,
+        "connect_args": connect_args,
+    }
 
-    engine = create_async_engine(
-        settings.url,
-        echo=settings.echo,
-        future=True,
-        pool_pre_ping=True,
-        pool_size=pool_size,
-        max_overflow=max_overflow,
-        pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
-        pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
-        connect_args=connect_args,
-    )
+    if is_sqlite:
+        # With low RLIMIT_NOFILE (common on macOS), pooled aiosqlite connections can
+        # accumulate across many short-lived async tests and hit EMFILE. NullPool
+        # ensures connections are closed promptly instead of being retained.
+        engine_kwargs["poolclass"] = NullPool
+    else:
+        engine_kwargs["pool_timeout"] = 30  # Fail fast with clear error instead of hanging indefinitely
+        engine_kwargs["pool_recycle"] = 3600  # Recycle connections after 1 hour to prevent stale handles
+        engine_kwargs["pool_size"] = 25
+        engine_kwargs["max_overflow"] = 25
+
+    engine = create_async_engine(settings.url, **engine_kwargs)
 
     # For SQLite: Set up event listener to configure each connection with WAL mode
     if is_sqlite:
@@ -206,8 +211,19 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
     factory = get_session_factory()
-    async with factory() as session:
+    session = factory()
+    try:
         yield session
+    finally:
+        # Ensure session close completes even under cancellation (anyio cancel scopes
+        # will raise asyncio.CancelledError which is BaseException in Python 3.14).
+        close_task = asyncio.create_task(session.close())
+        try:
+            await asyncio.shield(close_task)
+        except BaseException:
+            with suppress(Exception):
+                await close_task
+            raise
 
 
 @retry_on_db_lock(max_retries=5, base_delay=0.1, max_delay=5.0)
