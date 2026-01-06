@@ -4980,11 +4980,13 @@ def build_mcp_server() -> FastMCP:
                 updated = 1
             else:
                 if accept:
+                    if a_project.id is None or a.id is None or project.id is None or b.id is None:
+                        raise ValueError("Projects and agents must have ids before creating contact links.")
                     s.add(AgentLink(
-                        a_project_id=project.id or 0,
-                        a_agent_id=a.id or 0,
-                        b_project_id=project.id or 0,
-                        b_agent_id=b.id or 0,
+                        a_project_id=a_project.id,
+                        a_agent_id=a.id,
+                        b_project_id=project.id,
+                        b_agent_id=b.id,
                         status="approved",
                         reason="",
                         created_ts=naive_now,
