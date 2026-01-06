@@ -139,6 +139,7 @@ async def test_ensure_project_is_idempotent(isolated_env):
 
         # Verify only one project exists
         db_project = await get_project_from_db("/test/setup/idem")
+        assert db_project is not None, "Project should exist"
         assert db_project["id"] == first_id
 
 
@@ -190,6 +191,7 @@ async def test_register_agent_creates_new_agent(isolated_env):
 
         # Verify database record
         project = await get_project_from_db("/test/setup/agent")
+        assert project is not None, "Project should exist"
         agent = await get_agent_from_db(project["id"], result.data["name"])
         assert agent is not None, "Agent should exist in database"
         assert agent["program"] == "test-program"
@@ -218,6 +220,7 @@ async def test_register_agent_updates_existing_agent(isolated_env):
 
         # Get initial agent count
         project = await get_project_from_db("/test/setup/update")
+        assert project is not None, "Project should exist"
         initial_count = await count_agents_in_project(project["id"])
 
         # Update agent with same name
@@ -241,6 +244,7 @@ async def test_register_agent_updates_existing_agent(isolated_env):
 
         # Verify task description was updated
         agent = await get_agent_from_db(project["id"], agent_name)
+        assert agent is not None, "Agent should exist"
         assert agent["task_description"] == "Updated task"
 
 
@@ -314,6 +318,7 @@ async def test_create_agent_identity_always_creates_new(isolated_env):
 
         # Both should exist in database
         project = await get_project_from_db("/test/setup/identity")
+        assert project is not None, "Project should exist"
         agent1 = await get_agent_from_db(project["id"], name1)
         agent2 = await get_agent_from_db(project["id"], name2)
         assert agent1 is not None
@@ -367,7 +372,9 @@ async def test_last_active_ts_updated_on_activity(isolated_env):
 
         # Get initial last_active_ts
         project = await get_project_from_db("/test/setup/active")
+        assert project is not None, "Project should exist"
         agent_before = await get_agent_from_db(project["id"], agent_name)
+        assert agent_before is not None, "Agent should exist before update"
         initial_ts = agent_before["last_active_ts"]
 
         # Small delay to ensure timestamp difference
@@ -386,6 +393,7 @@ async def test_last_active_ts_updated_on_activity(isolated_env):
 
         # Verify last_active_ts was updated
         agent_after = await get_agent_from_db(project["id"], agent_name)
+        assert agent_after is not None, "Agent should exist after update"
         assert agent_after["last_active_ts"] >= initial_ts, "last_active_ts should be updated"
 
 

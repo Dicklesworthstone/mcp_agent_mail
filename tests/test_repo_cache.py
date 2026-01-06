@@ -122,7 +122,7 @@ class TestLRURepoCacheEviction:
         cache.put("repo1", repo1)
 
         # Mock cleanup to prevent immediate cleanup and verify eviction mechanism
-        evicted_during_put: list[MagicMock] = []
+        evicted_during_put: list = []  # type: ignore[type-arg]
         original_cleanup = cache._cleanup_evicted
         def tracking_cleanup() -> int:
             # Record what's in evicted list before cleanup runs
@@ -244,7 +244,7 @@ class TestLRURepoCacheOpportunisticCleanup:
             nonlocal cleanup_calls
             cleanup_calls += 1
             return original_cleanup()
-        cache._cleanup_evicted = tracking_cleanup
+        cache._cleanup_evicted = tracking_cleanup  # type: ignore[method-assign]
 
         # 3 gets - no cleanup yet
         cache.get("repo")

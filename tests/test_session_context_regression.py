@@ -397,8 +397,11 @@ async def test_contact_request_persists_to_database(isolated_env):
 
         # Verify via direct SQL
         project_id = await get_project_id_by_human_key("/test/session/contact")
+        assert project_id is not None, "Project should exist"
         a_id = await get_agent_id_by_name(project_id, agent_a_name)
+        assert a_id is not None, "Agent A should exist"
         b_id = await get_agent_id_by_name(project_id, agent_b_name)
+        assert b_id is not None, "Agent B should exist"
 
         db_state = await verify_agent_link_in_db(a_id, b_id)
         assert db_state["found"], "AgentLink should exist in database"
@@ -445,8 +448,11 @@ async def test_contact_respond_persists_to_database(isolated_env):
 
         # Get IDs for verification
         project_id = await get_project_id_by_human_key("/test/session/respond")
+        assert project_id is not None, "Project should exist"
         a_id = await get_agent_id_by_name(project_id, agent_a_name)
+        assert a_id is not None, "Agent A should exist"
         b_id = await get_agent_id_by_name(project_id, agent_b_name)
+        assert b_id is not None, "Agent B should exist"
 
         # Verify pending state
         before_state = await verify_agent_link_in_db(a_id, b_id)
@@ -516,7 +522,9 @@ async def test_message_read_persists_to_database(isolated_env):
 
         # Get receiver agent ID
         project_id = await get_project_id_by_human_key("/test/session/read")
+        assert project_id is not None, "Project should exist"
         receiver_id = await get_agent_id_by_name(project_id, receiver_name)
+        assert receiver_id is not None, "Receiver agent should exist"
 
         # Verify not read yet
         before_state = await verify_message_recipient_in_db(message_id, receiver_id)
@@ -582,7 +590,9 @@ async def test_message_acknowledge_persists_to_database(isolated_env):
 
         # Get receiver agent ID
         project_id = await get_project_id_by_human_key("/test/session/ack")
+        assert project_id is not None, "Project should exist"
         receiver_id = await get_agent_id_by_name(project_id, receiver_name)
+        assert receiver_id is not None, "Receiver agent should exist"
 
         # Verify not acknowledged yet
         before_state = await verify_message_recipient_in_db(message_id, receiver_id)
@@ -630,6 +640,7 @@ async def test_agent_registration_persists_to_database(isolated_env):
 
         # Verify via direct SQL
         project_id = await get_project_id_by_human_key("/test/session/agent")
+        assert project_id is not None, "Project should exist"
         async with get_session() as session:
             result = await session.execute(
                 text(
@@ -680,6 +691,7 @@ async def test_agent_update_persists_to_database(isolated_env):
 
         # Verify update persisted via direct SQL
         project_id = await get_project_id_by_human_key("/test/session/update")
+        assert project_id is not None, "Project should exist"
         async with get_session() as session:
             result = await session.execute(
                 text(
