@@ -1,17 +1,9 @@
 {
-  "_IMPORTANT_SETUP_INSTRUCTIONS": [
-    "This is a TEMPLATE file. You MUST replace ALL placeholder values before use:",
-    "  1. YOUR_BEARER_TOKEN -> Generate with: openssl rand -hex 32",
-    "  2. YOUR_PROJECT -> Your project slug (e.g., 'my-project')",
-    "  3. YOUR_PROJECT_PATH -> Absolute path (e.g., '/Users/you/projects/myproject')",
-    "  4. YOUR_AGENT_NAME -> Your agent name (e.g., 'BlueMountain')",
-    "Delete this _IMPORTANT_SETUP_INSTRUCTIONS key after configuring."
-  ],
   "mcpServers": {
     "mcp-agent-mail": {
       "type": "http",
       "url": "http://127.0.0.1:8765/mcp/",
-      "headers": { "Authorization": "Bearer YOUR_BEARER_TOKEN" }
+      "headers": { "Authorization": "Bearer dev-token" }
     }
   },
   "hooks": {
@@ -19,18 +11,17 @@
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active YOUR_PROJECT" },
-          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending YOUR_PROJECT YOUR_AGENT_NAME --limit 20" }
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active /Users/jemanuel/projects/mcp_agent_mail" },
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending /Users/jemanuel/projects/mcp_agent_mail EmeraldPond --limit 20" }
         ]
       }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon YOUR_PROJECT --minutes 10" } ] }
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon /Users/jemanuel/projects/mcp_agent_mail --minutes 10" } ] }
     ],
     "PostToolUse": [
-      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "AGENT_MAIL_PROJECT='YOUR_PROJECT_PATH' AGENT_MAIL_AGENT='YOUR_AGENT_NAME' AGENT_MAIL_URL='http://127.0.0.1:8765/mcp/' AGENT_MAIL_TOKEN='YOUR_BEARER_TOKEN' AGENT_MAIL_INTERVAL='120' '.claude/hooks/check_inbox.sh'" } ] },
-      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project YOUR_PROJECT --agent YOUR_AGENT_NAME --limit 10" } ] },
-      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list YOUR_PROJECT" } ] }
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project /Users/jemanuel/projects/mcp_agent_mail --agent EmeraldPond --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list /Users/jemanuel/projects/mcp_agent_mail" } ] }
     ]
   }
 }

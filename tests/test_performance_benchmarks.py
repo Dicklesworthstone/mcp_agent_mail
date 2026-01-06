@@ -602,15 +602,18 @@ class TestMessageSendLatency:
 
         async with Client(server) as client:
             await client.call_tool("ensure_project", {"human_key": project_key})
-            await client.call_tool(
-                "register_agent",
+
+            # Use create_agent_identity for guaranteed unique name
+            agent_result = await client.call_tool(
+                "create_agent_identity",
                 {
                     "project_key": project_key,
                     "program": "benchmark",
                     "model": "test",
-                    "name": "BlueLake",
+                    "task_description": "Message send benchmark",
                 },
             )
+            agent_name = agent_result.data.get("name")
 
             for i in range(num_iterations):
                 start = time.perf_counter()
@@ -618,8 +621,8 @@ class TestMessageSendLatency:
                     "send_message",
                     {
                         "project_key": project_key,
-                        "sender_name": "BlueLake",
-                        "to": ["BlueLake"],
+                        "sender_name": agent_name,
+                        "to": [agent_name],
                         "subject": f"Benchmark message {i}",
                         "body_md": f"Benchmark message {i} for latency testing.",
                     },
@@ -655,15 +658,18 @@ class TestInboxFetchLatency:
 
         async with Client(server) as client:
             await client.call_tool("ensure_project", {"human_key": project_key})
-            await client.call_tool(
-                "register_agent",
+
+            # Use create_agent_identity for guaranteed unique name
+            agent_result = await client.call_tool(
+                "create_agent_identity",
                 {
                     "project_key": project_key,
                     "program": "benchmark",
                     "model": "test",
-                    "name": "RedStone",
+                    "task_description": "Inbox fetch benchmark",
                 },
             )
+            agent_name = agent_result.data.get("name")
 
             # Populate inbox
             print(f"\nPopulating inbox with {num_messages} messages...")
@@ -672,8 +678,8 @@ class TestInboxFetchLatency:
                     "send_message",
                     {
                         "project_key": project_key,
-                        "sender_name": "RedStone",
-                        "to": ["RedStone"],
+                        "sender_name": agent_name,
+                        "to": [agent_name],
                         "subject": f"Message {i}",
                         "body_md": f"Content for message {i}",
                     },
@@ -686,7 +692,7 @@ class TestInboxFetchLatency:
                     "fetch_inbox",
                     {
                         "project_key": project_key,
-                        "agent_name": "RedStone",
+                        "agent_name": agent_name,
                         "limit": 100,
                     },
                 )
@@ -722,15 +728,18 @@ class TestSearchLatency:
 
         async with Client(server) as client:
             await client.call_tool("ensure_project", {"human_key": project_key})
-            await client.call_tool(
-                "register_agent",
+
+            # Use create_agent_identity for guaranteed unique name
+            agent_result = await client.call_tool(
+                "create_agent_identity",
                 {
                     "project_key": project_key,
                     "program": "benchmark",
                     "model": "test",
-                    "name": "SilverFox",
+                    "task_description": "Search benchmark",
                 },
             )
+            agent_name = agent_result.data.get("name")
 
             # Populate with searchable messages
             print(f"\nPopulating with {num_messages} messages for search...")
@@ -740,8 +749,8 @@ class TestSearchLatency:
                     "send_message",
                     {
                         "project_key": project_key,
-                        "sender_name": "SilverFox",
-                        "to": ["SilverFox"],
+                        "sender_name": agent_name,
+                        "to": [agent_name],
                         "subject": f"Report {keyword} {i}",
                         "body_md": f"This is a {keyword} report number {i}.",
                     },
