@@ -1,0 +1,34 @@
+{
+  "_SETUP_INSTRUCTIONS": [
+    "Copy this file to settings.json and replace placeholders:",
+    "  YOUR_PROJECT_PATH -> Absolute path to your project",
+    "  YOUR_AGENT_NAME   -> Your agent name (e.g., 'BlueMountain')",
+    "  YOUR_BEARER_TOKEN -> Token for HTTP auth (or 'dev-token' for local dev)",
+    "Then delete this _SETUP_INSTRUCTIONS block."
+  ],
+  "mcpServers": {
+    "mcp-agent-mail": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": { "Authorization": "Bearer YOUR_BEARER_TOKEN" }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations active YOUR_PROJECT_PATH" },
+          { "type": "command", "command": "uv run python -m mcp_agent_mail.cli acks pending YOUR_PROJECT_PATH YOUR_AGENT_NAME --limit 20" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations soon YOUR_PROJECT_PATH --minutes 10" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli list-acks --project YOUR_PROJECT_PATH --agent YOUR_AGENT_NAME --limit 10" } ] },
+      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "uv run python -m mcp_agent_mail.cli file_reservations list YOUR_PROJECT_PATH" } ] }
+    ]
+  }
+}

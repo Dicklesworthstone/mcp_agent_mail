@@ -14,7 +14,6 @@ Reference: mcp_agent_mail-yh8
 
 from __future__ import annotations
 
-import contextlib
 from typing import Any
 
 import pytest
@@ -641,8 +640,8 @@ class TestXSSPrevention:
             # Should return the payload unchanged (not None) since it's not an FTS syntax issue
             result = _sanitize_fts_query(payload)
             # The sanitizer only handles FTS syntax, not XSS - XSS prevention is elsewhere
-            # Just verify it doesn't crash
-            assert result is not None or payload in {"<script>alert(1)</script>"}
+            # Just verify it doesn't crash and returns something
+            assert result is not None
 
     @pytest.mark.asyncio
     async def test_xss_in_message_body_stored_safely(self, isolated_env):

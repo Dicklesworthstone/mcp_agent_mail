@@ -228,9 +228,9 @@ signing-*.pub
 .idea/
 
 # Local agent configuration directories (per-user, not project config)
-# Exception: We track template config files as examples for this project
+# We track .template files as examples; actual settings.json is user-specific
 .claude/
-!.claude/settings.json
+!.claude/settings.json.template
 .codex/
 !.codex/config.toml
 .cursor/

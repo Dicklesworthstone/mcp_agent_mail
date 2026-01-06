@@ -196,6 +196,7 @@ class TestConcurrentMessageSending:
 
             # Verify all expected subjects exist (data integrity)
             pid = await get_project_id(project_key)
+            assert pid is not None, "Project should exist after setup"
             db_subjects = await get_all_message_subjects(pid)
             for i in range(num_agents):
                 expected = f"Message from agent {i}"
@@ -313,9 +314,10 @@ class TestConcurrentFileReservations:
             for i, r in enumerate(results):
                 assert not isinstance(r, Exception), f"Agent {i} failed: {r}"
 
-            # Count successes and conflicts
-            successes = [r for r in results if r["granted"]]
-            conflicts = [r for r in results if r["conflicts"]]
+            # Count successes and conflicts (filter to dicts for type safety)
+            valid_results = [r for r in results if isinstance(r, dict)]
+            successes = [r for r in valid_results if r["granted"]]
+            conflicts = [r for r in valid_results if r["conflicts"]]
 
             # At least one should succeed
             assert len(successes) >= 1, "At least one agent should get the reservation"
@@ -526,7 +528,6 @@ class TestConcurrentArchiveWrites:
             # Under high concurrency some registrations may fail due to transient async issues.
             # The key test is: no duplicates among successful registrations.
             successful_names = [r for r in results if isinstance(r, str)]
-            sum(1 for r in results if isinstance(r, Exception))
 
             # At least 70% should succeed
             min_success = int(num_agents * 0.7)
@@ -541,6 +542,7 @@ class TestConcurrentArchiveWrites:
 
             # Verify database count matches successful registrations
             pid = await get_project_id(project_key)
+            assert pid is not None, "Project should exist after setup"
             db_count = await count_agents_in_db(pid)
             assert db_count >= len(successful_names), (
                 f"DB has {db_count} agents but {len(successful_names)} succeeded"
@@ -595,6 +597,7 @@ class TestConcurrentArchiveWrites:
 
             # Verify database integrity for successful sends
             pid = await get_project_id(project_key)
+            assert pid is not None, "Project should exist after setup"
             db_subjects = await get_all_message_subjects(pid)
 
             # Check subjects from successful sends are present (data integrity)
@@ -748,12 +751,12 @@ class TestNoDeadlocks:
 
             # Under high concurrency some agents may fail due to transient async issues.
             # The key test is: successful agents have data integrity.
-            successful_subjects = []
+            successful_subjects: list[str] = []
             failed_agents = 0
             for _i, r in enumerate(results):
                 if isinstance(r, Exception):
                     failed_agents += 1
-                else:
+                elif isinstance(r, list):
                     successful_subjects.extend(r)
 
             # At least 50% of agents should complete all their work
@@ -765,6 +768,7 @@ class TestNoDeadlocks:
 
             # Verify database integrity for successful sends
             pid = await get_project_id(project_key)
+            assert pid is not None, "Project should exist after setup"
             db_subjects = await get_all_message_subjects(pid)
 
             # Check subjects from successful agents are present (data integrity)
