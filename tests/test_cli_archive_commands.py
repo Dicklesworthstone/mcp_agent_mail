@@ -30,49 +30,6 @@ runner = CliRunner()
 # ============================================================================
 
 
-async def seed_project_with_message() -> tuple[Project, Agent, Message]:
-    """Create a project with an agent and a message for archive testing."""
-    await ensure_schema()
-    async with get_session() as session:
-        project = Project(slug="archivetest", human_key="/archive/test")
-        session.add(project)
-        await session.commit()
-        await session.refresh(project)
-
-        agent = Agent(
-            project_id=project.id,
-            name="ArchiveAgent",
-            program="test",
-            model="test",
-            task_description="Archive testing",
-        )
-        session.add(agent)
-        await session.commit()
-        await session.refresh(agent)
-
-        message = Message(
-            project_id=project.id,
-            sender_id=agent.id,
-            subject="Archive Test Message",
-            body_md="Test body for archive",
-            ack_required=True,
-            importance="normal",
-        )
-        session.add(message)
-        await session.commit()
-        await session.refresh(message)
-
-        recipient = MessageRecipient(
-            message_id=message.id,
-            agent_id=agent.id,
-            kind="to",
-        )
-        session.add(recipient)
-        await session.commit()
-
-        return project, agent, message
-
-
 def create_test_archive(archive_dir: Path, name: str = "test_archive.zip") -> Path:
     """Create a minimal test archive file."""
     archive_path = archive_dir / name

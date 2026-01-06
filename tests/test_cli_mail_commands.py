@@ -29,29 +29,6 @@ runner = CliRunner()
 # ============================================================================
 
 
-async def seed_basic_project() -> tuple[Project, Agent]:
-    """Create a basic project with one agent."""
-    await ensure_schema()
-    async with get_session() as session:
-        project = Project(slug="testproj", human_key="/test/project")
-        session.add(project)
-        await session.commit()
-        await session.refresh(project)
-
-        agent = Agent(
-            project_id=project.id,
-            name="TestAgent",
-            program="test-program",
-            model="test-model",
-            task_description="Testing",
-        )
-        session.add(agent)
-        await session.commit()
-        await session.refresh(agent)
-
-        return project, agent
-
-
 async def seed_project_with_agents() -> tuple[Project, Agent, Agent]:
     """Create a project with two agents for message exchange."""
     await ensure_schema()
