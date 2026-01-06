@@ -24,6 +24,7 @@ from .config import get_settings
 
 _router: Optional[Any] = None
 _init_lock = asyncio.Lock()
+_initialized: bool = False
 _logger = structlog.get_logger(__name__)
 
 
@@ -82,11 +83,11 @@ def _setup_callbacks() -> None:
 
 
 async def _ensure_initialized() -> None:
-    global _router
-    if _router is not None:
+    global _router, _initialized
+    if _initialized:
         return
     async with _init_lock:
-        if _router is not None:
+        if _initialized:
             return
         settings = get_settings()
 
@@ -98,9 +99,7 @@ async def _ensure_initialized() -> None:
 
         # Enable cache globally (in-memory or Redis) using LiteLLM's API
         if settings.llm.cache_enabled:
-            from contextlib import suppress
-
-            with suppress(Exception):
+            with contextlib.suppress(Exception):
                 backend = (getattr(settings.llm, "cache_backend", "local") or "local").lower()
                 if backend == "redis" and getattr(settings.llm, "cache_redis_url", ""):
                     parsed = urlparse(settings.llm.cache_redis_url)
@@ -128,6 +127,7 @@ async def _ensure_initialized() -> None:
         # Router is designed for load balancing across multiple deployments with a model_list,
         # but we're just using single API keys, so direct completion is simpler and works fine.
         _router = None
+        _initialized = True
 
 
 def _choose_best_available_model(preferred: str) -> str:

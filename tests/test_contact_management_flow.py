@@ -201,6 +201,8 @@ async def test_request_contact_creates_pending_link(isolated_env):
         # Verify database record
         agent_a_id = await get_agent_id(project_key, agent_a)
         agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None, "Agent A should exist"
+        assert agent_b_id is not None, "Agent B should exist"
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         assert link is not None
         assert link["status"] == "pending"
@@ -287,6 +289,8 @@ async def test_approve_contact_request(isolated_env):
         # Verify database shows approved
         agent_a_id = await get_agent_id(project_key, agent_a)
         agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None, "Agent A should exist"
+        assert agent_b_id is not None, "Agent B should exist"
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         assert link is not None
         assert link["status"] == "approved"
@@ -375,6 +379,8 @@ async def test_deny_contact_request(isolated_env):
         # Verify database shows blocked (status is "blocked" when denied)
         agent_a_id = await get_agent_id(project_key, agent_a)
         agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None, "Agent A should exist"
+        assert agent_b_id is not None, "Agent B should exist"
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         assert link is not None
         assert link["status"] in ("denied", "blocked"), f"Expected denied/blocked, got {link['status']}"
@@ -474,6 +480,7 @@ async def test_policy_open_allows_all_messages(isolated_env):
 
         # Verify policy was set
         project_id = await get_project_id(project_key)
+        assert project_id is not None, "Project should exist"
         policy = await get_agent_policy(project_id, agent_b)
         assert policy == "open"
 
@@ -513,6 +520,7 @@ async def test_policy_contacts_only_requires_approval(isolated_env):
 
         # Verify policy was set
         project_id = await get_project_id(project_key)
+        assert project_id is not None, "Project should exist"
         policy = await get_agent_policy(project_id, agent_b)
         assert policy == "contacts_only"
 
@@ -555,6 +563,7 @@ async def test_policy_block_all_blocks_everyone(isolated_env):
 
         # Verify policy was set
         project_id = await get_project_id(project_key)
+        assert project_id is not None, "Project should exist"
         policy = await get_agent_policy(project_id, agent_b)
         assert policy == "block_all"
 
@@ -687,6 +696,8 @@ async def test_contact_request_has_ttl(isolated_env):
         # Verify expires_ts is set in database
         agent_a_id = await get_agent_id(project_key, agent_a)
         agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None, "Agent A should exist"
+        assert agent_b_id is not None, "Agent B should exist"
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         assert link is not None
         assert link["expires_ts"] is not None
@@ -798,6 +809,8 @@ async def test_macro_contact_handshake_auto_accept(isolated_env):
         # Check database for approved status
         agent_a_id = await get_agent_id(project_key, agent_a)
         agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None, "Agent A should exist"
+        assert agent_b_id is not None, "Agent B should exist"
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         if link:
             assert link["status"] == "approved"
@@ -834,6 +847,7 @@ async def test_set_contact_policy_persists(isolated_env):
 
         # Verify via database
         project_id = await get_project_id(project_key)
+        assert project_id is not None, "Project should exist"
         policy = await get_agent_policy(project_id, agent_name)
         assert policy == "contacts_only"
 
