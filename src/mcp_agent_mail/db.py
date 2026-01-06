@@ -303,28 +303,20 @@ def get_database_path(settings: Settings | None = None) -> Path | None:
         Path to the database file, or None if not using SQLite or path cannot be determined
     """
     resolved = settings or get_settings()
-    url = resolved.database.url
+    url_raw = resolved.database.url
 
-    # Only SQLite has a file path
-    if "sqlite" not in url.lower():
+    try:
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(url_raw)
+    except Exception:
         return None
 
-    # Parse the URL to extract the path
-    # Format: sqlite+aiosqlite:///path/to/db.sqlite3
-    # or: sqlite:///path/to/db.sqlite3
-    # or: sqlite+aiosqlite:////absolute/path (4 slashes for absolute)
-    if ":///" in url:
-        # Extract path after ://
-        path_part = url.split("://", 1)[1]
-        # Remove leading slashes but keep one for absolute paths
-        if path_part.startswith("//"):
-            # Absolute path: sqlite:////absolute/path -> /absolute/path
-            db_path = path_part[2:]
-        else:
-            # Relative path: sqlite:///relative/path -> relative/path
-            db_path = path_part[1:] if path_part.startswith("/") else path_part
+    if parsed.get_backend_name() != "sqlite":
+        return None
 
-        return Path(db_path)
+    db_path = parsed.database
+    if not db_path or db_path == ":memory:":
+        return None
 
-    return None
-
+    return Path(db_path)
