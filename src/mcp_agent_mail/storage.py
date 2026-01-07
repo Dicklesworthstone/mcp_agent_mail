@@ -2373,3 +2373,165 @@ async def restore_from_backup(
             results["errors"].append(f"Bundle restore failed for {bundle_path}: {e}")
 
     return results
+
+
+# -------------------------------------------------------------------------------------------------
+# Push Notifications: Signal file approach for local deployments
+# -------------------------------------------------------------------------------------------------
+# When enabled, write a signal file when a message is delivered to an agent's inbox.
+# Agents can watch these files using inotify/FSEvents/kqueue for instant notifications
+# without polling. This is useful for local multi-agent workflows.
+#
+# Signal file path: {signals_dir}/projects/{project_slug}/agents/{agent_name}.signal
+# Signal file contents: JSON with message metadata (id, from, subject, importance, timestamp)
+
+# Debounce tracking: (project_slug, agent_name) -> last_signal_time
+_SIGNAL_DEBOUNCE: dict[tuple[str, str], float] = {}
+
+
+async def emit_notification_signal(
+    settings: Settings,
+    project_slug: str,
+    agent_name: str,
+    message_metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Emit a notification signal for an agent in a project.
+
+    This creates/updates a signal file that agents can watch for incoming messages.
+    The signal file contains metadata about the notification for context.
+
+    Args:
+        settings: Application settings (must have notifications enabled)
+        project_slug: Project identifier
+        agent_name: Target agent name
+        message_metadata: Optional dict with message info (id, from, subject, importance)
+
+    Returns:
+        True if signal was emitted, False if notifications disabled or debounced
+    """
+    if not settings.notifications.enabled:
+        return False
+
+    # Debounce check: skip if we signaled this agent recently
+    debounce_key = (project_slug, agent_name)
+    debounce_ms = settings.notifications.debounce_ms
+    now_ms = time.time() * 1000
+
+    last_signal = _SIGNAL_DEBOUNCE.get(debounce_key, 0)
+    if now_ms - last_signal < debounce_ms:
+        return False  # Too soon, skip
+
+    _SIGNAL_DEBOUNCE[debounce_key] = now_ms
+
+    # Build signal file path
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
+
+    # Prepare signal content
+    signal_data: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "project": project_slug,
+        "agent": agent_name,
+    }
+
+    if settings.notifications.include_metadata and message_metadata:
+        signal_data["message"] = {
+            "id": message_metadata.get("id"),
+            "from": message_metadata.get("from"),
+            "subject": message_metadata.get("subject"),
+            "importance": message_metadata.get("importance", "normal"),
+        }
+
+    # Write signal file
+    def _write_signal() -> None:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        signal_path.write_text(json.dumps(signal_data, indent=2), encoding="utf-8")
+
+    try:
+        await _to_thread(_write_signal)
+        return True
+    except Exception:
+        # Signal emission is best-effort; don't fail message delivery
+        return False
+
+
+async def clear_notification_signal(
+    settings: Settings,
+    project_slug: str,
+    agent_name: str,
+) -> bool:
+    """Clear notification signal for an agent (called when inbox is read).
+
+    This removes the signal file to indicate the agent has acknowledged notifications.
+
+    Args:
+        settings: Application settings
+        project_slug: Project identifier
+        agent_name: Target agent name
+
+    Returns:
+        True if signal was cleared, False if file didn't exist or error
+    """
+    if not settings.notifications.enabled:
+        return False
+
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
+
+    def _clear_signal() -> bool:
+        if signal_path.exists():
+            signal_path.unlink()
+            return True
+        return False
+
+    try:
+        return await _to_thread(_clear_signal)
+    except Exception:
+        return False
+
+
+def list_pending_signals(settings: Settings, project_slug: str | None = None) -> list[dict[str, Any]]:
+    """List all pending notification signals.
+
+    Args:
+        settings: Application settings
+        project_slug: Optional filter by project
+
+    Returns:
+        List of signal info dicts with project, agent, and metadata
+    """
+    if not settings.notifications.enabled:
+        return []
+
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    if not signals_dir.exists():
+        return []
+
+    results: list[dict[str, Any]] = []
+    projects_dir = signals_dir / "projects"
+
+    if not projects_dir.exists():
+        return []
+
+    project_dirs = [projects_dir / project_slug] if project_slug else list(projects_dir.iterdir())
+
+    for proj_dir in project_dirs:
+        if not proj_dir.is_dir():
+            continue
+        agents_dir = proj_dir / "agents"
+        if not agents_dir.exists():
+            continue
+
+        for signal_file in agents_dir.glob("*.signal"):
+            try:
+                data = json.loads(signal_file.read_text(encoding="utf-8"))
+                results.append(data)
+            except Exception:
+                # Corrupted signal file; include minimal info
+                results.append({
+                    "project": proj_dir.name,
+                    "agent": signal_file.stem,
+                    "error": "Failed to parse signal file",
+                })
+
+    return results
