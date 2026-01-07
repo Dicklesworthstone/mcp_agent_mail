@@ -629,8 +629,10 @@ def serve_stdio() -> None:
 
     from .config import clear_settings_cache
 
-    # Disable tool debug logging - it outputs to stdout and would corrupt the protocol
+    # Disable tool debug logging and rich console output - they output to stdout
+    # and would corrupt the stdio protocol
     os.environ["TOOLS_LOG_ENABLED"] = "false"
+    os.environ["LOG_RICH_ENABLED"] = "false"
     clear_settings_cache()
 
     # Redirect all logging to stderr to avoid corrupting stdio transport
