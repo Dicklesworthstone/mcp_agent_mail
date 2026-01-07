@@ -159,8 +159,9 @@ def test_archive_list_empty_directory(isolated_env, tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["archive", "list"])
     assert result.exit_code == 0
-    # Strip ANSI codes for reliable matching in CI
-    stdout = strip_ansi(result.stdout)
+    # Strip ANSI codes and normalize whitespace for reliable matching in CI
+    # Rich Console may word-wrap long lines causing "does not\nexist" splits
+    stdout = " ".join(strip_ansi(result.stdout).split())
     assert "does not exist" in stdout or "No saved" in stdout
 
 
