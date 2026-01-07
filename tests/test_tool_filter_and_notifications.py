@@ -1,8 +1,8 @@
 """Tests for tool filtering and push notification features."""
 
 import json
+
 import pytest
-from pathlib import Path
 
 
 class TestToolFilter:
