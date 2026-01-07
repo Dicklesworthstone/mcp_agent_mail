@@ -57,6 +57,7 @@ from .storage import (
     archive_write_lock,
     clear_repo_cache,
     collect_lock_status,
+    emit_notification_signal,
     ensure_archive,
     heal_archive_locks,
     process_attachments,
@@ -128,6 +129,123 @@ CLUSTER_FILE_RESERVATIONS = "file_reservations"
 CLUSTER_MACROS = "workflow_macros"
 CLUSTER_BUILD_SLOTS = "build_slots"
 CLUSTER_PRODUCT = "product_bus"
+
+# -------------------------------------------------------------------------------------------------
+# Tool Filtering: Predefined profiles for context reduction
+# -------------------------------------------------------------------------------------------------
+# Each profile maps to a set of clusters or specific tools to include.
+# Using profiles can reduce context overhead by up to ~70% for minimal workflows.
+#
+# Profile definitions:
+#   - full: All tools (default, no filtering)
+#   - core: Essential tools for typical agent workflows
+#   - minimal: Bare minimum for simple message passing
+#   - messaging: Focus on messaging without file reservations
+#   - custom: User-defined via TOOLS_FILTER_CLUSTERS/TOOLS_FILTER_TOOLS
+
+TOOL_FILTER_PROFILES: dict[str, dict[str, list[str] | set[str]]] = {
+    "full": {
+        "clusters": [],  # Empty = all clusters
+        "tools": [],
+    },
+    "core": {
+        "clusters": [CLUSTER_IDENTITY, CLUSTER_MESSAGING, CLUSTER_FILE_RESERVATIONS, CLUSTER_MACROS],
+        "tools": ["health_check", "ensure_project"],
+    },
+    "minimal": {
+        "clusters": [],
+        "tools": [
+            "health_check",
+            "ensure_project",
+            "register_agent",
+            "send_message",
+            "fetch_inbox",
+            "acknowledge_message",
+        ],
+    },
+    "messaging": {
+        "clusters": [CLUSTER_IDENTITY, CLUSTER_MESSAGING, CLUSTER_CONTACT],
+        "tools": ["health_check", "ensure_project", "search_messages"],
+    },
+}
+
+# Track filtered tools for logging/debugging
+_FILTERED_TOOLS: set[str] = set()
+
+
+def _should_expose_tool(tool_name: str, cluster: str, settings: Settings) -> bool:
+    """Determine if a tool should be exposed based on filter settings.
+
+    Returns True if the tool should be registered, False if it should be hidden.
+    This is evaluated once at server startup, not per-request.
+    """
+    filter_cfg = settings.tool_filter
+    if not filter_cfg.enabled:
+        return True  # No filtering, expose all tools
+
+    profile = filter_cfg.profile
+
+    # Custom profile: use explicit clusters/tools from settings
+    if profile == "custom":
+        clusters_list = filter_cfg.clusters
+        tools_list = filter_cfg.tools
+        mode = filter_cfg.mode
+
+        # If no explicit filters, expose all
+        if not clusters_list and not tools_list:
+            return True
+
+        in_cluster = cluster in clusters_list if clusters_list else False
+        in_tools = tool_name in tools_list if tools_list else False
+
+        if mode == "include":
+            return in_cluster or in_tools
+        else:  # exclude
+            return not (in_cluster or in_tools)
+
+    # Predefined profile
+    if profile == "full":
+        return True
+
+    profile_def = TOOL_FILTER_PROFILES.get(profile)
+    if not profile_def:
+        return True  # Unknown profile, default to exposing
+
+    profile_clusters = profile_def.get("clusters", [])
+    profile_tools = profile_def.get("tools", [])
+
+    # If profile_clusters is empty for that profile, only check tools
+    if profile_clusters and cluster in profile_clusters:
+        return True
+    if profile_tools and tool_name in profile_tools:
+        return True
+
+    # For profiles with explicit lists, if tool not in any list, don't expose
+    return not (profile_clusters or profile_tools)
+
+
+def _filtered_tool_decorator(
+    mcp: FastMCP,
+    tool_name: str,
+    cluster: str,
+    settings: Settings,
+    **kwargs: Any,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Conditional tool registration based on filter settings.
+
+    Returns either the real @mcp.tool decorator or a no-op decorator that
+    doesn't register the tool.
+    """
+    if _should_expose_tool(tool_name, cluster, settings):
+        return mcp.tool(name=tool_name, **kwargs)
+    else:
+        _FILTERED_TOOLS.add(tool_name)
+
+        # Return a no-op decorator that preserves the function but doesn't register it
+        def noop_decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+            return func
+
+        return noop_decorator
 
 
 class ToolExecutionError(Exception):
@@ -3425,6 +3543,25 @@ def build_mcp_server() -> FastMCP:
                 attachment_files,
                 commit_panel_text,
             )
+
+            # Emit notification signals for recipients (if enabled)
+            if settings.notifications.enabled:
+                message_meta = {
+                    "id": message.id,
+                    "from": sender.name,
+                    "subject": subject,
+                    "importance": importance,
+                }
+                # Signal to/cc recipients (not bcc - blind copies shouldn't trigger visible signals)
+                for agent in to_agents + cc_agents:
+                    with suppress(Exception):
+                        await emit_notification_signal(
+                            settings,
+                            project.slug,
+                            agent.name,
+                            message_meta,
+                        )
+
         await ctx.info(
             f"Message {message.id} created by {sender.name} (to {', '.join(recipients_for_archive)})"
         )
@@ -8801,4 +8938,51 @@ def build_mcp_server() -> FastMCP:
 
     # No explicit output-schema transform; the tool returns ToolResult with {"result": ...}
 
+    # -------------------------------------------------------------------------------------------------
+    # Tool Filtering: Remove tools that shouldn't be exposed based on settings
+    # -------------------------------------------------------------------------------------------------
+    if settings.tool_filter.enabled:
+        _apply_tool_filter(mcp, settings)
+
     return mcp
+
+
+def _apply_tool_filter(mcp: FastMCP, settings: Settings) -> None:
+    """Remove filtered tools from the MCP server's tool registry.
+
+    This is a post-registration step that removes tools that shouldn't be exposed
+    based on the tool filter settings. This approach is cleaner than conditional
+    registration because it doesn't require modifying every @mcp.tool decorator.
+    """
+    # FastMCP stores tools in _tool_manager._tools (dict keyed by tool name)
+    tool_manager = getattr(mcp, "_tool_manager", None)
+    if tool_manager is None:
+        logger.warning("Tool filtering enabled but FastMCP tool manager not found")
+        return
+
+    tools_registry = getattr(tool_manager, "_tools", None)
+    if tools_registry is None or not isinstance(tools_registry, dict):
+        logger.warning("Tool filtering enabled but tool registry not accessible")
+        return
+
+    # Identify tools to remove
+    to_remove: list[str] = []
+    for tool_name in list(tools_registry.keys()):
+        cluster = TOOL_CLUSTER_MAP.get(tool_name, "unclassified")
+        if not _should_expose_tool(tool_name, cluster, settings):
+            to_remove.append(tool_name)
+            _FILTERED_TOOLS.add(tool_name)
+
+    # Remove filtered tools
+    for tool_name in to_remove:
+        del tools_registry[tool_name]
+        # Also remove from metadata registries
+        TOOL_CLUSTER_MAP.pop(tool_name, None)
+        TOOL_METADATA.pop(tool_name, None)
+
+    if to_remove:
+        profile = settings.tool_filter.profile
+        logger.info(
+            f"Tool filtering active (profile={profile}): removed {len(to_remove)} tools, "
+            f"{len(tools_registry)} tools exposed"
+        )
