@@ -613,6 +613,35 @@ def serve_http(
     uvicorn.run(app, **_kwargs)
 
 
+@app.command("serve-stdio")
+def serve_stdio() -> None:
+    """Run the MCP server over stdio transport for CLI integration.
+
+    This transport communicates via stdin/stdout, making it suitable for
+    integrations where the host process (e.g., Claude Code) spawns and manages
+    the MCP server directly. This enables project-local installation patterns
+    without requiring a separate HTTP server.
+
+    Note: All logging is redirected to stderr to avoid corrupting the stdio protocol.
+    """
+    import logging
+
+    # Redirect all logging to stderr to avoid corrupting stdio transport
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+    )
+
+    # Print startup message to stderr (stdout is reserved for MCP protocol)
+    print("MCP Agent Mail - Starting stdio transport...", file=sys.stderr)
+
+    server = build_mcp_server()
+    server.run(transport="stdio")
+
+
 def _run_command(command: list[str]) -> None:
     console.print(f"[cyan]$ {' '.join(command)}[/]")
     result = subprocess.run(command, check=False)
