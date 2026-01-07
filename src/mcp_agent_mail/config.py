@@ -108,6 +108,61 @@ class LlmSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class ToolFilterSettings:
+    """Tool filtering configuration for context reduction.
+
+    When enabled, only a subset of tools are exposed to the MCP client,
+    reducing context overhead by up to ~70% for minimal workflows.
+
+    Profiles:
+        - "full": All tools exposed (default behavior)
+        - "core": Essential tools only (identity, messaging, file_reservations)
+        - "minimal": Bare minimum (identity, messaging basics)
+        - "messaging": Messaging-focused subset
+        - "custom": Use explicit include/exclude lists
+
+    Example .env:
+        TOOLS_FILTER_ENABLED=true
+        TOOLS_FILTER_PROFILE=core
+
+    Or for custom filtering:
+        TOOLS_FILTER_ENABLED=true
+        TOOLS_FILTER_PROFILE=custom
+        TOOLS_FILTER_MODE=include
+        TOOLS_FILTER_CLUSTERS=messaging,identity
+        TOOLS_FILTER_TOOLS=send_message,fetch_inbox
+    """
+
+    enabled: bool
+    profile: str  # "full" | "core" | "minimal" | "messaging" | "custom"
+    mode: str  # "include" | "exclude"
+    clusters: list[str]  # Cluster names to include/exclude
+    tools: list[str]  # Specific tool names to include/exclude
+
+
+@dataclass(slots=True, frozen=True)
+class NotificationSettings:
+    """Push notification configuration for local deployments.
+
+    When enabled, touching a signal file notifies agents of new messages.
+    Agents can watch these files using inotify/FSEvents/kqueue for instant
+    notification without polling.
+
+    Signal file location: {signals_dir}/{project_slug}/{agent_name}.signal
+    Signal files contain JSON metadata for the most recent notification.
+
+    Example .env:
+        NOTIFICATIONS_ENABLED=true
+        NOTIFICATIONS_SIGNALS_DIR=~/.mcp_agent_mail/signals
+    """
+
+    enabled: bool
+    signals_dir: str  # Directory for signal files
+    include_metadata: bool  # Include message metadata in signal file
+    debounce_ms: int  # Debounce multiple signals within this window
+
+
+@dataclass(slots=True, frozen=True)
 class Settings:
     """Top-level application settings."""
 
@@ -122,6 +177,8 @@ class Settings:
     storage: StorageSettings
     cors: CorsSettings
     llm: LlmSettings
+    tool_filter: ToolFilterSettings
+    notifications: NotificationSettings
     # Background maintenance toggles
     file_reservations_cleanup_enabled: bool
     file_reservations_cleanup_interval_seconds: int
@@ -276,6 +333,33 @@ def get_settings() -> Settings:
         cost_logging_enabled=_bool(_decouple_config("LLM_COST_LOGGING_ENABLED", default="true"), default=True),
     )
 
+    def _tool_filter_profile(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in {"full", "core", "minimal", "messaging", "custom"}:
+            return v
+        return "full"
+
+    def _tool_filter_mode(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in {"include", "exclude"}:
+            return v
+        return "include"
+
+    tool_filter_settings = ToolFilterSettings(
+        enabled=_bool(_decouple_config("TOOLS_FILTER_ENABLED", default="false"), default=False),
+        profile=_tool_filter_profile(_decouple_config("TOOLS_FILTER_PROFILE", default="full")),
+        mode=_tool_filter_mode(_decouple_config("TOOLS_FILTER_MODE", default="include")),
+        clusters=_csv("TOOLS_FILTER_CLUSTERS", default=""),
+        tools=_csv("TOOLS_FILTER_TOOLS", default=""),
+    )
+
+    notification_settings = NotificationSettings(
+        enabled=_bool(_decouple_config("NOTIFICATIONS_ENABLED", default="false"), default=False),
+        signals_dir=_decouple_config("NOTIFICATIONS_SIGNALS_DIR", default="~/.mcp_agent_mail/signals"),
+        include_metadata=_bool(_decouple_config("NOTIFICATIONS_INCLUDE_METADATA", default="true"), default=True),
+        debounce_ms=_int(_decouple_config("NOTIFICATIONS_DEBOUNCE_MS", default="100"), default=100),
+    )
+
     def _agent_name_mode(value: str) -> str:
         v = (value or "").strip().lower()
         if v in {"strict", "coerce", "always_auto"}:
@@ -296,6 +380,8 @@ def get_settings() -> Settings:
         storage=storage_settings,
         cors=cors_settings,
         llm=llm_settings,
+        tool_filter=tool_filter_settings,
+        notifications=notification_settings,
         file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
         file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
         file_reservation_inactivity_seconds=_int(_decouple_config("FILE_RESERVATION_INACTIVITY_SECONDS", default="1800"), default=1800),
