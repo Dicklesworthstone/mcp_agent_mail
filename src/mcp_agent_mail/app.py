@@ -3364,7 +3364,17 @@ def build_mcp_server() -> FastMCP:
         "Provide message routing, coordination tooling, and project context to cooperating agents."
     )
 
-    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)  # type: ignore[arg-type]
+    # Tool tag filtering: convert list to set, empty list means no filtering
+    include_tags = set(settings.tool_include_tags) if settings.tool_include_tags else None
+    exclude_tags = set(settings.tool_exclude_tags) if settings.tool_exclude_tags else None
+
+    mcp = FastMCP(
+        name="mcp-agent-mail",
+        instructions=instructions,
+        lifespan=lifespan,  # type: ignore[arg-type]
+        include_tags=include_tags,
+        exclude_tags=exclude_tags,
+    )
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -3569,7 +3579,7 @@ def build_mcp_server() -> FastMCP:
             raise RuntimeError("Message payload was not generated.")
         return payload
 
-    @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
+    @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.", tags={"infrastructure"})
     @_instrument_tool("health_check", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, complexity="low")
     async def health_check(ctx: Context) -> dict[str, Any]:
         """
@@ -3618,7 +3628,7 @@ def build_mcp_server() -> FastMCP:
             "database_url": settings.database.url,
         }
 
-    @mcp.tool(name="ensure_project")
+    @mcp.tool(name="ensure_project", tags={"infrastructure", "core"})
     @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "storage"}, complexity="low", project_arg="human_key")
     async def ensure_project(ctx: Context, human_key: str, identity_mode: Optional[str] = None) -> dict[str, Any]:
         """
@@ -3698,7 +3708,7 @@ def build_mcp_server() -> FastMCP:
             payload.update(_resolve_project_identity(human_key))
         return payload
 
-    @mcp.tool(name="register_agent")
+    @mcp.tool(name="register_agent", tags={"identity", "core"})
     @_instrument_tool("register_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name", project_arg="project_key")
     async def register_agent(
         ctx: Context,
@@ -3806,7 +3816,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
 
-    @mcp.tool(name="whois")
+    @mcp.tool(name="whois", tags={"identity"})
     @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
     async def whois(
         ctx: Context,
@@ -3863,7 +3873,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"whois for '{agent_name}' in '{project.human_key}' returned {len(recent)} commits")
         return profile
 
-    @mcp.tool(name="create_agent_identity")
+    @mcp.tool(name="create_agent_identity", tags={"identity"})
     @_instrument_tool("create_agent_identity", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="name_hint", project_arg="project_key")
     async def create_agent_identity(
         ctx: Context,
@@ -3940,7 +3950,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
 
-    @mcp.tool(name="send_message")
+    @mcp.tool(name="send_message", tags={"messaging", "core"})
     @_instrument_tool(
         "send_message",
         cluster=CLUSTER_MESSAGING,
@@ -4834,7 +4844,7 @@ def build_mcp_server() -> FastMCP:
                 result["attachments"] = payload.get("attachments")
         return result
 
-    @mcp.tool(name="reply_message")
+    @mcp.tool(name="reply_message", tags={"messaging", "core"})
     @_instrument_tool(
         "reply_message",
         cluster=CLUSTER_MESSAGING,
@@ -5086,7 +5096,7 @@ def build_mcp_server() -> FastMCP:
                 primary_payload.setdefault("attachments", attachments)
         return primary_payload
 
-    @mcp.tool(name="request_contact")
+    @mcp.tool(name="request_contact", tags={"contact"})
     @_instrument_tool(
         "request_contact",
         cluster=CLUSTER_CONTACT,
@@ -5256,7 +5266,7 @@ def build_mcp_server() -> FastMCP:
             )
         return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
 
-    @mcp.tool(name="respond_contact")
+    @mcp.tool(name="respond_contact", tags={"contact"})
     @_instrument_tool(
         "respond_contact",
         cluster=CLUSTER_CONTACT,
@@ -5324,7 +5334,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
         return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
 
-    @mcp.tool(name="list_contacts")
+    @mcp.tool(name="list_contacts", tags={"contact"})
     @_instrument_tool(
         "list_contacts",
         cluster=CLUSTER_CONTACT,
@@ -5353,7 +5363,7 @@ def build_mcp_server() -> FastMCP:
                 })
         return out
 
-    @mcp.tool(name="set_contact_policy")
+    @mcp.tool(name="set_contact_policy", tags={"contact"})
     @_instrument_tool(
         "set_contact_policy",
         cluster=CLUSTER_CONTACT,
@@ -5376,7 +5386,7 @@ def build_mcp_server() -> FastMCP:
                 await s.commit()
         return {"agent": agent.name, "policy": pol}
 
-    @mcp.tool(name="fetch_inbox")
+    @mcp.tool(name="fetch_inbox", tags={"messaging", "core"})
     @_instrument_tool(
         "fetch_inbox",
         cluster=CLUSTER_MESSAGING,
@@ -5457,7 +5467,7 @@ def build_mcp_server() -> FastMCP:
             _rich_error_panel("fetch_inbox", {"error": str(exc)})
             raise
 
-    @mcp.tool(name="mark_message_read")
+    @mcp.tool(name="mark_message_read", tags={"messaging"})
     @_instrument_tool(
         "mark_message_read",
         cluster=CLUSTER_MESSAGING,
@@ -5526,7 +5536,7 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
-    @mcp.tool(name="acknowledge_message")
+    @mcp.tool(name="acknowledge_message", tags={"messaging"})
     @_instrument_tool(
         "acknowledge_message",
         cluster=CLUSTER_MESSAGING,
@@ -5606,7 +5616,7 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
-    @mcp.tool(name="macro_start_session")
+    @mcp.tool(name="macro_start_session", tags={"workflow_macros"})
     @_instrument_tool(
         "macro_start_session",
         cluster=CLUSTER_MACROS,
@@ -5673,7 +5683,7 @@ def build_mcp_server() -> FastMCP:
             "inbox": inbox_items,
         }
 
-    @mcp.tool(name="macro_prepare_thread")
+    @mcp.tool(name="macro_prepare_thread", tags={"workflow_macros"})
     @_instrument_tool(
         "macro_prepare_thread",
         cluster=CLUSTER_MACROS,
@@ -5736,7 +5746,7 @@ def build_mcp_server() -> FastMCP:
             "inbox": inbox_items,
         }
 
-    @mcp.tool(name="macro_file_reservation_cycle")
+    @mcp.tool(name="macro_file_reservation_cycle", tags={"workflow_macros"})
     @_instrument_tool(
         "macro_file_reservation_cycle",
         cluster=CLUSTER_MACROS,
@@ -5795,7 +5805,7 @@ def build_mcp_server() -> FastMCP:
             "released": release_result,
         }
 
-    @mcp.tool(name="macro_contact_handshake")
+    @mcp.tool(name="macro_contact_handshake", tags={"workflow_macros"})
     @_instrument_tool(
         "macro_contact_handshake",
         cluster=CLUSTER_MACROS,
@@ -6034,7 +6044,7 @@ def build_mcp_server() -> FastMCP:
             "welcome_message": welcome_result,
         }
 
-    @mcp.tool(name="search_messages")
+    @mcp.tool(name="search_messages", tags={"search"})
     @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH, capabilities={"search"}, project_arg="project_key")
     async def search_messages(
         ctx: Context,
@@ -6167,7 +6177,7 @@ def build_mcp_server() -> FastMCP:
         except Exception:
             return items
 
-    @mcp.tool(name="summarize_thread")
+    @mcp.tool(name="summarize_thread", tags={"search"})
     @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
     async def summarize_thread(
         ctx: Context,
@@ -6338,7 +6348,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
         return {"threads": thread_summaries, "aggregate": aggregate}
 
-    @mcp.tool(name="install_precommit_guard")
+    @mcp.tool(name="install_precommit_guard", tags={"infrastructure"})
     @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")
     async def install_precommit_guard(
         ctx: Context,
@@ -6364,7 +6374,7 @@ def build_mcp_server() -> FastMCP:
         await _ctx_info_safe(ctx, f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
         return {"hook": str(hook_path)}
 
-    @mcp.tool(name="uninstall_precommit_guard")
+    @mcp.tool(name="uninstall_precommit_guard", tags={"infrastructure"})
     @_instrument_tool("uninstall_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"})
     async def uninstall_precommit_guard(
         ctx: Context,
@@ -6388,7 +6398,7 @@ def build_mcp_server() -> FastMCP:
             await _ctx_info_safe(ctx, f"No pre-commit guard to remove at {repo_path / '.git/hooks/pre-commit'}.")
         return {"removed": removed}
 
-    @mcp.tool(name="file_reservation_paths")
+    @mcp.tool(name="file_reservation_paths", tags={"file_reservations", "core"})
     @_instrument_tool("file_reservation_paths", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations", "repository"}, project_arg="project_key", agent_arg="agent_name")
     async def file_reservation_paths(
         ctx: Context,
@@ -6568,7 +6578,7 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
-    @mcp.tool(name="release_file_reservations")
+    @mcp.tool(name="release_file_reservations", tags={"file_reservations", "core"})
     @_instrument_tool("release_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
     async def release_file_reservations_tool(
         ctx: Context,
@@ -6686,7 +6696,7 @@ def build_mcp_server() -> FastMCP:
                     pass
             raise
 
-    @mcp.tool(name="force_release_file_reservation")
+    @mcp.tool(name="force_release_file_reservation", tags={"file_reservations"})
     @_instrument_tool(
         "force_release_file_reservation",
         cluster=CLUSTER_FILE_RESERVATIONS,
@@ -6860,7 +6870,7 @@ def build_mcp_server() -> FastMCP:
 
         summary["notified"] = notified
         return {"released": 1, "released_at": _iso(now), "reservation": summary}
-    @mcp.tool(name="renew_file_reservations")
+    @mcp.tool(name="renew_file_reservations", tags={"file_reservations"})
     @_instrument_tool("renew_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
     async def renew_file_reservations(
         ctx: Context,
@@ -7008,7 +7018,7 @@ def build_mcp_server() -> FastMCP:
                     continue
             return results
 
-        @mcp.tool(name="acquire_build_slot")
+        @mcp.tool(name="acquire_build_slot", tags={"build_slots"})
         @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
         async def acquire_build_slot(
             ctx: Context,
@@ -7053,7 +7063,7 @@ def build_mcp_server() -> FastMCP:
                 await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
             return {"granted": payload, "conflicts": conflicts}
 
-        @mcp.tool(name="renew_build_slot")
+        @mcp.tool(name="renew_build_slot", tags={"build_slots"})
         @_instrument_tool("renew_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
         async def renew_build_slot(
             ctx: Context,
@@ -7082,7 +7092,7 @@ def build_mcp_server() -> FastMCP:
                 await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
             return {"renewed": True, "expires_ts": new_exp}
 
-        @mcp.tool(name="release_build_slot")
+        @mcp.tool(name="release_build_slot", tags={"build_slots"})
         @_instrument_tool("release_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
         async def release_build_slot(
             ctx: Context,
@@ -7160,7 +7170,7 @@ def build_mcp_server() -> FastMCP:
         return res.scalars().first()  # type: ignore[no-any-return]
 
     if settings.worktrees_enabled:
-        @mcp.tool(name="ensure_product")
+        @mcp.tool(name="ensure_product", tags={"product_bus"})
         @_instrument_tool("ensure_product", cluster=CLUSTER_PRODUCT, capabilities={"product"})
         async def ensure_product_tool(
             ctx: Context,
@@ -7201,7 +7211,7 @@ def build_mcp_server() -> FastMCP:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
-        @mcp.tool(name="products_link")
+        @mcp.tool(name="products_link", tags={"product_bus"})
         @_instrument_tool("products_link", cluster=CLUSTER_PRODUCT, capabilities={"product"}, project_arg="project_key")
         async def products_link_tool(
             ctx: Context,
@@ -7295,7 +7305,7 @@ def build_mcp_server() -> FastMCP:
             return _run_coro_sync(_load())  # type: ignore[no-any-return]
 
     if settings.worktrees_enabled:
-        @mcp.tool(name="search_messages_product")
+        @mcp.tool(name="search_messages_product", tags={"product_bus"})
         @_instrument_tool("search_messages_product", cluster=CLUSTER_PRODUCT, capabilities={"search"})
         async def search_messages_product(
             ctx: Context,
@@ -7372,7 +7382,7 @@ def build_mcp_server() -> FastMCP:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
-        @mcp.tool(name="fetch_inbox_product")
+        @mcp.tool(name="fetch_inbox_product", tags={"product_bus"})
         @_instrument_tool("fetch_inbox_product", cluster=CLUSTER_PRODUCT, capabilities={"messaging", "read"})
         async def fetch_inbox_product(
             ctx: Context,
@@ -7420,7 +7430,7 @@ def build_mcp_server() -> FastMCP:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
-        @mcp.tool(name="summarize_thread_product")
+        @mcp.tool(name="summarize_thread_product", tags={"product_bus"})
         @_instrument_tool("summarize_thread_product", cluster=CLUSTER_PRODUCT, capabilities={"summarization", "search"})
         async def summarize_thread_product(
             ctx: Context,
