@@ -623,8 +623,15 @@ def serve_stdio() -> None:
     without requiring a separate HTTP server.
 
     Note: All logging is redirected to stderr to avoid corrupting the stdio protocol.
+    Tool debug panels are automatically disabled in stdio mode.
     """
     import logging
+
+    from .config import clear_settings_cache
+
+    # Disable tool debug logging - it outputs to stdout and would corrupt the protocol
+    os.environ["TOOLS_LOG_ENABLED"] = "false"
+    clear_settings_cache()
 
     # Redirect all logging to stderr to avoid corrupting stdio transport
     for handler in logging.root.handlers[:]:
