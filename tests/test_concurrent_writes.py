@@ -10,6 +10,7 @@ Tests concurrent access patterns including:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
@@ -18,6 +19,7 @@ from sqlalchemy import text
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema, get_session
+from mcp_agent_mail.storage import AsyncFileLock, _commit_lock_path
 
 
 async def _setup_project_and_agents(settings: _config.Settings) -> dict:
@@ -537,3 +539,38 @@ async def test_concurrent_message_bundle_writes(isolated_env):
     # Should handle concurrent access (archive lock)
     errors = [r for r in results if isinstance(r, Exception)]
     assert len(errors) < 5, f"Most writes should succeed: {errors}"
+
+
+# =============================================================================
+# Commit Lock Scoping Tests
+# =============================================================================
+
+
+def test_commit_lock_path_scopes_to_project(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    rel_paths = [
+        "projects/alpha/agents/GreenLake/profile.json",
+        "projects/alpha/messages/2026/01/msg.md",
+    ]
+    lock_path = _commit_lock_path(repo_root, rel_paths)
+    assert lock_path == repo_root / "projects" / "alpha" / ".commit.lock"
+
+
+def test_commit_lock_path_falls_back_for_mixed_paths(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    rel_paths = [
+        "projects/alpha/agents/GreenLake/profile.json",
+        "projects/beta/messages/2026/01/msg.md",
+    ]
+    lock_path = _commit_lock_path(repo_root, rel_paths)
+    assert lock_path == repo_root / ".commit.lock"
+
+
+@pytest.mark.asyncio
+async def test_commit_lock_paths_do_not_block_across_projects(tmp_path: Path) -> None:
+    repo_root = tmp_path
+    lock_a = _commit_lock_path(repo_root, ["projects/alpha/messages/2026/01/a.md"])
+    lock_b = _commit_lock_path(repo_root, ["projects/beta/messages/2026/01/b.md"])
+
+    async with AsyncFileLock(lock_a, timeout_seconds=0.5), AsyncFileLock(lock_b, timeout_seconds=0.5):
+        assert lock_a != lock_b
