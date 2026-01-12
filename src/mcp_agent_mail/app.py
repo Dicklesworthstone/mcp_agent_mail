@@ -3037,19 +3037,35 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a) or (a == b)
 
 
+def _normalize_pattern(p: str) -> str:
+    """Normalize a pattern for caching - convert backslashes and strip leading slash."""
+    return p.replace("\\", "/").lstrip("/")
+
+
+@functools.lru_cache(maxsize=1024)
+def _compile_pathspec(pattern: str) -> "PathSpec | None":
+    """Compile a PathSpec from a normalized pattern with LRU caching.
+
+    Returns None if PathSpec is not available.
+    """
+    if PathSpec is None or GitWildMatchPattern is None:
+        return None
+    return PathSpec.from_lines("gitwildmatch", [pattern])
+
+
 def _patterns_overlap(a: str, b: str) -> bool:
     # Overlap if any file could be matched by both patterns (approximate by cross-matching)
-    def _normalize(p: str) -> str:
-        return p.replace("\\", "/").lstrip("/")
-    if PathSpec is not None and GitWildMatchPattern is not None:
-        a_spec = PathSpec.from_lines("gitwildmatch", [a])
-        b_spec = PathSpec.from_lines("gitwildmatch", [b])
+    a_norm = _normalize_pattern(a)
+    b_norm = _normalize_pattern(b)
+
+    a_spec = _compile_pathspec(a_norm)
+    b_spec = _compile_pathspec(b_norm)
+
+    if a_spec is not None and b_spec is not None:
         # Heuristic: check direct cross-matches on normalized patterns
-        return a_spec.match_file(_normalize(b)) or b_spec.match_file(_normalize(a))
+        return a_spec.match_file(b_norm) or b_spec.match_file(a_norm)
     # Fallback approximate
-    a1 = _normalize(a)
-    b1 = _normalize(b)
-    return fnmatch.fnmatchcase(a1, b1) or fnmatch.fnmatchcase(b1, a1) or (a1 == b1)
+    return fnmatch.fnmatchcase(a_norm, b_norm) or fnmatch.fnmatchcase(b_norm, a_norm) or (a_norm == b_norm)
 
 
 def _file_reservations_patterns_overlap(paths_a: Sequence[str], paths_b: Sequence[str]) -> bool:
