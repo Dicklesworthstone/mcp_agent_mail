@@ -59,3 +59,39 @@ jobs:
         shell: bash
         run: |
           uv run python -m mcp_agent_mail.cli am-run ci-slot -- echo "ok"
+
+      - name: Run performance benchmarks (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+          RUN_BENCHMARKS: "1"
+          INSTRUMENTATION_ENABLED: "true"
+        run: |
+          uv run -m pytest tests/benchmarks/ -v -m benchmark --tb=short || true
+
+      - name: CI Performance Regression Check (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          uv run -m pytest tests/benchmarks/test_ci_regression.py -v -m ci_regression --tb=short
+
+      - name: Upload regression report artifact
+        if: matrix.os == 'ubuntu-latest' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-reports
+          path: tests/benchmarks/regression_reports/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload benchmark results artifact
+        if: matrix.os == 'ubuntu-latest' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: tests/benchmarks/results/
+          if-no-files-found: ignore
+          retention-days: 30
