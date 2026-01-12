@@ -19,8 +19,8 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
-from mcp_agent_mail.app import build_mcp_server
-from mcp_agent_mail.db import track_queries
+from mcp_agent_mail.app import _get_agent, _get_project_by_identifier, _list_outbox, build_mcp_server
+from mcp_agent_mail.db import ensure_schema, track_queries
 
 
 def get_field(obj: Any, field: str) -> Any:
@@ -269,6 +269,59 @@ async def test_send_message_recipient_lookup_query_count(isolated_env):
 
     agents_queries = tracker.per_table.get("agents", 0)
     assert agents_queries <= 2, f"Expected <= 2 agent queries, got {agents_queries}"
+
+
+@pytest.mark.asyncio
+async def test_list_outbox_recipient_lookup_query_count(isolated_env):
+    """Listing outbox recipients should not fetch recipients per message."""
+    server = build_mcp_server()
+    project_key = "/test/outbox-query"
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": project_key})
+
+        sender_payload = await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test"},
+        )
+        sender = sender_payload.data["name"]
+
+        recipients: list[str] = []
+        for _ in range(3):
+            payload = await client.call_tool(
+                "register_agent",
+                {"project_key": project_key, "program": "test", "model": "test"},
+            )
+            recipients.append(payload.data["name"])
+
+        for name in [sender, *recipients]:
+            await client.call_tool(
+                "set_contact_policy",
+                {"project_key": project_key, "agent_name": name, "policy": "open"},
+            )
+
+        for idx in range(2):
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": project_key,
+                    "sender_name": sender,
+                    "to": recipients,
+                    "subject": f"Outbox Query {idx}",
+                    "body_md": "Outbox query benchmark.",
+                },
+            )
+
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, sender)
+        await ensure_schema()
+        with track_queries() as tracker:
+            items = await _list_outbox(project, agent, limit=10, include_bodies=False, since_ts=None)
+
+    assert len(items) >= 2
+    messages_queries = tracker.per_table.get("messages", 0)
+    recipients_queries = tracker.per_table.get("message_recipients", 0)
+    assert messages_queries <= 1, f"Expected <= 1 messages query, got {messages_queries}"
+    assert recipients_queries <= 1, f"Expected <= 1 recipient query, got {recipients_queries}"
 
 
 @pytest.mark.asyncio
