@@ -888,11 +888,20 @@ def scrub_snapshot(
             if attachments_value:
                 if isinstance(attachments_value, str):
                     try:
-                        attachments_data = json.loads(attachments_value)
+                        parsed = json.loads(attachments_value)
                     except json.JSONDecodeError:
-                        attachments_data = attachments_value
-                else:
+                        parsed = []
+                        attachments_updated = True
+                    if isinstance(parsed, list):
+                        attachments_data = parsed
+                    else:
+                        attachments_data = []
+                        attachments_updated = True
+                elif isinstance(attachments_value, list):
                     attachments_data = attachments_value
+                else:
+                    attachments_data = []
+                    attachments_updated = True
             else:
                 attachments_data = []
             if preset_opts["drop_attachments"] and attachments_data:

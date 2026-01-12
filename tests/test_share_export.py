@@ -220,6 +220,26 @@ def test_scrub_snapshot_archive_preset_preserves_runtime_state(tmp_path: Path) -
     assert attachments and "download_url" in attachments[0]
 
 
+def test_scrub_snapshot_invalid_attachments_json(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.execute("UPDATE messages SET attachments = ? WHERE id = 1", ("{not json}",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    scrub_snapshot(snapshot, export_salt=b"invalid-json")
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        attachments_raw = conn.execute("SELECT attachments FROM messages WHERE id = 1").fetchone()[0]
+        assert attachments_raw == "[]"
+    finally:
+        conn.close()
+
+
 def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
     snapshot = _build_snapshot(tmp_path)
     storage_root = tmp_path / "storage"
