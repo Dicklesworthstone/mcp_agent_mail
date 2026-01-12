@@ -8,10 +8,10 @@ import statistics
 import subprocess
 import time
 import tracemalloc
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -52,7 +52,7 @@ class BenchHarness:
     project_key: str
     agent_name: str
     call_tool: Callable[[str, dict[str, Any]], Awaitable[Any]]
-    read_resource: Callable[[str], Awaitable[Any]] = field(default=None)
+    read_resource: Optional[Callable[[str], Awaitable[Any]]] = None
 
 
 def percentile(data: list[float], p: float) -> float:
