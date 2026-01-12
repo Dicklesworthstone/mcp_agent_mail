@@ -3028,8 +3028,9 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
     if PathSpec is not None and GitWildMatchPattern is not None:
-        spec = PathSpec.from_lines("gitwildmatch", [existing.path_pattern])
-        return spec.match_file(_normalize(candidate_path))
+        spec = _compile_pathspec(_normalize_pathspec_pattern(existing.path_pattern))
+        if spec is not None:
+            return spec.match_file(_normalize(candidate_path))
     # Fallback to conservative fnmatch if pathspec not available
     pat = existing.path_pattern
     a = _normalize(candidate_path)
