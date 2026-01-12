@@ -3535,9 +3535,11 @@ def build_mcp_server() -> FastMCP:
         to_names = _unique(to_names)
         cc_names = _unique(cc_names)
         bcc_names = _unique(bcc_names)
-        to_agents = [await _get_agent(project, name) for name in to_names]
-        cc_agents = [await _get_agent(project, name) for name in cc_names]
-        bcc_agents = [await _get_agent(project, name) for name in bcc_names]
+        combined_names = [*to_names, *cc_names, *bcc_names]
+        agent_map = await _get_agents_batch(project, combined_names)
+        to_agents = [agent_map[name] for name in to_names]
+        cc_agents = [agent_map[name] for name in cc_names]
+        bcc_agents = [agent_map[name] for name in bcc_names]
         recipient_records: list[tuple[Agent, str]] = [(agent, "to") for agent in to_agents]
         recipient_records.extend((agent, "cc") for agent in cc_agents)
         recipient_records.extend((agent, "bcc") for agent in bcc_agents)
