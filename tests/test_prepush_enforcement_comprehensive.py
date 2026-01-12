@@ -559,6 +559,29 @@ class TestPrepushPatternMatching:
         )
         assert result.returncode == 1
 
+    def test_prepush_rename_conflicts_with_old_path(self, tmp_path: Path):
+        """Renames should include old + new paths for conflict checks."""
+        repo, _ = _init_repo_with_remote(tmp_path)
+        _create_commit(repo, "src/old_name.txt", "hello", "add old name")
+        _git(repo, "mv", "src/old_name.txt", "src/new_name.txt")
+        _git(repo, "commit", "-m", "rename file")
+        sha = _git(repo, "rev-parse", "HEAD")
+
+        archive_root = tmp_path / "archive"
+        _write_reservation(
+            archive_root,
+            agent="OtherAgent",
+            pattern="src/old_name.txt",
+            expires_ts=_future_iso(),
+        )
+
+        result = _run_prepush_hook(
+            repo,
+            archive_root,
+            stdin_payload=_make_stdin_payload(repo, sha),
+        )
+        assert result.returncode == 1
+
 
 # =============================================================================
 # Empty Push Tests
