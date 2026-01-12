@@ -3076,6 +3076,63 @@ def _file_reservations_patterns_overlap(paths_a: Sequence[str], paths_b: Sequenc
                 return True
     return False
 
+
+def _build_reservation_union_spec(
+    existing_reservations: list[tuple["FileReservation", str]],
+    exclude_agent_id: int | None,
+    candidate_exclusive: bool,
+) -> "PathSpec | None":
+    """Build a union PathSpec matching ANY potentially conflicting reservation pattern.
+
+    This enables O(n+m) conflict detection instead of O(n×m) by quickly identifying
+    which candidate paths MIGHT conflict with existing reservations.
+
+    Parameters
+    ----------
+    existing_reservations : list[tuple[FileReservation, str]]
+        List of (reservation, holder_name) tuples to check against.
+    exclude_agent_id : int
+        Agent ID to exclude (the requesting agent's own reservations).
+    candidate_exclusive : bool
+        Whether the candidate reservation is exclusive.
+
+    Returns
+    -------
+    PathSpec | None
+        A union PathSpec matching any potentially conflicting pattern, or None if
+        no patterns qualify or PathSpec is unavailable.
+
+    Notes
+    -----
+    A reservation is potentially conflicting if:
+    - It is not released (released_ts is None)
+    - It belongs to a different agent (agent_id != exclude_agent_id)
+    - Either the existing or candidate reservation is exclusive
+    """
+    if PathSpec is None or GitWildMatchPattern is None:
+        return None
+
+    patterns: list[str] = []
+    for record, _ in existing_reservations:
+        # Skip released reservations
+        if record.released_ts is not None:
+            continue
+        # Skip own reservations
+        if record.agent_id == exclude_agent_id:
+            continue
+        # Skip non-exclusive if candidate is also non-exclusive
+        if not record.exclusive and not candidate_exclusive:
+            continue
+        # Add normalized pattern
+        patterns.append(_normalize_pathspec_pattern(record.path_pattern))
+
+    if not patterns:
+        return None
+
+    # Build union PathSpec matching ANY of these patterns
+    return PathSpec.from_lines("gitwildmatch", patterns)
+
+
 async def _list_inbox(
     project: Project,
     agent: Agent,
@@ -3603,10 +3660,29 @@ def build_mcp_server() -> FastMCP:
                             cast(Any, FileReservation.expires_ts) > _naive_utc(now_ts),
                         )
                     )
-                    active_file_reservations = rows.all()
+                    active_file_reservations: list[tuple[FileReservation, str]] = [
+                        (row[0], row[1]) for row in rows.all()
+                    ]
 
                 conflicts: list[dict[str, Any]] = []
+
+                # Build union PathSpec for fast conflict pre-filtering
+                union_spec = _build_reservation_union_spec(active_file_reservations, sender.id, True)
+
+                # Pre-compute which surfaces might conflict
+                potentially_conflicting_surfaces: set[str] = set()
+                if union_spec is not None:
+                    normalized_surfaces = [_normalize_pathspec_pattern(s) for s in candidate_surfaces]
+                    matching_normalized = set(union_spec.match_files(normalized_surfaces))
+                    for orig_surface, norm_surface in zip(candidate_surfaces, normalized_surfaces, strict=True):
+                        if norm_surface in matching_normalized:
+                            potentially_conflicting_surfaces.add(orig_surface)
+                else:
+                    potentially_conflicting_surfaces = set(candidate_surfaces)
+
                 for surface in candidate_surfaces:
+                    if surface not in potentially_conflicting_surfaces:
+                        continue  # Fast path: no conflicts possible for this surface
                     for file_reservation_record, holder_name in active_file_reservations:
                         if _file_reservations_conflict(file_reservation_record, surface, True, sender):
                             conflicts.append({
@@ -6684,18 +6760,41 @@ def build_mcp_server() -> FastMCP:
                         ctx_worktree = None
             except Exception:
                 pass
+            # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n×m))
+            union_spec = _build_reservation_union_spec(existing_reservations, agent.id, exclusive)
+
+            # Pre-compute which paths might conflict using the union spec
+            potentially_conflicting_paths: set[str] = set()
+            if union_spec is not None:
+                # Normalize paths for matching (same normalization as pattern matching)
+                normalized_paths = [_normalize_pathspec_pattern(p) for p in paths]
+                # Match all normalized paths against union in a single pass
+                matching_normalized = set(union_spec.match_files(normalized_paths))
+                # Build set of original paths that might conflict
+                for orig_path, norm_path in zip(paths, normalized_paths, strict=True):
+                    if norm_path in matching_normalized:
+                        potentially_conflicting_paths.add(orig_path)
+            else:
+                # Fallback: all paths potentially conflict (PathSpec unavailable)
+                potentially_conflicting_paths = set(paths)
+
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
-                for file_reservation_record, holder_name in existing_reservations:
-                    if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
-                        conflicting_holders.append(
-                            {
-                                "agent": holder_name,
-                                "path_pattern": file_reservation_record.path_pattern,
-                                "exclusive": file_reservation_record.exclusive,
-                                "expires_ts": _iso(file_reservation_record.expires_ts),
-                            }
-                        )
+
+                # Fast path: skip detailed check if path cannot conflict with any reservation
+                if path in potentially_conflicting_paths:
+                    # Slow path: detailed attribution for potentially conflicting paths only
+                    for file_reservation_record, holder_name in existing_reservations:
+                        if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
+                            conflicting_holders.append(
+                                {
+                                    "agent": holder_name,
+                                    "path_pattern": file_reservation_record.path_pattern,
+                                    "exclusive": file_reservation_record.exclusive,
+                                    "expires_ts": _iso(file_reservation_record.expires_ts),
+                                }
+                            )
+
                 if conflicting_holders:
                     # Advisory model: still grant the file_reservation but surface conflicts
                     conflicts.append({"path": path, "holders": conflicting_holders})
