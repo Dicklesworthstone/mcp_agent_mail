@@ -62,7 +62,7 @@ async def _setup_archive_with_commits(settings: _config.Settings) -> dict:
     # Write a message (creates another commit)
     await write_message_bundle(
         archive,
-        message={"id": 1, "subject": "Archive Test Message"},
+        message={"id": 1, "subject": "Archive Test Message", "created": "2026-01-12T12:00:00"},
         body_md="This is a test message for archive visualization.",
         sender="GreenCastle",
         recipients=["BlueLake"],
