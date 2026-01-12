@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
+from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema
@@ -22,15 +24,21 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_marker)
 
 
-@pytest.fixture
-def bench_factory(isolated_env):
-    async def _factory(label: str, seed: int) -> BenchHarness:
-        await ensure_schema()
-        mcp = build_mcp_server()
+@asynccontextmanager
+async def _bench_context(label: str, seed: int):
+    """Context manager for benchmark setup with proper FastMCP Client."""
+    await ensure_schema()
+    mcp = build_mcp_server()
+
+    async with Client(mcp) as client:
 
         async def call_tool(tool_name: str, args: dict[str, Any]) -> Any:
-            _contents, structured = await mcp._mcp_call_tool(tool_name, args)
-            return structured
+            result = await client.call_tool(tool_name, args)
+            return result.data if hasattr(result, "data") else result
+
+        async def read_resource(uri: str) -> Any:
+            result = await client.read_resource(uri)
+            return result
 
         project_key = f"/bench-{label}-{seed}"
         await call_tool("ensure_project", {"human_key": project_key})
@@ -44,6 +52,15 @@ def bench_factory(isolated_env):
             },
         )
         agent_name = agent_result["name"]
-        return BenchHarness(mcp=mcp, project_key=project_key, agent_name=agent_name, call_tool=call_tool)
+        yield BenchHarness(
+            mcp=mcp,
+            project_key=project_key,
+            agent_name=agent_name,
+            call_tool=call_tool,
+            read_resource=read_resource,
+        )
 
-    return _factory
+
+@pytest.fixture
+def bench_factory(isolated_env):
+    return _bench_context
