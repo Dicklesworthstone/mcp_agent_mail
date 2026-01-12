@@ -2608,6 +2608,46 @@ async def _get_agent(project: Project, name: str) -> Agent:
         )
 
 
+async def _get_agents_batch(project: Project, names: Sequence[str]) -> dict[str, Agent]:
+    """Batch lookup agents by name with `_get_agent`-equivalent error reporting."""
+    await ensure_schema()
+    if not names:
+        return {}
+    if project.id is None:
+        raise ValueError("Project must have an id before querying agents.")
+
+    lowered_names: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        lowered_names.append(lowered)
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name).in_(lowered_names))
+        )
+        agents = result.scalars().all()
+
+    by_lower = {agent.name.lower(): agent for agent in agents}
+    resolved: dict[str, Agent] = {}
+    missing: list[str] = []
+    for name in names:
+        agent = by_lower.get(name.lower())
+        if agent is None:
+            missing.append(name)
+        else:
+            resolved[name] = agent
+
+    if missing:
+        # Reuse the exact error logic from _get_agent for the first missing entry.
+        await _get_agent(project, missing[0])
+
+    return resolved
+
+
 async def _create_message(
     project: Project,
     sender: Agent,
