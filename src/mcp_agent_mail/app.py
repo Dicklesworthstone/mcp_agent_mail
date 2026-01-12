@@ -3037,9 +3037,9 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a) or (a == b)
 
 
-def _normalize_pattern(p: str) -> str:
-    """Normalize a pattern for caching - convert backslashes and strip leading slash."""
-    return p.replace("\\", "/").lstrip("/")
+def _normalize_pathspec_pattern(pattern: str) -> str:
+    """Normalize a pattern for PathSpec caching (slash normalization + leading slash strip)."""
+    return pattern.replace("\\", "/").lstrip("/")
 
 
 @functools.lru_cache(maxsize=1024)
@@ -3055,8 +3055,8 @@ def _compile_pathspec(pattern: str) -> "PathSpec | None":
 
 def _patterns_overlap(a: str, b: str) -> bool:
     # Overlap if any file could be matched by both patterns (approximate by cross-matching)
-    a_norm = _normalize_pattern(a)
-    b_norm = _normalize_pattern(b)
+    a_norm = _normalize_pathspec_pattern(a)
+    b_norm = _normalize_pathspec_pattern(b)
 
     a_spec = _compile_pathspec(a_norm)
     b_spec = _compile_pathspec(b_norm)
