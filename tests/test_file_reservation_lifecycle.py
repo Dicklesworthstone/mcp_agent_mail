@@ -32,7 +32,9 @@ from fastmcp import Client
 from sqlalchemy import text
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import get_session
+from mcp_agent_mail.storage import ensure_archive
 
 # ============================================================================
 # Helper: Direct SQL verification
@@ -198,6 +200,47 @@ async def test_create_shared_reservation(isolated_env):
         reservation = await get_file_reservation_from_db(granted["id"])
         assert reservation is not None
         assert reservation["exclusive"] == 0  # SQLite stores bool as int
+
+
+@pytest.mark.asyncio
+async def test_file_reservation_paths_batches_commits(isolated_env):
+    """file_reservation_paths should emit a single commit per tool call."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/res/batch-commits"
+        project = await client.call_tool("ensure_project", {"human_key": project_key})
+        slug = project.data["slug"]
+        agent = await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": "BatchAgent"},
+        )
+
+        settings = get_settings()
+        archive = await ensure_archive(settings, slug)
+        initial_commits = list(archive.repo.iter_commits())
+
+        result = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent.data["name"],
+                "paths": ["src/a.py", "src/b.py"],
+                "ttl_seconds": 3600,
+                "exclusive": True,
+                "reason": "Batch commit test",
+            },
+        )
+        assert len(result.data.get("granted", [])) == 2
+
+        after_commits = list(archive.repo.iter_commits())
+        assert len(after_commits) - len(initial_commits) == 1
+
+        latest_message = after_commits[0].message
+        latest_text = latest_message.decode() if isinstance(latest_message, bytes) else str(latest_message)
+        subject = latest_text.splitlines()[0]
+        assert subject.startswith("file_reservation: ")
+        assert "src/a.py" in latest_text
+        assert "src/b.py" in latest_text
 
 
 # ============================================================================

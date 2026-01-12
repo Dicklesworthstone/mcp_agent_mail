@@ -66,7 +66,7 @@ from .storage import (
     heal_archive_locks,
     process_attachments,
     write_agent_profile,
-    write_file_reservation_record,
+    write_file_reservation_records,
     write_message_bundle,
 )
 from .utils import (
@@ -2771,14 +2771,16 @@ async def _write_file_reservation_records(
     target_archive = archive or await ensure_archive(settings, project.slug)
 
     async def _write_all() -> None:
-        for reservation, agent in records:
-            payload = _file_reservation_payload(
+        payloads = [
+            _file_reservation_payload(
                 project,
                 reservation,
                 agent,
                 reason_override=reason_override,
             )
-            await write_file_reservation_record(target_archive, payload)
+            for reservation, agent in records
+        ]
+        await write_file_reservation_records(target_archive, payloads)
 
     if archive_locked:
         await _write_all()
@@ -6645,6 +6647,24 @@ def build_mcp_server() -> FastMCP:
                     )
                 )
                 existing_reservations = [(row[0], row[1]) for row in existing_rows.all()]
+            payloads: list[dict[str, Any]] = []
+            ctx_branch: Optional[str] = None
+            ctx_worktree: Optional[str] = None
+            try:
+                with _git_repo(project.human_key) as repo:
+                    try:
+                        ctx_branch = repo.active_branch.name
+                    except Exception:
+                        try:
+                            ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                        except Exception:
+                            ctx_branch = None
+                    try:
+                        ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                    except Exception:
+                        ctx_worktree = None
+            except Exception:
+                pass
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
                 for file_reservation_record, holder_name in existing_reservations:
@@ -6661,24 +6681,6 @@ def build_mcp_server() -> FastMCP:
                     # Advisory model: still grant the file_reservation but surface conflicts
                     conflicts.append({"path": path, "holders": conflicting_holders})
                 file_reservation = await _create_file_reservation(project, agent, path, exclusive, reason, ttl_seconds)
-                # Attempt to capture branch/worktree context (best-effort; non-blocking)
-                ctx_branch: Optional[str] = None
-                ctx_worktree: Optional[str] = None
-                try:
-                    with _git_repo(project.human_key) as repo:
-                        try:
-                            ctx_branch = repo.active_branch.name
-                        except Exception:
-                            try:
-                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
-                            except Exception:
-                                ctx_branch = None
-                        try:
-                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                        except Exception:
-                            ctx_worktree = None
-                except Exception:
-                    pass
                 file_reservation_payload = _file_reservation_payload(
                     project,
                     file_reservation,
@@ -6686,7 +6688,7 @@ def build_mcp_server() -> FastMCP:
                     branch=ctx_branch,
                     worktree=ctx_worktree,
                 )
-                await write_file_reservation_record(archive, file_reservation_payload)
+                payloads.append(file_reservation_payload)
                 granted.append(
                     {
                         "id": file_reservation.id,
@@ -6697,6 +6699,8 @@ def build_mcp_server() -> FastMCP:
                     }
                 )
                 existing_reservations.append((file_reservation, agent.name))
+            if payloads:
+                await write_file_reservation_records(archive, payloads)
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
