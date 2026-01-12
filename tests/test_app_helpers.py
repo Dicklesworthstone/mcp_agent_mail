@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import cast
 
@@ -10,6 +11,7 @@ from mcp_agent_mail.app import (
     ToolExecutionError,
     _enforce_capabilities,
     _iso,
+    _latest_filesystem_activity,
     _parse_iso,
     _parse_json_safely,
     build_mcp_server,
@@ -46,6 +48,23 @@ def test_enforce_capabilities_denied():
     assert "requires capabilities" in str(exc.value)
 
 
+def test_latest_filesystem_activity_returns_max(tmp_path) -> None:
+    older = tmp_path / "older.txt"
+    newer = tmp_path / "newer.txt"
+    older.write_text("old", encoding="utf-8")
+    newer.write_text("new", encoding="utf-8")
+
+    old_ts = datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp()
+    new_ts = datetime(2025, 1, 2, tzinfo=timezone.utc).timestamp()
+    os.utime(older, (old_ts, old_ts))
+    os.utime(newer, (new_ts, new_ts))
+
+    latest = _latest_filesystem_activity([older, newer])
+
+    assert latest is not None
+    assert latest == datetime.fromtimestamp(new_ts, tz=timezone.utc)
+
+
 @pytest.mark.asyncio
 async def test_tool_metrics_resource_populates_after_calls(isolated_env):
     server = build_mcp_server()
@@ -60,5 +79,4 @@ async def test_tool_metrics_resource_populates_after_calls(isolated_env):
         assert metrics_blocks and metrics_blocks[0].text
         # the text is JSON; ensure tools list contains health_check
         assert "health_check" in metrics_blocks[0].text
-
 
