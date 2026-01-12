@@ -24,9 +24,11 @@ import asyncio
 import pytest
 from fastmcp import Client
 from sqlalchemy import text
+from sqlmodel import select
 
-from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.app import ToolExecutionError, _get_agent, _get_agents_batch, build_mcp_server
 from mcp_agent_mail.db import get_session
+from mcp_agent_mail.models import Project
 
 # ============================================================================
 # Helper: Direct SQL verification
@@ -572,3 +574,89 @@ async def test_whois_nonexistent_agent_error(isolated_env):
         # Should indicate agent not found
         error_msg = str(exc_info.value).lower()
         assert "not found" in error_msg or "does not exist" in error_msg
+
+
+# ============================================================================
+# Test: _get_agents_batch helper
+# ============================================================================
+
+
+async def _load_project(human_key: str) -> Project:
+    async with get_session() as session:
+        result = await session.execute(select(Project).where(Project.human_key == human_key))
+        project = result.scalars().first()
+    assert project is not None
+    return project
+
+
+@pytest.mark.asyncio
+async def test_get_agents_batch_empty_list(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/setup/batch-empty"})
+
+    project = await _load_project("/test/setup/batch-empty")
+    resolved = await _get_agents_batch(project, [])
+    assert resolved == {}
+
+
+@pytest.mark.asyncio
+async def test_get_agents_batch_mixed_case(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/setup/batch-case"})
+        agent_result = await client.call_tool(
+            "create_agent_identity",
+            {
+                "project_key": "/test/setup/batch-case",
+                "program": "test",
+                "model": "test",
+                "task_description": "Batch case test",
+            },
+        )
+        agent_name = agent_result.data["name"]
+
+    project = await _load_project("/test/setup/batch-case")
+    resolved = await _get_agents_batch(project, [agent_name.lower(), agent_name.upper()])
+    assert resolved[agent_name.lower()].name == agent_name
+    assert resolved[agent_name.upper()].name == agent_name
+
+
+@pytest.mark.asyncio
+async def test_get_agents_batch_missing_name_uses_get_agent_error(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/setup/batch-missing"})
+        agent_result = await client.call_tool(
+            "create_agent_identity",
+            {
+                "project_key": "/test/setup/batch-missing",
+                "program": "test",
+                "model": "test",
+                "task_description": "Batch missing test",
+            },
+        )
+        agent_name = agent_result.data["name"]
+
+    project = await _load_project("/test/setup/batch-missing")
+    missing_name = f"{agent_name}Typo"
+    with pytest.raises(ToolExecutionError) as batch_exc:
+        await _get_agents_batch(project, [agent_name, missing_name])
+
+    with pytest.raises(ToolExecutionError) as single_exc:
+        await _get_agent(project, missing_name)
+
+    assert batch_exc.value.error_type == single_exc.value.error_type
+    assert str(batch_exc.value) == str(single_exc.value)
+
+
+@pytest.mark.asyncio
+async def test_get_agents_batch_placeholder_detection(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/setup/batch-placeholder"})
+
+    project = await _load_project("/test/setup/batch-placeholder")
+    with pytest.raises(ToolExecutionError) as exc_info:
+        await _get_agents_batch(project, ["YOUR_AGENT_NAME"])
+    assert exc_info.value.error_type == "CONFIGURATION_ERROR"
