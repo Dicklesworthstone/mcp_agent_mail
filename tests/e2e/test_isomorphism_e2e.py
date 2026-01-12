@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,14 +13,16 @@ import httpx
 import pytest
 from fastmcp import Client
 from PIL import Image
+from rich.table import Table
 from sqlalchemy import text
 
 from mcp_agent_mail import share
-from mcp_agent_mail.app import ToolExecutionError, build_mcp_server
+from mcp_agent_mail.app import ToolExecutionError, _compile_pathspec, _patterns_overlap, build_mcp_server
 from mcp_agent_mail.cli import _collect_preview_status
 from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import ensure_schema, get_session, reset_database_state
 from mcp_agent_mail.http import build_http_app
+from mcp_agent_mail.storage import ensure_archive
 from tests.e2e.utils import assert_matches_golden, make_console, render_phase, write_log
 
 INLINE_PNG_BASE64 = (
@@ -55,8 +58,63 @@ def _parse_search_html(html: str) -> dict[str, Any]:
         "subject_count": len(subjects),
         "subjects_sample": subjects[:3],
         "mark_count": html.count("<mark>"),
+        "hits_badge_count": len(re.findall(r">\\s*\\d+\\s+match(?:es)?\\s*<", html)),
         "has_snippet_block": "line-clamp-2" in html,
     }
+
+
+def _cache_hit_ratio() -> float:
+    """Return PathSpec cache hit ratio, or 0.0 when no samples collected."""
+    info = _compile_pathspec.cache_info()
+    total = info.hits + info.misses
+    return (info.hits / total) if total else 0.0
+
+
+def _render_cache_stats_table(console) -> None:
+    """Render cache stats with Rich for log visibility."""
+    info = _compile_pathspec.cache_info()
+    ratio = _cache_hit_ratio()
+    table = Table(title="PathSpec Cache Stats")
+    table.add_column("Hits", justify="right")
+    table.add_column("Misses", justify="right")
+    table.add_column("Maxsize", justify="right")
+    table.add_column("Currsize", justify="right")
+    table.add_column("Hit Ratio", justify="right")
+    table.add_row(
+        str(info.hits),
+        str(info.misses),
+        str(info.maxsize),
+        str(info.currsize),
+        f"{ratio:.2%}",
+    )
+    console.print(table)
+
+
+async def _measure_file_reservation_commit_delta(
+    server,
+    *,
+    project_key: str,
+    agent_name: str,
+) -> int:
+    """Return number of archive commits added after a file_reservation_paths call."""
+    settings = get_settings()
+    slug = project_key.strip("/").replace("/", "-")
+    archive = await ensure_archive(settings, slug)
+    before = list(archive.repo.iter_commits())
+    async with Client(server) as client:
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": ["src/a.py", "src/b.py"],
+                "ttl_seconds": 3600,
+                "exclusive": True,
+                "reason": "phase2-commit-batch",
+            },
+        )
+    after = list(archive.repo.iter_commits())
+    return len(after) - len(before)
 
 
 def _iso_at(base: datetime, *, offset_seconds: int) -> str:
@@ -371,6 +429,47 @@ async def test_isomorphism_e2e_suite(isolated_env, tmp_path: Path, monkeypatch) 
             }
         )
 
+        render_phase(console, "phase2_checks", {"pathspec_cache": "warmup", "commit_batching": "measure"})
+        _compile_pathspec.cache_clear()
+        for _ in range(20):
+            _patterns_overlap("src/**", "src/file.txt")
+            _patterns_overlap("docs/**", "docs/readme.md")
+            _patterns_overlap("assets/*.png", "assets/logo.png")
+        cache_info = _compile_pathspec.cache_info()
+        cache_ratio = _cache_hit_ratio()
+        _render_cache_stats_table(console)
+        assert cache_ratio >= 0.9, f"PathSpec cache hit ratio too low: {cache_ratio:.2%}"
+
+        perf_project = _tool_data(
+            await client.call_tool(
+                "ensure_project", {"human_key": f"/perf-phase2-{uuid.uuid4().hex[:6]}"}
+            )
+        )
+        perf_key = perf_project["slug"]
+        perf_agent = _tool_data(
+            await client.call_tool(
+                "create_agent_identity",
+                {
+                    "project_key": perf_key,
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "task_description": "phase2 commit batching check",
+                },
+            )
+        )
+        perf_agent_name = perf_agent["name"]
+        commit_delta = await _measure_file_reservation_commit_delta(
+            server,
+            project_key=perf_key,
+            agent_name=perf_agent_name,
+        )
+        assert commit_delta == 1, f"Expected 1 commit, got {commit_delta}"
+
+        phase2_cache_info = cache_info
+        phase2_cache_ratio = cache_ratio
+        phase2_commit_delta = commit_delta
+        phase2_project = perf_key
+
         render_phase(console, "contacts", {"from": "BlueLake", "to": "PurpleBear"})
         request_contact = _tool_data(
             await client.call_tool(
@@ -548,6 +647,29 @@ async def test_isomorphism_e2e_suite(isolated_env, tmp_path: Path, monkeypatch) 
                 "like_fallback": like_summary,
             }
         )
+
+        if fts_summary["hits_badge_count"] > 0:
+            assert fts_summary["mark_count"] > 0
+        assert like_summary["mark_count"] == 0
+        assert like_summary["hits_badge_count"] == 0
+
+        phase2_metrics = {
+            "pathspec_cache": {
+                "hits": phase2_cache_info.hits,
+                "misses": phase2_cache_info.misses,
+                "ratio": phase2_cache_ratio,
+            },
+            "commit_batching": {
+                "project": phase2_project,
+                "commit_delta": phase2_commit_delta,
+            },
+            "snippet_metrics": {
+                "fts": fts_summary,
+                "like_fallback": like_summary,
+            },
+        }
+        phases.append({"phase": "phase2_verification", "metrics": phase2_metrics})
+        write_log("phase2_verification", phase2_metrics)
 
         # Recreate FTS tables/triggers so later snapshot scrubbing succeeds.
         reset_database_state()
@@ -734,6 +856,7 @@ async def test_isomorphism_e2e_suite(isolated_env, tmp_path: Path, monkeypatch) 
         (str(snapshot_path), "<snapshot_path>"),
         (str(database_path), "<database_path>"),
         (str(product.get("product_uid") or ""), "<product_uid>"),
+        (str(phase2_project), "<phase2_project>"),
     ]
 
     result = {
