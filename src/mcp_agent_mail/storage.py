@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar, cast
 
 from filelock import SoftFileLock, Timeout
@@ -1196,6 +1196,29 @@ async def _append_attachment_audit(archive: ProjectArchive, sha1: str, event: di
         pass
 
 
+def _commit_lock_path(repo_root: Path, rel_paths: Sequence[str]) -> Path:
+    """Derive the commit lock path based on project-scoped rel_paths."""
+    if not rel_paths:
+        return repo_root / ".commit.lock"
+
+    project_slug: str | None = None
+    for rel_path in rel_paths:
+        parts = PurePosixPath(rel_path).parts
+        if len(parts) < 2 or parts[0] != "projects":
+            project_slug = None
+            break
+        slug = parts[1]
+        if project_slug is None:
+            project_slug = slug
+        elif project_slug != slug:
+            project_slug = None
+            break
+
+    if project_slug:
+        return repo_root / "projects" / project_slug / ".commit.lock"
+    return repo_root / ".commit.lock"
+
+
 async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
     if not rel_paths:
         return
@@ -1234,7 +1257,9 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
     working_tree = repo.working_tree_dir
     if working_tree is None:
         raise ValueError("Repository has no working tree directory")
-    commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
+    repo_root = Path(working_tree).resolve()
+    commit_lock_path = _commit_lock_path(repo_root, rel_paths)
+    await _to_thread(commit_lock_path.parent.mkdir, parents=True, exist_ok=True)
     async with AsyncFileLock(commit_lock_path):
         import errno
 
