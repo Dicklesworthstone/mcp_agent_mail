@@ -72,10 +72,10 @@ class QueryTracker:
 
 
 def _clean_table_name(raw: str) -> str:
-    cleaned = raw.strip().strip("`\"[]")
+    cleaned = raw.strip()
     if "." in cleaned:
         cleaned = cleaned.split(".")[-1]
-    return cleaned
+    return cleaned.strip("`\"[]")
 
 
 def _extract_table_name(statement: str) -> str | None:

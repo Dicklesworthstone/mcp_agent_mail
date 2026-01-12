@@ -235,6 +235,7 @@ class TestQueryTrackingHelpers:
         assert _extract_table_name("UPDATE projects SET name = 'x'") == "projects"
         assert _extract_table_name("INSERT INTO `message_recipients` (id) VALUES (1)") == "message_recipients"
         assert _extract_table_name("SELECT * FROM main.file_reservations") == "file_reservations"
+        assert _extract_table_name('SELECT * FROM "main"."messages"') == "messages"
         assert _extract_table_name("BEGIN") is None
 
     def test_query_tracker_records_counts_and_slow_queries(self):
