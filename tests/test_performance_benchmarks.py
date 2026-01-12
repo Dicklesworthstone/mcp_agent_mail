@@ -12,13 +12,19 @@ Reference: PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 261
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from rich.console import Console
+from rich.table import Table
 
 from mcp_agent_mail import share
+
+console = Console()
 
 
 @pytest.fixture
@@ -37,6 +43,14 @@ def medium_db(tmp_path: Path) -> Path:
 def large_db(tmp_path: Path) -> Path:
     """Create a large database (~100MB) with 5000 messages."""
     return _create_test_database(tmp_path, "large.sqlite3", num_messages=5000, body_size=20000)
+
+
+@pytest.fixture(scope="session")
+def benchmark_log_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    env_path = os.environ.get("PERF_BENCHMARK_LOG_PATH")
+    if env_path:
+        return Path(env_path)
+    return tmp_path_factory.mktemp("benchmarks") / "performance_benchmarks.json"
 
 
 def _create_test_database(tmp_path: Path, name: str, num_messages: int, body_size: int) -> Path:
@@ -142,8 +156,38 @@ def _get_file_size_mb(path: Path) -> float:
     return path.stat().st_size / (1024 * 1024)
 
 
+def _record_benchmark(log_path: Path, entry: dict[str, object]) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    entries: list[dict[str, object]] = []
+    if log_path.exists():
+        try:
+            existing = json.loads(log_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+        if isinstance(existing, dict):
+            generated_at = existing.get("generated_at", generated_at)
+            existing_entries = existing.get("entries", [])
+            if isinstance(existing_entries, list):
+                entries = [item for item in existing_entries if isinstance(item, dict)]
+    entries.append(entry)
+    payload: dict[str, object] = {"generated_at": generated_at, "entries": entries}
+    log_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _print_benchmark_table(title: str, rows: list[tuple[str, str]]) -> None:
+    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="magenta")
+    for label, value in rows:
+        table.add_row(label, value)
+    console.print(table)
+
+
 @pytest.mark.benchmark
-def test_small_bundle_export_performance(small_db: Path, tmp_path: Path) -> None:
+def test_small_bundle_export_performance(
+    small_db: Path, tmp_path: Path, benchmark_log_path: Path
+) -> None:
     """Benchmark snapshot creation performance for ~1MB database.
 
     Small databases should snapshot very quickly as they use SQLite Online Backup API.
@@ -159,11 +203,26 @@ def test_small_bundle_export_performance(small_db: Path, tmp_path: Path) -> None
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print("\nSmall snapshot performance:")
-    print(f"  Database size: {db_size_mb:.2f} MB")
-    print(f"  Snapshot time: {export_time:.3f} seconds")
-    if export_time > 0:
-        print(f"  Throughput: {db_size_mb / export_time:.2f} MB/s")
+    throughput = db_size_mb / export_time if export_time > 0 else None
+    _print_benchmark_table(
+        "Small Snapshot Performance",
+        [
+            ("Database size", f"{db_size_mb:.2f} MB"),
+            ("Snapshot time", f"{export_time:.3f} s"),
+            ("Throughput", f"{throughput:.2f} MB/s" if throughput else "n/a"),
+        ],
+    )
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "small_snapshot",
+            "db_size_mb": db_size_mb,
+            "snapshot_seconds": export_time,
+            "throughput_mb_s": throughput,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
     # Small snapshots should be fast
     assert export_time < 5.0, "Small snapshot should complete in < 5 seconds"
@@ -171,7 +230,9 @@ def test_small_bundle_export_performance(small_db: Path, tmp_path: Path) -> None
 
 @pytest.mark.benchmark
 @pytest.mark.slow
-def test_medium_bundle_export_performance(medium_db: Path, tmp_path: Path) -> None:
+def test_medium_bundle_export_performance(
+    medium_db: Path, tmp_path: Path, benchmark_log_path: Path
+) -> None:
     """Benchmark snapshot creation performance for ~10MB database.
 
     Medium databases should snapshot efficiently without chunking.
@@ -187,11 +248,26 @@ def test_medium_bundle_export_performance(medium_db: Path, tmp_path: Path) -> No
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print("\nMedium snapshot performance:")
-    print(f"  Database size: {db_size_mb:.2f} MB")
-    print(f"  Snapshot time: {export_time:.3f} seconds")
-    if export_time > 0:
-        print(f"  Throughput: {db_size_mb / export_time:.2f} MB/s")
+    throughput = db_size_mb / export_time if export_time > 0 else None
+    _print_benchmark_table(
+        "Medium Snapshot Performance",
+        [
+            ("Database size", f"{db_size_mb:.2f} MB"),
+            ("Snapshot time", f"{export_time:.3f} s"),
+            ("Throughput", f"{throughput:.2f} MB/s" if throughput else "n/a"),
+        ],
+    )
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "medium_snapshot",
+            "db_size_mb": db_size_mb,
+            "snapshot_seconds": export_time,
+            "throughput_mb_s": throughput,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
     # Medium snapshots should complete in reasonable time
     assert export_time < 30.0, "Medium snapshot should complete in < 30 seconds"
@@ -199,7 +275,9 @@ def test_medium_bundle_export_performance(medium_db: Path, tmp_path: Path) -> No
 
 @pytest.mark.benchmark
 @pytest.mark.slow
-def test_large_bundle_export_performance(large_db: Path, tmp_path: Path) -> None:
+def test_large_bundle_export_performance(
+    large_db: Path, tmp_path: Path, benchmark_log_path: Path
+) -> None:
     """Benchmark snapshot + chunking performance for ~100MB database.
 
     Large databases should snapshot efficiently and optionally be chunked for httpvfs.
@@ -215,11 +293,14 @@ def test_large_bundle_export_performance(large_db: Path, tmp_path: Path) -> None
     assert snapshot_path.exists()
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print("\nLarge snapshot performance:")
-    print(f"  Database size: {db_size_mb:.2f} MB")
-    print(f"  Snapshot time: {snapshot_time:.3f} seconds")
-    if snapshot_time > 0:
-        print(f"  Throughput: {db_size_mb / snapshot_time:.2f} MB/s")
+    throughput = db_size_mb / snapshot_time if snapshot_time > 0 else None
+    rows = [
+        ("Database size", f"{db_size_mb:.2f} MB"),
+        ("Snapshot time", f"{snapshot_time:.3f} s"),
+        ("Throughput", f"{throughput:.2f} MB/s" if throughput else "n/a"),
+    ]
+    chunk_time = None
+    chunked = None
 
     # Test chunking if database is large enough
     if db_size_mb > 10:
@@ -235,15 +316,32 @@ def test_large_bundle_export_performance(large_db: Path, tmp_path: Path) -> None
         )
         chunk_time = time.time() - chunk_start
 
-        print(f"  Chunking time: {chunk_time:.3f} seconds")
-        print(f"  Was chunked: {chunked is not None}")
+        rows.append(("Chunking time", f"{chunk_time:.3f} s"))
+        rows.append(("Was chunked", str(chunked is not None)))
+
+    _print_benchmark_table("Large Snapshot Performance", rows)
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "large_snapshot",
+            "db_size_mb": db_size_mb,
+            "snapshot_seconds": snapshot_time,
+            "throughput_mb_s": throughput,
+            "chunking_seconds": chunk_time,
+            "chunked": chunked is not None if chunked is not None else False,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
     # Large snapshots should still complete in reasonable time
     assert snapshot_time < 120.0, "Large snapshot should complete in < 2 minutes"
 
 
 @pytest.mark.benchmark
-def test_database_compressibility(small_db: Path, tmp_path: Path) -> None:
+def test_database_compressibility(
+    small_db: Path, tmp_path: Path, benchmark_log_path: Path
+) -> None:
     """Test database compressibility for different scenarios.
 
     SQLite databases with repetitive content should compress well with gzip/brotli.
@@ -270,10 +368,25 @@ def test_database_compressibility(small_db: Path, tmp_path: Path) -> None:
     compressed_mb = compressed_size / (1024 * 1024)
     compression_ratio = compressed_size / uncompressed_size
 
-    print("\nDatabase compression statistics:")
-    print(f"  Uncompressed: {uncompressed_mb:.2f} MB")
-    print(f"  Compressed (gzip): {compressed_mb:.2f} MB")
-    print(f"  Compression ratio: {compression_ratio:.2%}")
+    _print_benchmark_table(
+        "Database Compression Statistics",
+        [
+            ("Uncompressed", f"{uncompressed_mb:.2f} MB"),
+            ("Compressed (gzip)", f"{compressed_mb:.2f} MB"),
+            ("Compression ratio", f"{compression_ratio:.2%}"),
+        ],
+    )
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "database_compressibility",
+            "uncompressed_mb": uncompressed_mb,
+            "compressed_mb": compressed_mb,
+            "compression_ratio": compression_ratio,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
     # Expect at least 30% compression for repetitive test data
     assert compression_ratio < 0.7, \
@@ -281,7 +394,9 @@ def test_database_compressibility(small_db: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.benchmark
-def test_chunk_size_validation(large_db: Path, tmp_path: Path) -> None:
+def test_chunk_size_validation(
+    large_db: Path, tmp_path: Path, benchmark_log_path: Path
+) -> None:
     """Test that chunking produces appropriately sized chunks.
 
     httpvfs performance depends on chunk size - too small means many HTTP requests,
@@ -303,8 +418,7 @@ def test_chunk_size_validation(large_db: Path, tmp_path: Path) -> None:
         chunk_bytes=int(chunk_size_mb * 1024 * 1024),
     )
 
-    print("\nChunk validation:")
-    print(f"  Was chunked: {chunked}")
+    rows = [("Was chunked", str(chunked))]
 
     if chunked:
         # Check if config file was created
@@ -313,24 +427,36 @@ def test_chunk_size_validation(large_db: Path, tmp_path: Path) -> None:
             config = json.loads(config_path.read_text())
             total_size = config.get("databaseLength", 0)
 
-            print(f"  Total size: {total_size / (1024 * 1024):.2f} MB")
+            total_size_mb = total_size / (1024 * 1024)
+            rows.append(("Total size", f"{total_size_mb:.2f} MB"))
 
             # Validate chunks directory
             chunks_dir = output_dir / "chunks"
             if chunks_dir.exists():
                 chunk_files = sorted(chunks_dir.glob("mailbox.sqlite3*"))
-                print(f"  Number of chunks: {len(chunk_files)}")
+                rows.append(("Number of chunks", str(len(chunk_files))))
 
                 # Check individual chunk sizes
                 for chunk_file in chunk_files:
                     chunk_size = chunk_file.stat().st_size / (1024 * 1024)
-                    print(f"    {chunk_file.name}: {chunk_size:.2f} MB")
+                    rows.append((chunk_file.name, f"{chunk_size:.2f} MB"))
 
                     # Chunks should not wildly exceed requested size
                     assert chunk_size <= chunk_size_mb * 2, \
                         f"Chunk {chunk_file.name} too large ({chunk_size:.2f} > {chunk_size_mb * 2})"
     else:
-        print("  Database not chunked (below threshold)")
+        rows.append(("Status", "Database not chunked (below threshold)"))
+
+    _print_benchmark_table("Chunk Validation", rows)
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "chunk_size_validation",
+            "chunked": chunked,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
 
 def test_vacuum_improves_locality() -> None:
@@ -503,7 +629,9 @@ def test_browser_performance_requirements_documentation() -> None:
 
 @pytest.mark.benchmark
 @pytest.mark.parametrize("num_messages", [100, 1000, 5000])
-def test_export_scales_linearly(tmp_path: Path, num_messages: int) -> None:
+def test_export_scales_linearly(
+    tmp_path: Path, num_messages: int, benchmark_log_path: Path
+) -> None:
     """Test that snapshot time scales linearly with database size.
 
     Snapshot performance should be O(n) where n = database size.
@@ -519,13 +647,31 @@ def test_export_scales_linearly(tmp_path: Path, num_messages: int) -> None:
     snapshot_time = time.time() - start_time
 
     # Calculate throughput
-    throughput = num_messages / snapshot_time if snapshot_time > 0 else float('inf')
+    throughput = num_messages / snapshot_time if snapshot_time > 0 else 0.0
 
     db_size_mb = _get_file_size_mb(snapshot_path)
 
-    print(f"\nScale test ({num_messages} messages, {db_size_mb:.2f} MB):")
-    print(f"  Snapshot time: {snapshot_time:.3f} seconds")
-    print(f"  Throughput: {throughput:.0f} messages/second")
+    _print_benchmark_table(
+        "Linear Scaling Test",
+        [
+            ("Messages", str(num_messages)),
+            ("Database size", f"{db_size_mb:.2f} MB"),
+            ("Snapshot time", f"{snapshot_time:.3f} s"),
+            ("Throughput", f"{throughput:.0f} msg/s" if snapshot_time > 0 else "n/a"),
+        ],
+    )
+    _record_benchmark(
+        benchmark_log_path,
+        {
+            "test": "export_scales_linearly",
+            "messages": num_messages,
+            "db_size_mb": db_size_mb,
+            "snapshot_seconds": snapshot_time,
+            "throughput_msg_s": throughput,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
     # Snapshot should handle at least 50 messages/second
     assert throughput > 50, f"Snapshot throughput too low: {throughput:.0f} msg/s"
@@ -554,7 +700,13 @@ def percentile(data: list[float], p: int) -> float:
     return sorted_data[f] * (c - k) + sorted_data[c] * (k - f)
 
 
-def print_latency_stats(name: str, latencies_ms: list[float]) -> dict[str, float]:
+def print_latency_stats(
+    name: str,
+    latencies_ms: list[float],
+    log_path: Path | None = None,
+    *,
+    test_name: str | None = None,
+) -> dict[str, float]:
     """Print and return latency statistics."""
     import statistics
 
@@ -569,14 +721,28 @@ def print_latency_stats(name: str, latencies_ms: list[float]) -> dict[str, float
         "p95": percentile(latencies_ms, 95),
         "p99": percentile(latencies_ms, 99),
     }
-    print(f"\n{name} Latency (ms):")
-    print(f"  Count: {stats['count']}")
-    print(f"  Min: {stats['min']:.2f}")
-    print(f"  Max: {stats['max']:.2f}")
-    print(f"  Mean: {stats['mean']:.2f}")
-    print(f"  P50: {stats['p50']:.2f}")
-    print(f"  P95: {stats['p95']:.2f}")
-    print(f"  P99: {stats['p99']:.2f}")
+    _print_benchmark_table(
+        f"{name} Latency (ms)",
+        [
+            ("Count", str(stats["count"])),
+            ("Min", f"{stats['min']:.2f}"),
+            ("Max", f"{stats['max']:.2f}"),
+            ("Mean", f"{stats['mean']:.2f}"),
+            ("P50", f"{stats['p50']:.2f}"),
+            ("P95", f"{stats['p95']:.2f}"),
+            ("P99", f"{stats['p99']:.2f}"),
+        ],
+    )
+    if log_path is not None:
+        _record_benchmark(
+            log_path,
+            {
+                "test": test_name or name.lower().replace(" ", "_"),
+                "latency_ms": stats,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        console.print(f"[dim]Benchmark log:[/] {log_path}")
     return stats
 
 
@@ -585,7 +751,9 @@ class TestMessageSendLatency:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_message_send_latency_baseline(self, isolated_env):
+    async def test_message_send_latency_baseline(
+        self, isolated_env, benchmark_log_path: Path
+    ):
         """Establish baseline for message send latency. Target: < 100ms p95."""
         import uuid
 
@@ -630,7 +798,12 @@ class TestMessageSendLatency:
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 latencies.append(elapsed_ms)
 
-        stats = print_latency_stats("Message Send", latencies)
+        stats = print_latency_stats(
+            "Message Send",
+            latencies,
+            benchmark_log_path,
+            test_name="message_send_latency",
+        )
         # Target: < 100ms p95, allow 500ms for test environment overhead
         assert stats["p95"] < 500, f"Message send p95 ({stats['p95']:.2f}ms) exceeds threshold"
 
@@ -640,7 +813,9 @@ class TestInboxFetchLatency:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_inbox_fetch_with_100_messages(self, isolated_env):
+    async def test_inbox_fetch_with_100_messages(
+        self, isolated_env, benchmark_log_path: Path
+    ):
         """Benchmark inbox fetch with 100 messages. Target: < 200ms p95."""
         import uuid
 
@@ -672,7 +847,7 @@ class TestInboxFetchLatency:
             agent_name = agent_result.data.get("name")
 
             # Populate inbox
-            print(f"\nPopulating inbox with {num_messages} messages...")
+            console.print(f"[dim]Populating inbox with {num_messages} messages...[/]")
             for i in range(num_messages):
                 await client.call_tool(
                     "send_message",
@@ -700,7 +875,12 @@ class TestInboxFetchLatency:
                 latencies.append(elapsed_ms)
                 assert len(result.data) > 0
 
-        stats = print_latency_stats("Inbox Fetch (100 msgs)", latencies)
+        stats = print_latency_stats(
+            "Inbox Fetch (100 msgs)",
+            latencies,
+            benchmark_log_path,
+            test_name="inbox_fetch_latency",
+        )
         # Target: < 200ms p95, allow 500ms for overhead
         assert stats["p95"] < 500, f"Inbox fetch p95 ({stats['p95']:.2f}ms) exceeds threshold"
 
@@ -710,7 +890,9 @@ class TestSearchLatency:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_search_with_many_messages(self, isolated_env):
+    async def test_search_with_many_messages(
+        self, isolated_env, benchmark_log_path: Path
+    ):
         """Benchmark search latency. Target: < 500ms p95."""
         import uuid
 
@@ -742,7 +924,7 @@ class TestSearchLatency:
             agent_name = agent_result.data.get("name")
 
             # Populate with searchable messages
-            print(f"\nPopulating with {num_messages} messages for search...")
+            console.print(f"[dim]Populating with {num_messages} messages for search...[/]")
             for i in range(num_messages):
                 keyword = ["alpha", "beta", "gamma", "delta"][i % 4]
                 await client.call_tool(
@@ -770,7 +952,12 @@ class TestSearchLatency:
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 latencies.append(elapsed_ms)
 
-        stats = print_latency_stats("Search (FTS)", latencies)
+        stats = print_latency_stats(
+            "Search (FTS)",
+            latencies,
+            benchmark_log_path,
+            test_name="search_latency",
+        )
         # Target: < 500ms p95, allow 1000ms for overhead
         assert stats["p95"] < 1000, f"Search p95 ({stats['p95']:.2f}ms) exceeds threshold"
 
@@ -780,7 +967,9 @@ class TestFileReservationLatency:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_reservation_conflict_check_with_100(self, isolated_env):
+    async def test_reservation_conflict_check_with_100(
+        self, isolated_env, benchmark_log_path: Path
+    ):
         """Benchmark conflict check with many existing reservations."""
         import uuid
 
@@ -823,7 +1012,9 @@ class TestFileReservationLatency:
             agent2_name = agent2_result.data.get("name")
 
             # Create many reservations
-            print(f"\nCreating {num_reservations} reservations with {agent1_name}...")
+            console.print(
+                f"[dim]Creating {num_reservations} reservations with {agent1_name}...[/]"
+            )
             for i in range(num_reservations):
                 await client.call_tool(
                     "file_reservation_paths",
@@ -837,7 +1028,7 @@ class TestFileReservationLatency:
                 )
 
             # Measure conflict check time using agent2
-            print(f"Measuring conflict checks with {agent2_name}...")
+            console.print(f"[dim]Measuring conflict checks with {agent2_name}...[/]")
             for i in range(check_iterations):
                 start = time.perf_counter()
                 await client.call_tool(
@@ -853,7 +1044,12 @@ class TestFileReservationLatency:
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 latencies.append(elapsed_ms)
 
-        stats = print_latency_stats("Conflict Check (50 reservations)", latencies)
+        stats = print_latency_stats(
+            "Conflict Check (50 reservations)",
+            latencies,
+            benchmark_log_path,
+            test_name="reservation_conflict_check",
+        )
         assert stats["p95"] < 500, "Conflict check p95 exceeds threshold"
 
 
@@ -862,7 +1058,7 @@ class TestArchiveWriteLatency:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_archive_ensure_latency(self, isolated_env):
+    async def test_archive_ensure_latency(self, isolated_env, benchmark_log_path: Path):
         """Benchmark archive initialization latency."""
         from mcp_agent_mail.config import get_settings
         from mcp_agent_mail.storage import ensure_archive
@@ -877,7 +1073,12 @@ class TestArchiveWriteLatency:
             elapsed_ms = (time.perf_counter() - start) * 1000
             latencies.append(elapsed_ms)
 
-        stats = print_latency_stats("Archive Ensure", latencies)
+        stats = print_latency_stats(
+            "Archive Ensure",
+            latencies,
+            benchmark_log_path,
+            test_name="archive_ensure_latency",
+        )
         assert stats["p95"] < 1000, "Archive ensure p95 exceeds threshold"
 
 
@@ -886,7 +1087,9 @@ class TestPerformanceSummary:
 
     @pytest.mark.asyncio
     @pytest.mark.benchmark
-    async def test_generate_summary_report(self, isolated_env):
+    async def test_generate_summary_report(
+        self, isolated_env, benchmark_log_path: Path
+    ):
         """Run minimal benchmark suite and print summary."""
         import uuid
 
@@ -971,15 +1174,22 @@ class TestPerformanceSummary:
                 "p95": percentile(latencies, 95),
             }
 
-        # Print summary table
-        print("\n" + "=" * 60)
-        print("PERFORMANCE SUMMARY REPORT")
-        print("=" * 60)
-        print(f"{'Operation':<25} {'P50 (ms)':<15} {'P95 (ms)':<15}")
-        print("-" * 60)
+        table = Table(title="Performance Summary Report", show_header=True, header_style="bold cyan")
+        table.add_column("Operation", style="cyan")
+        table.add_column("P50 (ms)", style="magenta")
+        table.add_column("P95 (ms)", style="magenta")
         for op, stats in results.items():
-            print(f"{op:<25} {stats['p50']:<15.2f} {stats['p95']:<15.2f}")
-        print("=" * 60)
+            table.add_row(op, f"{stats['p50']:.2f}", f"{stats['p95']:.2f}")
+        console.print(table)
+        _record_benchmark(
+            benchmark_log_path,
+            {
+                "test": "performance_summary",
+                "summary": results,
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        console.print(f"[dim]Benchmark log:[/] {benchmark_log_path}")
 
         for op, stats in results.items():
             assert stats["p95"] < 1000, f"{op} p95 ({stats['p95']:.2f}ms) too slow"
