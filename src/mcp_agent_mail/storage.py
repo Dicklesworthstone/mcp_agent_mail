@@ -26,6 +26,7 @@ from .config import Settings
 from .utils import validate_thread_id_format
 
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
+_SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
 
 @dataclass(slots=True)
@@ -814,7 +815,7 @@ async def write_message_bundle(
     # Descriptive, ISO-prefixed filename: <ISO>__<subject-slug>__<id>.md
     created_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     subject_value = str(message.get("subject", "")).strip() or "message"
-    subject_slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", subject_value).strip("-_").lower()[:80] or "message"
+    subject_slug = _SUBJECT_SLUG_RE.sub("-", subject_value).strip("-_").lower()[:80] or "message"
     id_suffix = str(message.get("id", ""))
     filename = (
         f"{created_iso}__{subject_slug}__{id_suffix}.md"

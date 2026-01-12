@@ -2648,6 +2648,60 @@ async def _get_agents_batch(project: Project, names: Sequence[str]) -> dict[str,
     return resolved
 
 
+async def _get_agents_batch_lenient(project: Project, names: Sequence[str]) -> dict[str, Agent]:
+    """Batch lookup agents by name, silently skipping missing agents.
+
+    Unlike _get_agents_batch, this does NOT raise errors for missing agents.
+    Use this for contact policy enforcement where missing recipients should
+    be skipped rather than treated as errors.
+
+    Parameters
+    ----------
+    project : Project
+        The project to look up agents in.
+    names : Sequence[str]
+        Agent names to look up.
+
+    Returns
+    -------
+    dict[str, Agent]
+        Mapping from original name to Agent. Missing agents are omitted.
+    """
+    await ensure_schema()
+    if not names:
+        return {}
+    if project.id is None:
+        return {}
+
+    # Deduplicate and lowercase for efficient IN query
+    lowered_names: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        lowered = name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        lowered_names.append(lowered)
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name).in_(lowered_names))
+        )
+        agents = result.scalars().all()
+
+    # Build lookup by lowercase name
+    by_lower = {agent.name.lower(): agent for agent in agents}
+
+    # Resolve original names to agents (preserving original case in keys)
+    resolved: dict[str, Agent] = {}
+    for name in names:
+        agent = by_lower.get(name.lower())
+        if agent is not None:
+            resolved[name] = agent
+
+    return resolved
+
+
 async def _create_message(
     project: Project,
     sender: Agent,
@@ -3084,15 +3138,15 @@ def _build_reservation_union_spec(
 ) -> "PathSpec | None":
     """Build a union PathSpec matching ANY potentially conflicting reservation pattern.
 
-    This enables O(n+m) conflict detection instead of O(n×m) by quickly identifying
+    This enables O(n+m) conflict detection instead of O(n*m) by quickly identifying
     which candidate paths MIGHT conflict with existing reservations.
 
     Parameters
     ----------
     existing_reservations : list[tuple[FileReservation, str]]
         List of (reservation, holder_name) tuples to check against.
-    exclude_agent_id : int
-        Agent ID to exclude (the requesting agent's own reservations).
+    exclude_agent_id : int | None
+        Agent ID to exclude (the requesting agent's own reservations), or None.
     candidate_exclusive : bool
         Whether the candidate reservation is exclusive.
 
@@ -4454,14 +4508,16 @@ def build_mcp_server() -> FastMCP:
                 pass
             # For each recipient, require link unless policy/open or in auto_ok
             blocked_recipients: list[str] = []
+            # Batch-fetch all recipient agents in a single query (eliminates N+1)
+            all_recipient_names = list(set(to + (cc or []) + (bcc or [])))
+            recipient_agents = await _get_agents_batch_lenient(project, all_recipient_names)
             async with get_session() as s3:
                 for nm in to + (cc or []) + (bcc or []):
                     if nm in auto_ok_names:
                         continue
-                    # recipient lookup
-                    try:
-                        rec = await _get_agent(project, nm)
-                    except Exception:
+                    # recipient lookup (from batch-fetched dict)
+                    rec = recipient_agents.get(nm)
+                    if rec is None:
                         continue
                     rec_policy = getattr(rec, "contact_policy", "auto").lower()
                     # allow self always
@@ -4556,11 +4612,12 @@ def build_mcp_server() -> FastMCP:
                         # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
                         if settings_local.contact_auto_retry_enabled and attempted:
                             blocked_recipients = []
+                            # Re-fetch recipient agents in batch for re-evaluation
+                            recipient_agents_retry = await _get_agents_batch_lenient(project, all_recipient_names)
                             async with get_session() as s3b:
                                 for nm in to + (cc or []) + (bcc or []):
-                                    try:
-                                        rec = await _get_agent(project, nm)
-                                    except Exception:
+                                    rec = recipient_agents_retry.get(nm)
+                                    if rec is None:
                                         continue
                                     if rec.name == sender.name:
                                         continue
@@ -6760,7 +6817,7 @@ def build_mcp_server() -> FastMCP:
                         ctx_worktree = None
             except Exception:
                 pass
-            # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n×m))
+            # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n*m))
             union_spec = _build_reservation_union_spec(existing_reservations, agent.id, exclusive)
 
             # Pre-compute which paths might conflict using the union spec
