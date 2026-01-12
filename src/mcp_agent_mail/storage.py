@@ -741,23 +741,42 @@ async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object])
     await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [rel])
 
 
+def _build_file_reservation_commit_message(entries: Sequence[tuple[str, str]]) -> str:
+    first_agent, first_pattern = entries[0]
+    if len(entries) == 1:
+        return f"file_reservation: {first_agent} {first_pattern}"
+    subject = f"file_reservation: {first_agent} {first_pattern} (+{len(entries) - 1} more)"
+    lines = [f"- {agent} {pattern}" for agent, pattern in entries]
+    return subject + "\n\n" + "\n".join(lines)
+
+
+async def write_file_reservation_records(
+    archive: ProjectArchive,
+    file_reservations: Sequence[dict[str, object]],
+) -> None:
+    if not file_reservations:
+        return
+    rel_paths: list[str] = []
+    entries: list[tuple[str, str]] = []
+    for file_reservation in file_reservations:
+        path_pattern = str(file_reservation.get("path_pattern") or file_reservation.get("path") or "").strip()
+        if not path_pattern:
+            raise ValueError("File reservation record must include 'path_pattern'.")
+        normalized_file_reservation = dict(file_reservation)
+        normalized_file_reservation["path_pattern"] = path_pattern
+        normalized_file_reservation.pop("path", None)
+        digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
+        file_reservation_path = archive.root / "file_reservations" / f"{digest}.json"
+        await _write_json(file_reservation_path, normalized_file_reservation)
+        rel_paths.append(file_reservation_path.relative_to(archive.repo_root).as_posix())
+        agent_name = str(normalized_file_reservation.get("agent", "unknown"))
+        entries.append((agent_name, path_pattern))
+    commit_message = _build_file_reservation_commit_message(entries)
+    await _commit(archive.repo, archive.settings, commit_message, rel_paths)
+
+
 async def write_file_reservation_record(archive: ProjectArchive, file_reservation: dict[str, object]) -> None:
-    path_pattern = str(file_reservation.get("path_pattern") or file_reservation.get("path") or "").strip()
-    if not path_pattern:
-        raise ValueError("File reservation record must include 'path_pattern'.")
-    normalized_file_reservation = dict(file_reservation)
-    normalized_file_reservation["path_pattern"] = path_pattern
-    normalized_file_reservation.pop("path", None)
-    digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
-    file_reservation_path = archive.root / "file_reservations" / f"{digest}.json"
-    await _write_json(file_reservation_path, normalized_file_reservation)
-    agent_name = str(normalized_file_reservation.get("agent", "unknown"))
-    await _commit(
-        archive.repo,
-        archive.settings,
-        f"file_reservation: {agent_name} {path_pattern}",
-        [file_reservation_path.relative_to(archive.repo_root).as_posix()],
-    )
+    await write_file_reservation_records(archive, [file_reservation])
 
 
 async def write_message_bundle(
