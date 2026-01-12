@@ -77,6 +77,11 @@ def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
 
 _LOGGING_CONFIGURED = False
 
+# Pre-compiled regex patterns for HTTP validators
+_SLUG_VALIDATOR_RE = re.compile(r"^[a-z0-9_-]+$", re.IGNORECASE)
+_AGENT_NAME_VALIDATOR_RE = re.compile(r"^[A-Za-z0-9]+$")
+_TIMESTAMP_VALIDATOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
 
 def _configure_logging(settings: Settings) -> None:
     """Initialize structlog and stdlib logging formatting."""
@@ -2468,7 +2473,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         def _validate_project_slug(slug: str) -> bool:
             """Validate project slug format to prevent path traversal."""
-            import re
 
             # Slugs should only contain lowercase letters, numbers, hyphens, underscores
             # No path separators or relative path components
@@ -2479,7 +2483,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if "/" in slug or "\\" in slug or ".." in slug:
                 return False
             # Should match safe slug pattern
-            return bool(re.match(r"^[a-z0-9_-]+$", slug, re.IGNORECASE))
+            return bool(_SLUG_VALIDATOR_RE.match(slug))
 
         @fastapi_app.get("/mail/archive/guide", response_class=HTMLResponse)
         async def archive_guide() -> HTMLResponse:
@@ -2776,11 +2780,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
 
             # Validate agent name (alphanumeric only)
-            if not agent or not re.match(r"^[A-Za-z0-9]+$", agent):
+            if not agent or not _AGENT_NAME_VALIDATOR_RE.match(agent):
                 raise HTTPException(status_code=400, detail="Invalid agent name format")
 
             # Validate timestamp format (basic ISO 8601 check)
-            if not timestamp or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", timestamp):
+            if not timestamp or not _TIMESTAMP_VALIDATOR_RE.match(timestamp):
                 raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO 8601 format (YYYY-MM-DDTHH:MM)")
 
             try:
