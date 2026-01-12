@@ -3170,7 +3170,9 @@ def _canonical_relpath_for_message(project: Project, message: Message, archive: 
     ("<ISO>__<subject-slug>__<id>.md"). Returns a path relative to the archive
     Git repo root, or None if no matching file is found.
     """
-    ts = message.created_ts.astimezone(timezone.utc)
+    ts = _ensure_utc(message.created_ts)
+    if ts is None:
+        return None
     y = ts.strftime("%Y")
     m = ts.strftime("%m")
     project_root = archive.root
