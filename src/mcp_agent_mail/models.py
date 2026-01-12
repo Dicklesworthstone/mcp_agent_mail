@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import Column, UniqueConstraint
+from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import Field, SQLModel
 
@@ -43,7 +43,10 @@ class ProductProjectLink(SQLModel, table=True):
     """Associates a Project with a Product (many-to-many via link table)."""
 
     __tablename__ = "product_project_links"
-    __table_args__ = (UniqueConstraint("product_id", "project_id", name="uq_product_project"),)
+    __table_args__ = (
+        UniqueConstraint("product_id", "project_id", name="uq_product_project"),
+        Index("idx_product_project", "product_id", "project_id"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     product_id: int = Field(foreign_key="products.id", index=True)
@@ -69,6 +72,9 @@ class Agent(SQLModel, table=True):
 
 class MessageRecipient(SQLModel, table=True):
     __tablename__ = "message_recipients"
+    __table_args__ = (
+        Index("idx_message_recipients_agent_message", "agent_id", "message_id"),
+    )
 
     message_id: int = Field(foreign_key="messages.id", primary_key=True)
     agent_id: int = Field(foreign_key="agents.id", primary_key=True)
@@ -79,6 +85,10 @@ class MessageRecipient(SQLModel, table=True):
 
 class Message(SQLModel, table=True):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("idx_messages_project_created", "project_id", "created_ts"),
+        Index("idx_messages_project_sender_created", "project_id", "sender_id", "created_ts"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.id", index=True)
@@ -97,6 +107,10 @@ class Message(SQLModel, table=True):
 
 class FileReservation(SQLModel, table=True):
     __tablename__ = "file_reservations"
+    __table_args__ = (
+        Index("idx_file_reservations_project_released_expires", "project_id", "released_ts", "expires_ts"),
+        Index("idx_file_reservations_project_agent_released", "project_id", "agent_id", "released_ts"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.id", index=True)

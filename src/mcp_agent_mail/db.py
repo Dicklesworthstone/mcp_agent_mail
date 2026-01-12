@@ -474,6 +474,26 @@ def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent ON message_recipients(agent_id)"
     )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent_message "
+        "ON message_recipients(agent_id, message_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_project_sender_created "
+        "ON messages(project_id, sender_id, created_ts DESC)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_file_reservations_project_released_expires "
+        "ON file_reservations(project_id, released_ts, expires_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_file_reservations_project_agent_released "
+        "ON file_reservations(project_id, agent_id, released_ts)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_product_project "
+        "ON product_project_links(product_id, project_id)"
+    )
 
 
 def get_database_path(settings: Settings | None = None) -> Path | None:

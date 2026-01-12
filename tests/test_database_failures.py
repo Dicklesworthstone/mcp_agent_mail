@@ -106,6 +106,11 @@ class TestDatabaseAutoCreation:
         assert "idx_messages_created_ts" in index_names
         assert "idx_messages_thread_id" in index_names
         assert "idx_file_reservations_expires_ts" in index_names
+        assert "idx_message_recipients_agent_message" in index_names
+        assert "idx_messages_project_sender_created" in index_names
+        assert "idx_file_reservations_project_released_expires" in index_names
+        assert "idx_file_reservations_project_agent_released" in index_names
+        assert "idx_product_project" in index_names
 
     @pytest.mark.asyncio
     async def test_ensure_schema_is_idempotent(self, isolated_env):
