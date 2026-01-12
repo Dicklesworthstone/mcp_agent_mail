@@ -8,7 +8,7 @@ import statistics
 import subprocess
 import time
 import tracemalloc
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -46,12 +46,13 @@ class BenchmarkResult:
     errors: int = 0
 
 
-@dataclass(slots=True)
+@dataclass
 class BenchHarness:
     mcp: Any
     project_key: str
     agent_name: str
     call_tool: Callable[[str, dict[str, Any]], Awaitable[Any]]
+    read_resource: Callable[[str], Awaitable[Any]] = field(default=None)
 
 
 def percentile(data: list[float], p: float) -> float:
