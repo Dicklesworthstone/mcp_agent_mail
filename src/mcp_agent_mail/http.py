@@ -2146,8 +2146,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 )
                 items = []
                 for r in rows.fetchall():
+                    attachments: list[dict[str, Any]] = []
                     try:
-                        attachments = r[3] or []
+                        raw = r[3]
+                        if isinstance(raw, str):
+                            try:
+                                parsed = json.loads(raw)
+                            except json.JSONDecodeError:
+                                parsed = []
+                        else:
+                            parsed = raw
+                        if isinstance(parsed, list):
+                            attachments = [a for a in parsed if isinstance(a, dict)]
                     except Exception:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
