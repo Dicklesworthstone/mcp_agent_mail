@@ -281,14 +281,7 @@ class TestQueryCountIntegration:
 
             # Track queries during mailbox (list_outbox equivalent via resource)
             with track_queries() as tracker:
-                # Using fetch_inbox as proxy since outbox is similar
-                await client.call_tool(
-                    "fetch_inbox",
-                    {
-                        "project_key": project_key,
-                        "agent_name": agent_name,
-                        "limit": 20,
-                    },
-                )
+                resource_uri = f"resource://outbox/{agent_name}?project={project_key}&limit=20"
+                await client.read_resource(resource_uri)
 
             assert_query_count_lte("list_outbox", max_queries, tracker.total)
