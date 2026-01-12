@@ -11,6 +11,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
@@ -1115,8 +1116,7 @@ def _sanitize_fts_query(query: str) -> str | None:
             return None
 
     # Multiple consecutive spaces -> single space
-    while "  " in trimmed:
-        trimmed = trimmed.replace("  ", " ")
+    trimmed = re.sub(r" {2,}", " ", trimmed)
 
     return trimmed if trimmed else None
 
