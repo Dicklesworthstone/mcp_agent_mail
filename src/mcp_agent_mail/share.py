@@ -16,7 +16,7 @@ from collections import defaultdict
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from importlib import abc, resources
+from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -484,7 +484,7 @@ def sign_manifest(
     overwrite: bool = False,
 ) -> dict[str, str]:
     try:
-        from nacl.signing import SigningKey  # type: ignore
+        from nacl.signing import SigningKey
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ShareExportError(
             "PyNaCl is required for Ed25519 signing. Install it with `uv add PyNaCl`."
@@ -686,6 +686,7 @@ def apply_project_scope(snapshot_path: Path, identifiers: Sequence[str]) -> Proj
             lookup[record.human_key.lower()] = record
 
         selected: list[ProjectRecord] = []
+        selected_ids: set[int] = set()  # O(1) membership check instead of O(n) list scan
         for identifier in identifiers:
             key = identifier.strip().lower()
             if not key:
@@ -693,13 +694,14 @@ def apply_project_scope(snapshot_path: Path, identifiers: Sequence[str]) -> Proj
             found_record = lookup.get(key)
             if found_record is None:
                 raise ShareExportError(f"Project identifier '{identifier}' not found in snapshot.")
-            if found_record not in selected:
+            if found_record.id not in selected_ids:
+                selected_ids.add(found_record.id)
                 selected.append(found_record)
 
         if not selected:
             raise ShareExportError("No matching projects found for provided filters.")
 
-        allowed_ids = [record.id for record in selected]
+        allowed_ids = {record.id for record in selected}  # Set for O(1) membership check
         disallowed_ids = [record.id for record in projects if record.id not in allowed_ids]
         if not disallowed_ids:
             return ProjectScopeResult(projects=selected, removed_count=0)
@@ -1708,7 +1710,7 @@ def copy_viewer_assets(output_dir: Path) -> None:
 
     package_root = resources.files("mcp_agent_mail.viewer_assets")
 
-    def _walk(node: abc.Traversable, relative: Path) -> None:  # type: ignore[name-defined]
+    def _walk(node: Any, relative: Path) -> None:
         for child in node.iterdir():
             child_relative = relative / child.name
             if child.is_dir():
@@ -1867,8 +1869,8 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
         if not key_b64 or not signature_b64:
             raise ShareExportError("manifest.sig.json missing public_key or signature fields.")
         try:
-            from nacl.exceptions import BadSignatureError  # type: ignore[import-not-found]
-            from nacl.signing import VerifyKey  # type: ignore[import-not-found]
+            from nacl.exceptions import BadSignatureError
+            from nacl.signing import VerifyKey
         except ImportError as exc:  # pragma: no cover - optional dependency
             raise ShareExportError("PyNaCl is required to verify manifest signatures.") from exc
 

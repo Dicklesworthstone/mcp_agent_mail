@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import random
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+import re
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
+from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar
@@ -22,6 +26,87 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _schema_ready = False
 _schema_lock: asyncio.Lock | None = None
+
+_QUERY_TRACKER: contextvars.ContextVar["QueryTracker | None"] = contextvars.ContextVar("query_tracker", default=None)
+_QUERY_HOOKS_INSTALLED = False
+_SLOW_QUERY_LIMIT = 50
+_SQL_TABLE_RE = re.compile(r"\\bfrom\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
+_SQL_UPDATE_RE = re.compile(r"\\bupdate\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
+_SQL_INSERT_RE = re.compile(r"\\binsert\\s+into\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
+
+
+@dataclass(slots=True)
+class QueryTracker:
+    total: int = 0
+    total_time_ms: float = 0.0
+    per_table: dict[str, int] = field(default_factory=dict)
+    slow_query_ms: float | None = None
+    slow_queries: list[dict[str, Any]] = field(default_factory=list)
+
+    def record(self, statement: str, duration_ms: float) -> None:
+        self.total += 1
+        self.total_time_ms += duration_ms
+        table = _extract_table_name(statement)
+        if table:
+            self.per_table[table] = self.per_table.get(table, 0) + 1
+        if (
+            self.slow_query_ms is not None
+            and duration_ms >= self.slow_query_ms
+            and len(self.slow_queries) < _SLOW_QUERY_LIMIT
+        ):
+            self.slow_queries.append(
+                {
+                    "table": table,
+                    "duration_ms": round(duration_ms, 2),
+                }
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "total_time_ms": round(self.total_time_ms, 2),
+            "per_table": dict(sorted(self.per_table.items(), key=lambda item: (-item[1], item[0]))),
+            "slow_query_ms": self.slow_query_ms,
+            "slow_queries": list(self.slow_queries),
+        }
+
+
+def _clean_table_name(raw: str) -> str:
+    cleaned = raw.strip().strip("`\"[]")
+    if "." in cleaned:
+        cleaned = cleaned.split(".")[-1]
+    return cleaned
+
+
+def _extract_table_name(statement: str) -> str | None:
+    for pattern in (_SQL_INSERT_RE, _SQL_UPDATE_RE, _SQL_TABLE_RE):
+        match = pattern.search(statement)
+        if match:
+            return _clean_table_name(match.group(1))
+    return None
+
+
+def get_query_tracker() -> QueryTracker | None:
+    return _QUERY_TRACKER.get()
+
+
+def start_query_tracking(*, slow_ms: float | None = None) -> tuple[QueryTracker, contextvars.Token]:
+    tracker = QueryTracker(slow_query_ms=slow_ms)
+    token = _QUERY_TRACKER.set(tracker)
+    return tracker, token
+
+
+def stop_query_tracking(token: contextvars.Token) -> None:
+    _QUERY_TRACKER.reset(token)
+
+
+@contextmanager
+def track_queries(*, slow_ms: float | None = None) -> Iterator[QueryTracker]:
+    tracker, token = start_query_tracking(slow_ms=slow_ms)
+    try:
+        yield tracker
+    finally:
+        stop_query_tracking(token)
 
 
 def retry_on_db_lock(max_retries: int = 5, base_delay: float = 0.1, max_delay: float = 5.0) -> Callable[..., Any]:
@@ -178,6 +263,50 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     return engine
 
 
+def install_query_hooks(engine: AsyncEngine) -> None:
+    """Install lightweight query counting hooks on the engine (idempotent)."""
+    global _QUERY_HOOKS_INSTALLED
+    if _QUERY_HOOKS_INSTALLED:
+        return
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def before_cursor_execute(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        tracker = _QUERY_TRACKER.get()
+        if tracker is None:
+            return
+        timings = conn.info.setdefault("query_start_time", [])
+        timings.append(time.perf_counter())
+
+    @event.listens_for(engine.sync_engine, "after_cursor_execute")
+    def after_cursor_execute(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        tracker = _QUERY_TRACKER.get()
+        if tracker is None:
+            return
+        timings = conn.info.get("query_start_time")
+        if not timings:
+            return
+        start_time = timings.pop()
+        duration_ms = (time.perf_counter() - start_time) * 1000.0
+        tracker.record(statement, duration_ms)
+
+    _QUERY_HOOKS_INSTALLED = True
+
+
 def init_engine(settings: Settings | None = None) -> None:
     """Initialise global engine and session factory once."""
     global _engine, _session_factory
@@ -185,6 +314,7 @@ def init_engine(settings: Settings | None = None) -> None:
         return
     resolved_settings = settings or get_settings()
     engine = _build_engine(resolved_settings.database)
+    install_query_hooks(engine)
     _engine = engine
     _session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from types import SimpleNamespace
+from types import ModuleType
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -34,12 +35,13 @@ async def test_rate_limit_redis_backend_path(isolated_env, monkeypatch):
         def from_url(cls, url: str):
             return cls()
 
-        async def eval(self, script: str, numkeys: int, *args):  # type: ignore[no-untyped-def]
+        async def eval(self, script: str, numkeys: int, *args):
             # Always allow (return 1)
             return 1
 
-    fake_pkg = SimpleNamespace(Redis=FakeRedis)
-    sys.modules["redis.asyncio"] = fake_pkg  # type: ignore[assignment]
+    fake_pkg = cast(Any, ModuleType("redis.asyncio"))
+    fake_pkg.Redis = FakeRedis
+    sys.modules["redis.asyncio"] = fake_pkg
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
@@ -51,5 +53,3 @@ async def test_rate_limit_redis_backend_path(isolated_env, monkeypatch):
         assert r1.status_code in (200, 429)
         r2 = await client.post(settings.http.path, json=_rpc("resources/read", {"uri": "resource://projects"}))
         assert r2.status_code in (200, 429)
-
-

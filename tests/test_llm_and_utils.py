@@ -61,12 +61,11 @@ async def test_complete_system_user_handles_missing_router(monkeypatch):
 
     monkeypatch.setattr(ll, "Router", _Router, raising=False)
 
-    def fake_completion(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_completion(**kwargs):
         return _Resp()
 
     monkeypatch.setattr(ll, "completion", fake_completion, raising=False)
 
     out = await complete_system_user("sys", "user")
     assert out.model
-
 

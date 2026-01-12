@@ -7,7 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Final
 
-from decouple import (  # type: ignore[import-untyped,attr-defined]
+from decouple import (
     Config as DecoupleConfig,
     RepositoryEmpty,
     RepositoryEnv,
@@ -19,7 +19,7 @@ try:
     _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
 except FileNotFoundError:
     # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
-    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type,misc]
+    _decouple_config = DecoupleConfig(RepositoryEmpty())
 
 
 @dataclass(slots=True, frozen=True)
@@ -207,6 +207,9 @@ class Settings:
     log_json_enabled: bool
     # Tools logging
     tools_log_enabled: bool
+    # Query/latency instrumentation
+    instrumentation_enabled: bool
+    instrumentation_slow_query_ms: int
     # Tool metrics emission
     tool_metrics_emit_enabled: bool
     tool_metrics_emit_interval_seconds: int
@@ -396,6 +399,8 @@ def get_settings() -> Settings:
         ack_escalation_claim_exclusive=_bool(_decouple_config("ACK_ESCALATION_CLAIM_EXCLUSIVE", default="false"), default=False),
         ack_escalation_claim_holder_name=_decouple_config("ACK_ESCALATION_CLAIM_HOLDER_NAME", default=""),
         tools_log_enabled=_bool(_decouple_config("TOOLS_LOG_ENABLED", default="true"), default=True),
+        instrumentation_enabled=_bool(_decouple_config("INSTRUMENTATION_ENABLED", default="false"), default=False),
+        instrumentation_slow_query_ms=_int(_decouple_config("INSTRUMENTATION_SLOW_QUERY_MS", default="250"), default=250),
         log_rich_enabled=_bool(_decouple_config("LOG_RICH_ENABLED", default="true"), default=True),
         log_level=_decouple_config("LOG_LEVEL", default="INFO"),
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),

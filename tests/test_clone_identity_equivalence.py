@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from mcp_agent_mail.app import _resolve_project_identity  # type: ignore
+from mcp_agent_mail.app import _resolve_project_identity
 from mcp_agent_mail.config import get_settings
 
 
@@ -12,7 +12,7 @@ def _git(cwd: Path, *args: str) -> str:
 
 def test_clones_share_same_project_uid_via_remote(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
     # Create bare remote
     remote = tmp_path / "remote.git"
     _git(tmp_path, "init", "--bare", str(remote))
@@ -25,5 +25,4 @@ def test_clones_share_same_project_uid_via_remote(tmp_path: Path, monkeypatch) -
     id2 = _resolve_project_identity(str(c2))
     assert id1["normalized_remote"] == id2["normalized_remote"]
     assert id1["project_uid"] == id2["project_uid"]
-
 

@@ -27,7 +27,7 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
     # Monkeypatch LLM call to return JSON content the app will parse
     from mcp_agent_mail import app as app_mod
 
-    async def _fake_complete(*_a, **_k):  # type: ignore[unused-argument]
+    async def _fake_complete(*_a, **_k):
         return _StubOut(
             '{"threads": [{"thread_id": "T-1", "key_points": ["refined"], "actions": ["do"]}, {"thread_id": "T-2", "key_points": ["also refined"], "actions": ["act"]}], "aggregate": {"top_mentions": [], "key_points": ["K"], "action_items": ["A"]}}'
         )
@@ -65,5 +65,4 @@ async def test_summarize_threads_llm_refinement(isolated_env, monkeypatch):
         # Ensure LLM-refined aggregate keys present
         agg = payload.get("aggregate") or {}
         assert agg.get("action_items") == ["A"]
-
 

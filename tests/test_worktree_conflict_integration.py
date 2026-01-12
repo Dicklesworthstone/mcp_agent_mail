@@ -4,10 +4,12 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from mcp_agent_mail.guard import render_precommit_script
+from mcp_agent_mail.storage import ProjectArchive
 
 
 class _DummyArchive:
@@ -51,12 +53,10 @@ def test_cross_worktree_conflict_blocks_commit(tmp_path: Path) -> None:
     (wt / "src" / "shared.txt").write_text("v2\n", encoding="utf-8")
     _git(wt, "add", "src/shared.txt")
     hook = wt / "pre-commit-test.py"
-    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
+    hook.write_text(render_precommit_script(cast(ProjectArchive, _DummyArchive(archive_root))), encoding="utf-8")
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "block"
     env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(wt), env=env).returncode
     assert rc == 1
-
-

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_agent_mail.app import _resolve_project_identity  # type: ignore
+from mcp_agent_mail.app import _resolve_project_identity
 
 
 def _is_wsl2() -> bool:
@@ -28,5 +28,4 @@ def test_wsl2_path_normalization(tmp_path: Path) -> None:
     assert Path(ident["canonical_path"]).exists()
     # Ensure we didn't accidentally produce a Windows-style drive path
     assert not str(ident["canonical_path"]).startswith(("C:\\", "D:\\")), "Expected POSIX path on WSL2"
-
 

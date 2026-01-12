@@ -17,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
-from types import SimpleNamespace
+from types import ModuleType
+from typing import Any, cast
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -386,8 +387,9 @@ class TestRedisBackend:
                 # Allow first 2, deny after
                 return 1 if len(lua_calls) <= 2 else 0
 
-        fake_pkg = SimpleNamespace(Redis=FakeRedis)
-        sys.modules["redis.asyncio"] = fake_pkg  # type: ignore[assignment]
+        fake_pkg = cast(Any, ModuleType("redis.asyncio"))
+        fake_pkg.Redis = FakeRedis
+        sys.modules["redis.asyncio"] = fake_pkg
 
         server = build_mcp_server()
         app = build_http_app(settings, server)
@@ -439,8 +441,9 @@ class TestRedisBackend:
             async def eval(self, script: str, numkeys: int, *args):
                 raise ConnectionError("Redis connection failed")
 
-        fake_pkg = SimpleNamespace(Redis=FakeRedis)
-        sys.modules["redis.asyncio"] = fake_pkg  # type: ignore[assignment]
+        fake_pkg = cast(Any, ModuleType("redis.asyncio"))
+        fake_pkg.Redis = FakeRedis
+        sys.modules["redis.asyncio"] = fake_pkg
 
         server = build_mcp_server()
         app = build_http_app(settings, server)

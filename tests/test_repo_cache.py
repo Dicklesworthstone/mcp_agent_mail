@@ -9,6 +9,7 @@ Reference: mcp_agent_mail-jto (Bug: File handle exhaustion)
 from __future__ import annotations
 
 import sys
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from mcp_agent_mail.storage import (
@@ -122,13 +123,14 @@ class TestLRURepoCacheEviction:
         cache.put("repo1", repo1)
 
         # Mock cleanup to prevent immediate cleanup and verify eviction mechanism
-        evicted_during_put: list = []  # type: ignore[type-arg]
+        evicted_during_put: list = []
         original_cleanup = cache._cleanup_evicted
         def tracking_cleanup() -> int:
             # Record what's in evicted list before cleanup runs
             evicted_during_put.extend(cache._evicted)
             return original_cleanup()
-        cache._cleanup_evicted = tracking_cleanup  # type: ignore[method-assign]
+        cache_any = cast(Any, cache)
+        cache_any._cleanup_evicted = tracking_cleanup
 
         cache.put("repo2", repo2)  # Evicts repo1
 
@@ -244,7 +246,8 @@ class TestLRURepoCacheOpportunisticCleanup:
             nonlocal cleanup_calls
             cleanup_calls += 1
             return original_cleanup()
-        cache._cleanup_evicted = tracking_cleanup  # type: ignore[method-assign]
+        cache_any = cast(Any, cache)
+        cache_any._cleanup_evicted = tracking_cleanup
 
         # 3 gets - no cleanup yet
         cache.get("repo")

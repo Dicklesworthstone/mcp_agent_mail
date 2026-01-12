@@ -48,6 +48,7 @@ class ToolCallContext:
     result: Any = None
     error: Optional[Exception] = None
     success: bool = True
+    query_stats: Optional[dict[str, Any]] = None
     _created_at: datetime = field(default_factory=datetime.now)  # Capture at creation time
     rendered_panel: Optional[str] = None
 
@@ -147,6 +148,11 @@ def _create_info_table(ctx: ToolCallContext) -> Table:
         else:
             table.add_row("❌", "Status", "[bold bright_red]FAILED[/bold bright_red]")
 
+    if ctx.query_stats:
+        total = int(ctx.query_stats.get("total", 0))
+        total_ms = float(ctx.query_stats.get("total_time_ms", 0.0) or 0.0)
+        table.add_row("🧮", "DB Queries", f"[bold]{total}[/bold] in [cyan]{total_ms:.1f}ms[/cyan]")
+
     return table
 
 
@@ -220,6 +226,40 @@ def _create_result_display(ctx: ToolCallContext) -> Panel:
     )
 
 
+def _create_query_stats_panel(stats: dict[str, Any]) -> Panel | None:
+    per_table = stats.get("per_table") or {}
+    slow_queries = stats.get("slow_queries") or []
+    if not per_table and not slow_queries:
+        return None
+
+    table = Table(
+        title="DB Query Breakdown",
+        show_header=True,
+        header_style="bold bright_cyan",
+        box=box.SIMPLE_HEAVY,
+        border_style="bright_cyan",
+    )
+    table.add_column("Table", style="white", overflow="fold")
+    table.add_column("Count", style="bold bright_green", justify="right")
+    for name, count in list(per_table.items())[:5]:
+        table.add_row(str(name), str(count))
+
+    if slow_queries:
+        slow_header = Text(
+            f"Slow queries (>= {stats.get('slow_query_ms')}ms)",
+            style="bold yellow",
+        )
+        slow_text = Text.assemble(slow_header, "\n")
+        for item in slow_queries[:5]:
+            table_name = item.get("table") or "unknown"
+            duration = item.get("duration_ms", 0.0)
+            slow_text.append(f"• {table_name}: {duration}ms\n")
+        group = Group(table, slow_text)
+        return Panel(group, border_style="bright_cyan", box=box.ROUNDED)
+
+    return Panel(table, border_style="bright_cyan", box=box.ROUNDED)
+
+
 def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
     """Create a compact summary table for tool calls."""
     table = Table(
@@ -270,6 +310,11 @@ def _create_tool_call_summary_table(ctx: ToolCallContext) -> Table:
             error_msg = str(ctx.error) if ctx.error else "Unknown error"
             table.add_row("📊 Status", "[bold bright_red]❌ FAILED[/bold bright_red]")
             table.add_row("⚠️  Error", f"[red]{escape(error_msg[:100])}[/red]")
+
+    if ctx.query_stats:
+        total = int(ctx.query_stats.get("total", 0))
+        total_ms = float(ctx.query_stats.get("total_time_ms", 0.0) or 0.0)
+        table.add_row("🧮 Queries", f"[bold]{total}[/bold] in [cyan]{total_ms:.1f}ms[/cyan]")
 
     return table
 
@@ -344,6 +389,12 @@ def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
 
     # Add spacer
     components.append(Text())
+
+    if ctx.query_stats:
+        query_panel = _create_query_stats_panel(ctx.query_stats)
+        if query_panel:
+            components.append(query_panel)
+            components.append(Text())
 
     # Add result panel
     result_panel = _create_result_display(ctx)
