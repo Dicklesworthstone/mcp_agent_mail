@@ -30,9 +30,9 @@ _schema_lock: asyncio.Lock | None = None
 _QUERY_TRACKER: contextvars.ContextVar["QueryTracker | None"] = contextvars.ContextVar("query_tracker", default=None)
 _QUERY_HOOKS_INSTALLED = False
 _SLOW_QUERY_LIMIT = 50
-_SQL_TABLE_RE = re.compile(r"\\bfrom\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
-_SQL_UPDATE_RE = re.compile(r"\\bupdate\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
-_SQL_INSERT_RE = re.compile(r"\\binsert\\s+into\\s+([\\w\\.\"`\\[\\]]+)", re.IGNORECASE)
+_SQL_TABLE_RE = re.compile(r"\bfrom\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
+_SQL_UPDATE_RE = re.compile(r"\bupdate\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
+_SQL_INSERT_RE = re.compile(r"\binsert\s+into\s+([\w\.\"`\[\]]+)", re.IGNORECASE)
 
 
 @dataclass(slots=True)

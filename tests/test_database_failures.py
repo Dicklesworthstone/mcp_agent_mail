@@ -19,12 +19,16 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from mcp_agent_mail.db import (
+    QueryTracker,
+    _extract_table_name,
     ensure_schema,
     get_engine,
+    get_query_tracker,
     get_session,
     get_session_factory,
     reset_database_state,
     retry_on_db_lock,
+    track_queries,
 )
 from mcp_agent_mail.models import Agent, Project
 
@@ -215,6 +219,45 @@ class TestRetryOnDbLock:
         result = await busy_func()
         assert result == "success"
         assert call_count["value"] == 2
+
+
+# ============================================================================
+# Query Tracking Helper Tests
+# ============================================================================
+
+
+class TestQueryTrackingHelpers:
+    """Tests for query tracking utilities and normalization helpers."""
+
+    def test_extract_table_name_variants(self):
+        assert _extract_table_name("SELECT * FROM messages") == "messages"
+        assert _extract_table_name('select * from "agents"') == "agents"
+        assert _extract_table_name("UPDATE projects SET name = 'x'") == "projects"
+        assert _extract_table_name("INSERT INTO `message_recipients` (id) VALUES (1)") == "message_recipients"
+        assert _extract_table_name("SELECT * FROM main.file_reservations") == "file_reservations"
+        assert _extract_table_name("BEGIN") is None
+
+    def test_query_tracker_records_counts_and_slow_queries(self):
+        tracker = QueryTracker(slow_query_ms=5.0)
+        tracker.record("SELECT * FROM messages", 3.0)
+        tracker.record("SELECT * FROM messages", 7.5)
+
+        assert tracker.total == 2
+        assert tracker.per_table["messages"] == 2
+        assert tracker.slow_queries == [{"table": "messages", "duration_ms": 7.5}]
+
+        payload = tracker.to_dict()
+        assert payload["total"] == 2
+        assert payload["per_table"]["messages"] == 2
+        assert payload["slow_query_ms"] == 5.0
+        assert payload["slow_queries"] == [{"table": "messages", "duration_ms": 7.5}]
+
+    def test_track_queries_context_manages_contextvar(self):
+        assert get_query_tracker() is None
+        with track_queries() as tracker:
+            assert get_query_tracker() is tracker
+            tracker.record("SELECT * FROM agents", 1.2)
+        assert get_query_tracker() is None
 
 
 # ============================================================================
