@@ -11,7 +11,7 @@ def test_am_run_creates_lease_when_enabled(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
     monkeypatch.setenv("AGENT_MAIL_GUARD_MODE", "warn")
     monkeypatch.setenv("AGENT_NAME", "TestAgent")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
 
     proj = tmp_path / "proj"
     proj.mkdir(parents=True, exist_ok=True)
@@ -36,5 +36,4 @@ def test_am_run_creates_lease_when_enabled(tmp_path: Path, monkeypatch) -> None:
             found = True
             break
     assert found, "Expected a lease JSON file to be created for am-run"
-
 

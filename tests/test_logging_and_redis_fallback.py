@@ -37,7 +37,7 @@ async def test_rate_limit_redis_fallback(isolated_env, monkeypatch):
     # Simulate import failure by shadowing importlib.import_module to raise for redis.asyncio
     import importlib
 
-    def fake_import(name: str, *a, **k):  # type: ignore[no-untyped-def]
+    def fake_import(name: str, *a, **k):
         if name == "redis.asyncio":
             raise ImportError("no redis")
         return real_import(name, *a, **k)
@@ -50,4 +50,3 @@ async def test_rate_limit_redis_fallback(isolated_env, monkeypatch):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         r = await client.get("/health/liveness")
         assert r.status_code == 200
-

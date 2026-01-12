@@ -64,11 +64,11 @@ def test_llm_env_bridge_and_callbacks(monkeypatch):
             self.choices = [{"message": {"content": "ok"}}]
 
     class _StubRouter:
-        def completion(self, **kwargs):  # type: ignore[no-untyped-def]
+        def completion(self, **kwargs):
             # Emulate LiteLLM Router interface
             return _StubResp()
 
-    import litellm as litellm_pkg  # type: ignore
+    import litellm as litellm_pkg
 
     # Install stubs and capture success_callback list
     monkeypatch.setattr(litellm_pkg, "Router", _StubRouter)
@@ -81,5 +81,4 @@ def test_llm_env_bridge_and_callbacks(monkeypatch):
     out = asyncio.run(llm_mod.complete_system_user("sys", "user"))
     # content may vary by stub path; assert at least model populated
     assert isinstance(out.model, str) and len(out.model) > 0
-
 

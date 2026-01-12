@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 import litellm
 import structlog
-from decouple import Config as DecoupleConfig, RepositoryEnv  # type: ignore[import-untyped]
+from decouple import Config as DecoupleConfig, RepositoryEnv
 from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
@@ -234,13 +234,13 @@ def _bridge_provider_env() -> None:
     Also map common synonyms to LiteLLM's canonical env names, e.g. GEMINI_API_KEY -> GOOGLE_API_KEY,
     GROK_API_KEY -> XAI_API_KEY.
     """
-    from decouple import RepositoryEmpty  # type: ignore[import-untyped]
+    from decouple import RepositoryEmpty
 
     # Gracefully handle missing .env file (e.g., in CI/tests)
     try:
         cfg = DecoupleConfig(RepositoryEnv(".env"))
     except FileNotFoundError:
-        cfg = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
+        cfg = DecoupleConfig(RepositoryEmpty())
 
     def _get_from_any(*keys: str) -> str:
         for k in keys:
@@ -272,5 +272,4 @@ def _bridge_provider_env() -> None:
             val = _get_from_any(*aliases)
             if val:
                 os.environ[canonical] = val
-
 

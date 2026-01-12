@@ -2,7 +2,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from mcp_agent_mail.app import _resolve_project_identity  # type: ignore
+from mcp_agent_mail.app import _resolve_project_identity
 from mcp_agent_mail.config import get_settings
 
 
@@ -17,7 +17,7 @@ def _expect_uid(norm: str, default_branch: str = "main") -> str:
 
 def test_https_remote_normalization(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
     repo = tmp_path / "r1"
     repo.mkdir()
     _git(repo, "init")
@@ -31,7 +31,7 @@ def test_https_remote_normalization(tmp_path: Path, monkeypatch) -> None:
 
 def test_scp_style_remote_normalization(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
     repo = tmp_path / "r2"
     repo.mkdir()
     _git(repo, "init")
@@ -45,7 +45,7 @@ def test_scp_style_remote_normalization(tmp_path: Path, monkeypatch) -> None:
 
 def test_ssh_scheme_remote_normalization(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
     repo = tmp_path / "r3"
     repo.mkdir()
     _git(repo, "init")
@@ -55,5 +55,4 @@ def test_ssh_scheme_remote_normalization(tmp_path: Path, monkeypatch) -> None:
     ident = _resolve_project_identity(str(repo))
     assert ident["normalized_remote"] == "github.com/owner/repo"
     assert ident["project_uid"] == _expect_uid("github.com/owner/repo")
-
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fnmatch
 import functools
 import hashlib
@@ -12,33 +13,35 @@ import json
 import logging
 import time
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional, cast
+from typing import Any, AsyncContextManager, Callable, Optional, cast
 from urllib.parse import parse_qsl
 import uuid
 
 from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
-try:
-    from pathspec import PathSpec  # type: ignore[import-not-found]
-    from pathspec.patterns.gitwildmatch import GitWildMatchPattern  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover - optional dependency fallback
-    PathSpec = None  # type: ignore[misc,assignment]
-    GitWildMatchPattern = None  # type: ignore[misc,assignment]
-from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
+from sqlalchemy import asc as _sa_asc, bindparam, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
 from .config import Settings, get_settings
-from .db import ensure_schema, get_engine, get_session, init_engine
+from .db import (
+    ensure_schema,
+    get_engine,
+    get_query_tracker,
+    get_session,
+    init_engine,
+    start_query_tracking,
+    stop_query_tracking,
+)
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .llm import complete_system_user
 from .models import (
@@ -72,9 +75,40 @@ from .utils import (
     validate_agent_name_format,
     validate_thread_id_format,
 )
-import contextlib
+
+PathSpec: Any
+GitWildMatchPattern: Any
+try:
+    from pathspec import PathSpec as _PathSpec
+    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GitWildMatchPattern
+    PathSpec = _PathSpec
+    GitWildMatchPattern = _GitWildMatchPattern
+except Exception:  # pragma: no cover - optional dependency fallback
+    PathSpec = None
+    GitWildMatchPattern = None
 
 logger = logging.getLogger(__name__)
+
+# ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
+# Provide lightweight wrappers to keep type checking focused on our code.
+def select(*entities: Any, **kwargs: Any) -> Any:
+    return _sa_select(*entities, **kwargs)
+
+
+def update(*args: Any, **kwargs: Any) -> Any:
+    return _sa_update(*args, **kwargs)
+
+
+def or_(*clauses: Any) -> Any:
+    return _sa_or(*clauses)
+
+
+def asc(value: Any) -> Any:
+    return _sa_asc(value)
+
+
+def desc(value: Any) -> Any:
+    return _sa_desc(value)
 
 
 @contextlib.contextmanager
@@ -359,6 +393,13 @@ def _instrument_tool(
             settings = get_settings()
             log_enabled = settings.tools_log_enabled
             log_ctx = None
+            query_tracker = get_query_tracker()
+            tracker_token = None
+
+            if query_tracker is None and settings.instrumentation_enabled:
+                query_tracker, tracker_token = start_query_tracking(
+                    slow_ms=float(settings.instrumentation_slow_query_ms),
+                )
 
             if log_enabled:
                 try:
@@ -533,6 +574,24 @@ def _instrument_tool(
             finally:
                 _record_recent(tool_name, project_value, agent_value)
 
+                query_stats = None
+                if query_tracker is not None:
+                    query_stats = query_tracker.to_dict()
+
+                if query_stats and settings.instrumentation_enabled:
+                    logger.info(
+                        "tool_query_stats",
+                        extra={
+                            "tool": tool_name,
+                            "project": project_value,
+                            "agent": agent_value,
+                            "queries": query_stats.get("total", 0),
+                            "query_time_ms": query_stats.get("total_time_ms", 0.0),
+                            "per_table": query_stats.get("per_table", {}),
+                            "slow_query_ms": query_stats.get("slow_query_ms"),
+                        },
+                    )
+
                 # Rich logging: Log tool call end if enabled
                 if log_ctx is not None:
                     try:
@@ -540,10 +599,15 @@ def _instrument_tool(
                         log_ctx.result = result
                         log_ctx.error = error
                         log_ctx.success = error is None
+                        if query_stats:
+                            log_ctx.query_stats = query_stats
                         rich_logger.log_tool_call_end(log_ctx)
                     except Exception:
                         # Logging errors should not suppress original exceptions
                         pass
+
+                if tracker_token is not None:
+                    stop_query_tracking(tracker_token)
 
             return result
 
@@ -609,7 +673,7 @@ def _capabilities_for(agent: Optional[str], project: Optional[str]) -> list[str]
     return sorted(caps)
 
 
-def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[None]]:
+def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastMCP) -> AsyncIterator[None]:
         init_engine(settings)
@@ -647,7 +711,7 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncIterator[N
             if cancelled is not None:
                 raise cancelled
 
-    return lifespan  # type: ignore[return-value]
+    return lifespan
 
 
 def _iso(dt: Any) -> str:
@@ -670,7 +734,7 @@ def _iso(dt: Any) -> str:
             # Handle naive datetimes from SQLite (assume UTC)
             if getattr(dt, "tzinfo", None) is None or dt.tzinfo.utcoffset(dt) is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc).isoformat()  # type: ignore[no-any-return]
+            return dt.astimezone(timezone.utc).isoformat()
         return str(dt)
     except Exception:
         return str(dt)
@@ -1374,7 +1438,7 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
                 return {}
             # Prefer PyYAML when available for robust parsing; fallback to minimal parser
             try:
-                import yaml as _yaml  # type: ignore
+                import yaml as _yaml
                 loaded = _yaml.safe_load(ypath.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     # Keep only known keys to avoid surprises
@@ -1559,7 +1623,7 @@ async def _ensure_project(human_key: str) -> Project:
     for attempt in range(6):
         try:
             async with get_session() as session:
-                result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+                result = await session.execute(select(Project).where(Project.slug == slug))
                 project = result.scalars().first()
                 if project:
                     return project
@@ -1570,12 +1634,12 @@ async def _ensure_project(human_key: str) -> Project:
                 except IntegrityError:
                     # Concurrent ensure_project: another caller created the row. Treat as idempotent.
                     await session.rollback()
-                    result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+                    result = await session.execute(select(Project).where(Project.slug == slug))
                     project = result.scalars().first()
                     if project:
                         return project
                     raise
-                await session.refresh(project)  # type: ignore[arg-type]
+                await session.refresh(project)
                 return project
         except OperationalError as exc:
             error_msg = str(exc).lower()
@@ -1635,7 +1699,7 @@ async def _list_project_agents(project: Project, limit: int = 10) -> list[str]:
     """List agent names in a project."""
     async with get_session() as session:
         result = await session.execute(
-            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)  # type: ignore[call-overload]
+            select(Agent.name).where(cast(Any, Agent.project_id == project.id)).limit(limit)
         )
         return [row[0] for row in result.all()]
 
@@ -1683,7 +1747,7 @@ async def _get_project_by_identifier(identifier: str) -> Project:
 
     slug = slugify(identifier)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))  # type: ignore[arg-type]
+        result = await session.execute(select(Project).where(Project.slug == slug))
         project = result.scalars().first()
         if project:
             return project
@@ -2036,14 +2100,14 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
         if len(projects) < 2:
             return
 
-        agents_rows = await session.execute(select(Agent.project_id, Agent.name))  # type: ignore[call-overload]
+        agents_rows = await session.execute(select(Agent.project_id, Agent.name))
         agent_map: dict[int, list[str]] = defaultdict(list)
         for proj_id, name in agents_rows.fetchall():
             agent_map[int(proj_id)].append(name)
 
         existing_rows = (await session.execute(select(ProjectSiblingSuggestion))).scalars().all()
         existing_map: dict[tuple[int, int], ProjectSiblingSuggestion] = {}
-        for suggestion in existing_rows:  # type: ignore[call-overload]
+        for suggestion in existing_rows:
             pair = _canonical_project_pair(suggestion.project_a_id, suggestion.project_b_id)
             existing_map[pair] = suggestion
 
@@ -2064,7 +2128,7 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                     continue
 
                 pair = _canonical_project_pair(project_a.id, project_b.id)
-                suggestion = existing_map.get(pair)  # type: ignore[assignment]
+                suggestion = existing_map.get(pair)
                 if suggestion is None:
                     to_evaluate.append((project_a, project_b, None))
                 else:
@@ -2082,14 +2146,14 @@ async def refresh_project_sibling_suggestions(*, max_pairs: int = _PROJECT_SIBLI
                         continue
                     if age >= _PROJECT_SIBLING_REFRESH_TTL and len(to_evaluate) < max_pairs:
                         to_evaluate.append((project_a, project_b, suggestion))
-            if len(to_evaluate) >= max_pairs:
-                break
+                if len(to_evaluate) >= max_pairs:
+                    break
 
         if not to_evaluate:
             return
 
         updated = False
-        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:  # type: ignore[assignment]
+        for project_a, project_b, suggestion in to_evaluate[:max_pairs]:
             profile_a = await _build_project_profile(project_a, agent_map.get(project_a.id or -1, []))
             profile_b = await _build_project_profile(project_b, agent_map.get(project_b.id or -1, []))
             score, rationale = await _score_project_pair(project_a, profile_a, project_b, profile_b)
@@ -2173,30 +2237,30 @@ async def update_project_sibling_status(project_id: int, other_id: int, status: 
         suggestion = (
             await session.execute(
                 select(ProjectSiblingSuggestion).where(
-                    ProjectSiblingSuggestion.project_a_id == pair[0],  # type: ignore[arg-type]
-                    ProjectSiblingSuggestion.project_b_id == pair[1],  # type: ignore[arg-type]
+                    ProjectSiblingSuggestion.project_a_id == pair[0],
+                    ProjectSiblingSuggestion.project_b_id == pair[1],
                 )
             )
         ).scalars().first()
 
         if suggestion is None:
-            # Create a baseline suggestion via refresh for this specific pair  # type: ignore[arg-type]
-            project_a_obj = await session.get(Project, pair[0])  # type: ignore[arg-type]
+            # Create a baseline suggestion via refresh for this specific pair
+            project_a_obj = await session.get(Project, pair[0])
             project_b_obj = await session.get(Project, pair[1])
             projects = [proj for proj in (project_a_obj, project_b_obj) if proj is not None]
             if len(projects) != 2:
                 raise NoResultFound("Project pair not found")
             project_map = {proj.id: proj for proj in projects if proj.id is not None}
             agents_rows = await session.execute(
-                select(Agent.project_id, Agent.name).where(  # type: ignore[call-overload]
-                    or_(Agent.project_id == pair[0], cast(Any, Agent.project_id) == pair[1])  # type: ignore[arg-type]
+                select(Agent.project_id, Agent.name).where(
+                    or_(Agent.project_id == pair[0], cast(Any, Agent.project_id) == pair[1])
                 )
             )
             agent_map: dict[int, list[str]] = defaultdict(list)
             for proj_id, name in agents_rows.fetchall():
                 agent_map[int(proj_id)].append(name)
-            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))  # type: ignore[call-overload]
-            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))  # type: ignore[arg-type]
+            profile_a = await _build_project_profile(project_map[pair[0]], agent_map.get(pair[0], []))
+            profile_b = await _build_project_profile(project_map[pair[1]], agent_map.get(pair[1], []))
             score, rationale = await _score_project_pair(project_map[pair[0]], profile_a, project_map[pair[1]], profile_b)
             suggestion = ProjectSiblingSuggestion(
                 project_a_id=pair[0],
@@ -2251,14 +2315,14 @@ async def _agent_name_exists(project: Project, name: str) -> bool:
         raise ValueError("Project must have an id before querying agents.")
     async with get_session() as session:
         result = await session.execute(
-            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[call-overload]
+            select(Agent.id).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
         )
         return result.first() is not None
 
 
 async def _generate_unique_agent_name(
     project: Project,
-    settings: Settings,  # type: ignore[arg-type]
+    settings: Settings,
     name_hint: Optional[str] = None,
 ) -> str:
     archive = await ensure_archive(settings, project.slug)
@@ -2386,7 +2450,7 @@ async def _get_or_create_agent(
                 agent.program = program
                 agent.model = model
                 agent.task_description = task_description
-                agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
+                agent.last_active_ts = _naive_utc()
                 session.add(agent)
                 await session.commit()
                 await session.refresh(agent)
@@ -2424,7 +2488,7 @@ async def _get_or_create_agent(
                     agent.program = program
                     agent.model = model
                     agent.task_description = task_description
-                    agent.last_active_ts = _naive_utc()  # type: ignore[arg-type]
+                    agent.last_active_ts = _naive_utc()
                     session.add(agent)
                     await session.commit()
                     await session.refresh(agent)
@@ -2483,7 +2547,7 @@ async def _get_agent(project: Project, name: str) -> Agent:
 
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())
         )
         agent = result.scalars().first()
         if agent:
@@ -2702,52 +2766,52 @@ async def _collect_file_reservation_statuses(
         stmt = (
             select(FileReservation, Agent)
             .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
-            .where(FileReservation.project_id == project.id)  # type: ignore[arg-type]
-            .order_by(asc(FileReservation.created_ts))  # type: ignore[arg-type]
+            .where(FileReservation.project_id == project.id)
+            .order_by(asc(FileReservation.created_ts))
         )
         if not include_released:
             stmt = stmt.where(cast(Any, FileReservation.released_ts).is_(None))
         result = await session.execute(stmt)
-        rows = result.all()  # type: ignore[arg-type]
-        if not rows:  # type: ignore[arg-type]
-            return []  # type: ignore[arg-type]
+        rows = result.all()
+        if not rows:
+            return []
         agent_ids = [agent.id for _, agent in rows if agent.id is not None]
         send_map: dict[int, Optional[datetime]] = {}
         ack_map: dict[int, Optional[datetime]] = {}
         read_map: dict[int, Optional[datetime]] = {}
         if agent_ids:
             send_result = await session.execute(
-                select(Message.sender_id, func.max(Message.created_ts))  # type: ignore[call-overload]
+                select(Message.sender_id, func.max(Message.created_ts))
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, Message.sender_id).in_(agent_ids),
                 )
                 .group_by(Message.sender_id)
             )
-            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}  # type: ignore[call-overload]
+            send_map = {row[0]: _ensure_utc(row[1]) for row in send_result}
             ack_result = await session.execute(
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))  # type: ignore[call-overload]
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.ack_ts))
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.ack_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
-            )  # type: ignore[arg-type]
+                .group_by(MessageRecipient.agent_id)
+            )
             ack_map = {row[0]: _ensure_utc(row[1]) for row in ack_result}
-            read_result = await session.execute(  # type: ignore[arg-type]
-                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))  # type: ignore[call-overload]
+            read_result = await session.execute(
+                select(MessageRecipient.agent_id, func.max(MessageRecipient.read_ts))
                 .join(Message, MessageRecipient.message_id == Message.id)
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, MessageRecipient.agent_id).in_(agent_ids),
                     cast(Any, MessageRecipient.read_ts).is_not(None),
                 )
-                .group_by(MessageRecipient.agent_id)  # type: ignore[call-overload]
-            )  # type: ignore[arg-type]
+                .group_by(MessageRecipient.agent_id)
+            )
             read_map = {row[0]: _ensure_utc(row[1]) for row in read_result}
-  # type: ignore[arg-type]
+
     workspace = _project_workspace_path(project)
     repo = _open_repo_if_available(workspace) if workspace is not None else None
 
@@ -2862,7 +2926,7 @@ async def _expire_stale_file_reservations(
             )
             await session.commit()
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
-    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]  # type: ignore[arg-type]
+    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
     if stale_ids:
         async with get_session() as session:
@@ -2967,21 +3031,21 @@ async def _list_inbox(
     await ensure_schema()
     async with get_session() as session:
         stmt = (
-            select(Message, MessageRecipient.kind, sender_alias.name)  # type: ignore[call-overload]
+            select(Message, MessageRecipient.kind, sender_alias.name)
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
             .where(
                 cast(Any, Message.project_id) == project.id,
                 MessageRecipient.agent_id == agent.id,
             )
-            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
-            .limit(limit)  # type: ignore[arg-type]
-        )  # type: ignore[arg-type]
+            .order_by(desc(Message.created_ts))
+            .limit(limit)
+        )
         if urgent_only:
-            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))  # type: ignore[arg-type]
-        if since_ts:  # type: ignore[arg-type]
+            stmt = stmt.where(cast(Any, Message.importance).in_(["high", "urgent"]))
+        if since_ts:
             since_dt = _parse_iso(since_ts)
-            if since_dt:  # type: ignore[arg-type]
+            if since_dt:
                 stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
         result = await session.execute(stmt)
         rows = result.all()
@@ -2989,7 +3053,7 @@ async def _list_inbox(
     for message, recipient_kind, sender_name in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
         payload["from"] = sender_name
-        payload["kind"] = recipient_kind  # type: ignore[arg-type]
+        payload["kind"] = recipient_kind
         messages.append(payload)
     return messages
 
@@ -3009,39 +3073,50 @@ async def _list_outbox(
     async with get_session() as session:
         stmt = (
             select(Message)
-            .where(Message.project_id == project.id, Message.sender_id == agent.id)  # type: ignore[arg-type]
-            .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
+            .where(Message.project_id == project.id, Message.sender_id == agent.id)
+            .order_by(desc(Message.created_ts))
             .limit(limit)
         )
         if since_ts:
             since_dt = _parse_iso(since_ts)
             if since_dt:
-                stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))  # type: ignore[arg-type]
-        result = await session.execute(stmt)  # type: ignore[arg-type]
+                stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
+        result = await session.execute(stmt)
         message_rows = result.scalars().all()
 
-        # For each message, collect recipients grouped by kind
+        if not message_rows:
+            return messages
+
+        # Batch fetch all recipients for all messages in one query (N+1 elimination)
+        message_ids = [msg.id for msg in message_rows if msg.id is not None]
+        if not message_ids:
+            message_ids = []
+        recs_stmt = (
+            select(MessageRecipient.message_id, MessageRecipient.kind, Agent.name)
+            .join(Agent, MessageRecipient.agent_id == Agent.id)
+            .where(cast(Any, MessageRecipient.message_id).in_(message_ids))
+        )
+        recs_result = await session.execute(recs_stmt)
+        all_recipients = recs_result.all()
+
+        # Group recipients by message_id
+        recipients_by_msg: dict[int, dict[str, list[str]]] = {}
+        for msg_id, kind, name in all_recipients:
+            if msg_id not in recipients_by_msg:
+                recipients_by_msg[msg_id] = {"to": [], "cc": [], "bcc": []}
+            if kind in ("to", "cc", "bcc"):
+                recipients_by_msg[msg_id][kind].append(name)
+
+        # Build output
         for msg in message_rows:
-            recs = await session.execute(
-                select(MessageRecipient.kind, Agent.name)  # type: ignore[call-overload]
-                .join(Agent, MessageRecipient.agent_id == Agent.id)
-                .where(MessageRecipient.message_id == msg.id)
-            )
-            to_list: list[str] = []
-            cc_list: list[str] = []
-            bcc_list: list[str] = []
-            for kind, name in recs.all():  # type: ignore[call-overload]
-                if kind == "to":  # type: ignore[arg-type]
-                    to_list.append(name)  # type: ignore[arg-type]
-                elif kind == "cc":
-                    cc_list.append(name)
-                elif kind == "bcc":
-                    bcc_list.append(name)
+            if msg.id is None:
+                continue
             payload = _message_to_dict(msg, include_body=include_bodies)
             payload["from"] = agent.name
-            payload["to"] = to_list
-            payload["cc"] = cc_list
-            payload["bcc"] = bcc_list
+            rec_data = recipients_by_msg.get(msg.id, {"to": [], "cc": [], "bcc": []})
+            payload["to"] = rec_data["to"]
+            payload["cc"] = rec_data["cc"]
+            payload["bcc"] = rec_data["bcc"]
             messages.append(payload)
     return messages
 
@@ -3115,7 +3190,7 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
                 diffs = parent.diff(commit, paths=[relpath], create_patch=True)
                 for d in diffs:
                     try:
-                        patch = d.diff.decode("utf-8", "ignore")  # type: ignore[union-attr]
+                        patch = d.diff.decode("utf-8", "ignore")
                     except Exception:
                         patch = ""
                     for line in patch.splitlines():
@@ -3233,21 +3308,23 @@ async def _compute_thread_summary(
         message_id = int(thread_id)
     except ValueError:
         message_id = None
-    criteria = [Message.thread_id == thread_id]
+    criteria: list[Any] = [cast(Any, Message.thread_id) == thread_id]
     if message_id is not None:
-        criteria.append(Message.id == message_id)
+        criteria.append(cast(Any, Message.id) == message_id)
     async with get_session() as session:
         stmt = (
-            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+            select(Message, sender_alias.name)
             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
+            .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
             .order_by(asc(cast(Any, Message.created_ts)))
         )
         if per_thread_limit:
             stmt = stmt.limit(per_thread_limit)
         result = await session.execute(stmt)
-        rows = result.all()
-    summary = _summarize_messages(rows)  # type: ignore[arg-type]
+        raw_rows = result.all()
+    rows = [(row[0], row[1]) for row in raw_rows]
+    summary = _summarize_messages(rows)
+    heuristic_key_points = list(summary.get("key_points", []))
 
     if llm_mode and get_settings().llm.enabled:
         try:
@@ -3277,6 +3354,18 @@ async def _compute_thread_summary(
                         value = parsed.get(key)
                         if value:
                             summary[key] = value
+                    if heuristic_key_points and isinstance(summary.get("key_points"), list):
+                        keywords = ("TODO", "ACTION", "FIXME", "NEXT", "BLOCKED")
+                        extra = [
+                            kp for kp in heuristic_key_points
+                            if any(token in str(kp).upper() for token in keywords)
+                        ]
+                        if extra:
+                            merged: list[str] = []
+                            for item in summary["key_points"] + extra:
+                                if item not in merged:
+                                    merged.append(item)
+                            summary["key_points"] = merged[:10]
         except Exception as e:
             logger.debug("thread_summary.llm_skipped", extra={"thread_id": thread_id, "error": str(e)})
 
@@ -3300,7 +3389,7 @@ async def _get_message(project: Project, message_id: int) -> Message:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Message).where(Message.project_id == project.id, Message.id == message_id)  # type: ignore[arg-type]
+            select(Message).where(Message.project_id == project.id, Message.id == message_id)
         )
         message = result.scalars().first()
         if not message:
@@ -3314,7 +3403,7 @@ async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)  # type: ignore[arg-type]
+            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)
         )
         agent = result.scalars().first()
         if not agent:
@@ -3334,7 +3423,7 @@ async def _update_recipient_timestamp(
     async with get_session() as session:
         # Read current value first
         result_sel = await session.execute(
-            select(MessageRecipient).where(cast(Any, MessageRecipient.message_id == message_id), cast(Any, MessageRecipient.agent_id == agent.id))  # type: ignore[arg-type]
+            select(MessageRecipient).where(cast(Any, MessageRecipient.message_id == message_id), cast(Any, MessageRecipient.agent_id == agent.id))
         )
         rec = result_sel.scalars().first()
         if not rec:
@@ -3346,7 +3435,7 @@ async def _update_recipient_timestamp(
         # Set only if null
         stmt = (
             update(MessageRecipient)
-            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)  # type: ignore[arg-type]
+            .where(MessageRecipient.message_id == message_id, MessageRecipient.agent_id == agent.id)
             .values({field: naive_now})
         )
         await session.execute(stmt)
@@ -3364,7 +3453,7 @@ def build_mcp_server() -> FastMCP:
         "Provide message routing, coordination tooling, and project context to cooperating agents."
     )
 
-    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)  # type: ignore[arg-type]
+    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -3443,7 +3532,7 @@ def build_mcp_server() -> FastMCP:
 
                 async with get_session() as session:
                     rows = await session.execute(
-                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        select(FileReservation, Agent.name)
                         .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                         .where(
                             cast(Any, FileReservation.project_id) == project.id,
@@ -4182,20 +4271,20 @@ def build_mcp_server() -> FastMCP:
                     thread_rows: list[tuple[Message, str]]
                     sender_alias = aliased(Agent)
                     # Build criteria: thread_id match or numeric id seed
-                    criteria = [Message.thread_id == thread_id]
+                    criteria: list[Any] = [cast(Any, Message.thread_id) == thread_id]
                     try:
                         seed_id = int(thread_id)
-                        criteria.append(Message.id == seed_id)
+                        criteria.append(cast(Any, Message.id) == seed_id)
                     except Exception:
                         pass
                     async with get_session() as s:
                         stmt = (
-                            cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                            select(Message, sender_alias.name)
                             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                            .where(Message.project_id == project.id, or_(*criteria))  # type: ignore[arg-type]
+                            .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
                             .limit(500)
                         )
-                        thread_rows = list((await s.execute(stmt)).all())  # type: ignore[arg-type]
+                        thread_rows = [(row[0], row[1]) for row in (await s.execute(stmt)).all()]
                     # collect participants (sender names and recipients)
                     participants: set[str] = {n for _m, n in thread_rows}
                     auto_ok_names.update(participants)
@@ -4207,7 +4296,7 @@ def build_mcp_server() -> FastMCP:
             try:
                 async with get_session() as s2:
                     file_reservation_rows = await s2.execute(
-                        cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                        select(FileReservation, Agent.name)
                         .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                         .where(FileReservation.project_id == project.id, cast(Any, FileReservation.released_ts).is_(None), cast(Any, FileReservation.expires_ts) > _naive_utc(now_utc))
                     )
@@ -4277,7 +4366,7 @@ def build_mcp_server() -> FastMCP:
                     try:
                         link = await s3.execute(
                             select(AgentLink)
-                            .where(  # type: ignore[arg-type]
+                            .where(
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.b_project_id) == project.id,
@@ -4305,7 +4394,7 @@ def build_mcp_server() -> FastMCP:
                 effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                 if effective_auto_contact:
                     try:
-                        from fastmcp.tools.tool import FunctionTool  # type: ignore
+                        from fastmcp.tools.tool import FunctionTool
                         # Prefer a single handshake with auto_accept=true
                         handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
                         for nm in blocked_recipients:
@@ -4342,7 +4431,7 @@ def build_mcp_server() -> FastMCP:
                                     # After auto-approval, link should exist; double-check
                                     link = await s3b.execute(
                                         select(AgentLink)
-                                        .where(  # type: ignore[arg-type]
+                                        .where(
                                             cast(Any, AgentLink.a_project_id) == project.id,
                                             cast(Any, AgentLink.a_agent_id) == sender.id,
                                             cast(Any, AgentLink.b_project_id) == project.id,
@@ -4432,10 +4521,10 @@ def build_mcp_server() -> FastMCP:
 
         async with get_session() as sx:
             # Preload local agent names (normalized -> canonical stored name)
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_lookup: dict[str, str] = {}
-            for row in existing.fetchall():  # type: ignore[assignment]
-                canonical_name = (row[0] or "").strip()  # type: ignore[index]
+            for row in existing.fetchall():
+                canonical_name = (row[0] or "").strip()
                 if not canonical_name:
                     continue
                 sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
@@ -4544,9 +4633,9 @@ def build_mcp_server() -> FastMCP:
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Project, Project.id == AgentLink.b_project_id)
                             .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(  # type: ignore[arg-type]
+                            .where(
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
@@ -4558,9 +4647,9 @@ def build_mcp_server() -> FastMCP:
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Project, Project.id == AgentLink.b_project_id)
                             .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(  # type: ignore[arg-type]
+                            .where(
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
@@ -4629,7 +4718,7 @@ def build_mcp_server() -> FastMCP:
                 try:
                     effective_auto_contact = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                     if effective_auto_contact and unknown_external:
-                        from fastmcp.tools.tool import FunctionTool  # type: ignore
+                        from fastmcp.tools.tool import FunctionTool
                         handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
                         # Iterate over a copy since we may mutate/resolve entries
                         for label, names in list(unknown_external.items()):
@@ -4674,9 +4763,9 @@ def build_mcp_server() -> FastMCP:
                                             lookup_value = (nm or "").strip().lower()
                                             rows = await scheck.execute(
                                                 select(AgentLink, Project, Agent)
-                                                .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                                                .join(Project, Project.id == AgentLink.b_project_id)
                                                 .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                                                .where(  # type: ignore[arg-type]
+                                                .where(
                                                     cast(Any, AgentLink.a_project_id) == project.id,
                                                     cast(Any, AgentLink.a_agent_id) == sender.id,
                                                     cast(Any, AgentLink.status == "approved"),
@@ -4936,7 +5025,7 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
 
         async with get_session() as sx:
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))  # type: ignore[call-overload]
+            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
             local_names = {row[0] for row in existing.fetchall()}
 
             class _ContactBlocked(Exception):
@@ -4967,9 +5056,9 @@ def build_mcp_server() -> FastMCP:
                     if target_project_override is not None and target_name_override:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Project, Project.id == AgentLink.b_project_id)
                             .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(  # type: ignore[arg-type]
+                            .where(
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
@@ -4981,9 +5070,9 @@ def build_mcp_server() -> FastMCP:
                     else:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)  # type: ignore[arg-type]
+                            .join(Project, Project.id == AgentLink.b_project_id)
                             .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(  # type: ignore[arg-type]
+                            .where(
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
@@ -5339,7 +5428,7 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as s:
             rows = await s.execute(
-                cast(Any, select(AgentLink, Agent.name))  # type: ignore[call-overload]
+                select(AgentLink, Agent.name)
                 .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
                 .where(cast(Any, AgentLink.a_project_id) == project.id, cast(Any, AgentLink.a_agent_id) == agent.id)
             )
@@ -5518,8 +5607,8 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             if get_settings().tools_log_enabled:
                 try:
-                    from rich.console import Console  # type: ignore
-                    from rich.json import JSON  # type: ignore
+                    from rich.console import Console
+                    from rich.json import JSON
 
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
@@ -5599,8 +5688,8 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console  # type: ignore[misc]
-                    JSON = _rj.JSON  # type: ignore[misc]
+                    Console = _rc.Console
+                    JSON = _rj.JSON
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -5836,14 +5925,14 @@ def build_mcp_server() -> FastMCP:
                 # If requester missing and exactly one agent exists in project, assume that one
                 if not real_requester and project.id is not None:
                     async with get_session() as s:
-                        rows = await s.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
+                        rows = await s.execute(select(Agent.name).where(cast(Any, Agent.project_id) == project.id))
                         names = [str(row[0]).strip() for row in rows.fetchall() if (row and row[0])]
                     if len(names) == 1:
                         real_requester = names[0]
                 # If target missing and exactly two agents exist, infer the other
                 if not real_target and project.id is not None:
                     async with get_session() as s2:
-                        rows2 = await s2.execute(cast(Any, select(Agent.name)).where(cast(Any, Agent.project_id) == project.id))  # type: ignore[call-overload]
+                        rows2 = await s2.execute(select(Agent.name).where(cast(Any, Agent.project_id) == project.id))
                         names2 = [str(row[0]).strip() for row in rows2.fetchall() if (row and row[0])]
                     if real_requester and len(names2) == 2 and real_requester in names2:
                         real_target = next((n for n in names2 if n != real_requester), real_target)
@@ -6107,7 +6196,7 @@ def build_mcp_server() -> FastMCP:
         if sanitized_query is None:
             await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
             try:
-                from fastmcp.tools.tool import ToolResult  # type: ignore
+                from fastmcp.tools.tool import ToolResult
                 return ToolResult(structured_content={"result": []})
             except Exception:
                 return []
@@ -6162,7 +6251,7 @@ def build_mcp_server() -> FastMCP:
             for row in rows
         ]
         try:
-            from fastmcp.tools.tool import ToolResult  # type: ignore
+            from fastmcp.tools.tool import ToolResult
             return ToolResult(structured_content={"result": items})
         except Exception:
             return items
@@ -6256,14 +6345,15 @@ def build_mcp_server() -> FastMCP:
                 if seed_id is not None:
                     criteria.append(cast(Any, Message.id) == seed_id)
                 stmt = (
-                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    select(Message, sender_alias.name)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                    .where(Message.project_id == project.id, or_(*criteria))
+                    .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
                     .order_by(asc(cast(Any, Message.created_ts)))
                     .limit(per_thread_limit)
                 )
-                rows = (await session.execute(stmt)).all()
-                summary = _summarize_messages(rows)  # type: ignore[arg-type]
+                raw_rows = (await session.execute(stmt)).all()
+                rows = [(row[0], row[1]) for row in raw_rows]
+                summary = _summarize_messages(rows)
                 # accumulate
                 for m in summary.get("mentions", []):
                     name = str(m.get("name", "")).strip()
@@ -6504,7 +6594,7 @@ def build_mcp_server() -> FastMCP:
         async with _archive_write_lock(archive):
             async with get_session() as session:
                 existing_rows = await session.execute(
-                    cast(Any, select(FileReservation, Agent.name))  # type: ignore[call-overload]
+                    select(FileReservation, Agent.name)
                     .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
                     .where(
                         cast(Any, FileReservation.project_id) == project_id,
@@ -6512,7 +6602,7 @@ def build_mcp_server() -> FastMCP:
                         cast(Any, FileReservation.expires_ts) > _naive_utc(),
                     )
                 )
-                existing_reservations = existing_rows.all()
+                existing_reservations = [(row[0], row[1]) for row in existing_rows.all()]
             for path in paths:
                 conflicting_holders: list[dict[str, Any]] = []
                 for file_reservation_record, holder_name in existing_reservations:
@@ -6564,7 +6654,7 @@ def build_mcp_server() -> FastMCP:
                         "expires_ts": _iso(file_reservation.expires_ts),
                     }
                 )
-                existing_reservations.append((file_reservation, agent.name))  # type: ignore[attr-defined]
+                existing_reservations.append((file_reservation, agent.name))
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
         return {"granted": granted, "conflicts": conflicts}
 
@@ -6613,8 +6703,8 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                from rich.console import Console
+                from rich.panel import Panel
 
                 details = [
                     f"project={project_key}",
@@ -6679,8 +6769,8 @@ def build_mcp_server() -> FastMCP:
                     import importlib as _imp
                     _rc = _imp.import_module("rich.console")
                     _rj = _imp.import_module("rich.json")
-                    Console = _rc.Console  # type: ignore[misc]
-                    JSON = _rj.JSON  # type: ignore[misc]
+                    Console = _rc.Console
+                    JSON = _rj.JSON
                     Console().print(JSON.from_data({"error": str(exc)}))
                 except Exception:
                     pass
@@ -6893,8 +6983,8 @@ def build_mcp_server() -> FastMCP:
         """
         if get_settings().tools_log_enabled:
             try:
-                from rich.console import Console  # type: ignore
-                from rich.panel import Panel  # type: ignore
+                from rich.console import Console
+                from rich.panel import Panel
 
                 meta = [
                     f"project={project_key}",
@@ -6983,9 +7073,9 @@ def build_mcp_server() -> FastMCP:
             try:
                 with _git_repo(path) as repo:
                     try:
-                        return repo.active_branch.name  # type: ignore[no-any-return]
+                        return repo.active_branch.name
                     except Exception:
-                        return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()  # type: ignore[no-any-return]
+                        return repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
             except Exception:
                 return None
 
@@ -7153,11 +7243,11 @@ def build_mcp_server() -> FastMCP:
 
     # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
 
-    async def _get_product_by_key(session, key: str) -> Optional[Product]:  # type: ignore[no-untyped-def]
+    async def _get_product_by_key(session, key: str) -> Optional[Product]:
         # Key may match product_uid or name (case-sensitive by default)
         stmt = select(Product).where(cast(Any, (Product.product_uid == key) | (Product.name == key)))
         res = await session.execute(stmt)
-        return res.scalars().first()  # type: ignore[no-any-return]
+        return res.scalars().first()
 
     if settings.worktrees_enabled:
         @mcp.tool(name="ensure_product")
@@ -7197,7 +7287,7 @@ def build_mcp_server() -> FastMCP:
                     await session.refresh(prod)
             return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
     else:
-        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:  # type: ignore[misc]
+        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7239,7 +7329,7 @@ def build_mcp_server() -> FastMCP:
                     "linked": True,
                 }
     else:
-        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:  # type: ignore[misc]
+        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7249,16 +7339,16 @@ def build_mcp_server() -> FastMCP:
             Inspect product and list linked projects.
             """
             # Safe runner that works even if an event loop is already running
-            def _run_coro_sync(coro):  # type: ignore[no-untyped-def]
+            def _run_coro_sync(coro):
                 try:
                     asyncio.get_running_loop()
                     # Run in a separate thread to avoid nested loop issues
                 except RuntimeError:
                     return asyncio.run(coro)
-                import threading  # type: ignore
-                import queue  # type: ignore
+                import threading
+                import queue
                 q: "queue.Queue[tuple[bool, Any]]" = queue.Queue()
-                def _runner():  # type: ignore[no-untyped-def]
+                def _runner():
                     try:
                         q.put((True, asyncio.run(coro)))
                     except Exception as e:
@@ -7292,7 +7382,7 @@ def build_mcp_server() -> FastMCP:
                         "projects": projects,
                     }
             # Run async in a synchronous resource
-            return _run_coro_sync(_load())  # type: ignore[no-any-return]
+            return _run_coro_sync(_load())
 
     if settings.worktrees_enabled:
         @mcp.tool(name="search_messages_product")
@@ -7311,7 +7401,7 @@ def build_mcp_server() -> FastMCP:
             if sanitized_query is None:
                 await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
                 try:
-                    from fastmcp.tools.tool import ToolResult  # type: ignore
+                    from fastmcp.tools.tool import ToolResult
                     return ToolResult(structured_content={"result": []})
                 except Exception:
                     return []
@@ -7323,7 +7413,7 @@ def build_mcp_server() -> FastMCP:
                 if prod is None:
                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
                 proj_ids_rows = await session.execute(
-                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
+                    select(ProductProjectLink.project_id).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))
                 )
                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
                 if not proj_ids:
@@ -7363,12 +7453,12 @@ def build_mcp_server() -> FastMCP:
                 for row in rows
             ]
             try:
-                from fastmcp.tools.tool import ToolResult  # type: ignore
+                from fastmcp.tools.tool import ToolResult
                 return ToolResult(structured_content={"result": items})
             except Exception:
                 return items
     else:
-        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:  # type: ignore[misc]
+        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7416,7 +7506,7 @@ def build_mcp_server() -> FastMCP:
             messages.sort(key=_dt_key, reverse=True)
             return messages[: max(0, int(limit))]
     else:
-        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:  # type: ignore[misc]
+        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7440,30 +7530,32 @@ def build_mcp_server() -> FastMCP:
                 seed_id = int(thread_id)
             except ValueError:
                 seed_id = None
-            criteria = [Message.thread_id == thread_id]
+            criteria: list[Any] = [cast(Any, Message.thread_id) == thread_id]
             if seed_id is not None:
-                criteria.append(Message.id == seed_id)
+                criteria.append(cast(Any, Message.id) == seed_id)
 
             async with get_session() as session:
                 prod = await _get_product_by_key(session, product_key.strip())
                 if prod is None:
                     raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
                 proj_ids_rows = await session.execute(
-                    cast(Any, select(ProductProjectLink.project_id)).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))  # type: ignore[call-overload]
+                    select(ProductProjectLink.project_id).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))
                 )
                 proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
                 if not proj_ids:
                     return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
                 stmt = (
-                    cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                    select(Message, sender_alias.name)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
                     .where(cast(Any, Message.project_id).in_(proj_ids), or_(*cast(Any, criteria)))
                     .order_by(asc(cast(Any, Message.created_ts)))
                 )
                 if per_thread_limit:
                     stmt = stmt.limit(per_thread_limit)
-                rows = (await session.execute(stmt)).all()
-            summary = _summarize_messages(rows)  # type: ignore[arg-type]
+                raw_rows = (await session.execute(stmt)).all()
+            rows = [(row[0], row[1]) for row in raw_rows]
+            summary = _summarize_messages(rows)
+            heuristic_key_points = list(summary.get("key_points", []))
 
             # Optional LLM refinement (same as project-level)
             if llm_mode and get_settings().llm.enabled:
@@ -7494,6 +7586,18 @@ def build_mcp_server() -> FastMCP:
                                 value = parsed.get(key)
                                 if value:
                                     summary[key] = value
+                            if heuristic_key_points and isinstance(summary.get("key_points"), list):
+                                keywords = ("TODO", "ACTION", "FIXME", "NEXT", "BLOCKED")
+                                extra = [
+                                    kp for kp in heuristic_key_points
+                                    if any(token in str(kp).upper() for token in keywords)
+                                ]
+                                if extra:
+                                    merged: list[str] = []
+                                    for item in summary["key_points"] + extra:
+                                        if item not in merged:
+                                            merged.append(item)
+                                    summary["key_points"] = merged[:10]
                 except Exception as e:
                     await ctx.debug(f"summarize_thread_product.llm_skipped: {e}")
 
@@ -7511,7 +7615,7 @@ def build_mcp_server() -> FastMCP:
             await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
             return {"thread_id": thread_id, "summary": summary, "examples": examples}
     else:
-        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:  # type: ignore[misc]
+        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
     if settings.worktrees_enabled:
         @mcp.resource("resource://identity/{project}", mime_type="application/json")
@@ -7929,8 +8033,8 @@ def build_mcp_server() -> FastMCP:
             try:
                 from urllib.parse import parse_qs
                 parsed = parse_qs(qs, keep_blank_values=False)
-                agent = agent or (parsed.get("agent") or [None])[0]  # type: ignore[list-item]
-                project = project or (parsed.get("project") or [None])[0]  # type: ignore[list-item]
+                agent = agent or (parsed.get("agent") or [None])[0]
+                project = project or (parsed.get("project") or [None])[0]
             except Exception:
                 pass
         try:
@@ -8093,13 +8197,13 @@ def build_mcp_server() -> FastMCP:
 
             # Get unread message counts for all agents in one query
             unread_counts_stmt = (
-                cast(Any, select(  # type: ignore[call-overload]
+                select(
                     MessageRecipient.agent_id,
-                    func.count(cast(Any, MessageRecipient.message_id)).label("unread_count")  # type: ignore[arg-type]
-                ))
+                    func.count(cast(Any, MessageRecipient.message_id)).label("unread_count"),
+                )
                 .where(
                     cast(Any, MessageRecipient.read_ts).is_(None),
-                    cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents])
+                    cast(Any, MessageRecipient.agent_id).in_([agent.id for agent in agents]),
                 )
                 .group_by(MessageRecipient.agent_id)
             )
@@ -8351,13 +8455,13 @@ def build_mcp_server() -> FastMCP:
             criteria.append(Message.id == message_id)
         async with get_session() as session:
             stmt = (
-                cast(Any, select(Message, sender_alias.name))  # type: ignore[call-overload]
+                select(Message, sender_alias.name)
                 .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
                 .where(cast(Any, Message.project_id == project_obj.id), or_(*cast(Any, criteria)))
                 .order_by(asc(cast(Any, Message.created_ts)))
             )
             result = await session.execute(stmt)
-            rows = result.all()  # type: ignore[assignment]
+            rows = result.all()
         messages = []
         for message, sender_name in rows:
             payload = _message_to_dict(message, include_body=include_bodies)
@@ -8524,7 +8628,7 @@ def build_mcp_server() -> FastMCP:
 
             for item in items:
                 result = await session.execute(
-                    cast(Any, select(MessageRecipient.read_ts)).where(  # type: ignore[call-overload]
+                    select(MessageRecipient.read_ts).where(
                         cast(Any, MessageRecipient.message_id == item["id"]), cast(Any, MessageRecipient.agent_id == agent_obj.id)
                     )
                 )
@@ -8584,7 +8688,7 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                select(Message, MessageRecipient.kind)
                 .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
                     cast(Any, Message.project_id) == project_obj.id,
@@ -8592,7 +8696,7 @@ def build_mcp_server() -> FastMCP:
                     cast(Any, Message.ack_required).is_(True),
                     cast(Any, MessageRecipient.ack_ts).is_(None),
                 )
-                .order_by(desc(cast(Any, Message.created_ts)))  # type: ignore[arg-type]
+                .order_by(desc(cast(Any, Message.created_ts)))
                 .limit(limit)
             )
             for msg, kind in rows.all():
@@ -8664,7 +8768,7 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                cast(Any, select(Message, MessageRecipient.kind, MessageRecipient.read_ts))  # type: ignore[call-overload]
+                select(Message, MessageRecipient.kind, MessageRecipient.read_ts)
                 .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
                     cast(Any, Message.project_id) == project_obj.id,
@@ -8746,7 +8850,7 @@ def build_mcp_server() -> FastMCP:
         out: list[dict[str, Any]] = []
         async with get_session() as session:
             rows = await session.execute(
-                cast(Any, select(Message, MessageRecipient.kind))  # type: ignore[call-overload]
+                select(Message, MessageRecipient.kind)
                 .join(MessageRecipient, cast(Any, MessageRecipient.message_id == Message.id))
                 .where(
                     cast(Any, Message.project_id) == project_obj.id,

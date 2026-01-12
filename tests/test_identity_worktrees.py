@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_agent_mail.app import _resolve_project_identity  # type: ignore
+from mcp_agent_mail.app import _resolve_project_identity
 from mcp_agent_mail.config import get_settings
 
 
@@ -17,7 +17,7 @@ def test_identity_same_across_worktrees(tmp_path: Path, monkeypatch) -> None:
     # Enable worktrees and choose git-common-dir mode for stable identity across worktrees
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
     monkeypatch.setenv("PROJECT_IDENTITY_MODE", "git-common-dir")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
 
     repo = tmp_path / "main"
     repo.mkdir()
@@ -35,5 +35,4 @@ def test_identity_same_across_worktrees(tmp_path: Path, monkeypatch) -> None:
     ident_wt = _resolve_project_identity(str(wt))
     assert ident_main["project_uid"] == ident_wt["project_uid"]
     assert ident_main["slug"] == ident_wt["slug"]
-
 

@@ -70,7 +70,7 @@ def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
         segment = token.split(".", 1)[0]
         padded = segment + "=" * (-len(segment) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
+        return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
 
@@ -94,7 +94,7 @@ def _configure_logging(settings: Settings) -> None:
     else:
         processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
     structlog.configure(
-        processors=processors,  # type: ignore[arg-type]
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.log_level.upper(), logging.INFO)),
         cache_logger_on_first_use=True,
     )
@@ -128,7 +128,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
         self._allow_localhost = allow_localhost
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
@@ -313,7 +313,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         # Perform periodic cleanup of in-memory rate limit buckets
         if self._redis is None:
             now = self._monotonic()
@@ -428,7 +428,7 @@ async def readiness_check() -> None:
         await session.execute(text("SELECT 1"))
 
 
-def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[no-untyped-def]
+def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Configure logging once
     _configure_logging(settings)
     if server is None:
@@ -799,7 +799,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def lifespan_context(app: FastAPI):  # type: ignore[no-untyped-def]
+    async def lifespan_context(app: FastAPI):
         # Ensure the mounted MCP app initializes its internal task group
         async with mcp_http_app.lifespan(mcp_http_app):
             await _startup()
@@ -816,7 +816,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         import time as _time
 
         class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
                 start = _time.time()
                 response = await call_next(request)
                 dur_ms = int((_time.time() - start) * 1000)
@@ -859,7 +859,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
                 return response
 
-        fastapi_app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
+        app_any = cast(Any, fastapi_app)
+        app_any.add_middleware(RequestLoggingMiddleware)
 
     # Unified JWT/RBAC and robust rate limiter middleware
     if (
@@ -867,7 +868,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         or getattr(settings.http, "jwt_enabled", False)
         or getattr(settings.http, "rbac_enabled", True)
     ):
-        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)  # type: ignore[arg-type]
+        app_any = cast(Any, fastapi_app)
+        app_any.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
     # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
     if settings.http.bearer_token:
         from typing import Any as _Any, cast as _cast  # local type-only import
@@ -927,7 +929,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
     from mcp.server.streamable_http import StreamableHTTPServerTransport
 
     class StatelessMCPASGIApp:
-        def __init__(self, mcp_server) -> None:  # type: ignore[no-untyped-def]
+        def __init__(self, mcp_server) -> None:
             self._server = mcp_server
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -1036,14 +1038,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
 
     # ----- Simple SSR Mail UI -----
     def _register_mail_ui() -> None:
-        import bleach  # type: ignore
-        import markdown2  # type: ignore
+        import bleach
+        import markdown2
 
         try:
-            from bleach.css_sanitizer import CSSSanitizer  # type: ignore
+            from bleach.css_sanitizer import CSSSanitizer as _CSSSanitizerImport
         except Exception:  # tinycss2 may be missing; degrade gracefully
-            CSSSanitizer = None  # type: ignore
-        from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
+            _CSSSanitizer = None
+        else:
+            _CSSSanitizer = _CSSSanitizerImport
+        CSSSanitizer = cast(Any, _CSSSanitizer)
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
 
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(
@@ -1385,8 +1390,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                     fts_sql = (
                         "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet, "
-                        "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18), '<mark>', ''))) / 6 AS hits "
+                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet "
                         "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
                         "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                         + (
@@ -1407,7 +1411,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 "importance": r[4],
                                 "thread_id": r[5],
                                 "snippet": r[6],
-                                "hits": int(r[7] or 0),
+                                "hits": (r[6] or "").count("<mark>"),
                             }
                             for r in search.fetchall()
                         ]
@@ -1826,7 +1830,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+                    count = int(getattr(result, "rowcount", 0) or 0)
 
                     return JSONResponse({
                         "success": True,
@@ -1890,7 +1894,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+                    count = int(getattr(result, "rowcount", 0) or 0)
 
                     return JSONResponse({
                         "success": True,
@@ -2025,8 +2029,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                 fts_sql = (
                     "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet, "
-                    "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22), '<mark>', ''))) / 6 AS hits "
+                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet "
                     "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
                     "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                     + (
@@ -2047,7 +2050,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                             "importance": r[4],
                             "thread_id": r[5],
                             "snippet": r[6],
-                            "hits": int(r[7] or 0),
+                            "hits": (r[6] or "").count("<mark>"),
                         }
                         for r in rows.fetchall()
                     ]
@@ -2501,7 +2504,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     import asyncio as _asyncio
                     import subprocess as _subprocess
                     try:
-                        def _run_du():  # type: ignore[no-untyped-def]
+                        def _run_du():
                             return _subprocess.run(
                                 ["du", "-sh", str(repo_root)],
                                 capture_output=True,

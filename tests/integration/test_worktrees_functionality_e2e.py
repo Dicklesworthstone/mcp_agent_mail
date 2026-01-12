@@ -25,7 +25,7 @@ def _print_tools_and_resources(console: Console, mcp: Any) -> tuple[list[str], l
     except RuntimeError:
         # in-case nested loop; run a temporary loop
         import queue
-        import threading  # type: ignore
+        import threading
         q: "queue.Queue[Iterable[Any]]" = queue.Queue()
         def _runner():
             q.put(_asyncio.run(mcp.get_tools()))
@@ -36,7 +36,7 @@ def _print_tools_and_resources(console: Console, mcp: Any) -> tuple[list[str], l
         resources = _asyncio.run(mcp.get_resources())
     except RuntimeError:
         import queue
-        import threading  # type: ignore
+        import threading
         q2: "queue.Queue[Iterable[Any]]" = queue.Queue()
         def _runner2():
             q2.put(_asyncio.run(mcp.get_resources()))
@@ -74,10 +74,10 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     # Helper to (re)build MCP server with current env
     def _build_server():
         # Invalidate cached settings between toggles
-        from mcp_agent_mail.config import clear_settings_cache  # type: ignore
+        from mcp_agent_mail.config import clear_settings_cache
 
         clear_settings_cache()
-        from mcp_agent_mail.app import build_mcp_server  # type: ignore
+        from mcp_agent_mail.app import build_mcp_server
 
         mcp = build_mcp_server()
         return mcp
@@ -129,7 +129,7 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     # Ensure a project exists for the repo so guard install can resolve it
     async def _call_tool(tool_name: str, args: dict[str, Any]) -> Any:
         mcp = _build_server()
-        _contents, structured = await mcp._mcp_call_tool(tool_name, args)  # type: ignore[attr-defined]
+        _contents, structured = await mcp._mcp_call_tool(tool_name, args)
         return structured
 
     project_payload = __import__("asyncio").run(_call_tool("ensure_project", {"human_key": str(repo.resolve())}))
@@ -173,13 +173,13 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     # 6) Optional Product Bus round-trip (gate ON)
     console.print(Panel.fit("Product Bus (ensure/link/list) — optional", title="Step 6"))
-    from mcp_agent_mail.db import ensure_schema  # type: ignore
+    from mcp_agent_mail.db import ensure_schema
 
     asyncio = __import__("asyncio")
 
     async def _call(tool_name: str, args: dict[str, Any]) -> Any:
         mcp = _build_server()
-        _contents, structured = await mcp._mcp_call_tool(tool_name, args)  # type: ignore[attr-defined]
+        _contents, structured = await mcp._mcp_call_tool(tool_name, args)
         return structured
 
     try:
@@ -195,7 +195,7 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
         console.print(Panel.fit(json.dumps(link, indent=2), title="products_link result"))
 
         mcp = _build_server()
-        res_list = __import__('asyncio').run(mcp._mcp_read_resource(f"resource://product/{prod['product_uid']}"))  # type: ignore[attr-defined]
+        res_list = __import__('asyncio').run(mcp._mcp_read_resource(f"resource://product/{prod['product_uid']}"))
         assert res_list and getattr(res_list[0], "content", None)
         payload = json.loads(res_list[0].content)
         console.print(Panel.fit(json.dumps(payload, indent=2), title="resource://product payload"))
@@ -204,5 +204,4 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
         console.print(Panel.fit(str(exc), title="Product Bus skipped (not registered)", style="yellow"))
 
     console.print(Panel.fit("E2E orchestration completed successfully", title="Done", border_style="green"))
-
 

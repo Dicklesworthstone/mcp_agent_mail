@@ -31,7 +31,7 @@ async def test_http_jwt_bad_kid_rejected(isolated_env, monkeypatch):
     public_jwk["kid"] = "abc"
     jwks_payload = {"keys": [public_jwk]}
 
-    async def fake_get(self, url: str):  # type: ignore[override]
+    async def fake_get(self, url: str):
         class _Resp:
             status_code = 200
             def json(self) -> dict[str, Any]:
@@ -42,7 +42,7 @@ async def test_http_jwt_bad_kid_rejected(isolated_env, monkeypatch):
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
-    import httpx  # type: ignore
+    import httpx
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get, raising=False)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -107,5 +107,4 @@ async def test_http_jwt_malformed_token(isolated_env, monkeypatch):
         headers = {"Authorization": "Bearer not.a.jwt"}
         r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r.status_code == 401
-
 

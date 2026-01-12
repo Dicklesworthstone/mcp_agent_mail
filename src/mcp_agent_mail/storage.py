@@ -496,7 +496,7 @@ class AsyncFileLock:
 
         # Try psutil first if available (most reliable cross-platform method)
         try:
-            import psutil  # type: ignore[import-not-found]
+            import psutil
             return bool(psutil.pid_exists(pid))
         except ImportError:
             pass
@@ -1051,7 +1051,7 @@ async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str
     # Open image and convert, properly closing the original to prevent file handle leaks
     def _open_and_convert(p: Path) -> Image.Image:
         with Image.open(p) as pil:
-            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")  # type: ignore[no-any-return]
+            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")
 
     img = await _to_thread(_open_and_convert, path)
     try:
