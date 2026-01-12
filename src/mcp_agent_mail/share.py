@@ -1160,7 +1160,7 @@ def build_materialized_views(snapshot_path: Path) -> None:
                     json_extract(value, '$.type') AS attachment_type,
                     json_extract(value, '$.media_type') AS media_type,
                     json_extract(value, '$.path') AS path,
-                    CAST(json_extract(value, '$.size_bytes') AS INTEGER) AS size_bytes
+                    CAST(json_extract(value, '$.bytes') AS INTEGER) AS size_bytes
                 FROM messages m,
                      json_each(m.attachments)
                 WHERE m.attachments != '[]';
@@ -1184,7 +1184,7 @@ def build_materialized_views(snapshot_path: Path) -> None:
                     json_extract(value, '$.type') AS attachment_type,
                     json_extract(value, '$.media_type') AS media_type,
                     json_extract(value, '$.path') AS path,
-                    CAST(json_extract(value, '$.size_bytes') AS INTEGER) AS size_bytes
+                    CAST(json_extract(value, '$.bytes') AS INTEGER) AS size_bytes
                 FROM messages m,
                      json_each(m.attachments)
                 WHERE m.attachments != '[]';

@@ -1145,7 +1145,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 key = None
                 val = p
                 if ":" in p and not p.startswith('"'):
-                    key, val = p.split(":", 1)
+                    maybe_key, maybe_val = p.split(":", 1)
+                    if maybe_key in {"subject", "body"}:
+                        key = maybe_key
+                        val = maybe_val
                 val = val.strip()
                 val_inner = val[1:-1] if val.startswith('"') and val.endswith('"') and len(val) >= 2 else val
                 like_terms.append(val_inner)

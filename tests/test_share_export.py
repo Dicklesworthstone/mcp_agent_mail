@@ -1173,13 +1173,13 @@ def test_build_materialized_views(tmp_path: Path) -> None:
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
             VALUES (
                 1, 1, 1, 'thread-1', 'Test Message 1', 'Body 1', 'high', 1, '2025-01-01T00:00:00Z',
-                '[{"type":"file","path":"test.txt","size_bytes":100,"media_type":"text/plain"}]'
+                '[{"type":"file","path":"test.txt","bytes":100,"media_type":"text/plain"}]'
             );
 
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
             VALUES (
                 2, 1, 2, 'thread-1', 'Test Message 2', 'Body 2', 'normal', 0, '2025-01-02T00:00:00Z',
-                '[{"type":"inline","data_uri":"data:text/plain;base64,dGVzdA=="},{"type":"file","path":"doc.pdf","size_bytes":500,"media_type":"application/pdf"}]'
+                '[{"type":"inline","data_uri":"data:text/plain;base64,dGVzdA=="},{"type":"file","path":"doc.pdf","bytes":500,"media_type":"application/pdf"}]'
             );
 
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
