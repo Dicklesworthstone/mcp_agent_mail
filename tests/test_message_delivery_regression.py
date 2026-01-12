@@ -20,6 +20,7 @@ import pytest
 from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import track_queries
 
 
 def get_field(obj: Any, field: str) -> Any:
@@ -223,6 +224,51 @@ async def test_send_message_multiple_to_recipients(isolated_env):
             )
             items = get_inbox_items(inbox)
             assert any(m.get("subject") == "Broadcast" for m in items)
+
+
+@pytest.mark.asyncio
+async def test_send_message_recipient_lookup_query_count(isolated_env):
+    """Sending to many recipients should not scale agent lookup queries linearly."""
+    server = build_mcp_server()
+    project_key = "/test/query-count"
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": project_key})
+
+        sender_payload = await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test"},
+        )
+        sender = sender_payload.data["name"]
+
+        recipients: list[str] = []
+        for _ in range(3):
+            payload = await client.call_tool(
+                "register_agent",
+                {"project_key": project_key, "program": "test", "model": "test"},
+            )
+            recipients.append(payload.data["name"])
+
+        for name in [sender, *recipients]:
+            await client.call_tool(
+                "set_contact_policy",
+                {"project_key": project_key, "agent_name": name, "policy": "open"},
+            )
+
+        with track_queries() as tracker:
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": project_key,
+                    "sender_name": sender,
+                    "to": recipients,
+                    "subject": "Query Count",
+                    "body_md": "Benchmarking query count.",
+                    "ack_required": True,
+                },
+            )
+
+    agents_queries = tracker.per_table.get("agents", 0)
+    assert agents_queries <= 2, f"Expected <= 2 agent queries, got {agents_queries}"
 
 
 @pytest.mark.asyncio
