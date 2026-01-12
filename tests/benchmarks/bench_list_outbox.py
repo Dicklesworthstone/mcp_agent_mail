@@ -54,10 +54,7 @@ async def test_bench_list_outbox(bench_factory):
             # Parse result - FastMCP client returns different structure
             if hasattr(result, "contents") and result.contents:
                 content = result.contents[0]
-                if hasattr(content, "text"):
-                    payload = json.loads(content.text)
-                else:
-                    payload = json.loads(str(content))
+                payload = json.loads(content.text) if hasattr(content, "text") else json.loads(str(content))
             else:
                 payload = {}
             assert payload.get("count", 0) >= 0
