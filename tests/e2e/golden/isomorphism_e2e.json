@@ -689,6 +689,7 @@
   "search": {
     "http_fts": {
       "has_snippet_block": true,
+      "hits_badge_count": 0,
       "mark_count": 1,
       "subject_count": 17,
       "subjects_sample": [
@@ -699,6 +700,7 @@
     },
     "http_like_fallback": {
       "has_snippet_block": false,
+      "hits_badge_count": 0,
       "mark_count": 0,
       "subject_count": 16,
       "subjects_sample": [
@@ -756,17 +758,17 @@
       "manifest_iso": "2024-08-30T06:40:06+00:00",
       "manifest_ns": 1725000006000000000,
       "manual_token": 0,
-      "signature": "1f3fc4b80e572fcd52ed34dc75fb9472c850727c4e6340d924e6513582e26540"
+      "signature": "c59d7b3c965d2d4edc9bcaa24ddc4d10f7d1cdc4fdb32912e3b1d6dfcaef0085"
     },
     "scrub_summary": {
       "ack_flags_cleared": 6,
       "agent_links_removed": 2,
       "agents_pseudonymized": 0,
-      "agents_total": 7,
+      "agents_total": 8,
       "attachments_cleared": 0,
       "attachments_sanitized": 0,
       "bodies_redacted": 0,
-      "file_reservations_removed": 3,
+      "file_reservations_removed": 5,
       "preset": "standard",
       "pseudonym_salt": "standard",
       "recipients_cleared": 8,
@@ -785,6 +787,10 @@
       },
       "messages": 6,
       "projects": [
+        {
+          "human_key": "/<phase2_project>",
+          "slug": "<phase2_project>"
+        },
         {
           "human_key": "/alpha",
           "slug": "alpha"
