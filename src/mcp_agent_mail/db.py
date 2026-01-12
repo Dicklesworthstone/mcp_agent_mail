@@ -494,6 +494,23 @@ def _setup_fts(connection: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_product_project "
         "ON product_project_links(product_id, project_id)"
     )
+    # AgentLink indexes for efficient contact lookups
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_a_project "
+        "ON agent_links(a_project_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_b_project "
+        "ON agent_links(b_project_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_b_project_agent "
+        "ON agent_links(b_project_id, b_agent_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_agent_links_status "
+        "ON agent_links(status)"
+    )
 
 
 def get_database_path(settings: Settings | None = None) -> Path | None:
