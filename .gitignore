@@ -248,3 +248,4 @@ test.sqlite3-wal
 
 # bv (beads viewer) local config and caches
 .bv/
+tests/benchmarks/regression_reports/
