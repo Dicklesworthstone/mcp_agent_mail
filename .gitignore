@@ -158,6 +158,7 @@ sec_insiders.db-shm
 sec_insiders.db-wal
 file_analysis_*.json
 finviz_test_results_*.json
+tests/e2e/logs/
 presentation_test_results*.json
 *.bak
 
