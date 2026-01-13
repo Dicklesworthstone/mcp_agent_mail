@@ -4187,9 +4187,11 @@ def doctor_check(
         if db_path and db_path.exists():
             try:
                 conn = sqlite3.connect(str(db_path))
-                cursor = conn.execute("PRAGMA integrity_check")
-                integrity_result = cursor.fetchone()
-                conn.close()
+                try:
+                    cursor = conn.execute("PRAGMA integrity_check")
+                    integrity_result = cursor.fetchone()
+                finally:
+                    conn.close()
                 if integrity_result and integrity_result[0] == "ok":
                     results.append(DiagnosticResult(
                         name="Database",

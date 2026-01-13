@@ -2053,7 +2053,11 @@ async def get_historical_inbox_snapshot(
                             importance = "normal"
 
                             try:
-                                blob_content = item.data_stream.read().decode('utf-8', errors='ignore')
+                                stream = item.data_stream
+                                try:
+                                    blob_content = stream.read().decode('utf-8', errors='ignore')
+                                finally:
+                                    stream.close()
 
                                 # Parse JSON frontmatter (format: ---json\n{...}\n---)
                                 if blob_content.startswith('---json\n') or blob_content.startswith('---json\r\n'):
