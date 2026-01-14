@@ -867,16 +867,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         app_any = cast(Any, fastapi_app)
         app_any.add_middleware(RequestLoggingMiddleware)
 
+    jwt_enabled = bool(getattr(settings.http, "jwt_enabled", False))
+
     # Unified JWT/RBAC and robust rate limiter middleware
     if (
         settings.http.rate_limit_enabled
-        or getattr(settings.http, "jwt_enabled", False)
+        or jwt_enabled
         or getattr(settings.http, "rbac_enabled", True)
     ):
         app_any = cast(Any, fastapi_app)
         app_any.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
-    # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
-    if settings.http.bearer_token:
+    # Static bearer auth is only used when JWT auth is disabled.
+    # When JWT is enabled, a valid Authorization: Bearer <jwt> should be accepted as-is
+    # and must not be pre-empted by a fixed token check.
+    if settings.http.bearer_token and not jwt_enabled:
         from typing import Any as _Any, cast as _cast  # local type-only import
         app_any = _cast(_Any, fastapi_app)
         app_any.add_middleware(
@@ -1023,12 +1027,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     response_body = {}
 
         # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
+        # (only for static bearer auth; JWT mode requires a real JWT).
         scope = dict(request.scope)
         try:
             client_host = request.client.host if request.client else ""
         except Exception:
             client_host = ""
-        if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+        if (
+            settings.http.allow_localhost_unauthenticated
+            and (not jwt_enabled)
+            and client_host in {"127.0.0.1", "::1", "localhost"}
+        ):
             scope_headers = list(scope.get("headers") or [])
             has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
             if not has_auth and settings.http.bearer_token:

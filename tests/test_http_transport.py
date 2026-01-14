@@ -115,6 +115,53 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
 
 
 @pytest.mark.asyncio
+async def test_http_jwt_enabled_does_not_enforce_static_bearer_token(isolated_env, monkeypatch):
+    # Regression test: when JWT auth is enabled, a configured HTTP_BEARER_TOKEN must not pre-empt JWT validation.
+    monkeypatch.setenv("HTTP_JWT_ENABLED", "true")
+    monkeypatch.setenv("HTTP_JWT_ALGORITHMS", "HS256")
+    monkeypatch.setenv("HTTP_JWT_SECRET", "secret")
+    monkeypatch.setenv("HTTP_RBAC_ENABLED", "false")
+    monkeypatch.setenv("HTTP_RATE_LIMIT_ENABLED", "false")
+
+    # Simulate a deployment where a legacy static token remains configured.
+    monkeypatch.setenv("HTTP_BEARER_TOKEN", "token123")
+
+    # Disable localhost auto-authentication to ensure headers are respected.
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+    settings = _config.get_settings()
+
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    token = jwt.encode(
+        {"alg": "HS256"},
+        {"sub": "u1", settings.http.jwt_role_claim: "writer"},
+        settings.http.jwt_secret,
+    ).decode("utf-8")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # A valid JWT should work even though a static bearer token is configured.
+        ok = await client.post(
+            settings.http.path,
+            headers={"Authorization": f"Bearer {token}"},
+            json=_rpc("tools/call", {"name": "health_check", "arguments": {}}),
+        )
+        assert ok.status_code == 200
+
+        # A legacy static bearer token is not a JWT and should be rejected in JWT mode.
+        bad = await client.post(
+            settings.http.path,
+            headers={"Authorization": "Bearer token123"},
+            json=_rpc("tools/call", {"name": "health_check", "arguments": {}}),
+        )
+        assert bad.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_http_path_mount_trailing_and_no_slash(isolated_env):
     server = build_mcp_server()
     settings = _config.get_settings()
