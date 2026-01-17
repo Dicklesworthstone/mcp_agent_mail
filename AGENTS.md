@@ -333,6 +333,99 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - ❌ Fix symptom (`if (x) { x.y }`) → ✅ Root cause (`x?.y`)
 ````
 
+---
+
+## Morph Warp Grep — AI-Powered Code Search
+
+**Use `mcp__morph-mcp__warp_grep` for exploratory "how does X work?" questions.** An AI agent expands your query, greps the codebase, reads relevant files, and returns precise line ranges with full context.
+
+**Use `ripgrep` for targeted searches.** When you know exactly what you're looking for.
+
+**Use `ast-grep` for structural patterns.** When you need AST precision for matching/rewriting.
+
+### When to Use What
+
+| Scenario | Tool | Why |
+|----------|------|-----|
+| "How is authentication implemented?" | `warp_grep` | Exploratory; don't know where to start |
+| "Where is the API router?" | `warp_grep` | Need to understand architecture |
+| "Find all uses of `Session`" | `ripgrep` | Targeted literal search |
+| "Find files with `print()`" | `ripgrep` | Simple pattern |
+| "Replace all `os.getenv` with decouple" | `ast-grep` | Structural refactor |
+
+### warp_grep Usage
+
+```
+mcp__morph-mcp__warp_grep(
+  repoPath: "/path/to/project",
+  query: "How does the authentication middleware work?"
+)
+```
+
+Returns structured results with file paths, line ranges, and extracted code snippets.
+
+---
+
+## cass — Cross-Agent Session Search
+
+`cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.
+
+**Rules:** Never run bare `cass` (TUI). Always use `--robot` or `--json`.
+
+### Examples
+
+```bash
+cass health
+cass search "authentication error" --robot --limit 5
+cass view /path/to/session.jsonl -n 42 --json
+cass capabilities --json
+```
+
+### Tips
+
+- Use `--fields minimal` for lean output
+- Filter by agent with `--agent`
+- Use `--days N` to limit to recent history
+
+Treat cass as a way to avoid re-solving problems other agents already handled.
+
+<!-- bv-agent-instructions-v1 -->
+
+---
+
+## Beads Workflow Integration
+
+This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+### Essential Commands
+
+```bash
+# View issues (launches TUI - avoid in automated sessions)
+bv
+
+# CLI commands for agents (use these instead)
+bd ready              # Show issues ready to work (no blockers)
+bd list --status=open # All open issues
+bd show <id>          # Full issue details with dependencies
+bd create --title="..." --type=task --priority=2
+bd update <id> --status=in_progress
+bd close <id> --reason="Completed"
+bd close <id1> <id2>  # Close multiple issues at once
+bd sync               # Commit and push changes
+```
+
+### Workflow Pattern
+
+1. **Start**: Run `bd ready` to find actionable work
+2. **Claim**: Use `bd update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: Use `bd close <id>`
+5. **Sync**: Always run `bd sync` at session end
+
+<!-- end-bv-agent-instructions -->
+
+---
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
@@ -358,3 +451,17 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+
+---
+
+Note for Codex/GPT-5.2:
+
+You constantly bother me and stop working with concerned questions that look similar to this:
+
+```
+Unexpected changes (need guidance)
+
+- Working tree still shows edits I did not make in pyproject.toml, uv.lock, src/api/routes.py. Please advise whether to keep/commit/revert these before any further work. I did not touch them.
+```
+
+NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into think YOU made the changes and simply don't recall it for some reason.
