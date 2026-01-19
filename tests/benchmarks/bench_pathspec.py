@@ -54,6 +54,19 @@ except ImportError:
         return pattern.replace("\\", "/").lstrip("/")
 
 
+def _clear_pathspec_cache() -> None:
+    """Clear the pathspec compilation cache if available."""
+    if hasattr(_compile_pathspec, "cache_clear"):
+        _compile_pathspec.cache_clear()
+
+
+def _get_pathspec_cache_info():
+    """Get cache info if available, returns None if not cached."""
+    if hasattr(_compile_pathspec, "cache_info"):
+        return _compile_pathspec.cache_info()
+    return None
+
+
 def _generate_test_patterns(count: int, seed: int = DEFAULT_SEED) -> list[str]:
     """Generate realistic file reservation patterns for benchmarking."""
     import random
@@ -164,7 +177,7 @@ class TestPathSpecCompilationBenchmark:
         latencies_us: list[float] = []
 
         # Clear the LRU cache to get cold compilation times
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
 
         console.print(
             Panel.fit(
@@ -177,11 +190,11 @@ class TestPathSpecCompilationBenchmark:
         # Measure each pattern compilation
         for pattern in patterns:
             normalized = _normalize_pathspec_pattern(pattern)
-            _compile_pathspec.cache_clear()  # Clear cache for each pattern
+            _clear_pathspec_cache()  # Clear cache for each pattern
 
             start = time.perf_counter()
             for _ in range(iterations):
-                _compile_pathspec.cache_clear()
+                _clear_pathspec_cache()
                 _compile_pathspec(normalized)
             elapsed_us = ((time.perf_counter() - start) / iterations) * 1_000_000
             latencies_us.append(elapsed_us)
@@ -248,7 +261,7 @@ class TestPathSpecCacheHitRate:
 
         Target: 99 hits, 1 miss for 100 calls with same pattern.
         """
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
         test_pattern = "src/components/**/*.tsx"
         normalized = _normalize_pathspec_pattern(test_pattern)
 
@@ -261,16 +274,13 @@ class TestPathSpecCacheHitRate:
 
         # First call should be a miss
         _compile_pathspec(normalized)
-        info_after_first = _compile_pathspec.cache_info()
+        info_after_first = _get_pathspec_cache_info()
 
         # Next 99 calls should be hits
         for _ in range(99):
             _compile_pathspec(normalized)
 
-        info_after_100 = _compile_pathspec.cache_info()
-
-        info_after_100.hits - info_after_first.hits + 1  # +1 for the hits after first miss
-        info_after_100.misses - (info_after_first.misses - 1)  # First call was a miss
+        info_after_100 = _get_pathspec_cache_info()
 
         # More accurate: we know we called 100 times total, 1 miss, rest are hits
         total_calls = 100
@@ -313,7 +323,7 @@ class TestPathSpecCacheHitRate:
     @pytest.mark.skipif(not PATHSPEC_AVAILABLE, reason="pathspec not available")
     def test_cache_with_multiple_patterns(self) -> None:
         """Verify cache handles multiple different patterns correctly."""
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
         patterns = _generate_test_patterns(50)
         normalized_patterns = [_normalize_pathspec_pattern(p) for p in patterns]
 
@@ -327,12 +337,12 @@ class TestPathSpecCacheHitRate:
         # First pass: all misses
         for p in normalized_patterns:
             _compile_pathspec(p)
-        info_after_first_pass = _compile_pathspec.cache_info()
+        info_after_first_pass = _get_pathspec_cache_info()
 
         # Second pass: all hits
         for p in normalized_patterns:
             _compile_pathspec(p)
-        info_after_second_pass = _compile_pathspec.cache_info()
+        info_after_second_pass = _get_pathspec_cache_info()
 
         first_pass_misses = info_after_first_pass.misses
         second_pass_hits = info_after_second_pass.hits - info_after_first_pass.hits
@@ -382,7 +392,7 @@ class TestConflictDetectionBenchmark:
         )
 
         # Pre-compile all patterns (simulating cached state)
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
         compiled_specs = []
         for p in patterns:
             normalized = _normalize_pathspec_pattern(p)
@@ -487,7 +497,7 @@ class TestUnionPathSpecBenchmark:
         )
 
         # Pre-compile individual patterns
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
         normalized_patterns = [_normalize_pathspec_pattern(p) for p in patterns]
         individual_specs = [_compile_pathspec(p) for p in normalized_patterns]
 
@@ -661,7 +671,7 @@ class TestGuardHookPatternMatching:
         )
 
         # Pre-compile patterns (as the guard hook does)
-        _compile_pathspec.cache_clear()
+        _clear_pathspec_cache()
         normalized_patterns = [_normalize_pathspec_pattern(p) for p in patterns]
         compiled_patterns = [(p, _compile_pathspec(p)) for p in normalized_patterns]
 

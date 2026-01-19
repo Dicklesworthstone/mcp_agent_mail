@@ -10,7 +10,7 @@ from mcp_agent_mail.db import ensure_schema, reset_database_state
 async def _call(tool_name: str, args: dict[str, Any]) -> Any:
     # Use FastMCP internal call helper for consistency across versions
     mcp = build_mcp_server()
-    _contents, structured = await mcp._mcp_call_tool(tool_name, args)
+    _contents, structured = await mcp._mcp_call_tool(tool_name, args)  # type: ignore[attr-defined]
     return structured
 
 
@@ -33,7 +33,7 @@ def test_ensure_product_and_link_project(tmp_path, monkeypatch) -> None:
     assert link["linked"] is True
     # Product resource lists the project
     mcp = build_mcp_server()
-    res_list = asyncio.run(mcp._mcp_read_resource(f"resource://product/{prod['product_uid']}"))
+    res_list = asyncio.run(mcp._mcp_read_resource(f"resource://product/{prod['product_uid']}"))  # type: ignore[attr-defined]
     assert res_list and getattr(res_list[0], "content", None)
     payload = json.loads(res_list[0].content)
     assert any(p["slug"] == slug for p in payload.get("projects", []))
