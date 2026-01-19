@@ -163,11 +163,11 @@ Macros vs granular tools
 - View product status and linked projects:
   - `mcp-agent-mail products status MyProduct`
 - Search messages across all linked projects:
-  - `mcp-agent-mail products search MyProduct "bd-123 OR \"release plan\"" --limit 50`
+  - `mcp-agent-mail products search MyProduct "br-123 OR \"release plan\"" --limit 50`
 - Product-wide inbox for an agent:
   - `mcp-agent-mail products inbox MyProduct YourAgent --limit 50 --urgent-only --include-bodies`
 - Product-wide thread summarization:
-  - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --per-thread-limit 100 --no-llm`
+  - `mcp-agent-mail products summarize-thread MyProduct "br-123" --per-thread-limit 100 --no-llm`
 
 Server tools (for orchestrators)
 - `ensure_product(product_key|name)`
@@ -182,40 +182,42 @@ Common pitfalls
 
 ## Integrating with Beads (dependency‑aware task planning)
 
-Beads provides a lightweight, dependency‑aware issue database and a CLI (`bd`) for selecting “ready work,” setting priorities, and tracking status. It complements MCP Agent Mail’s messaging, audit trail, and file‑reservation signals. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads provides a lightweight, dependency‑aware issue database and a CLI (`br`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging, audit trail, and file‑reservation signals. Project: [Dicklesworthstone/beads_rust](https://github.com/Dicklesworthstone/beads_rust)
+
+**Note:** `br` (beads_rust) is non-invasive and never executes git commands directly. You must manually run git operations after `br sync --flush-only`.
 
 Recommended conventions
 - **Single source of truth**: Use **Beads** for task status/priority/dependencies; use **Agent Mail** for conversation, decisions, and attachments (audit).
-- **Shared identifiers**: Use the Beads issue id (e.g., `bd-123`) as the Mail `thread_id` and prefix message subjects with `[bd-123]`.
-- **Reservations**: When starting a `bd-###` task, call `file_reservation_paths(...)` for the affected paths; include the issue id in the `reason` and release on completion.
+- **Shared identifiers**: Use the Beads issue id (e.g., `br-123`) as the Mail `thread_id` and prefix message subjects with `[br-123]`.
+- **Reservations**: When starting a `br-###` task, call `file_reservation_paths(...)` for the affected paths; include the issue id in the `reason` and release on completion.
 
 Typical flow (agents)
 1) **Pick ready work** (Beads)
-   - `bd ready --json` → choose one item (highest priority, no blockers)
+   - `br ready --json` → choose one item (highest priority, no blockers)
 2) **Reserve edit surface** (Mail)
-   - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="bd-123")`
+   - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")`
 3) **Announce start** (Mail)
-   - `send_message(..., thread_id="bd-123", subject="[bd-123] Start: <short title>", ack_required=true)`
+   - `send_message(..., thread_id="br-123", subject="[br-123] Start: <short title>", ack_required=true)`
 4) **Work and update**
    - Reply in‑thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
 5) **Complete and release**
-   - `bd close bd-123 --reason "Completed"` (Beads is status authority)
+   - `br close br-123 --reason "Completed"` (Beads is status authority)
    - `release_file_reservations(project_key, agent_name, paths=["src/**"])`
-   - Final Mail reply: `[bd-123] Completed` with summary and links
+   - Final Mail reply: `[br-123] Completed` with summary and links
 
 Mapping cheat‑sheet
-- **Mail `thread_id`** ↔ `bd-###`
-- **Mail subject**: `[bd-###] …`
-- **File reservation `reason`**: `bd-###`
-- **Commit messages (optional)**: include `bd-###` for traceability
+- **Mail `thread_id`** ↔ `br-###`
+- **Mail subject**: `[br-###] …`
+- **File reservation `reason`**: `br-###`
+- **Commit messages (optional)**: include `br-###` for traceability
 
 Event mirroring (optional automation)
-- On `bd update --status blocked`, send a high‑importance Mail message in thread `bd-###` describing the blocker.
-- On Mail “ACK overdue” for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
+- On `br update --status blocked`, send a high‑importance Mail message in thread `br-###` describing the blocker.
+- On Mail "ACK overdue" for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `br ready`.
 
 Pitfalls to avoid
-- Don’t create or manage tasks in Mail; treat Beads as the single task queue.
-- Always include `bd-###` in message `thread_id` to avoid ID drift across tools.
+- Don't create or manage tasks in Mail; treat Beads as the single task queue.
+- Always include `br-###` in message `thread_id` to avoid ID drift across tools.
 
 ### ast-grep vs ripgrep (quick guidance)
 
@@ -395,7 +397,9 @@ Treat cass as a way to avoid re-solving problems other agents already handled.
 
 ## Beads Workflow Integration
 
-This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) for issue tracking. Issues are stored in `.beads/` and tracked in git.
+
+**Note:** `br` (beads_rust) is non-invasive and never executes git commands directly. After running `br sync --flush-only`, you must manually run git commands to commit and push changes.
 
 ### Essential Commands
 
@@ -404,23 +408,24 @@ This project uses [beads_viewer](https://github.com/Dicklesworthstone/beads_view
 bv
 
 # CLI commands for agents (use these instead)
-bd ready              # Show issues ready to work (no blockers)
-bd list --status=open # All open issues
-bd show <id>          # Full issue details with dependencies
-bd create --title="..." --type=task --priority=2
-bd update <id> --status=in_progress
-bd close <id> --reason="Completed"
-bd close <id1> <id2>  # Close multiple issues at once
-bd sync               # Commit and push changes
+br ready              # Show issues ready to work (no blockers)
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br create --title="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason="Completed"
+br close <id1> <id2>  # Close multiple issues at once
+br sync --flush-only  # Export to JSONL (does NOT run git commands)
+git add .beads/ && git commit -m "Update beads" && git push  # Manual git steps
 ```
 
 ### Workflow Pattern
 
-1. **Start**: Run `bd ready` to find actionable work
-2. **Claim**: Use `bd update <id> --status=in_progress`
+1. **Start**: Run `br ready` to find actionable work
+2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
-4. **Complete**: Use `bd close <id>`
-5. **Sync**: Always run `bd sync` at session end
+4. **Complete**: Use `br close <id>`
+5. **Sync**: Run `br sync --flush-only`, then manually `git add .beads/ && git commit && git push`
 
 <!-- end-bv-agent-instructions -->
 
@@ -438,7 +443,9 @@ bd sync               # Commit and push changes
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   br sync --flush-only
+   git add .beads/
+   git commit -m "Update beads"
    git push
    git status  # MUST show "up to date with origin"
    ```
