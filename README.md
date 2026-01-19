@@ -113,6 +113,7 @@ git clone https://github.com/Dicklesworthstone/mcp_agent_mail
 cd mcp_agent_mail
 
 # Create a Python 3.14 virtual environment and install dependencies
+# Note: If you have an older uv version, run `uv self update` first
 uv python install 3.14
 uv venv -p 3.14
 source .venv/bin/activate
