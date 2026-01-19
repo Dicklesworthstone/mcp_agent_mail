@@ -274,7 +274,6 @@ class TestPathSpecCacheHitRate:
 
         # First call should be a miss
         _compile_pathspec(normalized)
-        info_after_first = _get_pathspec_cache_info()
 
         # Next 99 calls should be hits
         for _ in range(99):
