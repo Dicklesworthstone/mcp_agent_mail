@@ -240,7 +240,7 @@ While `bd` (Beads CLI) handles task CRUD operations, `bv` provides **precomputed
 - **Cycle detection**: Spot circular dependencies before they cause deadlocks
 - **Parallel track planning**: Determine which tasks can run concurrently
 
-Instead of agents parsing `.beads/beads.jsonl` directly or attempting to compute graph metrics (risking hallucinated results), they can call bv's deterministic robot flags and get JSON output they can trust.
+Instead of agents parsing `.beads/issues.jsonl` directly or attempting to compute graph metrics (risking hallucinated results), they can call bv's deterministic robot flags and get JSON output they can trust. Legacy `.beads/beads.jsonl` is deprecated in this repo.
 
 ### Robot Flags for AI Integration
 
