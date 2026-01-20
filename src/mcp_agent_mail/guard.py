@@ -100,6 +100,38 @@ def _render_chain_runner_script(hook_name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+        return cp.stdout.strip()
+    except Exception:
+        return None
+
+
+def _resolve_hooks_dir(repo: Path) -> Path:
+    # Prefer core.hooksPath if configured
+    hooks_path = _git(repo, "config", "--get", "core.hooksPath")
+    if hooks_path:
+        # Expand user (e.g. ~/.githooks)
+        p = Path(hooks_path).expanduser()
+        if p.is_absolute():
+            return p
+        # Resolve relative to repo root
+        root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
+        return Path(root) / hooks_path
+
+    # Fall back to git-dir/hooks
+    git_dir = _git(repo, "rev-parse", "--git-dir")
+    if git_dir:
+        g = Path(git_dir)
+        if not g.is_absolute():
+            g = repo / g
+        return g / "hooks"
+    # Last resort: traditional path
+    return repo / ".git" / "hooks"
+
+
+
 def render_precommit_script(archive: ProjectArchive) -> str:
     """Return the pre-commit script content for the given archive.
 
@@ -512,34 +544,6 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
 
     archive = await ensure_archive(settings, project_slug)
 
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        # Prefer core.hooksPath if configured
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                resolved = Path(hooks_path)
-            else:
-                # Resolve relative to repo root
-                root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-                resolved = Path(root) / hooks_path
-            return resolved
-        # Fall back to git-dir/hooks
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        # Last resort: traditional path
-        return repo / ".git" / "hooks"
-
     hooks_dir = _resolve_hooks_dir(repo_path)
     if not hooks_dir.exists():
         await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
@@ -597,30 +601,6 @@ async def install_prepush_guard(settings: Settings, project_slug: str, repo_path
     """Install the pre-push chain-runner and Agent Mail guard plugin."""
     archive = await ensure_archive(settings, project_slug)
 
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                resolved = Path(hooks_path)
-            else:
-                root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-                resolved = Path(root) / hooks_path
-            return resolved
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        return repo / ".git" / "hooks"
-
     hooks_dir = _resolve_hooks_dir(repo_path)
     await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
     # Ensure hooks.d/pre-push exists
@@ -676,28 +656,6 @@ async def uninstall_guard(repo_path: Path) -> bool:
     - Legacy fallback: removes top-level pre-commit/pre-push only if they are old-style
       Agent Mail hooks (sentinel present) and not chain-runners.
     """
-
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                return Path(hooks_path)
-            root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-            return Path(root) / hooks_path
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        return repo / ".git" / "hooks"
 
     hooks_dir = _resolve_hooks_dir(repo_path)
     removed = False
