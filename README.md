@@ -91,11 +91,13 @@ That's it! The `am` alias (added to your `.zshrc` or `.bashrc` during installati
 
 **Port conflicts?** Use `--port` to specify a different port (default: 8765):
 
-```bash
-# Install with custom port
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+Install with custom port:
 
-# Or use the CLI command after installation
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+```
+
+Or use the CLI command after installation:
 uv run python -m mcp_agent_mail.cli config set-port 9000
 ```
 
@@ -103,8 +105,9 @@ uv run python -m mcp_agent_mail.cli config set-port 9000
 
 Clone the repo, set up and install with uv in a python 3.14 venv (install uv if you don't have it already), and then run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh`. This will automatically set things up for your various installed coding agent tools and start the MCP server on port 8765. If you want to run the MCP server again in the future, simply run `scripts/run_server_with_token.sh`:
 
+Install uv (if you don't have it already):
+
 ```bash
-# Install uv (if you don't have it already)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -1944,11 +1947,13 @@ Configuration is loaded from an existing `.env` via `python-decouple`. Do not us
 If port 8765 is already in use (e.g., by Cursor's Python extension), you can change it:
 
 **Option 1: During installation**
-```bash
-# One-liner with custom port
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+One-liner with custom port:
 
-# Or with local script
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+```
+
+Or with local script:
 ./scripts/install.sh --port 9000 --yes
 ```
 
