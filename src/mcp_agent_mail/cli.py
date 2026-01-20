@@ -3254,12 +3254,19 @@ def guard_check(
         raise typer.Exit(code=0)
     now = datetime.now(timezone.utc)
     conflicts: list[tuple[str, str, str]] = []
+    seen_ids: set[str] = set()
 
     for candidate in sorted(fr_dir.glob("*.json")):
         try:
             data = json.loads(candidate.read_text(encoding="utf-8"))
         except Exception:
             continue
+        res_id = data.get("id")
+        if res_id is not None:
+            res_key = str(res_id)
+            if res_key in seen_ids:
+                continue
+            seen_ids.add(res_key)
         if data.get("agent") == agent_name:
             continue
         if not data.get("exclusive", True):

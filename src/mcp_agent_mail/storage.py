@@ -767,9 +767,18 @@ async def write_file_reservation_records(
         normalized_file_reservation["path_pattern"] = path_pattern
         normalized_file_reservation.pop("path", None)
         digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
-        file_reservation_path = archive.root / "file_reservations" / f"{digest}.json"
-        await _write_json(file_reservation_path, normalized_file_reservation)
-        rel_paths.append(file_reservation_path.relative_to(archive.repo_root).as_posix())
+        # Legacy path: digest of path_pattern (kept to avoid stale artifacts in existing installs)
+        legacy_path = archive.root / "file_reservations" / f"{digest}.json"
+        await _write_json(legacy_path, normalized_file_reservation)
+        rel_paths.append(legacy_path.relative_to(archive.repo_root).as_posix())
+
+        # Stable per-reservation artifact to avoid collisions across shared reservations
+        reservation_id = normalized_file_reservation.get("id")
+        id_token = str(reservation_id).strip() if reservation_id is not None else ""
+        if id_token.isdigit():
+            id_path = archive.root / "file_reservations" / f"id-{id_token}.json"
+            await _write_json(id_path, normalized_file_reservation)
+            rel_paths.append(id_path.relative_to(archive.repo_root).as_posix())
         agent_name = str(normalized_file_reservation.get("agent", "unknown"))
         entries.append((agent_name, path_pattern))
     commit_message = _build_file_reservation_commit_message(entries)
@@ -790,8 +799,21 @@ async def write_message_bundle(
     commit_text: str | None = None,
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
-    timestamp_str = timestamp_obj if isinstance(timestamp_obj, str) else datetime.now(timezone.utc).isoformat()
-    now = datetime.fromisoformat(timestamp_str)
+    now: datetime
+    if isinstance(timestamp_obj, datetime):
+        now = timestamp_obj
+    elif isinstance(timestamp_obj, str) and timestamp_obj.strip():
+        timestamp_str = timestamp_obj.strip()
+        # Handle Z-suffixed timestamps (ISO 8601 UTC indicator)
+        if timestamp_str.endswith("Z"):
+            timestamp_str = timestamp_str[:-1] + "+00:00"
+        try:
+            now = datetime.fromisoformat(timestamp_str)
+        except ValueError:
+            now = datetime.now(timezone.utc)
+    else:
+        now = datetime.now(timezone.utc)
+
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
         # Treat naive timestamps as UTC (matches SQLite naive-UTC convention)
         now = now.replace(tzinfo=timezone.utc)
@@ -968,7 +990,9 @@ async def process_attachments(
     attachments_meta: list[dict[str, object]] = []
     commit_paths: list[str] = []
     updated_body = body_md
-    if convert_markdown and archive.settings.storage.convert_images:
+    # Respect explicit convert_markdown decision; embed_policy ("inline"/"file") forces conversion
+    should_convert = convert_markdown or embed_policy in {"inline", "file"}
+    if should_convert:
         updated_body = await _convert_markdown_images(
             archive, body_md, attachments_meta, commit_paths, embed_policy=embed_policy
         )
@@ -1996,12 +2020,26 @@ async def get_historical_inbox_snapshot(
                 "error": f"Invalid timestamp format: {e}"
             }
 
+        # Get agent inbox directory at that commit
+        inbox_path = f"projects/{archive.slug}/agents/{agent_name}/inbox"
+
         # Find commit closest to (but not after) target timestamp
         closest_commit = None
-        for commit in archive.repo.iter_commits(max_count=10000):
+        try:
+            commit_iter = archive.repo.iter_commits(max_count=10000, paths=[inbox_path])
+        except Exception:
+            commit_iter = archive.repo.iter_commits(max_count=10000)
+        for commit in commit_iter:
             if commit.authored_date <= target_timestamp:
                 closest_commit = commit
                 break
+
+        if not closest_commit:
+            # Fall back to full history when the inbox path has never been touched
+            for commit in archive.repo.iter_commits(max_count=10000):
+                if commit.authored_date <= target_timestamp:
+                    closest_commit = commit
+                    break
 
         if not closest_commit:
             # No commits before this time
@@ -2012,9 +2050,6 @@ async def get_historical_inbox_snapshot(
                 "requested_time": timestamp,
                 "note": "No commits found before this timestamp"
             }
-
-        # Get agent inbox directory at that commit
-        inbox_path = f"projects/{archive.slug}/agents/{agent_name}/inbox"
 
         messages = []
         try:
