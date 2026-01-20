@@ -7,7 +7,7 @@ name = "mcp-agent-mail"
 version = "0.3.0"
 description = "Coordinated multi-agent messaging and coordination MCP server."
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
   { name = "mcp-agent-mail maintainers" },
@@ -17,7 +17,7 @@ classifiers = [
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.12",
   "Topic :: Software Development :: Libraries",
   "Topic :: Utilities",
   "Typing :: Typed",
@@ -82,7 +82,7 @@ exclude = ["/.venv", "/.vscode", "/.idea", "/.git", "/__pycache__", "*.py[cod]",
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -108,7 +108,7 @@ known-first-party = ["mcp_agent_mail"]
 combine-as-imports = true
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
