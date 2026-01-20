@@ -4556,6 +4556,14 @@ def build_mcp_server() -> FastMCP:
                         thread_rows = [(row[0], row[1]) for row in (await s.execute(stmt)).all()]
                     # collect participants (sender names and recipients)
                     participants: set[str] = {n for _m, n in thread_rows}
+                    message_ids = [m.id for m, _ in thread_rows if m.id is not None]
+                    if message_ids:
+                        recipient_rows = await s.execute(
+                            select(Agent.name)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
+                            .where(cast(Any, MessageRecipient.message_id).in_(message_ids))
+                        )
+                        participants.update({row[0] for row in recipient_rows.all() if row[0]})
                     auto_ok_names.update(participants)
                 except Exception:
                     pass
