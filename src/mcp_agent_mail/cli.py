@@ -98,6 +98,26 @@ def asc(value: Any) -> Any:
 def desc(value: Any) -> Any:
     return _sa_desc(value)
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    """Parse ISO-8601 with Z/offset support and normalize to UTC."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except Exception:
+            return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 _PREVIEW_FORCE_TOKEN = 0
 _PREVIEW_FORCE_LOCK = threading.Lock()
 
@@ -478,14 +498,9 @@ def products_inbox(
                         from typing import Any as _Any
                         stmt = stmt.where(cast(_Any, Message.importance).in_(["high", "urgent"]))
                     if since_ts:
-                        try:
-                            s = since_ts.strip()
-                            s = s[:-1] + "+00:00" if s.endswith("Z") else s
-                            from datetime import datetime as _dt
-                            since_dt = _dt.fromisoformat(s)
-                            stmt = stmt.where(Message.created_ts > since_dt)
-                        except Exception:
-                            pass
+                        parsed = _parse_iso_datetime(since_ts)
+                        if parsed is not None:
+                            stmt = stmt.where(Message.created_ts > parsed.replace(tzinfo=None))
                     res = await session.execute(stmt)
                     for msg, kind, sender_name in res.all():
                         payload = {
@@ -2752,11 +2767,9 @@ def am_run(
                 data = json.loads(f.read_text(encoding="utf-8"))
                 exp = data.get("expires_ts")
                 if exp:
-                    try:
-                        if datetime.fromisoformat(exp) <= now:
-                            continue
-                    except Exception:
-                        pass
+                    parsed = _parse_iso_datetime(exp)
+                    if parsed is not None and parsed <= now:
+                        continue
                 results.append(data)
             except Exception:
                 continue
@@ -3273,11 +3286,9 @@ def guard_check(
             continue
         expires = data.get("expires_ts")
         if expires:
-            try:
-                if datetime.fromisoformat(expires) < now:
-                    continue
-            except Exception:
-                pass
+            parsed = _parse_iso_datetime(expires)
+            if parsed is not None and parsed < now:
+                continue
         pattern = (data.get("path_pattern") or "").strip()
         if not pattern:
             continue
