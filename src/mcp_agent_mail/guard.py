@@ -6,6 +6,7 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
+import json
 
 from .config import Settings
 from .storage import ProjectArchive, ensure_archive
@@ -126,8 +127,8 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "    _PS = None  # type: ignore[assignment]",
         "    _GWM = None  # type: ignore[assignment]",
         "",
-        f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
-        f"STORAGE_ROOT = Path(\"{storage_root}\")",
+        f"FILE_RESERVATIONS_DIR = Path({json.dumps(file_reservations_dir)})",
+        f"STORAGE_ROOT = Path({json.dumps(storage_root)})",
         "",
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
@@ -313,7 +314,7 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "    _PS = None  # type: ignore[assignment]",
         "    _GWM = None  # type: ignore[assignment]",
         "",
-        f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
+        f"FILE_RESERVATIONS_DIR = Path({json.dumps(file_reservations_dir)})",
         "",
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",

@@ -13,7 +13,7 @@ import re
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import structlog
 import uvicorn
@@ -62,6 +62,14 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
 
 
 __all__ = ["build_http_app", "main"]
+
+
+class _FastMCPHttpApp(Protocol):
+    def http_app(self, *args: Any, **kwargs: Any) -> FastAPI: ...
+
+
+class _FastAPILifespan(Protocol):
+    def lifespan(self, app: FastAPI) -> Any: ...
 
 
 def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
@@ -440,7 +448,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         server = build_mcp_server()
 
     # Build MCP HTTP sub-app with stateless mode for ASGI test transports
-    mcp_http_app = server.http_app(path="/", stateless_http=True, json_response=True)
+    mcp_http_app = cast(_FastMCPHttpApp, server).http_app(
+        path="/",
+        stateless_http=True,
+        json_response=True,
+    )
 
     # no-op wrapper removed; using explicit stateless adapter below
 
@@ -806,7 +818,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan_context(app: FastAPI):
         # Ensure the mounted MCP app initializes its internal task group
-        async with mcp_http_app.lifespan(mcp_http_app):
+        mcp_lifespan_app = cast(_FastAPILifespan, mcp_http_app)
+        async with mcp_lifespan_app.lifespan(mcp_http_app):
             await _startup()
             try:
                 yield
@@ -1146,6 +1159,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             def _quote(s: str) -> str:
                 return '"' + s.replace('"', '""') + '"'
 
+            def _like_escape(term: str) -> str:
+                return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
             for p in parts:
                 key = None
                 val = p
@@ -1156,7 +1172,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         val = maybe_val
                 val = val.strip()
                 val_inner = val[1:-1] if val.startswith('"') and val.endswith('"') and len(val) >= 2 else val
-                like_terms.append(val_inner)
+
+                # For LIKE pattern, we want literal matching of the user's term
+                like_terms.append(_like_escape(val_inner))
+
                 if key in {"subject", "body"}:
                     exprs.append(f"{key}:{_quote(val_inner)}")
                     tokens.append({"field": key, "value": val_inner})
@@ -1426,11 +1445,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     except Exception:
                         # Fallback to LIKE if FTS not available
                         if like_scope == "subject":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
                         elif like_scope == "body":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
                         else:
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT 10000"
                         search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
                         matched_messages = [
                             {
@@ -2064,11 +2083,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ]
                 except Exception:
                     if like_scope == "subject":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
                     elif like_scope == "body":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
                     else:
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT :lim"
                     rows = await session.execute(
                         text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%", "lim": limit}
                     )
@@ -2540,8 +2559,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 except Exception:
                     total_commits = "0"
                     project_count = 0
-                    repo_size = "Unknown"
-                    last_commit_time = "Unknown"
+                    repo_size = "0 MB"
+                    last_commit_time = "Never"
                 finally:
                     if repo is not None:
                         repo.close()
