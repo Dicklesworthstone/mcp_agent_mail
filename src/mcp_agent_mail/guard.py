@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from pathlib import Path
-import json
 
 from .config import Settings
 from .storage import ProjectArchive, ensure_archive
