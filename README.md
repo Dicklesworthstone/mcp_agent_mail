@@ -2058,7 +2058,7 @@ Common variables you may set:
 | `FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for file reservations cleanup task |
 | `FILE_RESERVATION_INACTIVITY_SECONDS` | `1800` | Inactivity threshold (seconds) before a reservation is considered stale |
 | `FILE_RESERVATION_ACTIVITY_GRACE_SECONDS` | `900` | Grace window for recent mail/filesystem/git activity to keep a reservation active |
-| `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations |
+| `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations targeting mail archive paths (agents/, messages/, attachments/) |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
 | `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
@@ -2196,7 +2196,7 @@ This section has been removed to keep the README focused. Client code samples be
 - Why Git and SQLite together?
   - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn't.
 - Are file reservations enforced?
-  - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists (`FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true`, default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo.
+  - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists for mail archive paths (agents/, messages/, attachments/) when `FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true` (default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo for project file paths.
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 

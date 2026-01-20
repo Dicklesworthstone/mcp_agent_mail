@@ -59,6 +59,7 @@ from .models import (
 from .storage import (
     ProjectArchive,
     archive_write_lock,
+    clear_notification_signal,
     clear_repo_cache,
     collect_lock_status,
     emit_notification_signal,
@@ -1057,6 +1058,30 @@ def _validate_thread_id(raw_value: Optional[str]) -> Optional[str]:
 
 # Patterns that are unsearchable in FTS5 - return None to signal "no results"
 _FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
+_LIKE_FALLBACK_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}")
+_LIKE_FALLBACK_STOPWORDS = frozenset({"AND", "OR", "NOT", "NEAR"})
+
+
+def _like_escape(term: str) -> str:
+    """Escape LIKE wildcards for literal substring matching."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _extract_like_terms(query: str, *, max_terms: int = 5) -> list[str]:
+    """Extract LIKE fallback terms from a raw search query."""
+    if not query:
+        return []
+    terms: list[str] = []
+    for token in _LIKE_FALLBACK_TOKEN_RE.findall(query):
+        if len(token) < 2:
+            continue
+        if token.upper() in _LIKE_FALLBACK_STOPWORDS:
+            continue
+        if token not in terms:
+            terms.append(token)
+        if len(terms) >= max_terms:
+            break
+    return terms
 
 
 def _sanitize_fts_query(query: str) -> str | None:
@@ -3081,14 +3106,18 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     # Git wildmatch semantics; treat inputs as repo-root relative forward-slash paths
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
+    candidate_norm = _normalize(candidate_path)
+    existing_norm = _normalize(existing.path_pattern)
+    # If either side is a glob, treat both as patterns and check for overlap conservatively
+    if _contains_glob(candidate_norm) or _contains_glob(existing_norm):
+        return _patterns_overlap(existing_norm, candidate_norm)
     if PathSpec is not None and GitWildMatchPattern is not None:
         spec = _compile_pathspec(_normalize_pathspec_pattern(existing.path_pattern))
         if spec is not None:
-            return spec.match_file(_normalize(candidate_path))
+            return spec.match_file(candidate_norm)
     # Fallback to conservative fnmatch if pathspec not available
-    pat = existing.path_pattern
-    a = _normalize(candidate_path)
-    b = _normalize(pat)
+    a = candidate_norm
+    b = existing_norm
     return fnmatch.fnmatchcase(a, b) or fnmatch.fnmatchcase(b, a) or (a == b)
 
 
@@ -3129,6 +3158,24 @@ def _file_reservations_patterns_overlap(paths_a: Sequence[str], paths_b: Sequenc
             if _patterns_overlap(pa, pb):
                 return True
     return False
+
+
+_ARCHIVE_PATH_PREFIXES: tuple[str, ...] = (
+    "agents/",
+    "messages/",
+    "attachments/",
+    "threads/",
+    "file_reservations/",
+)
+
+
+def _looks_like_archive_path(pattern: str) -> bool:
+    """Return True if a reservation pattern targets archive paths (agents/, messages/, attachments/...)."""
+    normalized = (pattern or "").strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    return normalized.startswith(_ARCHIVE_PATH_PREFIXES)
 
 
 def _build_reservation_union_spec(
@@ -3700,9 +3747,17 @@ def build_mcp_server() -> FastMCP:
                 y_dir = now_ts.strftime("%Y")
                 m_dir = now_ts.strftime("%m")
                 candidate_surfaces: list[str] = []
+                candidate_surfaces.append(f"messages/{y_dir}/{m_dir}/*.md")
                 candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
                 for r in to_agents + cc_agents + bcc_agents:
                     candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
+                if thread_id:
+                    candidate_surfaces.append(f"messages/threads/{thread_id}.md")
+                has_attachments = bool(attachment_paths) or (
+                    convert_markdown and ("![" in body_md or "data:image" in body_md)
+                )
+                if has_attachments:
+                    candidate_surfaces.append("attachments/**")
 
                 async with get_session() as session:
                     rows = await session.execute(
@@ -3720,32 +3775,40 @@ def build_mcp_server() -> FastMCP:
 
                 conflicts: list[dict[str, Any]] = []
 
-                # Build union PathSpec for fast conflict pre-filtering
-                union_spec = _build_reservation_union_spec(active_file_reservations, sender.id, True)
-
-                # Pre-compute which surfaces might conflict
-                potentially_conflicting_surfaces: set[str] = set()
-                if union_spec is not None:
-                    normalized_surfaces = [_normalize_pathspec_pattern(s) for s in candidate_surfaces]
-                    matching_normalized = set(union_spec.match_files(normalized_surfaces))
-                    for orig_surface, norm_surface in zip(candidate_surfaces, normalized_surfaces, strict=True):
-                        if norm_surface in matching_normalized:
-                            potentially_conflicting_surfaces.add(orig_surface)
+                archive_reservations = [
+                    (reservation, holder)
+                    for reservation, holder in active_file_reservations
+                    if _looks_like_archive_path(reservation.path_pattern)
+                ]
+                if not archive_reservations:
+                    conflicts = []
                 else:
-                    potentially_conflicting_surfaces = set(candidate_surfaces)
+                    # Build union PathSpec for fast conflict pre-filtering
+                    union_spec = _build_reservation_union_spec(archive_reservations, sender.id, True)
 
-                for surface in candidate_surfaces:
-                    if surface not in potentially_conflicting_surfaces:
-                        continue  # Fast path: no conflicts possible for this surface
-                    for file_reservation_record, holder_name in active_file_reservations:
-                        if _file_reservations_conflict(file_reservation_record, surface, True, sender):
-                            conflicts.append({
-                                "surface": surface,
-                                "holder": holder_name,
-                                "path_pattern": file_reservation_record.path_pattern,
-                                "exclusive": file_reservation_record.exclusive,
-                                "expires_ts": _iso(file_reservation_record.expires_ts),
-                            })
+                    # Pre-compute which surfaces might conflict
+                    potentially_conflicting_surfaces: set[str] = set()
+                    if union_spec is not None:
+                        normalized_surfaces = [_normalize_pathspec_pattern(s) for s in candidate_surfaces]
+                        matching_normalized = set(union_spec.match_files(normalized_surfaces))
+                        for orig_surface, norm_surface in zip(candidate_surfaces, normalized_surfaces, strict=True):
+                            if norm_surface in matching_normalized:
+                                potentially_conflicting_surfaces.add(orig_surface)
+                    else:
+                        potentially_conflicting_surfaces = set(candidate_surfaces)
+
+                    for surface in candidate_surfaces:
+                        if surface not in potentially_conflicting_surfaces:
+                            continue  # Fast path: no conflicts possible for this surface
+                        for file_reservation_record, holder_name in archive_reservations:
+                            if _file_reservations_conflict(file_reservation_record, surface, True, sender):
+                                conflicts.append({
+                                    "surface": surface,
+                                    "holder": holder_name,
+                                    "path_pattern": file_reservation_record.path_pattern,
+                                    "exclusive": file_reservation_record.exclusive,
+                                    "expires_ts": _iso(file_reservation_record.expires_ts),
+                                })
                 if conflicts:
                     # Return a structured error payload that clients can surface directly
                     return {
@@ -4280,6 +4343,7 @@ def build_mcp_server() -> FastMCP:
             Extra file paths to include as attachments; will be converted to WebP and stored.
         convert_images : Optional[bool]
             Overrides server default for image conversion/inlining. If None, server settings apply.
+            Note: sender attachments_policy "inline"/"file" always forces conversion/inlining.
         importance : str
             One of {"low","normal","high","urgent"} (free form tolerated; used by filters).
         ack_required : bool
@@ -5722,7 +5786,8 @@ def build_mcp_server() -> FastMCP:
         # Validate since_ts format upfront with helpful error message
         _validate_iso_timestamp(since_ts, "since_ts")
 
-        if get_settings().tools_log_enabled:
+        settings = get_settings()
+        if settings.tools_log_enabled:
             try:
                 import importlib as _imp
                 _rc = _imp.import_module("rich.console")
@@ -5736,6 +5801,9 @@ def build_mcp_server() -> FastMCP:
             project = await _get_project_by_identifier(project_key)
             agent = await _get_agent(project, agent_name)
             items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
+            if settings.notifications.enabled:
+                with suppress(Exception):
+                    await clear_notification_signal(settings, project.slug, agent.name)
             await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'. urgent_only={urgent_only}")
             return items
         except Exception as exc:
@@ -6420,8 +6488,38 @@ def build_mcp_server() -> FastMCP:
         except Exception as fts_err:
             # FTS query syntax error - return empty results instead of crashing
             logger.warning("FTS query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
-            await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
-            rows = []
+            fallback_terms = _extract_like_terms(query)
+            if not fallback_terms:
+                await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
+                rows = []
+            else:
+                clauses = []
+                params: dict[str, Any] = {"project_id": project.id, "limit": limit}
+                for idx, term in enumerate(fallback_terms):
+                    key = f"t{idx}"
+                    params[key] = f"%{_like_escape(term)}%"
+                    clauses.append(
+                        f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                    )
+                where_clause = " AND ".join(clauses)
+                result = await session.execute(
+                    text(
+                        f"""
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, a.name AS sender_name
+                        FROM messages m
+                        JOIN agents a ON m.sender_id = a.id
+                        WHERE m.project_id = :project_id AND {where_clause}
+                        ORDER BY m.created_ts DESC
+                        LIMIT :limit
+                        """
+                    ),
+                    params,
+                )
+                rows = list(result.mappings().all())
+                await ctx.info(
+                    f"FTS query failed; used LIKE fallback with {len(fallback_terms)} term(s), returned {len(rows)} result(s)."
+                )
 
         await ctx.info(f"Search '{query}' returned {len(rows)} messages for project '{project.human_key}'.")
         if get_settings().tools_log_enabled:
@@ -6694,6 +6792,8 @@ def build_mcp_server() -> FastMCP:
         - Glob matching is symmetric (`fnmatchcase(a,b)` or `fnmatchcase(b,a)`), including exact matches
         - When granted, a JSON artifact is written under `file_reservations/<sha1(path)>.json` and the DB is updated
         - TTL must be >= 60 seconds (enforced by the server settings/policy)
+        - Server-side enforcement (if enabled) only checks reservations that target mail archive paths
+          such as `agents/`, `messages/`, or `attachments/`; code repo enforcement is via the pre-commit guard
 
         Do / Don't
         ----------
@@ -7659,7 +7759,34 @@ def build_mcp_server() -> FastMCP:
                     rows = list(result.mappings().all())
                 except Exception as fts_err:
                     logger.warning("FTS product query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
-                    rows = []
+                    fallback_terms = _extract_like_terms(query)
+                    if not fallback_terms:
+                        rows = []
+                    else:
+                        clauses = []
+                        params: dict[str, Any] = {"proj_ids": proj_ids, "limit": limit}
+                        for idx, term in enumerate(fallback_terms):
+                            key = f"t{idx}"
+                            params[key] = f"%{_like_escape(term)}%"
+                            clauses.append(
+                                f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                            )
+                        where_clause = " AND ".join(clauses)
+                        result = await session.execute(
+                            text(
+                                f"""
+                                SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                       m.thread_id, a.name AS sender_name, m.project_id
+                                FROM messages m
+                                JOIN agents a ON m.sender_id = a.id
+                                WHERE m.project_id IN :proj_ids AND {where_clause}
+                                ORDER BY m.created_ts DESC
+                                LIMIT :limit
+                                """
+                            ).bindparams(bindparam("proj_ids", expanding=True)),
+                            params,
+                        )
+                        rows = list(result.mappings().all())
             items = [
                 {
                     "id": row["id"],
@@ -9243,10 +9370,23 @@ def build_mcp_server() -> FastMCP:
                     since_ts = parsed["since_ts"][0]
             except Exception:
                 pass
-        """List messages sent by the agent, enriched with commit metadata for canonical files."""
+
         if project is None:
-            raise ValueError("project parameter is required for outbox resource")
-        project_obj = await _get_project_by_identifier(project)
+            # Auto-detect project by agent name if uniquely identifiable
+            async with get_session() as s_auto:
+                rows = await s_auto.execute(
+                    select(Project)
+                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
+                    .where(func.lower(Agent.name) == agent.lower())
+                    .limit(2)
+                )
+                projects = [row[0] for row in rows.all()]
+            if len(projects) == 1:
+                project_obj = projects[0]
+            else:
+                raise ValueError("project parameter is required for outbox resource")
+        else:
+            project_obj = await _get_project_by_identifier(project)
         agent_obj = await _get_agent(project_obj, agent)
         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
         enriched: list[dict[str, Any]] = []
