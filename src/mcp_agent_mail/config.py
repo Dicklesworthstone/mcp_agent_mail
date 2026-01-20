@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol, cast
 
 from decouple import (
     Config as DecoupleConfig,
@@ -14,12 +14,18 @@ from decouple import (
 )
 
 _DOTENV_PATH: Final[Path] = Path(".env")
-# Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
-try:
-    _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
-except FileNotFoundError:
-    # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
-    _decouple_config = DecoupleConfig(RepositoryEmpty())
+
+
+def _build_decouple_config() -> DecoupleConfig:
+    # Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository.
+    try:
+        return DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
+    except FileNotFoundError:
+        # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
+        return DecoupleConfig(RepositoryEmpty())
+
+
+_decouple_config: Final[DecoupleConfig] = _build_decouple_config()
 
 
 @dataclass(slots=True, frozen=True)
@@ -426,8 +432,12 @@ def get_settings() -> Settings:
     )
 
 
+class _CacheClearable(Protocol):
+    def cache_clear(self) -> None: ...
+
+
 def clear_settings_cache() -> None:
-    """Clear the lru_cache for get_settings in a mypy-friendly way."""
-    cache_clear = getattr(get_settings, "cache_clear", None)
+    """Clear the lru_cache for get_settings in a type-checker-friendly way."""
+    cache_clear = getattr(cast(_CacheClearable, get_settings), "cache_clear", None)
     if callable(cache_clear):
         cache_clear()

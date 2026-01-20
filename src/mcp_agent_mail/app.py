@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
-from typing import Any, AsyncContextManager, Callable, Optional, cast
+from typing import Any, AsyncContextManager, Callable, Optional, Protocol, cast
 from urllib.parse import parse_qsl
 import uuid
 
@@ -90,6 +90,18 @@ except Exception:  # pragma: no cover - optional dependency fallback
     GitWildMatchPattern = None
 
 logger = logging.getLogger(__name__)
+
+
+class _FastMCPToolGetter(Protocol):
+    async def get_tool(self, name: str) -> Any: ...
+
+
+class _ToolRegistryLike(Protocol):
+    _tools: dict[str, Any]
+
+
+class _FastMCPToolManagerLike(Protocol):
+    _tool_manager: _ToolRegistryLike
 
 # ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
 # Provide lightweight wrappers to keep type checking focused on our code.
@@ -5993,7 +6005,8 @@ def build_mcp_server() -> FastMCP:
             # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
             from fastmcp.tools.tool import FunctionTool
 
-            _file_reservation_tool = cast(FunctionTool, await mcp.get_tool("file_reservation_paths"))
+            mcp_with_tools = cast(_FastMCPToolGetter, mcp)
+            _file_reservation_tool = cast(FunctionTool, await mcp_with_tools.get_tool("file_reservation_paths"))
             _file_reservation_run = await _file_reservation_tool.run(
                 {
                     "ctx": ctx,
@@ -9420,12 +9433,12 @@ def _apply_tool_filter(mcp: FastMCP, settings: Settings) -> None:
     registration because it doesn't require modifying every @mcp.tool decorator.
     """
     # FastMCP stores tools in _tool_manager._tools (dict keyed by tool name)
-    tool_manager = getattr(mcp, "_tool_manager", None)
+    tool_manager = getattr(cast(_FastMCPToolManagerLike, mcp), "_tool_manager", None)
     if tool_manager is None:
         logger.warning("Tool filtering enabled but FastMCP tool manager not found")
         return
 
-    tools_registry = getattr(tool_manager, "_tools", None)
+    tools_registry = getattr(cast(_ToolRegistryLike, tool_manager), "_tools", None)
     if tools_registry is None or not isinstance(tools_registry, dict):
         logger.warning("Tool filtering enabled but tool registry not accessible")
         return
