@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import inspect
 from typing import Any, cast
 
@@ -11,7 +10,9 @@ from typing import Any, cast
 # Patch it globally to the inspect implementation before importing submodules.
 asyncio.iscoroutinefunction = cast(Any, inspect.iscoroutinefunction)
 
-_app_module = cast(Any, importlib.import_module(".app", __name__))
-build_mcp_server = _app_module.build_mcp_server
+def build_mcp_server() -> Any:
+    """Lazily import and build the FastMCP server to avoid heavy module import costs."""
+    from .app import build_mcp_server as _build_mcp_server
+    return _build_mcp_server()
 
 __all__ = ["build_mcp_server"]

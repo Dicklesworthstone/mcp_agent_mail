@@ -1,4 +1,17 @@
-"""Filesystem and Git archive helpers for MCP Agent Mail."""
+"""Filesystem and Git archive helpers for MCP Agent Mail.
+
+Concurrency Architecture:
+- Per-project archive locks (.archive.lock) serialize archive mutations
+- Per-project commit locks (.commit.lock) serialize git commit operations
+- Commit queue with batching reduces lock contention under high load
+- Adaptive retry with exponential backoff + jitter for transient failures
+
+Key Design Decisions:
+1. File locks use SoftFileLock (cross-platform, doesn't require OS support)
+2. Lock metadata (.owner.json) enables stale lock detection and cleanup
+3. Process-level asyncio.Lock prevents re-entrant acquisition within same process
+4. Git index.lock errors are retried with exponential backoff + stale cleanup
+"""
 
 from __future__ import annotations
 
@@ -7,12 +20,14 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import os
+import random
 import re
 import sys
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar, cast
@@ -25,8 +40,300 @@ from PIL import Image
 from .config import Settings
 from .utils import validate_thread_id_format
 
+_logger = logging.getLogger(__name__)
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 _SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+# =============================================================================
+# Commit Queue - Batches multiple commits to reduce lock contention
+# =============================================================================
+
+@dataclass
+class _CommitRequest:
+    """A pending commit request in the queue."""
+    repo_root: Path
+    settings: Settings
+    message: str
+    rel_paths: list[str]
+    future: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+    created_at: float = field(default_factory=time.monotonic)
+
+
+class _CommitQueue:
+    """Batches and serializes git commit operations to reduce lock contention.
+
+    Instead of each operation acquiring a lock, performing a commit, and releasing,
+    this queue batches multiple pending commits into a single git operation when
+    the paths don't conflict. This dramatically reduces lock contention under
+    high concurrency.
+
+    Design:
+    - Commits are queued with asyncio.Future for result notification
+    - A background task processes the queue periodically or when full
+    - Non-conflicting commits (different file paths) are batched together
+    - Conflicting commits are processed sequentially
+
+    Usage:
+        queue = _CommitQueue()
+        await queue.start()
+        await queue.enqueue(repo_root, settings, message, rel_paths)
+        await queue.stop()
+    """
+
+    def __init__(
+        self,
+        max_batch_size: int = 10,
+        max_wait_ms: float = 50.0,
+        max_queue_size: int = 100,
+    ) -> None:
+        self._queue: asyncio.Queue[_CommitRequest] = asyncio.Queue(maxsize=max_queue_size)
+        self._max_batch_size = max_batch_size
+        self._max_wait_ms = max_wait_ms
+        self._max_queue_size = max_queue_size
+        self._task: asyncio.Task[None] | None = None
+        self._stopped = False
+        self._lock = asyncio.Lock()
+        self._enqueued = 0
+        self._batched = 0
+        self._commits = 0
+        self._batch_sizes: list[int] = []  # Rolling window of last 100 batch sizes
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        """Return queue statistics for monitoring."""
+        batch_sizes = self._batch_sizes
+        avg_batch = sum(batch_sizes) / len(batch_sizes) if batch_sizes else 0.0
+        return {
+            "enqueued": self._enqueued,
+            "batched": self._batched,
+            "commits": self._commits,
+            "avg_batch_size": round(avg_batch, 2),
+            "queue_size": self._queue.qsize(),
+            "running": self._task is not None and not self._task.done(),
+        }
+
+    async def start(self) -> None:
+        """Start the background queue processor."""
+        if self._task is not None:
+            return
+        self._stopped = False
+        self._task = asyncio.create_task(self._process_loop())
+
+    async def stop(self, timeout: float = 5.0) -> None:
+        """Stop the queue processor, draining pending commits."""
+        self._stopped = True
+        if self._task is not None:
+            # Signal the processor to wake up and check stopped flag
+            try:
+                self._queue.put_nowait(_CommitRequest(
+                    repo_root=Path("/dev/null"),  # Sentinel
+                    settings=None,  # type: ignore
+                    message="",
+                    rel_paths=[],
+                ))
+            except asyncio.QueueFull:
+                pass
+            try:
+                await asyncio.wait_for(self._task, timeout=timeout)
+            except asyncio.TimeoutError:
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+            self._task = None
+
+    async def enqueue(
+        self,
+        repo_root: Path,
+        settings: Settings,
+        message: str,
+        rel_paths: Sequence[str],
+    ) -> None:
+        """Enqueue a commit request and wait for completion.
+
+        Args:
+            repo_root: Path to git repository root
+            settings: Application settings
+            message: Commit message
+            rel_paths: Relative paths to add and commit
+
+        Raises:
+            asyncio.QueueFull: If queue is at capacity
+            Exception: Any exception from the actual commit operation
+        """
+        if not rel_paths:
+            return
+
+        request = _CommitRequest(
+            repo_root=repo_root,
+            settings=settings,
+            message=message,
+            rel_paths=list(rel_paths),
+        )
+        self._enqueued += 1
+
+        # If queue processor isn't running, fall back to direct commit
+        if self._task is None or self._task.done():
+            await _commit_direct(repo_root, settings, message, rel_paths)
+            return
+
+        try:
+            self._queue.put_nowait(request)
+        except asyncio.QueueFull:
+            # Queue is full - fall back to direct commit
+            _logger.warning("commit_queue.full", extra={"queue_size": self._queue.qsize()})
+            await _commit_direct(repo_root, settings, message, rel_paths)
+            return
+
+        # Wait for the commit to complete
+        await request.future
+
+    async def _process_loop(self) -> None:
+        """Background loop that processes queued commits."""
+        while not self._stopped:
+            try:
+                # Wait for first request with timeout
+                try:
+                    first = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=self._max_wait_ms / 1000.0,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                # Skip sentinel requests
+                if first.settings is None:
+                    continue
+
+                # Collect more requests if available (non-blocking)
+                batch = [first]
+                deadline = time.monotonic() + (self._max_wait_ms / 1000.0)
+
+                while len(batch) < self._max_batch_size and time.monotonic() < deadline:
+                    try:
+                        request = self._queue.get_nowait()
+                        if request.settings is not None:  # Skip sentinels
+                            batch.append(request)
+                    except asyncio.QueueEmpty:
+                        # Brief wait to allow more requests to arrive
+                        await asyncio.sleep(0.005)
+                        break
+
+                # Process the batch
+                await self._process_batch(batch)
+
+            except Exception as e:
+                _logger.exception("commit_queue.error", extra={"error": str(e)})
+                await asyncio.sleep(0.1)  # Back off on errors
+
+    async def _process_batch(self, batch: list[_CommitRequest]) -> None:
+        """Process a batch of commit requests.
+
+        Attempts to merge non-conflicting commits into a single git operation.
+        Falls back to sequential commits for conflicts.
+        """
+        if not batch:
+            return
+
+        self._batched += len(batch)
+
+        # Group by repo root (commits to same repo can potentially be batched)
+        by_repo: dict[str, list[_CommitRequest]] = {}
+        for req in batch:
+            key = str(req.repo_root)
+            by_repo.setdefault(key, []).append(req)
+
+        for repo_path, requests in by_repo.items():
+            if len(requests) == 1:
+                # Single request - just commit it directly
+                req = requests[0]
+                try:
+                    await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
+                    req.future.set_result(None)
+                    self._commits += 1
+                except Exception as e:
+                    req.future.set_exception(e)
+            else:
+                # Multiple requests to same repo - try to batch if no path conflicts
+                all_paths: set[str] = set()
+                can_batch = True
+                for req in requests:
+                    path_set = set(req.rel_paths)
+                    if all_paths & path_set:  # Overlap detected
+                        can_batch = False
+                        break
+                    all_paths.update(path_set)
+
+                if can_batch and len(requests) <= 5:  # Only batch small groups
+                    # Merge into single commit
+                    merged_paths: list[str] = []
+                    merged_messages: list[str] = []
+                    for req in requests:
+                        merged_paths.extend(req.rel_paths)
+                        merged_messages.append(req.message.split("\n")[0])  # First line only
+
+                    combined_message = f"batch: {len(requests)} commits\n\n" + "\n".join(
+                        f"- {msg}" for msg in merged_messages
+                    )
+
+                    try:
+                        await _commit_direct(
+                            requests[0].repo_root,
+                            requests[0].settings,
+                            combined_message,
+                            merged_paths,
+                        )
+                        for req in requests:
+                            req.future.set_result(None)
+                        self._commits += 1
+                        # Record batch size
+                        self._batch_sizes.append(len(requests))
+                        if len(self._batch_sizes) > 100:
+                            self._batch_sizes.pop(0)
+                    except Exception as e:
+                        for req in requests:
+                            req.future.set_exception(e)
+                else:
+                    # Process sequentially (conflicts or large batch)
+                    for req in requests:
+                        try:
+                            await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
+                            req.future.set_result(None)
+                            self._commits += 1
+                        except Exception as e:
+                            req.future.set_exception(e)
+
+
+# Global commit queue instance (lazily initialized)
+_COMMIT_QUEUE: _CommitQueue | None = None
+_COMMIT_QUEUE_LOCK: asyncio.Lock | None = None
+
+
+def _get_commit_queue_lock() -> asyncio.Lock:
+    """Get or create commit queue lock."""
+    global _COMMIT_QUEUE_LOCK
+    if _COMMIT_QUEUE_LOCK is None:
+        _COMMIT_QUEUE_LOCK = asyncio.Lock()
+    return _COMMIT_QUEUE_LOCK
+
+
+async def _get_commit_queue() -> _CommitQueue:
+    """Get or create the global commit queue."""
+    global _COMMIT_QUEUE
+    if _COMMIT_QUEUE is not None:
+        return _COMMIT_QUEUE
+    async with _get_commit_queue_lock():
+        if _COMMIT_QUEUE is None:
+            _COMMIT_QUEUE = _CommitQueue()
+            await _COMMIT_QUEUE.start()
+        return _COMMIT_QUEUE
+
+
+def get_commit_queue_stats() -> dict[str, Any]:
+    """Get commit queue statistics for monitoring."""
+    if _COMMIT_QUEUE is None:
+        return {"running": False, "initialized": False}
+    return _COMMIT_QUEUE.stats
 
 
 @dataclass(slots=True)
@@ -300,7 +607,21 @@ def get_repo_cache_stats() -> dict[str, int]:
 
 
 class AsyncFileLock:
-    """Async-friendly wrapper around SoftFileLock with metadata tracking."""
+    """Async-friendly wrapper around SoftFileLock with metadata tracking and adaptive retries.
+
+    Features:
+    - Metadata tracking (.owner.json) enables stale lock detection
+    - Process-level asyncio.Lock prevents re-entrant acquisition
+    - Adaptive retry with exponential backoff on acquisition failure
+    - Stale lock cleanup when owner process is dead or lock is too old
+
+    Adaptive Timeout Strategy:
+    - Initial attempt uses short timeout (10% of total)
+    - Failed attempts trigger stale lock cleanup check
+    - Subsequent attempts use progressively longer timeouts
+    - This allows fast acquisition when lock is free while still handling
+      edge cases like stale locks or slow I/O
+    """
 
     def __init__(
         self,
@@ -308,20 +629,40 @@ class AsyncFileLock:
         *,
         timeout_seconds: float = 60.0,
         stale_timeout_seconds: float = 180.0,
+        max_retries: int = 5,
     ) -> None:
         self._path = Path(path)
         self._lock = SoftFileLock(str(self._path))
         self._timeout = float(timeout_seconds)
         self._stale_timeout = float(max(stale_timeout_seconds, 0.0))
+        self._max_retries = max_retries
         self._pid = os.getpid()
         self._metadata_path = self._path.parent / f"{self._path.name}.owner.json"
         self._held = False
         self._lock_key = str(self._path.resolve())
+        self._acquisition_start: float | None = None
+        self._acquisition_attempts: int = 0
         self._loop_key: tuple[int, str] | None = None
         self._process_lock: asyncio.Lock | None = None
         self._process_lock_held = False
 
     async def __aenter__(self) -> None:
+        """Acquire the file lock with adaptive retry and stale lock detection.
+
+        Adaptive Retry Strategy:
+        1. First attempt: Short timeout (10% of total) - fast path for uncontested locks
+        2. On timeout: Check for stale locks and clean up if found
+        3. Subsequent attempts: Exponential backoff with longer per-attempt timeouts
+        4. Final attempt: Full remaining timeout
+
+        This strategy optimizes for:
+        - Fast acquisition when lock is free (common case)
+        - Graceful handling of stale locks from crashed processes
+        - Avoiding thundering herd with jittered backoff
+        """
+        self._acquisition_start = time.monotonic()
+        self._acquisition_attempts = 0
+
         loop = asyncio.get_running_loop()
         self._loop_key = (id(loop), self._lock_key)
         process_lock = _PROCESS_LOCKS.get(self._loop_key)
@@ -338,23 +679,85 @@ class AsyncFileLock:
         self._process_lock_held = True
         _PROCESS_LOCK_OWNERS[self._loop_key] = current_task_id
         try:
-            while True:
+            total_timeout = self._timeout if self._timeout > 0 else 60.0
+            remaining = total_timeout
+
+            for attempt in range(self._max_retries + 1):
+                self._acquisition_attempts = attempt + 1
+
+                # Adaptive timeout per attempt:
+                # - First attempt: 10% of total (fast path)
+                # - Middle attempts: progressively longer
+                # - Last attempt: all remaining time
+                if attempt == 0:
+                    per_attempt_timeout = min(total_timeout * 0.1, 5.0)  # 10%, max 5s
+                elif attempt == self._max_retries:
+                    per_attempt_timeout = remaining  # Use all remaining
+                else:
+                    # Exponential growth: 0.5s, 1s, 2s, 4s, ...
+                    per_attempt_timeout = min(0.5 * (2 ** attempt), remaining)
+
                 try:
                     if self._timeout <= 0:
                         await _to_thread(self._lock.acquire)
                     else:
-                        await _to_thread(self._lock.acquire, self._timeout)
+                        await _to_thread(self._lock.acquire, per_attempt_timeout)
                     self._held = True
                     await _to_thread(self._write_metadata)
-                    break
+
+                    # Log successful acquisition if it took retries
+                    if attempt > 0:
+                        elapsed = time.monotonic() - self._acquisition_start
+                        _logger.info(
+                            "file_lock.acquired_after_retry",
+                            extra={
+                                "path": str(self._path),
+                                "attempts": attempt + 1,
+                                "elapsed_seconds": round(elapsed, 2),
+                            },
+                        )
+                    return None
+
                 except Timeout:
+                    elapsed = time.monotonic() - self._acquisition_start
+                    remaining = total_timeout - elapsed
+
+                    if remaining <= 0 or attempt >= self._max_retries:
+                        # Final attempt failed - try one last stale cleanup
+                        cleaned = await _to_thread(self._cleanup_if_stale)
+                        if cleaned:
+                            # Stale lock was cleaned - try once more with short timeout
+                            try:
+                                await _to_thread(self._lock.acquire, 1.0)
+                                self._held = True
+                                await _to_thread(self._write_metadata)
+                                _logger.info(
+                                    "file_lock.acquired_after_stale_cleanup",
+                                    extra={"path": str(self._path)},
+                                )
+                                return None
+                            except Timeout:
+                                pass  # Fall through to timeout error
+                        raise TimeoutError(
+                            f"Timed out acquiring lock {self._path} after {elapsed:.2f}s "
+                            f"({attempt + 1} attempts). No stale owner detected."
+                        ) from None
+
+                    # Check for stale lock before retrying
                     cleaned = await _to_thread(self._cleanup_if_stale)
                     if cleaned:
+                        _logger.info(
+                            "file_lock.stale_cleaned",
+                            extra={"path": str(self._path), "attempt": attempt + 1},
+                        )
+                        # Don't add backoff delay - immediately retry after cleanup
                         continue
-                    raise TimeoutError(
-                        f"Timed out acquiring lock {self._path} after {self._timeout:.2f}s "
-                        "and no stale owner detected."
-                    ) from None
+
+                    # Add jittered backoff before retry (0.05s to 0.5s)
+                    backoff = min(0.05 * (2 ** attempt), 0.5)
+                    jitter = backoff * 0.25 * (2 * random.random() - 1)
+                    await asyncio.sleep(backoff + jitter)
+
         except BaseException:
             # Best-effort cleanup on any failure (including cancellation) to avoid leaking
             # lock file handles and process-level locks.
@@ -390,7 +793,6 @@ class AsyncFileLock:
                 _PROCESS_LOCKS.pop(self._loop_key, None)
             self._process_lock = None
             raise
-        return None
 
     def _cleanup_if_stale(self) -> bool:
         """Remove lock and metadata when the lock is stale.
@@ -1303,10 +1705,34 @@ class GitIndexLockError(Exception):
         self.attempts = attempts
 
 
-async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
+async def _commit_direct(
+    repo_root: Path,
+    settings: Settings,
+    message: str,
+    rel_paths: Sequence[str],
+) -> None:
+    """Perform a git commit directly without queue batching.
+
+    This is the core commit implementation used by both the commit queue
+    and direct commits. It handles:
+    - Git index.lock contention with exponential backoff
+    - Stale lock cleanup
+    - EMFILE recovery
+    - Trailer injection for agent/thread metadata
+
+    Args:
+        repo_root: Path to the git repository root
+        settings: Application settings
+        message: Commit message
+        rel_paths: Relative paths to add and commit
+    """
+    import errno
+
     if not rel_paths:
         return
+
     actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
+    repo = Repo(str(repo_root))
 
     def _perform_commit(target_repo: Repo) -> None:
         target_repo.index.add(rel_paths)
@@ -1338,16 +1764,10 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
             target_repo.index.commit(final_message, author=actor, committer=actor)
 
-    # Serialize commits across all projects sharing the same Git repo to avoid index races
-    working_tree = repo.working_tree_dir
-    if working_tree is None:
-        raise ValueError("Repository has no working tree directory")
-    repo_root = Path(working_tree).resolve()
     commit_lock_path = _commit_lock_path(repo_root, rel_paths)
     await _to_thread(commit_lock_path.parent.mkdir, parents=True, exist_ok=True)
-    async with AsyncFileLock(commit_lock_path):
-        import errno
 
+    async with AsyncFileLock(commit_lock_path):
         attempt_repo = repo
         # Maximum retries for git index.lock contention (happens with concurrent agents)
         max_index_lock_retries = 5
@@ -1374,7 +1794,7 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
                     await asyncio.sleep(0.05)
                     with contextlib.suppress(Exception):
                         attempt_repo.close()
-                    attempt_repo = Repo(str(Path(working_tree).resolve()))
+                    attempt_repo = Repo(str(repo_root))
                     continue
 
                 # Handle git index.lock contention (concurrent git operations)
@@ -1428,6 +1848,47 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
         if attempt_repo is not repo:
             with contextlib.suppress(Exception):
                 attempt_repo.close()
+
+    # Close the repo we opened
+    with contextlib.suppress(Exception):
+        repo.close()
+
+
+async def _commit(
+    repo: Repo,
+    settings: Settings,
+    message: str,
+    rel_paths: Sequence[str],
+    *,
+    use_queue: bool = True,
+) -> None:
+    """Commit changes to a git repository.
+
+    This is the main entry point for committing changes. It wraps _commit_direct
+    and optionally uses the commit queue for batching under high load.
+
+    Args:
+        repo: Git repository object
+        settings: Application settings
+        message: Commit message
+        rel_paths: Relative paths to add and commit
+        use_queue: If True, use commit queue for potential batching (default True)
+    """
+    if not rel_paths:
+        return
+
+    working_tree = repo.working_tree_dir
+    if working_tree is None:
+        raise ValueError("Repository has no working tree directory")
+    repo_root = Path(working_tree).resolve()
+
+    if use_queue:
+        # Use commit queue for batching under high load
+        queue = await _get_commit_queue()
+        await queue.enqueue(repo_root, settings, message, rel_paths)
+    else:
+        # Direct commit without queue
+        await _commit_direct(repo_root, settings, message, rel_paths)
 
 
 async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
