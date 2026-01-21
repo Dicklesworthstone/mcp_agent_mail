@@ -20,7 +20,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from mcp_agent_mail import config as _config
-from mcp_agent_mail.app import _sanitize_fts_query, build_mcp_server
+from mcp_agent_mail.app import _quote_hyphenated_tokens, _sanitize_fts_query, build_mcp_server
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.http import build_http_app
 from mcp_agent_mail.models import Agent, Project
@@ -106,6 +106,74 @@ class TestFTSQuerySanitization:
         """Quoted phrases are preserved."""
         assert _sanitize_fts_query('"hello world"') == '"hello world"'
         assert _sanitize_fts_query('"test phrase"') == '"test phrase"'
+
+    def test_sanitize_hyphenated_tokens(self):
+        """Hyphenated tokens are auto-quoted to prevent FTS5 syntax errors."""
+        # Single hyphenated token (like ticket IDs)
+        assert _sanitize_fts_query("POL-358") == '"POL-358"'
+        assert _sanitize_fts_query("FEAT-123") == '"FEAT-123"'
+        assert _sanitize_fts_query("bd-42") == '"bd-42"'
+
+        # Multiple hyphens
+        assert _sanitize_fts_query("foo-bar-baz") == '"foo-bar-baz"'
+
+        # Multiple hyphenated tokens
+        assert _sanitize_fts_query("POL-358 FEAT-123") == '"POL-358" "FEAT-123"'
+
+        # Mixed tokens (hyphenated and regular)
+        assert _sanitize_fts_query("search POL-358 plan") == 'search "POL-358" plan'
+
+    def test_sanitize_already_quoted_hyphenated(self):
+        """Already quoted hyphenated tokens are not double-quoted."""
+        assert _sanitize_fts_query('"POL-358"') == '"POL-358"'
+        assert _sanitize_fts_query('"FEAT-123"') == '"FEAT-123"'
+
+    def test_sanitize_no_hyphen_unchanged(self):
+        """Tokens without hyphens are not modified."""
+        assert _sanitize_fts_query("hello") == "hello"
+        assert _sanitize_fts_query("hello world") == "hello world"
+
+
+class TestQuoteHyphenatedTokens:
+    """Test hyphenated token quoting helper function."""
+
+    def test_quote_simple_hyphenated(self):
+        """Simple hyphenated tokens are quoted."""
+        assert _quote_hyphenated_tokens("POL-358") == '"POL-358"'
+        assert _quote_hyphenated_tokens("FEAT-123") == '"FEAT-123"'
+        assert _quote_hyphenated_tokens("bd-42") == '"bd-42"'
+        assert _quote_hyphenated_tokens("A-1") == '"A-1"'
+
+    def test_quote_multiple_hyphens(self):
+        """Tokens with multiple hyphens are quoted."""
+        assert _quote_hyphenated_tokens("foo-bar-baz") == '"foo-bar-baz"'
+        assert _quote_hyphenated_tokens("a-b-c-d") == '"a-b-c-d"'
+
+    def test_quote_multiple_tokens(self):
+        """Multiple hyphenated tokens in a query are all quoted."""
+        assert _quote_hyphenated_tokens("POL-358 FEAT-123") == '"POL-358" "FEAT-123"'
+        assert _quote_hyphenated_tokens("search POL-358") == 'search "POL-358"'
+
+    def test_no_quote_already_quoted(self):
+        """Already quoted tokens are not double-quoted."""
+        assert _quote_hyphenated_tokens('"POL-358"') == '"POL-358"'
+        assert _quote_hyphenated_tokens('"already-quoted"') == '"already-quoted"'
+
+    def test_no_quote_no_hyphen(self):
+        """Tokens without hyphens are unchanged."""
+        assert _quote_hyphenated_tokens("hello") == "hello"
+        assert _quote_hyphenated_tokens("hello world") == "hello world"
+        assert _quote_hyphenated_tokens("test123") == "test123"
+
+    def test_empty_and_none_input(self):
+        """Empty string is returned as-is."""
+        assert _quote_hyphenated_tokens("") == ""
+
+    def test_no_quote_trailing_hyphen(self):
+        """Tokens with trailing hyphens are not quoted (not valid hyphenated tokens)."""
+        # These don't match the pattern: alphanumeric-alphanumeric
+        result = _quote_hyphenated_tokens("foo-")
+        assert result == "foo-"  # No quote because pattern needs alphanumeric after hyphen
 
 
 # =============================================================================

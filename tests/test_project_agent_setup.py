@@ -161,6 +161,47 @@ async def test_project_slug_generated_from_human_key(isolated_env):
         assert "myapp" in slug.lower() or "my-app" in slug.lower() or "data" in slug.lower()
 
 
+@pytest.mark.asyncio
+async def test_ensure_project_resolves_symlinks(isolated_env, tmp_path):
+    """ensure_project resolves symlinks to canonical paths.
+
+    This ensures that /dp/ntm and /data/projects/ntm resolve to the same
+    project when /dp is a symlink to /data/projects.
+    """
+    import os
+
+    # Create a real directory and a symlink to it
+    real_dir = tmp_path / "real_project"
+    real_dir.mkdir()
+    symlink_dir = tmp_path / "symlink_project"
+    symlink_dir.symlink_to(real_dir)
+
+    real_path = str(real_dir.resolve())
+    symlink_path = str(symlink_dir)
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        # Create project via symlink path
+        result1 = await client.call_tool(
+            "ensure_project", {"human_key": symlink_path}
+        )
+
+        # The stored human_key should be the resolved (canonical) path
+        assert result1.data["human_key"] == real_path, \
+            f"human_key should be resolved path {real_path}, got {result1.data['human_key']}"
+
+        # Create project via real path - should return same project
+        result2 = await client.call_tool(
+            "ensure_project", {"human_key": real_path}
+        )
+
+        # Should be the same project
+        assert result1.data["id"] == result2.data["id"], \
+            "Symlink and real path should resolve to same project"
+        assert result1.data["slug"] == result2.data["slug"], \
+            "Symlink and real path should have same slug"
+
+
 # ============================================================================
 # Test: register_agent
 # ============================================================================
