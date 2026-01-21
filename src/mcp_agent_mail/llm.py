@@ -22,7 +22,6 @@ from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
 
-_router: Optional[Any] = None
 _init_lock = asyncio.Lock()
 _initialized: bool = False
 _logger = structlog.get_logger(__name__)
@@ -83,7 +82,7 @@ def _setup_callbacks() -> None:
 
 
 async def _ensure_initialized() -> None:
-    global _router, _initialized
+    global _initialized
     if _initialized:
         return
     async with _init_lock:
@@ -122,11 +121,6 @@ async def _ensure_initialized() -> None:
                     litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
 
         _setup_callbacks()
-
-        # Skip Router initialization - we use direct litellm.completion() calls.
-        # Router is designed for load balancing across multiple deployments with a model_list,
-        # but we're just using single API keys, so direct completion is simpler and works fine.
-        _router = None
         _initialized = True
 
 
@@ -172,9 +166,9 @@ def _resolve_model_alias(name: str) -> str:
 async def complete_system_user(system: str, user: str, *, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> LlmOutput:
     """Chat completion helper returning content.
 
-    Falls back to litellm.completion if Router isn't available.
+    Uses direct litellm.completion() calls. Falls back to alternative models
+    if the primary model fails and an alternative provider is available.
     """
-    global _router
     await _ensure_initialized()
     settings = get_settings()
     use_model = model or settings.llm.default_model
@@ -187,33 +181,20 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         {"role": "user", "content": user},
     ]
 
-    def _call_router(router: Any) -> Any:
-        return router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
-
-    def _call_direct() -> Any:
-        return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+    def _call_completion(m: str) -> Any:
+        return litellm.completion(model=m, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp: Any
     try:
-        if _router is not None:
-            current_router = _router
-            resp = await asyncio.to_thread(lambda: _call_router(current_router))
-        else:
-            resp = await asyncio.to_thread(_call_direct)
+        resp = await asyncio.to_thread(_call_completion, use_model)
     except Exception as err:
-        # Fallback to direct completion if Router path fails (e.g., no deployments)
-        _router = None
-        _logger.debug("litellm.router.disabled_after_failure")
-        try:
-            resp = await asyncio.to_thread(_call_direct)
-        except Exception:
-            # As a last resort, try with a provider-backed small model if available
-            alt_model = _choose_best_available_model(use_model)
-            if alt_model != use_model:
-                use_model = alt_model
-                resp = await asyncio.to_thread(lambda: litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
-            else:
-                raise err from None
+        # As a fallback, try with a provider-backed small model if available
+        alt_model = _choose_best_available_model(use_model)
+        if alt_model != use_model:
+            use_model = alt_model
+            resp = await asyncio.to_thread(_call_completion, use_model)
+        else:
+            raise err from None
 
     # Normalize content across potential shapes
     content: str

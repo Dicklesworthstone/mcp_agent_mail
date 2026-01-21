@@ -800,19 +800,24 @@ async def write_message_bundle(
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
     now: datetime
+    timestamp_str: str  # Always define to avoid UnboundLocalError
     if isinstance(timestamp_obj, datetime):
         now = timestamp_obj
+        timestamp_str = now.isoformat()
     elif isinstance(timestamp_obj, str) and timestamp_obj.strip():
         timestamp_str = timestamp_obj.strip()
         # Handle Z-suffixed timestamps (ISO 8601 UTC indicator)
-        if timestamp_str.endswith("Z"):
-            timestamp_str = timestamp_str[:-1] + "+00:00"
+        parse_str = timestamp_str
+        if parse_str.endswith("Z"):
+            parse_str = parse_str[:-1] + "+00:00"
         try:
-            now = datetime.fromisoformat(timestamp_str)
+            now = datetime.fromisoformat(parse_str)
         except ValueError:
             now = datetime.now(timezone.utc)
+            timestamp_str = now.isoformat()
     else:
         now = datetime.now(timezone.utc)
+        timestamp_str = now.isoformat()
 
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
         # Treat naive timestamps as UTC (matches SQLite naive-UTC convention)
