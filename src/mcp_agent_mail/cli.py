@@ -149,14 +149,29 @@ app.add_typer(doctor_app, name="doctor")
 
 
 async def _get_project_record(identifier: str) -> Project:
-    slug = slugify(identifier)
+    raw_identifier = identifier.strip()
+    canonical_identifier = raw_identifier
+    # Resolve absolute paths to canonical form so symlink aliases map to one project.
+    try:
+        candidate = Path(raw_identifier).expanduser()
+        if candidate.is_absolute():
+            canonical_identifier = str(candidate.resolve())
+    except Exception:
+        canonical_identifier = raw_identifier
+    slug = slugify(canonical_identifier)
     await ensure_schema()
     async with get_session() as session:
-        stmt = select(Project).where(or_(cast(ColumnElement[bool], Project.slug == slug), cast(ColumnElement[bool], Project.human_key == identifier)))
+        stmt = select(Project).where(
+            or_(
+                cast(ColumnElement[bool], Project.slug == slug),
+                cast(ColumnElement[bool], Project.human_key == canonical_identifier),
+                cast(ColumnElement[bool], Project.human_key == raw_identifier),
+            )
+        )
         result = await session.execute(stmt)
         project = result.scalars().first()
         if not project:
-            raise ValueError(f"Project '{identifier}' not found")
+            raise ValueError(f"Project '{raw_identifier}' not found")
         return project
 
 
@@ -3796,11 +3811,11 @@ def list_acks(
     async def _collect() -> list[tuple[Message, str]]:
         await ensure_schema()
         async with get_session() as session:
-            # Resolve project and agent
-            proj_result = await session.execute(select(Project).where(or_(cast(ColumnElement[bool], Project.slug == slugify(project_key)), cast(ColumnElement[bool], Project.human_key == project_key))))
-            project = proj_result.scalars().first()
-            if not project:
-                raise typer.BadParameter(f"Project not found for key: {project_key}")
+            # Resolve project and agent (canonicalize symlink paths)
+            try:
+                project = await _get_project_record(project_key)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc)) from exc
             assert project.id is not None
             agent_result = await session.execute(
                 select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == project.id), func.lower(Agent.name) == agent_name.lower()))

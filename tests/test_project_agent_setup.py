@@ -168,7 +168,6 @@ async def test_ensure_project_resolves_symlinks(isolated_env, tmp_path):
     This ensures that /dp/ntm and /data/projects/ntm resolve to the same
     project when /dp is a symlink to /data/projects.
     """
-    import os
 
     # Create a real directory and a symlink to it
     real_dir = tmp_path / "real_project"
@@ -200,6 +199,16 @@ async def test_ensure_project_resolves_symlinks(isolated_env, tmp_path):
             "Symlink and real path should resolve to same project"
         assert result1.data["slug"] == result2.data["slug"], \
             "Symlink and real path should have same slug"
+
+        # Register an agent via the symlinked project_key and ensure it lands on the canonical project
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": symlink_path, "program": "test-program", "model": "test-model"},
+        )
+        project = await get_project_from_db(real_path)
+        assert project is not None, "Canonical project should exist"
+        agent = await get_agent_from_db(project["id"], agent_result.data["name"])
+        assert agent is not None, "Agent registered via symlink should attach to canonical project"
 
 
 # ============================================================================

@@ -1844,6 +1844,16 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             data={"parameter": "project_key", "provided": repr(identifier)},
         )
 
+    raw_identifier = identifier.strip()
+    canonical_identifier = raw_identifier
+    # Resolve absolute paths to canonical form so symlink aliases map to one project.
+    try:
+        candidate = Path(raw_identifier).expanduser()
+        if candidate.is_absolute():
+            canonical_identifier = str(candidate.resolve())
+    except Exception:
+        canonical_identifier = raw_identifier
+
     # Detect common placeholder patterns - these indicate unconfigured hooks/settings
     _placeholder_patterns = [
         "YOUR_PROJECT",
@@ -1854,7 +1864,7 @@ async def _get_project_by_identifier(identifier: str) -> Project:
         "{PROJECT}",
         "$PROJECT",
     ]
-    identifier_upper = identifier.upper().strip()
+    identifier_upper = raw_identifier.upper()
     for pattern in _placeholder_patterns:
         if pattern in identifier_upper or identifier_upper == pattern:
             raise ToolExecutionError(
@@ -1872,25 +1882,33 @@ async def _get_project_by_identifier(identifier: str) -> Project:
                 },
             )
 
-    slug = slugify(identifier)
+    slug = slugify(canonical_identifier)
     async with get_session() as session:
-        result = await session.execute(select(Project).where(Project.slug == slug))
+        result = await session.execute(
+            select(Project).where(
+                or_(
+                    Project.slug == slug,
+                    Project.human_key == canonical_identifier,
+                    Project.human_key == raw_identifier,
+                )
+            )
+        )
         project = result.scalars().first()
         if project:
             return project
 
     # Project not found - provide helpful suggestions
-    suggestions = await _find_similar_projects(identifier)
+    suggestions = await _find_similar_projects(raw_identifier)
 
     if suggestions:
         suggestion_text = ", ".join([f"'{s[0]}'" for s in suggestions[:3]])
         raise ToolExecutionError(
             "NOT_FOUND",
-            f"Project '{identifier}' not found. Did you mean: {suggestion_text}? "
+            f"Project '{raw_identifier}' not found. Did you mean: {suggestion_text}? "
             f"Use ensure_project to create a new project, or check spelling.",
             recoverable=True,
             data={
-                "identifier": identifier,
+                "identifier": raw_identifier,
                 "slug_searched": slug,
                 "suggestions": [{"slug": s[0], "human_key": s[1], "score": round(s[2], 2)} for s in suggestions],
             },
@@ -1898,11 +1916,11 @@ async def _get_project_by_identifier(identifier: str) -> Project:
     else:
         raise ToolExecutionError(
             "NOT_FOUND",
-            f"Project '{identifier}' not found and no similar projects exist. "
+            f"Project '{raw_identifier}' not found and no similar projects exist. "
             f"Use ensure_project to create a new project first. "
             f"Example: ensure_project(human_key='/path/to/your/project')",
             recoverable=True,
-            data={"identifier": identifier, "slug_searched": slug},
+            data={"identifier": raw_identifier, "slug_searched": slug},
         )
 
 
