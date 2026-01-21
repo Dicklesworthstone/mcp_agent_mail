@@ -1247,6 +1247,57 @@ def _commit_lock_path(repo_root: Path, rel_paths: Sequence[str]) -> Path:
     return repo_root / ".commit.lock"
 
 
+def _is_git_index_lock_error(exc: BaseException) -> bool:
+    """Check if exception is a git index.lock contention error.
+
+    Git uses .git/index.lock for atomic index operations. When multiple
+    processes/threads try to modify the index concurrently, the second one
+    gets FileExistsError (errno 17) or an OSError wrapping it.
+    """
+    # Direct FileExistsError
+    if isinstance(exc, FileExistsError) and exc.errno == 17:
+        return True
+    # OSError wrapping FileExistsError from gitdb.util.LockedFD
+    if isinstance(exc, OSError):
+        err_str = str(exc).lower()
+        if "index.lock" in err_str or "lock at" in err_str:
+            return True
+        # Check __cause__ chain
+        cause = exc.__cause__
+        if cause is not None and _is_git_index_lock_error(cause):
+            return True
+    return False
+
+
+def _try_clean_stale_git_lock(repo_root: Path, max_age_seconds: float = 300.0) -> bool:
+    """Attempt to remove a stale .git/index.lock file.
+
+    Returns True if a stale lock was removed, False otherwise.
+    Only removes locks older than max_age_seconds to avoid removing active locks.
+    """
+    lock_path = repo_root / ".git" / "index.lock"
+    if not lock_path.exists():
+        return False
+    try:
+        mtime = lock_path.stat().st_mtime
+        age = time.time() - mtime
+        if age > max_age_seconds:
+            lock_path.unlink(missing_ok=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+class GitIndexLockError(Exception):
+    """Raised when git index.lock contention cannot be resolved after retries."""
+
+    def __init__(self, message: str, lock_path: Path, attempts: int):
+        super().__init__(message)
+        self.lock_path = lock_path
+        self.attempts = attempts
+
+
 async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
     if not rel_paths:
         return
@@ -1281,6 +1332,7 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             if trailers:
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
             target_repo.index.commit(final_message, author=actor, committer=actor)
+
     # Serialize commits across all projects sharing the same Git repo to avoid index races
     working_tree = repo.working_tree_dir
     if working_tree is None:
@@ -1292,27 +1344,82 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
         import errno
 
         attempt_repo = repo
-        for attempt in range(2):
+        # Maximum retries for git index.lock contention (happens with concurrent agents)
+        max_index_lock_retries = 5
+        index_lock_attempts = 0
+        last_index_lock_exc: OSError | None = None
+        did_last_resort_clean = False
+
+        # +2 to allow: normal retries + 1 potential EMFILE recovery + 1 last resort after stale lock clean
+        for attempt in range(max(2, max_index_lock_retries + 2)):
             try:
                 await _to_thread(_perform_commit, attempt_repo)
                 break
             except OSError as exc:
-                if exc.errno != errno.EMFILE or attempt >= 1:
-                    raise
-                # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
-                # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
-                with contextlib.suppress(Exception):
-                    clear_repo_cache()
-                with contextlib.suppress(Exception):
-                    import gc
+                # Handle EMFILE (too many open files)
+                if exc.errno == errno.EMFILE and attempt < 1:
+                    # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
+                    # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
+                    with contextlib.suppress(Exception):
+                        clear_repo_cache()
+                    with contextlib.suppress(Exception):
+                        import gc
 
-                    gc.collect()
-                await asyncio.sleep(0.05)
-                with contextlib.suppress(Exception):
-                    attempt_repo.close()
-                attempt_repo = Repo(str(Path(working_tree).resolve()))
+                        gc.collect()
+                    await asyncio.sleep(0.05)
+                    with contextlib.suppress(Exception):
+                        attempt_repo.close()
+                    attempt_repo = Repo(str(Path(working_tree).resolve()))
+                    continue
+
+                # Handle git index.lock contention (concurrent git operations)
+                if _is_git_index_lock_error(exc):
+                    index_lock_attempts += 1
+                    last_index_lock_exc = exc
+
+                    if index_lock_attempts > max_index_lock_retries:
+                        # Already exhausted normal retries
+                        if not did_last_resort_clean:
+                            # Try cleaning stale lock as last resort (lower threshold: 60s instead of 5min)
+                            cleaned = _try_clean_stale_git_lock(repo_root, max_age_seconds=60.0)
+                            if cleaned:
+                                did_last_resort_clean = True
+                                continue  # Try one more time after cleaning
+                        # Give up with a helpful error
+                        lock_path = repo_root / ".git" / "index.lock"
+                        raise GitIndexLockError(
+                            f"Git index.lock contention after {index_lock_attempts} retries. "
+                            f"Another git operation may be in progress. "
+                            f"If this persists, manually remove: {lock_path}",
+                            lock_path=lock_path,
+                            attempts=index_lock_attempts,
+                        ) from exc
+
+                    # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
+                    # (index_lock_attempts is 1-indexed here, so 2^0=1 -> 0.1s first)
+                    delay = 0.1 * (2 ** (index_lock_attempts - 1))
+                    await asyncio.sleep(delay)
+
+                    # Try cleaning stale lock (only if older than 5 minutes)
+                    with contextlib.suppress(Exception):
+                        _try_clean_stale_git_lock(repo_root, max_age_seconds=300.0)
+                    continue
+
+                # Other OSError - re-raise
+                raise
         else:
-            raise RuntimeError("git commit failed after EMFILE recovery attempts")
+            # Loop exhausted without break - should only happen for unexpected error patterns
+            if last_index_lock_exc is not None:
+                lock_path = repo_root / ".git" / "index.lock"
+                raise GitIndexLockError(
+                    f"Git index.lock contention after {index_lock_attempts} retries. "
+                    f"Another git operation may be in progress. "
+                    f"If this persists, manually remove: {lock_path}",
+                    lock_path=lock_path,
+                    attempts=index_lock_attempts,
+                ) from last_index_lock_exc
+            raise RuntimeError("git commit failed after recovery attempts")
+
         if attempt_repo is not repo:
             with contextlib.suppress(Exception):
                 attempt_repo.close()
