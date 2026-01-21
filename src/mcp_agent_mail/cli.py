@@ -44,7 +44,7 @@ from sqlalchemy.sql import ColumnElement
 
 from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
-from .db import ensure_schema, get_session
+from .db import ensure_schema, get_session, reset_database_state
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import Agent, FileReservation, Message, MessageRecipient, Product, ProductProjectLink, Project
@@ -641,6 +641,13 @@ def serve_http(
     # Display awesome startup banner with database stats
     from . import rich_logger
     rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
+
+    # Reset database state after startup banner to prevent connection leak.
+    # The banner's _get_database_stats() uses asyncio.run() which creates connections
+    # on a temporary event loop. When uvicorn starts with its own loop, those
+    # connections become orphaned and cause SQLAlchemy GC warnings. Resetting
+    # here ensures fresh connections are created on the main event loop.
+    reset_database_state()
 
     server = build_mcp_server()
     app = build_http_app(settings, server)
