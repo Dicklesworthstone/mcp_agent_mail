@@ -242,6 +242,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         max_overflow=max_overflow,
         pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
+        pool_reset_on_return="rollback",  # Ensure uncommitted transactions are rolled back on return
         connect_args=connect_args,
     )
 
@@ -335,6 +336,17 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 @asynccontextmanager
 async def get_session() -> AsyncIterator[AsyncSession]:
+    """Provide an async database session with guaranteed cleanup.
+
+    This context manager ensures the session is always closed, even under task
+    cancellation. Uses asyncio.shield() to prevent cancellation from interrupting
+    the close operation.
+
+    Note: We do NOT call session.rollback() here because that would expire all
+    loaded objects, causing DetachedInstanceError when code tries to access
+    attributes after the session closes. The pool_reset_on_return='rollback'
+    setting handles uncommitted transactions at the pool level instead.
+    """
     factory = get_session_factory()
     session = factory()
     try:
