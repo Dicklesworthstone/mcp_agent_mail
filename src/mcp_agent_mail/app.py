@@ -1112,6 +1112,48 @@ _FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?"
 _LIKE_FALLBACK_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}")
 _LIKE_FALLBACK_STOPWORDS = frozenset({"AND", "OR", "NOT", "NEAR"})
 
+# Regex to detect hyphenated tokens that need quoting for FTS5
+# Matches: POL-358, FEAT-123, foo-bar-baz, A-1
+# Does not match: already-in-quotes, has spaces, etc.
+_FTS5_HYPHENATED_TOKEN_RE = re.compile(r"(?<!\")([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)(?!\")")
+
+
+def _quote_hyphenated_tokens(query: str) -> str:
+    """Quote hyphenated tokens in an FTS5 query to treat hyphens as literals.
+
+    FTS5 interprets hyphens as syntax operators. This function detects
+    hyphenated tokens (like POL-358, FEAT-123) that are not already quoted
+    and wraps them in double quotes for literal matching.
+
+    Parameters
+    ----------
+    query : str
+        The FTS5 query string.
+
+    Returns
+    -------
+    str
+        The query with hyphenated tokens quoted.
+
+    Examples
+    --------
+    >>> _quote_hyphenated_tokens("POL-358")
+    '"POL-358"'
+    >>> _quote_hyphenated_tokens("search for FEAT-123 and bd-42")
+    'search for "FEAT-123" and "bd-42"'
+    >>> _quote_hyphenated_tokens('"already-quoted"')
+    '"already-quoted"'
+    """
+    if not query or "-" not in query:
+        return query
+
+    # Don't modify queries that are entirely within quotes
+    if query.startswith('"') and query.endswith('"') and query.count('"') == 2:
+        return query
+
+    # Replace unquoted hyphenated tokens with quoted versions
+    return _FTS5_HYPHENATED_TOKEN_RE.sub(r'"\1"', query)
+
 
 def _like_escape(term: str) -> str:
     """Escape LIKE wildcards for literal substring matching."""
@@ -1146,6 +1188,8 @@ def _sanitize_fts_query(query: str) -> str | None:
     - Strips whitespace
     - Removes leading bare `*` (keeps `term*` prefix patterns)
     - Converts unsearchable patterns to None (empty results)
+    - Quotes hyphenated tokens (e.g., POL-358 → "POL-358") to prevent FTS5
+      from interpreting the hyphen as a syntax operator
 
     Parameters
     ----------
@@ -1193,6 +1237,10 @@ def _sanitize_fts_query(query: str) -> str | None:
 
     # Multiple consecutive spaces -> single space
     trimmed = re.sub(r" {2,}", " ", trimmed)
+
+    # Quote hyphenated tokens to prevent FTS5 from interpreting hyphens as operators
+    # e.g., "POL-358" would otherwise fail with "no such column: 358"
+    trimmed = _quote_hyphenated_tokens(trimmed)
 
     return trimmed if trimmed else None
 
@@ -1695,6 +1743,9 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
 
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
+    # Resolve symlinks to canonical path so /dp/ntm and /data/projects/ntm
+    # resolve to the same project identity
+    human_key = str(Path(human_key).resolve())
     slug = _compute_project_slug(human_key)
     for attempt in range(6):
         try:
