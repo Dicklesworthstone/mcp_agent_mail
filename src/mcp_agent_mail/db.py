@@ -230,8 +230,9 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         }
 
     # SQLite has low write concurrency; large pools can exhaust FDs under stress tests.
-    pool_size = 5 if is_sqlite else 25
-    max_overflow = 5 if is_sqlite else 25
+    pool_size = settings.pool_size if settings.pool_size is not None else (5 if is_sqlite else 25)
+    max_overflow = settings.max_overflow if settings.max_overflow is not None else (5 if is_sqlite else 25)
+    pool_timeout = settings.pool_timeout if settings.pool_timeout is not None else 30
 
     engine = create_async_engine(
         settings.url,
@@ -240,7 +241,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         pool_pre_ping=True,
         pool_size=pool_size,
         max_overflow=max_overflow,
-        pool_timeout=30,  # Fail fast with clear error instead of hanging indefinitely
+        pool_timeout=pool_timeout,  # Fail fast with clear error instead of hanging indefinitely
         pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale handles
         pool_reset_on_return="rollback",  # Ensure uncommitted transactions are rolled back on return
         connect_args=connect_args,

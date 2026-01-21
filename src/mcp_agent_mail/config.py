@@ -74,6 +74,9 @@ class DatabaseSettings:
 
     url: str
     echo: bool
+    pool_size: int | None
+    max_overflow: int | None
+    pool_timeout: int | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -257,6 +260,16 @@ def _int(value: str, *, default: int) -> int:
         return default
 
 
+def _int_optional(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached application settings."""
@@ -305,6 +318,9 @@ def get_settings() -> Settings:
     database_settings = DatabaseSettings(
         url=_decouple_config("DATABASE_URL", default="sqlite+aiosqlite:///./storage.sqlite3"),
         echo=_bool(_decouple_config("DATABASE_ECHO", default="false"), default=False),
+        pool_size=_int_optional(_decouple_config("DATABASE_POOL_SIZE", default="")),
+        max_overflow=_int_optional(_decouple_config("DATABASE_MAX_OVERFLOW", default="")),
+        pool_timeout=_int_optional(_decouple_config("DATABASE_POOL_TIMEOUT", default="")),
     )
 
     storage_settings = StorageSettings(

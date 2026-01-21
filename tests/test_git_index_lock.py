@@ -20,7 +20,6 @@ from mcp_agent_mail.storage import (
     _try_clean_stale_git_lock,
 )
 
-
 # ============================================================================
 # _is_git_index_lock_error() Tests
 # ============================================================================
@@ -233,7 +232,9 @@ class TestCommitRetryIntegration:
         _repo_root, repo = await ensure_archive_root(settings)
 
         # Create a test file
-        test_file = Path(repo.working_tree_dir) / "test.txt"
+        working_tree = repo.working_tree_dir
+        assert working_tree is not None
+        test_file = Path(working_tree) / "test.txt"
         test_file.write_text("test content")
 
         initial_commits = len(list(repo.iter_commits()))
@@ -255,12 +256,14 @@ class TestCommitRetryIntegration:
         _repo_root, repo = await ensure_archive_root(settings)
 
         # Create a test file
-        test_file = Path(repo.working_tree_dir) / "trailer_test.txt"
+        working_tree = repo.working_tree_dir
+        assert working_tree is not None
+        test_file = Path(working_tree) / "trailer_test.txt"
         test_file.write_text("trailer test")
 
         # Commit with a mail-style message that should trigger trailer extraction
         await _commit(repo, settings, "mail: TestAgent -> OtherAgent | Subject", ["trailer_test.txt"])
 
         # Check the commit message
-        latest_commit = list(repo.iter_commits())[0]
+        latest_commit = next(iter(repo.iter_commits()))
         assert "TestAgent" in latest_commit.message

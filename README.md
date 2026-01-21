@@ -2044,6 +2044,9 @@ Common variables you may set:
 | `APP_ENVIRONMENT` | `development` | Environment name (development/production) |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./storage.sqlite3` | SQLAlchemy async database URL |
 | `DATABASE_ECHO` | `false` | Echo SQL statements for debugging |
+| `DATABASE_POOL_SIZE` | `5 (sqlite) / 25 (other)` | Base SQLAlchemy pool size (optional override) |
+| `DATABASE_MAX_OVERFLOW` | `5 (sqlite) / 25 (other)` | Extra connections allowed beyond pool_size |
+| `DATABASE_POOL_TIMEOUT` | `30` | Seconds to wait for a pool connection before failing |
 | `GIT_AUTHOR_NAME` | `mcp-agent` | Git commit author name |
 | `GIT_AUTHOR_EMAIL` | `mcp-agent@example.com` | Git commit author email |
 | `LLM_ENABLED` | `true` | Enable LiteLLM for thread summaries and discovery |

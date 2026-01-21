@@ -29,7 +29,7 @@ from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from sqlalchemy import asc as _sa_asc, bindparam, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
-from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError
+from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
@@ -511,6 +511,25 @@ def _instrument_tool(
                     f"Missing required field: {exc}. Ensure all required parameters are provided.",
                     recoverable=True,
                     data={"tool": tool_name, "missing_field": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except SATimeoutError as exc:
+                # SQLAlchemy pool timeout (QueuePool exhausted)
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                db_settings = settings.database
+                wrapped_exc = ToolExecutionError(
+                    "DATABASE_POOL_EXHAUSTED",
+                    "Database connection pool exhausted. Reduce concurrency or increase pool settings.",
+                    recoverable=True,
+                    data={
+                        "tool": tool_name,
+                        "pool_size": db_settings.pool_size,
+                        "max_overflow": db_settings.max_overflow,
+                        "pool_timeout": db_settings.pool_timeout,
+                        "error_detail": str(exc),
+                    },
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
