@@ -8,8 +8,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 
@@ -61,9 +59,10 @@ class TestStartupBannerDatabaseReset:
         uvicorn_started = False
         engine_was_none_before_uvicorn = False
 
-        original_display_banner = None
         original_reset = db.reset_database_state
-        original_uvicorn_run = None
+
+        from mcp_agent_mail import rich_logger
+        original_display_banner = rich_logger.display_startup_banner
 
         def mock_display_banner(*args, **kwargs):
             nonlocal banner_displayed
@@ -83,13 +82,8 @@ class TestStartupBannerDatabaseReset:
             uvicorn_started = True
             # Don't actually start uvicorn
 
-        # Import and capture originals
-        from mcp_agent_mail import rich_logger
-        original_display_banner = rich_logger.display_startup_banner
-
         import uvicorn as uvicorn_module
 
-        original_uvicorn_run = uvicorn_module.run
 
         # Apply mocks
         monkeypatch.setattr(rich_logger, "display_startup_banner", mock_display_banner)
@@ -144,7 +138,6 @@ class TestMultipleEventLoopIsolation:
     async def test_fresh_engine_after_reset_works_correctly(self, isolated_env):
         """Fresh engine created after reset works correctly in async context."""
         from mcp_agent_mail import db
-        from mcp_agent_mail.rich_logger import _get_database_stats
 
         # Simulate the startup banner scenario:
         # 1. Banner uses asyncio.run() to get stats (in sync context)
@@ -161,6 +154,7 @@ class TestMultipleEventLoopIsolation:
             from sqlalchemy import text
             result = await session.execute(text("SELECT 1"))
             row = result.fetchone()
+            assert row is not None
             assert row[0] == 1
 
         # Engine should now be fresh
