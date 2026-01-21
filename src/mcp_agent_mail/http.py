@@ -131,6 +131,74 @@ def _configure_logging(settings: Settings) -> None:
     # Suppress SSE ping keepalive debug logs (periodic noise every 15s)
     logging.getLogger("sse_starlette.sse").setLevel(logging.INFO)
 
+    # Add filter to suppress verbose tracebacks for expected/recoverable errors
+    # FastMCP's tool_manager uses logger.exception() which prints full tracebacks
+    # even for expected errors like "agent not found" or "git lock contention".
+    # This filter intercepts those and removes the traceback for cleaner logs.
+    class ExpectedErrorFilter(logging.Filter):
+        """Filter that suppresses tracebacks for expected/recoverable tool errors.
+
+        Expected errors include:
+        - ToolExecutionError with recoverable=True
+        - Agent not found / project not found
+        - Git index.lock contention
+        - Resource busy / database lock
+
+        These are normal operational conditions in multi-agent environments
+        and don't need full stack traces cluttering the logs.
+        """
+
+        # Keywords that indicate an expected/recoverable error
+        _EXPECTED_PATTERNS = (
+            "not found in project",
+            "index.lock",
+            "git_index_lock",
+            "resource_busy",
+            "temporarily locked",
+            "recoverable=true",
+            "use register_agent",
+            "available agents:",
+        )
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            # Only process records from FastMCP tool_manager with exception info
+            if not record.exc_info or record.exc_info[1] is None:
+                return True
+
+            exc = record.exc_info[1]
+            exc_str = str(exc).lower()
+
+            # Check if this is an expected error based on message content
+            is_expected = any(pattern in exc_str for pattern in self._EXPECTED_PATTERNS)
+
+            # Also check for our ToolExecutionError with recoverable flag
+            if hasattr(exc, "recoverable") and exc.recoverable:
+                is_expected = True
+
+            # Check the cause chain for ToolExecutionError
+            cause = getattr(exc, "__cause__", None)
+            if cause is not None:
+                cause_str = str(cause).lower()
+                if any(pattern in cause_str for pattern in self._EXPECTED_PATTERNS):
+                    is_expected = True
+                if hasattr(cause, "recoverable") and cause.recoverable:
+                    is_expected = True
+
+            if is_expected:
+                # Clear exc_info to prevent traceback printing, but keep the log message
+                record.exc_info = None
+                record.exc_text = None
+                # Downgrade from ERROR to INFO for expected errors
+                if record.levelno >= logging.ERROR:
+                    record.levelno = logging.INFO
+                    record.levelname = "INFO"
+
+            return True
+
+    # Apply filter to FastMCP's tool_manager logger
+    fastmcp_logger = logging.getLogger("fastmcp.tools.tool_manager")
+    fastmcp_logger.addFilter(ExpectedErrorFilter())
+
     # mark configured
     _LOGGING_CONFIGURED = True
 
