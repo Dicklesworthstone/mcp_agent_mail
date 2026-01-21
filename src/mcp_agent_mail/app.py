@@ -57,6 +57,7 @@ from .models import (
     ProductProjectLink,
 )
 from .storage import (
+    GitIndexLockError,
     ProjectArchive,
     archive_write_lock,
     clear_notification_signal,
@@ -522,6 +523,25 @@ def _instrument_tool(
                     f"Operation timed out: {exc}. The server may be under heavy load. Try again in a moment.",
                     recoverable=True,
                     data={"tool": tool_name, "error_detail": str(exc)},
+                )
+                error = wrapped_exc
+                raise wrapped_exc from exc
+            except GitIndexLockError as exc:
+                # Git index.lock contention (concurrent git operations)
+                # This is an expected error in multi-agent environments
+                metrics["errors"] += 1
+                _record_tool_error(tool_name, exc)
+                wrapped_exc = ToolExecutionError(
+                    "GIT_INDEX_LOCK",
+                    f"Git repository is temporarily locked by another operation. "
+                    f"This is normal in multi-agent environments. "
+                    f"Wait a moment and retry. (Attempted {exc.attempts} times before giving up)",
+                    recoverable=True,
+                    data={
+                        "tool": tool_name,
+                        "lock_path": str(exc.lock_path),
+                        "attempts": exc.attempts,
+                    },
                 )
                 error = wrapped_exc
                 raise wrapped_exc from exc
