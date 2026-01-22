@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import hashlib
 import importlib.metadata as importlib_metadata
 import json
@@ -72,6 +73,11 @@ from .utils import slugify
 # Suppress annoying bleach CSS sanitizer warning from dependencies
 warnings.filterwarnings("ignore", category=UserWarning, module="bleach")
 
+# Register cleanup handler to dispose database connections on exit.
+# aiosqlite uses background threads that can block Python shutdown if not cleaned up.
+# See: https://github.com/Dicklesworthstone/mcp_agent_mail/issues/68
+atexit.register(reset_database_state)
+
 console = Console()
 DEFAULT_ENV_PATH = Path(".env")
 ARCHIVE_DIR_NAME = "archived_mailbox_states"
@@ -79,6 +85,23 @@ ARCHIVE_METADATA_FILENAME = "metadata.json"
 ARCHIVE_SNAPSHOT_RELATIVE = Path("snapshot") / "mailbox.sqlite3"
 ARCHIVE_STORAGE_DIRNAME = Path("storage_repo")
 DEFAULT_ARCHIVE_SCRUB_PRESET = "archive"
+
+
+def _run_async(coro: Any) -> Any:
+    """Run an async coroutine and ensure database cleanup on exit.
+
+    This wrapper ensures that aiosqlite background threads are properly
+    terminated before the CLI exits. Without this, Python's shutdown
+    sequence can hang waiting for orphaned threads.
+
+    See: https://github.com/Dicklesworthstone/mcp_agent_mail/issues/68
+    """
+    try:
+        return asyncio.run(coro)
+    finally:
+        reset_database_state()
+
+
 app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
 
 # ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
@@ -281,7 +304,7 @@ def products_ensure(
                 await session.commit()
                 await session.refresh(prod)
                 return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": prod.created_at}
-        resp_data = asyncio.run(_ensure_local())
+        resp_data = _run_async(_ensure_local())
     table = Table(title="Product", show_lines=False)
     table.add_column("Field")
     table.add_column("Value")
@@ -325,7 +348,7 @@ def products_link(
                 await session.commit()
                 await session.refresh(link)
         return {"product_uid": prod.product_uid, "product_name": prod.name, "project_slug": proj.slug}
-    res = asyncio.run(_link())
+    res = _run_async(_link())
     console.print(f"[green]Linked[/] project '{res['project_slug']}' into product '{res['product_name']}' ({res['product_uid']}).")
 
 
@@ -351,7 +374,7 @@ def products_status(
             )
             projects = list(rows.scalars().all())
             return prod, projects
-    prod, projects = asyncio.run(_status())
+    prod, projects = _run_async(_status())
     table = Table(title=f"Product: {prod.name}", show_lines=False)
     table.add_column("Field")
     table.add_column("Value")
@@ -418,7 +441,7 @@ def products_search(
             except Exception:
                 # FTS query failed - return empty results
                 return []
-    rows = asyncio.run(_run())
+    rows = _run_async(_run())
     if not rows:
         console.print("[yellow]No results.[/]")
         return
@@ -534,7 +557,7 @@ def products_inbox(
                 # Sort desc by created_ts
                 items.sort(key=lambda r: r.get("created_ts") or 0, reverse=True)
                 return items[: max(0, int(limit))]
-        rows = asyncio.run(_fallback())
+        rows = _run_async(_fallback())
     if not rows:
         console.print("[yellow]No messages found.[/]")
         return
@@ -658,7 +681,7 @@ def serve_http(
     rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
 
     # Reset database state after startup banner to prevent connection leak.
-    # The banner's _get_database_stats() uses asyncio.run() which creates connections
+    # The banner's _get_database_stats() uses _run_async() which creates connections
     # on a temporary event loop. When uvicorn starts with its own loop, those
     # connections become orphaned and cause SQLAlchemy GC warnings. Resetting
     # here ensures fresh connections are created on the main event loop.
@@ -2495,7 +2518,7 @@ def migrate() -> None:
     settings = get_settings()
     with console.status("Creating database schema from models..."):
         # Pure SQLModel: models define schema, create_all() creates tables
-        asyncio.run(ensure_schema(settings))
+        _run_async(ensure_schema(settings))
     console.print("[green]✓ Database schema created from model definitions![/]")
     console.print("[dim]Note: To apply model changes, delete storage.sqlite3 and run this again.[/]")
 
@@ -2528,9 +2551,9 @@ def list_projects(
 
     if not json_output:
         with console.status("Collecting project data..."):
-            rows = asyncio.run(_collect())
+            rows = _run_async(_collect())
     else:
-        rows = asyncio.run(_collect())
+        rows = _run_async(_collect())
 
     if json_output:
         # Machine-readable JSON output
@@ -2591,7 +2614,7 @@ def guard_install(
         return project_record, hook_path
 
     try:
-        project_record, hook_path = asyncio.run(_run())
+        project_record, hook_path = _run_async(_run())
     except ValueError as exc:  # convert to CLI-friendly error
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"[green]Installed guard for [bold]{project_record.human_key}[/] at {hook_path}.")
@@ -2604,7 +2627,7 @@ def guard_uninstall(
     """Remove the advisory pre-commit guard from the repository."""
 
     repo_path = repo.expanduser().resolve()
-    removed = asyncio.run(uninstall_guard_script(repo_path))
+    removed = _run_async(uninstall_guard_script(repo_path))
     # Resolve hooks directory for accurate messaging
     def _git(cwd: Path, *args: str) -> str | None:
         try:
@@ -2656,7 +2679,7 @@ def file_reservations_list(
         return project_record, rows
 
     try:
-        project_record, rows = asyncio.run(_run())
+        project_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -2747,7 +2770,7 @@ def am_run(
     project_uid = ident["project_uid"]
     branch = ident.get("branch") or ""
     # Always ensure archive structure exists (for tests and local runs)
-    asyncio.run(ensure_archive(get_settings(), slug))
+    _run_async(ensure_archive(get_settings(), slug))
     if not branch:
         repo = None
         try:
@@ -2803,7 +2826,7 @@ def am_run(
     # Ensure local lease path exists upfront so tests can observe it even if server path is used
     lease_path: Optional[Path] = None
     try:
-        slot_dir_eager = asyncio.run(_ensure_slot_paths())
+        slot_dir_eager = _run_async(_ensure_slot_paths())
         lease_path = _lease_path(slot_dir_eager)
         payload = {
             "slot": slot,
@@ -2918,7 +2941,7 @@ def am_run(
                 renew_thread.start()
 
             if not use_server:
-                slot_dir = asyncio.run(_ensure_slot_paths())
+                slot_dir = _run_async(_ensure_slot_paths())
                 active = _read_active(slot_dir)
                 conflicts = [
                     e for e in active
@@ -3231,7 +3254,7 @@ def guard_check(
         console.print("[red]Internal error: cannot import slug helper.[/]")
         raise typer.Exit(code=1) from None
     slug_value = _compute_slug(str(repo_root))
-    archive = asyncio.run(ensure_archive(settings, slug_value))
+    archive = _run_async(ensure_archive(settings, slug_value))
 
     # Read NUL-delimited paths from STDIN
     paths: list[str] = []
@@ -3347,7 +3370,7 @@ def projects_adopt(
     try:
         async def _both() -> tuple[Project, Project]:
             return await asyncio.gather(_load(source), _load(target))
-        src, dst = asyncio.run(_both())
+        src, dst = _run_async(_both())
     except Exception as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3379,8 +3402,8 @@ def projects_adopt(
     # Describe filesystem moves (archive layout)
     settings = get_settings()
     from .storage import ensure_archive as _ensure_archive
-    src_archive = asyncio.run(_ensure_archive(settings, src.slug))
-    dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
+    src_archive = _run_async(_ensure_archive(settings, src.slug))
+    dst_archive = _run_async(_ensure_archive(settings, dst.slug))
     plan.append(f"Move Git artifacts: {src_archive.root} -> {dst_archive.root}")
     plan.append("Re-key DB rows: source project_id -> target project_id (messages, agents, file_reservations, etc.)")
     plan.append("Write aliases.json under target 'projects/<slug>/' with former_slugs")
@@ -3407,8 +3430,8 @@ def projects_adopt(
         settings = get_settings()
         # local import to minimize top-level churn and keep ordering stable
         from .storage import AsyncFileLock as _AsyncFileLock, ensure_archive as _ensure_archive
-        src_archive = asyncio.run(_ensure_archive(settings, src.slug))
-        dst_archive = asyncio.run(_ensure_archive(settings, dst.slug))
+        src_archive = _run_async(_ensure_archive(settings, src.slug))
+        dst_archive = _run_async(_ensure_archive(settings, dst.slug))
         moved_relpaths: list[str] = []
         for path_item in sorted(src_archive.root.rglob("*"), key=str):
             # rglob returns Path objects at runtime; cast for type checker
@@ -3450,7 +3473,7 @@ def projects_adopt(
             console.print(f"[yellow]Warning: failed to write aliases.json: {exc}[/]")
 
     try:
-        asyncio.run(_apply())
+        _run_async(_apply())
         console.print("[green]Adoption apply completed.[/]")
     except Exception as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -3480,7 +3503,7 @@ def file_reservations_active(
         return project_record, rows
 
     try:
-        project_record, rows = asyncio.run(_run())
+        project_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3543,7 +3566,7 @@ def file_reservations_soon(
         return project_record, rows
 
     try:
-        project_record, rows = asyncio.run(_run())
+        project_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3612,7 +3635,7 @@ def acks_pending(
         return project_record, agent_record, rows
 
     try:
-        project_record, agent_record, rows = asyncio.run(_run())
+        project_record, agent_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3684,7 +3707,7 @@ def acks_remind(
         return project_record, agent_record, rows
 
     try:
-        _project_record, agent_record, rows = asyncio.run(_run())
+        _project_record, agent_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3762,7 +3785,7 @@ def acks_overdue(
         return project_record, agent_record, rows
 
     try:
-        project_record, agent_record, rows = asyncio.run(_run())
+        project_record, agent_record, rows = _run_async(_run())
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -3841,7 +3864,7 @@ def list_acks(
             return [(row[0], row[1]) for row in rows.all()]
 
     console.rule("[bold blue]Ack-required Messages")
-    rows = asyncio.run(_collect())
+    rows = _run_async(_collect())
     table = Table(title=f"Pending Acks for {agent_name}")
     table.add_column("ID")
     table.add_column("Subject")
@@ -4357,7 +4380,7 @@ def doctor_check(
         return results
 
     try:
-        diagnostics = asyncio.run(_run())
+        diagnostics = _run_async(_run())
     except Exception as exc:
         if json_output:
             console.print_json(json.dumps({"error": str(exc)}))
@@ -4572,7 +4595,7 @@ def doctor_repair(
         return repair_results
 
     try:
-        results = asyncio.run(_run())
+        results = _run_async(_run())
     except Exception as exc:
         console.print(f"[red]Error during repair:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -4602,7 +4625,7 @@ def doctor_backups(
         settings = get_settings()
         return await list_backups(settings)
 
-    backups = asyncio.run(_run())
+    backups = _run_async(_run())
 
     if json_output:
         console.print_json(json.dumps(backups))
@@ -4683,7 +4706,7 @@ def doctor_restore(
         return await restore_from_backup(settings, backup_path, dry_run=dry_run)
 
     try:
-        result = asyncio.run(_run())
+        result = _run_async(_run())
     except Exception as exc:
         console.print(f"[red]Restore failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
