@@ -2783,7 +2783,7 @@ async def create_diagnostic_backup(
     # Create backup directory
     if backup_dir is None:
         backup_dir = Path(settings.storage.root) / "backups"
-    backup_dir = backup_dir.expanduser()
+    backup_dir = backup_dir.expanduser().resolve()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
     backup_path = backup_dir / f"{timestamp}_{reason}"
@@ -2793,7 +2793,7 @@ async def create_diagnostic_backup(
     database_copied: str | None = None
 
     # Get the archive repo
-    archive_root = Path(settings.storage.root)
+    archive_root = Path(settings.storage.root).expanduser().resolve()
     if not archive_root.exists():
         raise ValueError(f"Storage root does not exist: {archive_root}")
 
@@ -2894,7 +2894,7 @@ async def list_backups(settings: Settings) -> list[dict[str, Any]]:
     Returns:
         List of backup info dicts with path, created_at, reason, size
     """
-    backup_dir = Path(settings.storage.root) / "backups"
+    backup_dir = Path(settings.storage.root).expanduser().resolve() / "backups"
     if not backup_dir.exists():
         return []
 
@@ -3002,7 +3002,7 @@ async def restore_from_backup(
 
     # Restore git bundles
     bundles = manifest_data.get("project_bundles", [])
-    archive_root = Path(settings.storage.root)
+    archive_root = Path(settings.storage.root).expanduser().resolve()
 
     def _restore_bundle(bundle_to_restore: Path, target_root: Path) -> None:
         """Restore a git bundle to target directory."""
