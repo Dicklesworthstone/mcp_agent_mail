@@ -2783,6 +2783,7 @@ async def create_diagnostic_backup(
     # Create backup directory
     if backup_dir is None:
         backup_dir = Path(settings.storage.root) / "backups"
+    backup_dir = backup_dir.expanduser()
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
     backup_path = backup_dir / f"{timestamp}_{reason}"
