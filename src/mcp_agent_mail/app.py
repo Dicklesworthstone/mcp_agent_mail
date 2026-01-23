@@ -1,5 +1,5 @@
 """Application factory for the MCP Agent Mail server."""
-# ruff: noqa: I001
+# ruff: noqa: I001, A002
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import inspect
 import json
 import logging
 import re
+import shlex
+import subprocess
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
@@ -398,6 +400,7 @@ def _instrument_tool(
             metrics["calls"] += 1
             bound = _bind_arguments(signature, args, kwargs)
             ctx = bound.arguments.get("ctx")
+            format_value = bound.arguments.get("format")
             if isinstance(ctx, Context) and meta["capabilities"]:
                 required_caps = set(cast(list[str], meta["capabilities"]))
                 _enforce_capabilities(ctx, required_caps, tool_name)
@@ -452,6 +455,14 @@ def _instrument_tool(
                         result = await func(*args, **kwargs)
                     else:
                         raise
+                if format_value is not None or settings.output_format_default or settings.toon_default_format:
+                    result = await _apply_tool_output_format(
+                        result,
+                        ctx=ctx if isinstance(ctx, Context) else None,
+                        tool_name=tool_name,
+                        settings=settings,
+                        format_value=format_value,
+                    )
             except ToolExecutionError as exc:
                 metrics["errors"] += 1
                 _record_tool_error(tool_name, exc)
@@ -843,6 +854,270 @@ def _coerce_flag_to_bool(value: str, *, default: bool) -> bool:
     if normalized in _FALSE_FLAG_VALUES:
         return False
     return default
+
+
+_OUTPUT_FORMAT_AUTO_VALUES: frozenset[str] = frozenset({"", "auto", "default", "none", "null"})
+_OUTPUT_FORMAT_ALIASES: dict[str, str] = {
+    "application/json": "json",
+    "text/json": "json",
+    "application/toon": "toon",
+    "text/toon": "toon",
+}
+_TOON_STATS_TOKENS_RE = re.compile(
+    "Token estimates:\\s*~(?P<json>\\d+)\\s*\\(JSON\\)\\s*(?:->|\\u2192)\\s*~(?P<toon>\\d+)\\s*\\(TOON\\)"
+)
+_TOON_STATS_SAVED_RE = re.compile(r"Saved\\s*~(?P<saved>\\d+)\\s*tokens\\s*\\((?P<percent>-?\\d+(?:\\.\\d+)?)%\\)")
+
+
+@dataclass(frozen=True, slots=True)
+class _OutputFormatDecision:
+    resolved: str
+    source: str
+    requested: Optional[str]
+
+
+def _normalize_output_format(value: Any) -> tuple[Optional[str], bool]:
+    if value is None:
+        return None, True
+    text = str(value).strip().lower()
+    if text in _OUTPUT_FORMAT_AUTO_VALUES:
+        return None, True
+    if text in _OUTPUT_FORMAT_ALIASES:
+        text = _OUTPUT_FORMAT_ALIASES[text]
+    if text in {"json", "toon"}:
+        return text, True
+    return None, False
+
+
+def _resolve_output_format(value: Any, settings: Settings) -> _OutputFormatDecision:
+    normalized, ok = _normalize_output_format(value)
+    if value is not None and not ok:
+        raise ValueError(f"Invalid format '{value}'. Expected 'json' or 'toon'.")
+    if normalized:
+        return _OutputFormatDecision(resolved=normalized, source="param", requested=normalized)
+
+    default_raw = settings.output_format_default or settings.toon_default_format
+    default_normalized, ok = _normalize_output_format(default_raw)
+    if default_raw and not ok:
+        logger.warning(
+            "Invalid output format default; falling back to json",
+            extra={"value": default_raw},
+        )
+    if default_normalized:
+        return _OutputFormatDecision(resolved=default_normalized, source="default", requested=default_normalized)
+    return _OutputFormatDecision(resolved="json", source="implicit", requested=None)
+
+
+def _truncate_text(value: str, *, limit: int = 2000) -> str:
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}...(+{len(value) - limit} chars)"
+
+
+def _toon_command(settings: Settings) -> list[str]:
+    raw = (settings.toon_tr_path or "tr").strip()
+    if not raw:
+        return ["tr"]
+    try:
+        return shlex.split(raw)
+    except ValueError:
+        return [raw]
+
+
+def _run_toon_encode(json_payload: str, settings: Settings) -> subprocess.CompletedProcess[str]:
+    cmd = [*_toon_command(settings), "--encode"]
+    if settings.toon_stats_enabled:
+        cmd.append("--stats")
+    return subprocess.run(
+        cmd,
+        input=json_payload,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _parse_toon_stats(stderr: str) -> Optional[dict[str, Any]]:
+    stats: dict[str, Any] = {}
+    tokens_match = _TOON_STATS_TOKENS_RE.search(stderr)
+    if tokens_match:
+        stats["json_tokens"] = int(tokens_match.group("json"))
+        stats["toon_tokens"] = int(tokens_match.group("toon"))
+    saved_match = _TOON_STATS_SAVED_RE.search(stderr)
+    if saved_match:
+        stats["saved_tokens"] = int(saved_match.group("saved"))
+        stats["saved_percent"] = float(saved_match.group("percent"))
+    return stats or None
+
+
+def _json_fallback(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return _iso(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, set):
+        return sorted(value)
+    return str(value)
+
+
+def _dump_json_compact(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=_json_fallback)
+
+
+def _encode_payload_to_toon_sync(
+    payload: Any,
+    *,
+    settings: Settings,
+    tool_name: str,
+    source: str,
+    requested: str,
+) -> dict[str, Any]:
+    try:
+        json_payload = _dump_json_compact(payload)
+    except Exception as exc:
+        return {
+            "format": "json",
+            "data": payload,
+            "meta": {
+                "requested": requested,
+                "source": source,
+                "toon_error": f"json serialization failed: {exc}",
+            },
+        }
+    try:
+        result = _run_toon_encode(json_payload, settings)
+    except FileNotFoundError as exc:
+        return {
+            "format": "json",
+            "data": payload,
+            "meta": {
+                "requested": requested,
+                "source": source,
+                "toon_error": f"TOON encoder not found: {exc}",
+            },
+        }
+    except OSError as exc:
+        return {
+            "format": "json",
+            "data": payload,
+            "meta": {
+                "requested": requested,
+                "source": source,
+                "toon_error": f"TOON encoder failed: {exc}",
+            },
+        }
+
+    if result.returncode != 0:
+        return {
+            "format": "json",
+            "data": payload,
+            "meta": {
+                "requested": requested,
+                "source": source,
+                "toon_error": f"TOON encoder exited with {result.returncode}",
+                "toon_stderr": _truncate_text(result.stderr or ""),
+            },
+        }
+
+    toon_text = (result.stdout or "").rstrip("\n")
+    meta: dict[str, Any] = {
+        "requested": requested,
+        "source": source,
+        "encoder": "tr",
+    }
+    stats = _parse_toon_stats(result.stderr or "")
+    if stats:
+        meta["toon_stats"] = stats
+    elif settings.toon_stats_enabled and result.stderr:
+        meta["toon_stats_raw"] = _truncate_text(result.stderr)
+    return {
+        "format": "toon",
+        "data": toon_text,
+        "meta": meta,
+    }
+
+
+def _extract_structured_payload(result: Any) -> tuple[Any, Optional[Callable[[Any], None]]]:
+    if hasattr(result, "structured_content"):
+        try:
+            payload = result.structured_content
+
+            def _setter(value: Any) -> None:
+                result.structured_content = value
+                if hasattr(result, "data"):
+                    with suppress(Exception):
+                        result.data = value
+
+            return payload, _setter
+        except Exception:
+            return result, None
+    if isinstance(result, dict) and "structured_content" in result:
+        payload = result.get("structured_content")
+
+        def _setter(value: Any) -> None:
+            result["structured_content"] = value
+
+        return payload, _setter
+    return result, None
+
+
+async def _apply_tool_output_format(
+    result: Any,
+    *,
+    ctx: Optional[Context],
+    tool_name: str,
+    settings: Settings,
+    format_value: Any,
+) -> Any:
+    decision = _resolve_output_format(format_value, settings)
+    if decision.resolved != "toon":
+        return result
+
+    payload, setter = _extract_structured_payload(result)
+    if payload is None:
+        return result
+
+    formatted = await asyncio.to_thread(
+        _encode_payload_to_toon_sync,
+        payload,
+        settings=settings,
+        tool_name=tool_name,
+        source=decision.source,
+        requested=decision.requested or "toon",
+    )
+    if setter is not None:
+        try:
+            setter(formatted)
+            return result
+        except Exception:
+            return formatted
+    return formatted
+
+
+def _apply_resource_output_format(
+    payload: Any,
+    *,
+    settings: Settings,
+    resource_name: str,
+    format_value: Any,
+) -> Any:
+    decision = _resolve_output_format(format_value, settings)
+    if decision.resolved != "toon":
+        return payload
+    return _encode_payload_to_toon_sync(
+        payload,
+        settings=settings,
+        tool_name=resource_name,
+        source=decision.source,
+        requested=decision.requested or "toon",
+    )
+
+
+def _extract_format_param(params: dict[str, Any]) -> Optional[str]:
+    raw = params.get("format")
+    if isinstance(raw, list):
+        return raw[0] if raw else None
+    return cast(Optional[str], raw)
 
 
 @dataclass(slots=True)
@@ -3789,7 +4064,9 @@ def build_mcp_server() -> FastMCP:
 
     instructions = (
         "You are the MCP Agent Mail coordination server. "
-        "Provide message routing, coordination tooling, and project context to cooperating agents."
+        "Provide message routing, coordination tooling, and project context to cooperating agents. "
+        "Outputs are JSON by default; pass format='toon' (or set MCP_AGENT_MAIL_OUTPUT_FORMAT=toon) to receive "
+        "{format:'toon', data:'<TOON>'}."
     )
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
@@ -4036,7 +4313,7 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     @_instrument_tool("health_check", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, complexity="low")
-    async def health_check(ctx: Context) -> dict[str, Any]:
+    async def health_check(ctx: Context, format: Optional[str] = None) -> dict[str, Any]:
         """
         Quick readiness probe for agents and orchestrators.
 
@@ -4085,7 +4362,12 @@ def build_mcp_server() -> FastMCP:
 
     @mcp.tool(name="ensure_project")
     @_instrument_tool("ensure_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "storage"}, complexity="low", project_arg="human_key")
-    async def ensure_project(ctx: Context, human_key: str, identity_mode: Optional[str] = None) -> dict[str, Any]:
+    async def ensure_project(
+        ctx: Context,
+        human_key: str,
+        identity_mode: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         Idempotently create or ensure a project exists for the given human key.
 
@@ -4173,6 +4455,7 @@ def build_mcp_server() -> FastMCP:
         name: Optional[str] = None,
         task_description: str = "",
         attachments_policy: str = "auto",
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Create or update an agent identity within a project and persist its profile to Git.
@@ -4279,6 +4562,7 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         include_recent_commits: bool = True,
         commit_limit: int = 5,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Return enriched profile details for an agent, optionally including recent archive commits.
@@ -4338,6 +4622,7 @@ def build_mcp_server() -> FastMCP:
         name_hint: Optional[str] = None,
         task_description: str = "",
         attachments_policy: str = "auto",
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Create a new, unique agent identity and persist its profile to Git.
@@ -4428,6 +4713,7 @@ def build_mcp_server() -> FastMCP:
         ack_required: bool = False,
         thread_id: Optional[str] = None,
         auto_contact_if_blocked: bool = False,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Send a Markdown message to one or more recipients and persist canonical and mailbox copies to Git.
@@ -4795,6 +5081,7 @@ def build_mcp_server() -> FastMCP:
                                         "reason": "auto-handshake by send_message",
                                         "auto_accept": True,
                                         "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                        "format": "json",
                                     }
                                 )
                                 attempted.append(nm)
@@ -5127,6 +5414,7 @@ def build_mcp_server() -> FastMCP:
                                             "auto_accept": True,
                                             "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                             "register_if_missing": True,
+                                            "format": "json",
                                         }
                                     )
                                     attempted_external.append(f"{nm}@{label}")
@@ -5329,6 +5617,7 @@ def build_mcp_server() -> FastMCP:
         cc: Optional[list[str]] = None,
         bcc: Optional[list[str]] = None,
         subject_prefix: str = "Re:",
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Reply to an existing message, preserving or establishing a thread.
@@ -5584,6 +5873,7 @@ def build_mcp_server() -> FastMCP:
         program: Optional[str] = None,
         model: Optional[str] = None,
         task_description: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Request contact approval to message another agent.
 
@@ -5749,6 +6039,7 @@ def build_mcp_server() -> FastMCP:
         accept: bool,
         ttl_seconds: int = 30 * 24 * 3600,
         from_project: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Approve or deny a contact request."""
         project = await _get_project_by_identifier(project_key)
@@ -5809,7 +6100,12 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="agent_name",
     )
-    async def list_contacts(ctx: Context, project_key: str, agent_name: str) -> list[dict[str, Any]]:
+    async def list_contacts(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        format: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         """List contact links for an agent in a project."""
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
@@ -5838,7 +6134,13 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="agent_name",
     )
-    async def set_contact_policy(ctx: Context, project_key: str, agent_name: str, policy: str) -> dict[str, Any]:
+    async def set_contact_policy(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        policy: str,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
@@ -5869,6 +6171,7 @@ def build_mcp_server() -> FastMCP:
         urgent_only: bool = False,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
         Retrieve recent messages for an agent without mutating read/ack state.
@@ -5951,6 +6254,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         message_id: int,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Mark a specific message as read for the given agent.
@@ -6020,6 +6324,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         message_id: int,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Acknowledge a message addressed to an agent (and mark as read).
@@ -6106,6 +6411,7 @@ def build_mcp_server() -> FastMCP:
         file_reservation_reason: str = "macro-session",
         file_reservation_ttl_seconds: int = 3600,
         inbox_limit: int = 10,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Macro helper that boots a project session: ensure project, register agent,
@@ -6132,6 +6438,7 @@ def build_mcp_server() -> FastMCP:
                     "ttl_seconds": file_reservation_ttl_seconds,
                     "exclusive": True,
                     "reason": file_reservation_reason,
+                    "format": "json",
                 }
             )
             file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
@@ -6177,6 +6484,7 @@ def build_mcp_server() -> FastMCP:
         include_inbox_bodies: bool = False,
         llm_mode: bool = True,
         llm_model: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Macro helper that aligns an agent with an existing thread by ensuring registration,
@@ -6235,6 +6543,7 @@ def build_mcp_server() -> FastMCP:
         exclusive: bool = True,
         reason: str = "macro-file_reservation",
         auto_release: bool = False,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Reserve a set of file paths and optionally release them at the end of the workflow."""
 
@@ -6251,6 +6560,7 @@ def build_mcp_server() -> FastMCP:
                 "ttl_seconds": ttl_seconds,
                 "exclusive": exclusive,
                 "reason": reason,
+                "format": "json",
             }
         )
         file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
@@ -6264,6 +6574,7 @@ def build_mcp_server() -> FastMCP:
                     "project_key": project_key,
                     "agent_name": agent_name,
                     "paths": paths,
+                    "format": "json",
                 }
             )
             release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
@@ -6304,6 +6615,7 @@ def build_mcp_server() -> FastMCP:
         model: Optional[str] = None,
         task_description: Optional[str] = None,
         thread_id: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Request contact permissions and optionally auto-approve plus send a welcome message."""
 
@@ -6460,6 +6772,7 @@ def build_mcp_server() -> FastMCP:
             "to_agent": real_target,
             "reason": reason,
             "ttl_seconds": ttl_seconds,
+            "format": "json",
         }
         if target_project_key:
             request_payload["to_project"] = target_project_key
@@ -6484,6 +6797,7 @@ def build_mcp_server() -> FastMCP:
                 "from_agent": real_requester,
                 "accept": True,
                 "ttl_seconds": ttl_seconds,
+                "format": "json",
             }
             if target_project_key:
                 respond_payload["from_project"] = project_key
@@ -6503,6 +6817,7 @@ def build_mcp_server() -> FastMCP:
                         "subject": welcome_subject,
                         "body_md": welcome_body,
                         "thread_id": thread_id,
+                        "format": "json",
                     }
                 )
                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
@@ -6523,6 +6838,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
+        format: Optional[str] = None,
     ) -> Any:
         """
         Full-text search over subject and body for a project.
@@ -6689,6 +7005,7 @@ def build_mcp_server() -> FastMCP:
         llm_mode: bool = True,
         llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Extract participants, key points, and action items for one or more threads.
@@ -6857,6 +7174,7 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         project_key: str,
         code_repo_path: str,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         if not settings.worktrees_enabled:
             await ctx.info("Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.")
@@ -6882,6 +7200,7 @@ def build_mcp_server() -> FastMCP:
     async def uninstall_precommit_guard(
         ctx: Context,
         code_repo_path: str,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         if get_settings().tools_log_enabled:
             try:
@@ -6911,6 +7230,7 @@ def build_mcp_server() -> FastMCP:
         ttl_seconds: int = 3600,
         exclusive: bool = True,
         reason: str = "",
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Request advisory file reservations (leases) on project-relative paths/globs.
@@ -7116,6 +7436,7 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         paths: Optional[list[str]] = None,
         file_reservation_ids: Optional[list[int]] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Release active file reservations held by an agent.
@@ -7241,6 +7562,7 @@ def build_mcp_server() -> FastMCP:
         file_reservation_id: int,
         notify_previous: bool = True,
         note: str = "",
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Force-release a stale file reservation held by another agent after inactivity heuristics.
@@ -7392,6 +7714,7 @@ def build_mcp_server() -> FastMCP:
                         "to": [holder.name],
                         "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
                         "body_md": "\n".join(body_lines),
+                        "format": "json",
                     }
                 )
                 notified = True
@@ -7409,6 +7732,7 @@ def build_mcp_server() -> FastMCP:
         extend_seconds: int = 1800,
         paths: Optional[list[str]] = None,
         file_reservation_ids: Optional[list[int]] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Extend expiry for active file reservations held by an agent without reissuing them.
@@ -7557,6 +7881,7 @@ def build_mcp_server() -> FastMCP:
             slot: str,
             ttl_seconds: int = 3600,
             exclusive: bool = True,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
@@ -7601,6 +7926,7 @@ def build_mcp_server() -> FastMCP:
             agent_name: str,
             slot: str,
             extend_seconds: int = 1800,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Extend expiry for an existing build slot lease. No-op if missing.
@@ -7629,6 +7955,7 @@ def build_mcp_server() -> FastMCP:
             project_key: str,
             agent_name: str,
             slot: str,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
@@ -7652,8 +7979,8 @@ def build_mcp_server() -> FastMCP:
                 released = False
             return {"released": released, "released_at": _iso(now)}
 
-    @mcp.resource("resource://config/environment", mime_type="application/json")
-    def environment_resource() -> dict[str, Any]:
+    @mcp.resource("resource://config/environment{?format}", mime_type="application/json")
+    def environment_resource(format: Optional[str] = None) -> dict[str, Any]:
         """
         Inspect the server's current environment and HTTP settings.
 
@@ -7681,7 +8008,7 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r1","method":"resources/read","params":{"uri":"resource://config/environment"}}
         ```
         """
-        return {
+        payload = {
             "environment": settings.environment,
             "database_url": settings.database.url,
             "http": {
@@ -7690,6 +8017,12 @@ def build_mcp_server() -> FastMCP:
                 "path": settings.http.path,
             },
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://config/environment",
+            format_value=format,
+        )
 
     # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
 
@@ -7706,6 +8039,7 @@ def build_mcp_server() -> FastMCP:
             ctx: Context,
             product_key: Optional[str] = None,
             name: Optional[str] = None,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Ensure a Product exists. If not, create one.
@@ -7737,7 +8071,12 @@ def build_mcp_server() -> FastMCP:
                     await session.refresh(prod)
             return {"id": prod.id, "product_uid": prod.product_uid, "name": prod.name, "created_at": _iso(prod.created_at)}
     else:
-        async def ensure_product_tool(ctx: Context, product_key: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
+        async def ensure_product_tool(
+            ctx: Context,
+            product_key: Optional[str] = None,
+            name: Optional[str] = None,
+            format: Optional[str] = None,
+        ) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7747,6 +8086,7 @@ def build_mcp_server() -> FastMCP:
             ctx: Context,
             product_key: str,
             project_key: str,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Link a project into a product (idempotent).
@@ -7779,15 +8119,22 @@ def build_mcp_server() -> FastMCP:
                     "linked": True,
                 }
     else:
-        async def products_link_tool(ctx: Context, product_key: str, project_key: str) -> dict[str, Any]:
+        async def products_link_tool(
+            ctx: Context,
+            product_key: str,
+            project_key: str,
+            format: Optional[str] = None,
+        ) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
-        @mcp.resource("resource://product/{key}", mime_type="application/json")
-        def product_resource(key: str) -> dict[str, Any]:
+        @mcp.resource("resource://product/{key}{?format}", mime_type="application/json")
+        def product_resource(key: str, format: Optional[str] = None) -> dict[str, Any]:
             """
             Inspect product and list linked projects.
             """
+            key, query_params = _split_slug_and_query(key)
+            format_value = format or query_params.get("format")
             # Safe runner that works even if an event loop is already running
             def _run_coro_sync(coro):
                 try:
@@ -7832,7 +8179,13 @@ def build_mcp_server() -> FastMCP:
                         "projects": projects,
                     }
             # Run async in a synchronous resource
-            return _run_coro_sync(_load())
+            payload = _run_coro_sync(_load())
+            return _apply_resource_output_format(
+                payload,
+                settings=settings,
+                resource_name="resource://product/{key}",
+                format_value=format_value,
+            )
 
     if settings.worktrees_enabled:
         @mcp.tool(name="search_messages_product")
@@ -7842,6 +8195,7 @@ def build_mcp_server() -> FastMCP:
             product_key: str,
             query: str,
             limit: int = 20,
+            format: Optional[str] = None,
         ) -> Any:
             """
             Full-text search across all projects linked to a product.
@@ -7935,7 +8289,13 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 return items
     else:
-        async def search_messages_product(ctx: Context, product_key: str, query: str, limit: int = 20) -> Any:
+        async def search_messages_product(
+            ctx: Context,
+            product_key: str,
+            query: str,
+            limit: int = 20,
+            format: Optional[str] = None,
+        ) -> Any:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7949,6 +8309,7 @@ def build_mcp_server() -> FastMCP:
             urgent_only: bool = False,
             include_bodies: bool = False,
             since_ts: Optional[str] = None,
+            format: Optional[str] = None,
         ) -> list[dict[str, Any]]:
             """
             Retrieve recent messages for an agent across all projects linked to a product (non-mutating).
@@ -7983,7 +8344,16 @@ def build_mcp_server() -> FastMCP:
             messages.sort(key=_dt_key, reverse=True)
             return messages[: max(0, int(limit))]
     else:
-        async def fetch_inbox_product(ctx: Context, product_key: str, agent_name: str, limit: int = 20, urgent_only: bool = False, include_bodies: bool = False, since_ts: Optional[str] = None) -> list[dict[str, Any]]:
+        async def fetch_inbox_product(
+            ctx: Context,
+            product_key: str,
+            agent_name: str,
+            limit: int = 20,
+            urgent_only: bool = False,
+            include_bodies: bool = False,
+            since_ts: Optional[str] = None,
+            format: Optional[str] = None,
+        ) -> list[dict[str, Any]]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
 
     if settings.worktrees_enabled:
@@ -7997,6 +8367,7 @@ def build_mcp_server() -> FastMCP:
             llm_mode: bool = True,
             llm_model: Optional[str] = None,
             per_thread_limit: Optional[int] = None,
+            format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Summarize a thread (by id or thread key) across all projects linked to a product.
@@ -8092,21 +8463,36 @@ def build_mcp_server() -> FastMCP:
             await ctx.info(f"Summarized thread '{thread_id}' across product '{product_key}' with {len(rows)} messages")
             return {"thread_id": thread_id, "summary": summary, "examples": examples}
     else:
-        async def summarize_thread_product(ctx: Context, product_key: str, thread_id: str, include_examples: bool = False, llm_mode: bool = True, llm_model: Optional[str] = None, per_thread_limit: Optional[int] = None) -> dict[str, Any]:
+        async def summarize_thread_product(
+            ctx: Context,
+            product_key: str,
+            thread_id: str,
+            include_examples: bool = False,
+            llm_mode: bool = True,
+            llm_model: Optional[str] = None,
+            per_thread_limit: Optional[int] = None,
+            format: Optional[str] = None,
+        ) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
     if settings.worktrees_enabled:
-        @mcp.resource("resource://identity/{project}", mime_type="application/json")
-        def identity_resource(project: str) -> dict[str, Any]:
+        @mcp.resource("resource://identity/{project}{?format}", mime_type="application/json")
+        def identity_resource(project: str, format: Optional[str] = None) -> dict[str, Any]:
             """
             Inspect identity resolution for a given project path. Returns the slug actually used,
             the identity mode in effect, canonical path for the selected mode, and git repo facts.
             """
-            raw_path, _ = _split_slug_and_query(project)
+            raw_path, query_params = _split_slug_and_query(project)
+            format_value = format or query_params.get("format")
             target_path = str(Path(raw_path).expanduser().resolve())
-
-            return _resolve_project_identity(target_path)
-    @mcp.resource("resource://tooling/directory", mime_type="application/json")
-    def tooling_directory_resource() -> dict[str, Any]:
+            payload = _resolve_project_identity(target_path)
+            return _apply_resource_output_format(
+                payload,
+                settings=settings,
+                resource_name="resource://identity/{project}",
+                format_value=format_value,
+            )
+    @mcp.resource("resource://tooling/directory{?format}", mime_type="application/json")
+    def tooling_directory_resource(format: Optional[str] = None) -> dict[str, Any]:
         """
         Provide a clustered view of exposed MCP tools to combat option overload.
 
@@ -8422,22 +8808,45 @@ def build_mcp_server() -> FastMCP:
             },
         ]
 
-        return {
+        default_format = settings.output_format_default or settings.toon_default_format or "json"
+        payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "metrics_uri": "resource://tooling/metrics",
+            "output_formats": {
+                "default": default_format,
+                "tool_param": "format",
+                "resource_query": "format",
+                "values": ["json", "toon"],
+                "toon_envelope": {"format": "toon", "data": "<TOON>", "meta": {"requested": "toon"}},
+            },
             "clusters": clusters,
             "playbooks": playbooks,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/directory",
+            format_value=format,
+        )
 
-    @mcp.resource("resource://tooling/schemas", mime_type="application/json")
-    def tooling_schemas_resource() -> dict[str, Any]:
+    @mcp.resource("resource://tooling/schemas{?format}", mime_type="application/json")
+    def tooling_schemas_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Expose JSON-like parameter schemas for tools/macros to prevent drift.
 
         This is a lightweight, hand-maintained view focusing on the most error-prone
         parameters and accepted aliases to guide clients.
         """
-        return {
+        default_format = settings.output_format_default or settings.toon_default_format or "json"
+        payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
+            "global_optional": ["format"],
+            "output_formats": {
+                "default": default_format,
+                "tool_param": "format",
+                "resource_query": "format",
+                "values": ["json", "toon"],
+                "toon_envelope": {"format": "toon", "data": "<TOON>", "meta": {"requested": "toon"}},
+            },
             "tools": {
                 "send_message": {
                     "required": ["project_key", "sender_name", "to", "subject", "body_md"],
@@ -8460,25 +8869,48 @@ def build_mcp_server() -> FastMCP:
                 },
             },
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/schemas",
+            format_value=format,
+        )
 
-    @mcp.resource("resource://tooling/metrics", mime_type="application/json")
-    def tooling_metrics_resource() -> dict[str, Any]:
+    @mcp.resource("resource://tooling/metrics{?format}", mime_type="application/json")
+    def tooling_metrics_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Expose aggregated tool call/error counts for analysis."""
-        return {
+        payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "tools": _tool_metrics_snapshot(),
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/metrics",
+            format_value=format,
+        )
 
-    @mcp.resource("resource://tooling/locks", mime_type="application/json")
-    def tooling_locks_resource() -> dict[str, Any]:
+    @mcp.resource("resource://tooling/locks{?format}", mime_type="application/json")
+    def tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Return lock metadata from the shared archive storage."""
 
         settings_local = get_settings()
-        return collect_lock_status(settings_local)
+        payload = collect_lock_status(settings_local)
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/locks",
+            format_value=format,
+        )
 
-    @mcp.resource("resource://tooling/capabilities/{agent}", mime_type="application/json")
-    def tooling_capabilities_resource(agent: str, project: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://tooling/capabilities/{agent}{?project,format}", mime_type="application/json")
+    def tooling_capabilities_resource(
+        agent: str,
+        project: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         # Parse query embedded in agent path if present (robust to FastMCP variants)
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -8487,23 +8919,32 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
         caps = _capabilities_for(agent, project)
-        return {
+        payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "agent": agent,
             "project": project,
             "capabilities": caps,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/capabilities/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://tooling/recent/{window_seconds}", mime_type="application/json")
+    @mcp.resource("resource://tooling/recent/{window_seconds}{?agent,project,format}", mime_type="application/json")
     def tooling_recent_resource(
         window_seconds: str,
         agent: Optional[str] = None,
         project: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         # Allow query string to be embedded in the path segment per some transports
+        format_value = format
         if "?" in window_seconds:
             seg, _, qs = window_seconds.partition("?")
             window_seconds = seg
@@ -8512,6 +8953,7 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 agent = agent or (parsed.get("agent") or [None])[0]
                 project = project or (parsed.get("project") or [None])[0]
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
         try:
@@ -8536,15 +8978,21 @@ def build_mcp_server() -> FastMCP:
                 "cluster": TOOL_CLUSTER_MAP.get(tool_name, "unclassified"),
             }
             entries.append(record)
-        return {
+        payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
             "window_seconds": win,
             "count": len(entries),
             "entries": entries,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://tooling/recent/{window_seconds}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://projects", mime_type="application/json")
-    async def projects_resource() -> list[dict[str, Any]]:
+    @mcp.resource("resource://projects{?format}", mime_type="application/json")
+    async def projects_resource(format: Optional[str] = None) -> list[dict[str, Any]]:
         """
         List all projects known to the server in creation order.
 
@@ -8575,10 +9023,16 @@ def build_mcp_server() -> FastMCP:
             def _is_ignored(name: str) -> bool:
                 return any(_fnmatch.fnmatch(name, pat) for pat in ignore_patterns)
             filtered = [p for p in projects if not (_is_ignored(p.slug) or _is_ignored(p.human_key))]
-            return [_project_to_dict(project) for project in filtered]
+            payload = [_project_to_dict(project) for project in filtered]
+            return _apply_resource_output_format(
+                payload,
+                settings=settings,
+                resource_name="resource://projects",
+                format_value=format,
+            )
 
-    @mcp.resource("resource://project/{slug}", mime_type="application/json")
-    async def project_detail(slug: str) -> dict[str, Any]:
+    @mcp.resource("resource://project/{slug}{?format}", mime_type="application/json")
+    async def project_detail(slug: str, format: Optional[str] = None) -> dict[str, Any]:
         """
         Fetch a project and its agents by project slug or human key.
 
@@ -8603,18 +9057,26 @@ def build_mcp_server() -> FastMCP:
         {"jsonrpc":"2.0","id":"r3","method":"resources/read","params":{"uri":"resource://project/backend-abc123"}}
         ```
         """
-        project = await _get_project_by_identifier(slug)
+        slug_value, query_params = _split_slug_and_query(slug)
+        format_value = format or query_params.get("format")
+        project = await _get_project_by_identifier(slug_value)
         await ensure_schema()
         async with get_session() as session:
             result = await session.execute(select(Agent).where(cast(Any, Agent.project_id == project.id)))
             agents = result.scalars().all()
-        return {
+        payload = {
             **_project_to_dict(project),
             "agents": [_agent_to_dict(agent) for agent in agents],
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://project/{slug}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://agents/{project_key}", mime_type="application/json")
-    async def agents_directory(project_key: str) -> dict[str, Any]:
+    @mcp.resource("resource://agents/{project_key}{?format}", mime_type="application/json")
+    async def agents_directory(project_key: str, format: Optional[str] = None) -> dict[str, Any]:
         """
         List all registered agents in a project for easy agent discovery.
 
@@ -8662,7 +9124,9 @@ def build_mcp_server() -> FastMCP:
         - Use the returned names when calling tools like whois(), request_contact(), send_message().
         - Agents in different projects cannot see each other - project isolation is enforced.
         """
-        project = await _get_project_by_identifier(project_key)
+        key_value, query_params = _split_slug_and_query(project_key)
+        format_value = format or query_params.get("format")
+        project = await _get_project_by_identifier(key_value)
         await ensure_schema()
 
         async with get_session() as session:
@@ -8694,16 +9158,26 @@ def build_mcp_server() -> FastMCP:
                 agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
                 agent_data.append(agent_dict)
 
-        return {
+        payload = {
             "project": {
                 "slug": project.slug,
                 "human_key": project.human_key,
             },
             "agents": agent_data,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://agents/{project_key}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://file_reservations/{slug}", mime_type="application/json")
-    async def file_reservations_resource(slug: str, active_only: bool = False) -> list[dict[str, Any]]:
+    @mcp.resource("resource://file_reservations/{slug}{?active_only,format}", mime_type="application/json")
+    async def file_reservations_resource(
+        slug: str,
+        active_only: bool = False,
+        format: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         """
         List file_reservations for a project, optionally filtering to active-only.
 
@@ -8736,6 +9210,7 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         slug_value, query_params = _split_slug_and_query(slug)
+        format_value = format or query_params.get("format")
         if "active_only" in query_params:
             active_only = _coerce_flag_to_bool(query_params["active_only"], default=active_only)
 
@@ -8770,10 +9245,19 @@ def build_mcp_server() -> FastMCP:
                     "last_git_activity_ts": _iso(status.last_git_activity) if status.last_git_activity else None,
                 }
             )
-        return payload
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://file_reservations/{slug}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://message/{message_id}", mime_type="application/json")
-    async def message_resource(message_id: str, project: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://message/{message_id}{?project,format}", mime_type="application/json")
+    async def message_resource(
+        message_id: str,
+        project: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         Read a single message by id within a project.
 
@@ -8805,6 +9289,7 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         # Support toolkits that pass query in the template segment
+        format_value = format
         if "?" in message_id:
             id_part, _, qs = message_id.partition("?")
             message_id = id_part
@@ -8813,6 +9298,7 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
         if project is None:
@@ -8830,13 +9316,19 @@ def build_mcp_server() -> FastMCP:
         sender = await _get_agent_by_id(project_obj, message.sender_id)
         payload = _message_to_dict(message, include_body=True)
         payload["from"] = sender.name
-        return payload
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://message/{message_id}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://thread/{thread_id}", mime_type="application/json")
+    @mcp.resource("resource://thread/{thread_id}{?project,include_bodies,format}", mime_type="application/json")
     async def thread_resource(
         thread_id: str,
         project: Optional[str] = None,
         include_bodies: bool = False,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         List messages for a thread within a project.
@@ -8874,6 +9366,7 @@ def build_mcp_server() -> FastMCP:
         # Robust query parsing: some FastMCP versions do not inject query args.
         # If the templating layer included the query string in the path segment,
         # extract it and fill missing parameters.
+        format_value = format
         if "?" in thread_id:
             id_part, _, qs = thread_id.partition("?")
             thread_id = id_part
@@ -8885,6 +9378,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("include_bodies"):
                     val = parsed["include_bodies"][0].strip().lower()
                     include_bodies = val in ("1", "true", "t", "yes", "y")
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -8944,10 +9438,16 @@ def build_mcp_server() -> FastMCP:
             payload = _message_to_dict(message, include_body=include_bodies)
             payload["from"] = sender_name
             messages.append(payload)
-        return {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
+        payload = {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://thread/{thread_id}",
+            format_value=format_value,
+        )
 
     @mcp.resource(
-        "resource://inbox/{agent}",
+        "resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit,format}",
         mime_type="application/json",
     )
     async def inbox_resource(
@@ -8957,6 +9457,7 @@ def build_mcp_server() -> FastMCP:
         urgent_only: bool = False,
         include_bodies: bool = False,
         limit: int = 20,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Read an agent's inbox for a project.
@@ -8994,6 +9495,7 @@ def build_mcp_server() -> FastMCP:
         # Robust query parsing: some FastMCP versions do not inject query args.
         # If the templating layer included the query string in the last path segment,
         # extract it and fill missing parameters.
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9013,6 +9515,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9045,15 +9548,26 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
             enriched.append(item)
-        return {
+        payload = {
             "project": project_obj.human_key,
             "agent": agent_obj.name,
             "count": len(enriched),
             "messages": enriched,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://inbox/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://views/urgent-unread/{agent}", mime_type="application/json")
-    async def urgent_unread_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+    @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit,format}", mime_type="application/json")
+    async def urgent_unread_view(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         Convenience view listing urgent and high-importance messages that are unread for an agent.
 
@@ -9067,6 +9581,7 @@ def build_mcp_server() -> FastMCP:
             Max number of messages.
         """
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9078,6 +9593,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9112,10 +9628,21 @@ def build_mcp_server() -> FastMCP:
                 read_ts = result.scalar_one_or_none()
                 if read_ts is None:
                     unread.append(item)
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(unread), "messages": unread[:limit]}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://views/urgent-unread/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://views/ack-required/{agent}", mime_type="application/json")
-    async def ack_required_view(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+    @mcp.resource("resource://views/ack-required/{agent}{?project,limit,format}", mime_type="application/json")
+    async def ack_required_view(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         Convenience view listing messages requiring acknowledgement for an agent where ack is pending.
 
@@ -9129,6 +9656,7 @@ def build_mcp_server() -> FastMCP:
             Max number of messages.
         """
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9140,6 +9668,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9180,14 +9709,21 @@ def build_mcp_server() -> FastMCP:
                 payload = _message_to_dict(msg, include_body=False)
                 payload["kind"] = kind
                 out.append(payload)
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://views/ack-required/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://views/acks-stale/{agent}", mime_type="application/json")
+    @mcp.resource("resource://views/acks-stale/{agent}{?project,ttl_seconds,limit,format}", mime_type="application/json")
     async def acks_stale_view(
         agent: str,
         project: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
         limit: int = 20,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         List ack-required messages older than a TTL where acknowledgement is still missing.
@@ -9204,6 +9740,7 @@ def build_mcp_server() -> FastMCP:
             Max number of messages to return.
         """
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9218,6 +9755,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9270,23 +9808,31 @@ def build_mcp_server() -> FastMCP:
                     out.append(payload)
                     if len(out) >= limit:
                         break
-        return {
+        payload = {
             "project": project_obj.human_key,
             "agent": agent_obj.name,
             "ttl_seconds": ttl,
             "count": len(out),
             "messages": out,
         }
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://views/acks-stale/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://views/ack-overdue/{agent}", mime_type="application/json")
+    @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit,format}", mime_type="application/json")
     async def ack_overdue_view(
         agent: str,
         project: Optional[str] = None,
         ttl_minutes: int = 60,
         limit: int = 50,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """List messages requiring acknowledgement older than ttl_minutes without ack."""
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9301,6 +9847,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9348,10 +9895,21 @@ def build_mcp_server() -> FastMCP:
                     out.append(payload)
                     if len(out) >= limit:
                         break
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://views/ack-overdue/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://mailbox/{agent}", mime_type="application/json")
-    async def mailbox_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+    @mcp.resource("resource://mailbox/{agent}{?project,limit,format}", mime_type="application/json")
+    async def mailbox_resource(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """
         List recent messages in an agent's mailbox with lightweight Git commit context.
 
@@ -9361,6 +9919,7 @@ def build_mcp_server() -> FastMCP:
             { project, agent, count, messages: [{ id, subject, from, created_ts, importance, ack_required, kind, commit: {hexsha, summary} | null }] }
         """
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9372,6 +9931,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9419,15 +9979,27 @@ def build_mcp_server() -> FastMCP:
             payload = dict(item)
             payload["commit"] = commit_meta
             out.append(payload)
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://mailbox/{agent}",
+            format_value=format_value,
+        )
 
     @mcp.resource(
-        "resource://mailbox-with-commits/{agent}",
+        "resource://mailbox-with-commits/{agent}{?project,limit,format}",
         mime_type="application/json",
     )
-    async def mailbox_with_commits_resource(agent: str, project: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+    async def mailbox_with_commits_resource(
+        agent: str,
+        project: Optional[str] = None,
+        limit: int = 20,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
         """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
         # Parse query embedded in agent path if present
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9439,6 +10011,7 @@ def build_mcp_server() -> FastMCP:
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
         if project is None:
@@ -9469,18 +10042,26 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
             enriched.append(item)
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://mailbox-with-commits/{agent}",
+            format_value=format_value,
+        )
 
-    @mcp.resource("resource://outbox/{agent}", mime_type="application/json")
+    @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts,format}", mime_type="application/json")
     async def outbox_resource(
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
+        format: Optional[str] = None,
     ) -> dict[str, Any]:
         """List messages sent by the agent, enriched with commit metadata for canonical files."""
         # Support toolkits that incorrectly pass query in the template segment
+        format_value = format
         if "?" in agent:
             name_part, _, qs = agent.partition("?")
             agent = name_part
@@ -9497,6 +10078,7 @@ def build_mcp_server() -> FastMCP:
                     include_bodies = parsed["include_bodies"][0].lower() in {"1","true","t","yes","y"}
                 if parsed.get("since_ts"):
                     since_ts = parsed["since_ts"][0]
+                format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
 
@@ -9528,7 +10110,13 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
             enriched.append(item)
-        return {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+        payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(enriched), "messages": enriched}
+        return _apply_resource_output_format(
+            payload,
+            settings=settings,
+            resource_name="resource://outbox/{agent}",
+            format_value=format_value,
+        )
 
     # No explicit output-schema transform; the tool returns ToolResult with {"result": ...}
 

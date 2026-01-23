@@ -120,23 +120,22 @@ class _CommitQueue:
         self._stopped = False
         self._task = asyncio.create_task(self._process_loop())
 
-    async def stop(self, timeout: float = 5.0) -> None:
+    async def stop(self, timeout_seconds: float = 5.0) -> None:
         """Stop the queue processor, draining pending commits."""
         self._stopped = True
         if self._task is not None:
             # Signal the processor to wake up and check stopped flag
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 self._queue.put_nowait(_CommitRequest(
                     repo_root=Path("/dev/null"),  # Sentinel
                     settings=None,  # type: ignore
                     message="",
                     rel_paths=[],
                 ))
-            except asyncio.QueueFull:
-                pass
             try:
-                await asyncio.wait_for(self._task, timeout=timeout)
-            except asyncio.TimeoutError:
+                async with asyncio.timeout(timeout_seconds):
+                    await self._task
+            except TimeoutError:
                 self._task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._task
@@ -243,7 +242,7 @@ class _CommitQueue:
             key = str(req.repo_root)
             by_repo.setdefault(key, []).append(req)
 
-        for repo_path, requests in by_repo.items():
+        for _repo_path, requests in by_repo.items():
             if len(requests) == 1:
                 # Single request - just commit it directly
                 req = requests[0]
