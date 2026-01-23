@@ -214,6 +214,11 @@ class Settings:
     log_level: str
     log_include_trace: bool
     log_json_enabled: bool
+    # Output formatting
+    output_format_default: str
+    toon_default_format: str
+    toon_stats_enabled: bool
+    toon_tr_path: str
     # Tools logging
     tools_log_enabled: bool
     # Query/latency instrumentation
@@ -430,6 +435,10 @@ def get_settings() -> Settings:
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
         contact_auto_retry_enabled=_bool(_decouple_config("CONTACT_AUTO_RETRY_ENABLED", default="true"), default=True),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
+        output_format_default=_decouple_config("MCP_AGENT_MAIL_OUTPUT_FORMAT", default="").strip().lower(),
+        toon_default_format=_decouple_config("TOON_DEFAULT_FORMAT", default="").strip().lower(),
+        toon_stats_enabled=_bool(_decouple_config("TOON_STATS", default="false"), default=False),
+        toon_tr_path=_decouple_config("TOON_TR_PATH", default="tr").strip(),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
         tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),
         retention_report_enabled=_bool(_decouple_config("RETENTION_REPORT_ENABLED", default="false"), default=False),
