@@ -2027,6 +2027,10 @@ Common variables you may set:
 | `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
 | `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
 | `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
+| `MCP_AGENT_MAIL_OUTPUT_FORMAT` |  | Default output format for tools/resources (`json` or `toon`) |
+| `TOON_DEFAULT_FORMAT` |  | Global default output format fallback (`json` or `toon`) |
+| `TOON_STATS` | `false` | Emit TOON token stats (uses `tr --stats`) |
+| `TOON_TR_PATH` | `tr` | Path/command for TOON CLI encoder (default assumes `tr` on PATH) |
 | `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
 | `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
@@ -2240,6 +2244,11 @@ This section has been removed to keep the README focused. Client code samples be
 
 > Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory`.
 
+Output format (all tools/resources):
+- Tools accept optional `format` = `json` | `toon`; resources accept `?format=toon`.
+- TOON returns `{format:"toon", data:"<TOON>", meta:{...}}` (fallback: `{format:"json", ... , meta:{toon_error:"..."}}`).
+- Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
+
 | Name | Signature | Returns | Notes |
 | :-- | :-- | :-- | :-- |
 | `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
@@ -2270,6 +2279,12 @@ This section has been removed to keep the README focused. Client code samples be
 | `renew_file_reservations` | `renew_file_reservations(project_key: str, agent_name: str, extend_seconds?: int, paths?: list[str], file_reservation_ids?: list[int])` | `{renewed, file reservations[]}` | Extend TTL of existing file reservations |
 
 ### Resources
+
+Output format (resources):
+- Append `?format=toon` to any resource URI to receive `{format:"toon", data:"<TOON>", meta:{...}}`.
+- All resources declare `format` as an optional query parameter (FastMCP templates accept it).
+- FastMCP requires at least one query param; use `?format=json` for the JSON default.
+- Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
 
 | URI | Params | Returns | Notes |
 | :-- | :-- | :-- | :-- |
