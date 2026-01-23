@@ -979,7 +979,7 @@ function viewerController() {
           tokens.push({ kind: 'op', value: 'OR' });
         } else if (/^NOT$/i.test(full)) {
           tokens.push({ kind: 'op', value: 'NOT' });
-        } else if (m[2] != null) {
+        } else if (m[2] !== null && m[2] !== undefined) {
           tokens.push({ kind: 'term', value: m[2] });
         } else if (full && full.trim()) {
           tokens.push({ kind: 'term', value: full.trim() });
@@ -1068,7 +1068,7 @@ function viewerController() {
             stmt.bind([ftsExpr]);
             while (stmt.step()) {
               const row = stmt.getAsObject();
-              if (row.id != null) ids.add(Number(row.id));
+              if (row.id !== null && row.id !== undefined) ids.add(Number(row.id));
             }
           } catch (error) {
             console.warn('[viewer] FTS search failed, falling back to LIKE', error);
