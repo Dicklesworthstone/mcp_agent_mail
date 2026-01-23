@@ -18,7 +18,7 @@ require_cmd curl
 
 log_step "MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents"
 echo
-echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.gemini and generate per-agent MCP configs."
+echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.factory, ~/.gemini and generate per-agent MCP configs."
 echo "It will also create scripts/run_server_with_token.sh to start the server with a bearer token."
 echo
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
