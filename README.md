@@ -2242,7 +2242,7 @@ This section has been removed to keep the README focused. Client code samples be
 
 ### Tools
 
-> Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory`.
+> Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory?format=json`.
 
 Output format (all tools/resources):
 - Tools accept optional `format` = `json` | `toon`; resources accept `?format=toon`.
@@ -2283,19 +2283,19 @@ Output format (all tools/resources):
 Output format (resources):
 - Append `?format=toon` to any resource URI to receive `{format:"toon", data:"<TOON>", meta:{...}}`.
 - All resources declare `format` as an optional query parameter (FastMCP templates accept it).
-- FastMCP requires at least one query param; use `?format=json` for the JSON default.
+- For resources without path params (e.g., `resource://projects`), include `?format=json` or `?format=toon`.
 - Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
 
 | URI | Params | Returns | Notes |
 | :-- | :-- | :-- | :-- |
-| `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
-| `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
-| `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
-| `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
-| `resource://tooling/locks` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
+| `resource://config/environment{?format}` | — | `{environment, database_url, http}` | Inspect server settings |
+| `resource://tooling/directory{?format}` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
+| `resource://tooling/schemas{?format}` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
+| `resource://tooling/metrics{?format}` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
+| `resource://tooling/locks{?format}` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
-| `resource://projects` | — | `list[project]` | All projects |
+| `resource://projects{?format}` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations plus staleness metadata (heuristics, last activity timestamps) |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
@@ -2311,9 +2311,9 @@ Output format (resources):
 
 ### Client Integration Guide
 
-1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
+1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory?format=json` (and optionally `resource://tooling/metrics?format=json`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
 2. **Scope tools per workflow.** When the agent enters a new phase (e.g., "Messaging Lifecycle"), remount only the cluster's tools in your MCP client. This mirrors the workflow macros already provided and prevents "tool overload."
-3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
+3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics?format=json`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
 4. **Fallback to macros for smaller models.** If you're routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
 5. **Show recent actions.** Read `resource://tooling/recent/60?agent=<name>&project=<slug>` (adjust window as needed) to display the last few successful tool invocations relevant to the agent/project.
 
@@ -2322,10 +2322,10 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
 ```json
 {
   "steps": [
-    "resources/read -> resource://tooling/directory",
+    "resources/read -> resource://tooling/directory?format=json",
     "select active cluster (e.g. messaging)",
     "mount tools listed in cluster.tools plus macros if model size <= S",
-    "optional: resources/read -> resource://tooling/metrics for dashboard display",
+    "optional: resources/read -> resource://tooling/metrics?format=json for dashboard display",
     "optional: resources/read -> resource://tooling/recent/60?agent=<name>&project=<slug> for UI hints"
   ]
 }
