@@ -956,13 +956,13 @@ def _looks_like_toon_rust_encoder(exe: str) -> bool:
         return False
 
     ver_text = ((ver_result.stdout or "") + (ver_result.stderr or "")).strip().lower()
-    return ver_text.startswith("tr ") or ver_text.startswith("toon_rust ")
+    return ver_text.startswith("tru ") or ver_text.startswith("toon_rust ")
 
 
 def _toon_command(settings: Settings) -> list[str]:
-    raw = (settings.toon_bin or "toon-tr").strip()
+    raw = (settings.toon_bin or "tru").strip()
     if not raw:
-        return ["toon-tr"]
+        return ["tru"]
     try:
         cmd = shlex.split(raw)
     except ValueError:
@@ -974,7 +974,7 @@ def _toon_command(settings: Settings) -> list[str]:
         if not _looks_like_toon_rust_encoder(exe):
             raise ValueError(
                 f"TOON_BIN resolved to {exe!r}, which does not look like toon_rust "
-                f"(expected toon-tr). Refusing to run a non-toon_rust encoder."
+                f"(expected tru). Refusing to run a non-toon_rust encoder."
             )
     return cmd
 
@@ -1088,7 +1088,7 @@ def _encode_payload_to_toon_sync(
     try:
         encoder = _toon_command(settings)[0]
     except Exception:
-        encoder = "toon-tr"
+        encoder = "tru"
     meta: dict[str, Any] = {
         "requested": requested,
         "source": source,

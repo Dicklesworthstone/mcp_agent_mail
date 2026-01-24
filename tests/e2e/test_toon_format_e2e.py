@@ -12,11 +12,12 @@ from tests.e2e.utils import make_console, render_phase, write_log
 
 
 def _fake_completed(stdout: str, stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["toon-tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args=["tru", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.mark.asyncio
 async def test_toon_format_e2e_flow(isolated_env, monkeypatch):
+    monkeypatch.setattr(app_module, "_looks_like_toon_rust_encoder", lambda _exe: True)
     clear_settings_cache()
     console = make_console()
 
