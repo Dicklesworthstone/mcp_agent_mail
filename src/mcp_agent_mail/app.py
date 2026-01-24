@@ -914,14 +914,64 @@ def _truncate_text(value: str, *, limit: int = 2000) -> str:
     return f"{value[:limit]}...(+{len(value) - limit} chars)"
 
 
-def _toon_command(settings: Settings) -> list[str]:
-    raw = (settings.toon_tr_path or "tr").strip()
-    if not raw:
-        return ["tr"]
+@functools.lru_cache(maxsize=32)
+def _looks_like_toon_rust_encoder(exe: str) -> bool:
+    """
+    Best-effort guardrail to prevent accidentally using non-toon_rust encoders
+    (e.g. the Node.js `toon` CLI or coreutils `tr`).
+
+    We rely on toon_rust's help/version banners, which are stable across installs.
+    """
     try:
-        return shlex.split(raw)
+        help_result = subprocess.run(
+            [exe, "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    help_text = (help_result.stdout or "") + "\n" + (help_result.stderr or "")
+    if "reference implementation in rust" in help_text.lower():
+        return True
+
+    try:
+        ver_result = subprocess.run(
+            [exe, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    ver_text = ((ver_result.stdout or "") + (ver_result.stderr or "")).strip().lower()
+    return ver_text.startswith("tr ")
+
+
+def _toon_command(settings: Settings) -> list[str]:
+    raw = (settings.toon_tr_path or "toon-tr").strip()
+    if not raw:
+        return ["toon-tr"]
+    try:
+        cmd = shlex.split(raw)
     except ValueError:
-        return [raw]
+        cmd = [raw]
+
+    # Enforce toon_rust-only encoder usage (never the Node.js `toon` CLI).
+    if cmd:
+        exe = cmd[0]
+        if not _looks_like_toon_rust_encoder(exe):
+            raise ValueError(
+                f"TOON_TR_PATH resolved to {exe!r}, which does not look like toon_rust "
+                f"(expected toon-tr/tr). Refusing to run a non-toon_rust encoder."
+            )
+    return cmd
 
 
 def _run_toon_encode(json_payload: str, settings: Settings) -> subprocess.CompletedProcess[str]:
@@ -986,6 +1036,16 @@ def _encode_payload_to_toon_sync(
         }
     try:
         result = _run_toon_encode(json_payload, settings)
+    except ValueError as exc:
+        return {
+            "format": "json",
+            "data": payload,
+            "meta": {
+                "requested": requested,
+                "source": source,
+                "toon_error": str(exc),
+            },
+        }
     except FileNotFoundError as exc:
         return {
             "format": "json",
@@ -1020,10 +1080,14 @@ def _encode_payload_to_toon_sync(
         }
 
     toon_text = (result.stdout or "").rstrip("\n")
+    try:
+        encoder = _toon_command(settings)[0]
+    except Exception:
+        encoder = "toon-tr"
     meta: dict[str, Any] = {
         "requested": requested,
         "source": source,
-        "encoder": "tr",
+        "encoder": encoder,
     }
     stats = _parse_toon_stats(result.stderr or "")
     if stats:
