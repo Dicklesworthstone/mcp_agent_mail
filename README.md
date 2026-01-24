@@ -2030,7 +2030,7 @@ Common variables you may set:
 | `MCP_AGENT_MAIL_OUTPUT_FORMAT` |  | Default output format for tools/resources (`json` or `toon`) |
 | `TOON_DEFAULT_FORMAT` |  | Global default output format fallback (`json` or `toon`) |
 | `TOON_STATS` | `false` | Emit TOON token stats (uses `toon-tr --stats`) |
-| `TOON_TR_PATH` | `toon-tr` | Path/command for TOON CLI encoder (default assumes `toon-tr` on PATH) |
+| `TOON_TR_BIN` | `toon-tr` | Path/command for toon_rust encoder (legacy: `TOON_TR_PATH`, `TOON_TR`) |
 | `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
 | `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
