@@ -14,13 +14,20 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     steps:
-      - name: Ensure dispatch token
-        if: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN == '' }}
+      - name: Check if dispatch token is available
+        id: check-token
+        env:
+          TOKEN: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN }}
         run: |
-          echo "Missing secret ACFS_REPO_DISPATCH_TOKEN. Add a PAT with repo access for Dicklesworthstone/agentic_coding_flywheel_setup." >&2
-          exit 1
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::ACFS_REPO_DISPATCH_TOKEN not configured. Skipping dispatch."
+            echo "has_token=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Dispatch to ACFS
-        if: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN != '' }}
+        if: steps.check-token.outputs.has_token == 'true'
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN }}
