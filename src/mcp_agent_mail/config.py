@@ -439,11 +439,9 @@ def get_settings() -> Settings:
         toon_default_format=_decouple_config("TOON_DEFAULT_FORMAT", default="").strip().lower(),
         toon_stats_enabled=_bool(_decouple_config("TOON_STATS", default="false"), default=False),
         toon_bin=(
-            _decouple_config("TOON_BIN", default="").strip()
-            or _decouple_config("TOON_TR_BIN", default="").strip()
-            or _decouple_config("TOON_TR_PATH", default="").strip()
-            or _decouple_config("TOON_TRU_BIN", default="").strip()
-            or "toon-tr"
+            _decouple_config("TOON_TRU_BIN", default="").strip()
+            or _decouple_config("TOON_BIN", default="").strip()
+            or "tru"
         ),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
         tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),

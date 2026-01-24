@@ -12,12 +12,13 @@ from mcp_agent_mail.config import clear_settings_cache
 
 
 def _fake_completed(stdout: str, stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["toon-tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args=["tru", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.mark.asyncio
 async def test_tool_format_toon_envelope(isolated_env, monkeypatch):
     monkeypatch.setenv("TOON_STATS", "true")
+    monkeypatch.setattr(app_module, "_looks_like_toon_rust_encoder", lambda _exe: True)
     clear_settings_cache()
 
     def _fake_run(payload: str, settings):
@@ -37,7 +38,7 @@ async def test_tool_format_toon_envelope(isolated_env, monkeypatch):
         assert payload.get("format") == "toon"
         assert isinstance(payload.get("data"), str)
         meta = payload.get("meta") or {}
-        assert meta.get("encoder") == "toon-tr"
+        assert meta.get("encoder") == "tru"
         stats = meta.get("toon_stats") or {}
         assert stats.get("json_tokens") == 10
         assert stats.get("toon_tokens") == 5
@@ -45,6 +46,7 @@ async def test_tool_format_toon_envelope(isolated_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resource_format_toon_envelope(isolated_env, monkeypatch):
+    monkeypatch.setattr(app_module, "_looks_like_toon_rust_encoder", lambda _exe: True)
     clear_settings_cache()
 
     def _fake_run(payload: str, settings):
@@ -64,6 +66,7 @@ async def test_resource_format_toon_envelope(isolated_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_resource_format_query_param_fastmcp(isolated_env, monkeypatch):
+    monkeypatch.setattr(app_module, "_looks_like_toon_rust_encoder", lambda _exe: True)
     clear_settings_cache()
 
     def _fake_run(payload: str, settings):
