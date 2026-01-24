@@ -922,6 +922,11 @@ def _looks_like_toon_rust_encoder(exe: str) -> bool:
 
     We rely on toon_rust's help/version banners, which are stable across installs.
     """
+    exe_basename = exe.split("/")[-1].split("\\")[-1].lower()
+    if exe_basename in {"toon", "toon.exe"}:
+        # Never accept (or invoke) the Node.js `toon` CLI as the encoder backend.
+        return False
+
     try:
         help_result = subprocess.run(
             [exe, "--help"],
@@ -951,11 +956,11 @@ def _looks_like_toon_rust_encoder(exe: str) -> bool:
         return False
 
     ver_text = ((ver_result.stdout or "") + (ver_result.stderr or "")).strip().lower()
-    return ver_text.startswith("tr ")
+    return ver_text.startswith("tr ") or ver_text.startswith("toon_rust ")
 
 
 def _toon_command(settings: Settings) -> list[str]:
-    raw = (settings.toon_tr_path or "toon-tr").strip()
+    raw = (settings.toon_bin or "toon-tr").strip()
     if not raw:
         return ["toon-tr"]
     try:
@@ -968,8 +973,8 @@ def _toon_command(settings: Settings) -> list[str]:
         exe = cmd[0]
         if not _looks_like_toon_rust_encoder(exe):
             raise ValueError(
-                f"TOON_TR_PATH resolved to {exe!r}, which does not look like toon_rust "
-                f"(expected toon-tr/tr). Refusing to run a non-toon_rust encoder."
+                f"TOON_BIN resolved to {exe!r}, which does not look like toon_rust "
+                f"(expected toon-tr). Refusing to run a non-toon_rust encoder."
             )
     return cmd
 

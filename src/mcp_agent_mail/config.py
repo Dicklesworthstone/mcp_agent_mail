@@ -218,7 +218,7 @@ class Settings:
     output_format_default: str
     toon_default_format: str
     toon_stats_enabled: bool
-    toon_tr_path: str
+    toon_bin: str
     # Tools logging
     tools_log_enabled: bool
     # Query/latency instrumentation
@@ -438,11 +438,11 @@ def get_settings() -> Settings:
         output_format_default=_decouple_config("MCP_AGENT_MAIL_OUTPUT_FORMAT", default="").strip().lower(),
         toon_default_format=_decouple_config("TOON_DEFAULT_FORMAT", default="").strip().lower(),
         toon_stats_enabled=_bool(_decouple_config("TOON_STATS", default="false"), default=False),
-        toon_tr_path=(
-            _decouple_config("TOON_TR_BIN", default="").strip()
-            or _decouple_config("TOON_RUST_BIN", default="").strip()
+        toon_bin=(
+            _decouple_config("TOON_BIN", default="").strip()
+            or _decouple_config("TOON_TR_BIN", default="").strip()
             or _decouple_config("TOON_TR_PATH", default="").strip()
-            or _decouple_config("TOON_TR", default="").strip()
+            or _decouple_config("TOON_TRU_BIN", default="").strip()
             or "toon-tr"
         ),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),

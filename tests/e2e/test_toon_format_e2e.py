@@ -12,7 +12,7 @@ from tests.e2e.utils import make_console, render_phase, write_log
 
 
 def _fake_completed(stdout: str, stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args=["toon-tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.mark.asyncio

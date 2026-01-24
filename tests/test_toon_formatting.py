@@ -12,7 +12,7 @@ from mcp_agent_mail.config import clear_settings_cache
 
 
 def _fake_completed(stdout: str, stderr: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(args=["tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(args=["toon-tr", "--encode"], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 @pytest.mark.asyncio
@@ -37,7 +37,7 @@ async def test_tool_format_toon_envelope(isolated_env, monkeypatch):
         assert payload.get("format") == "toon"
         assert isinstance(payload.get("data"), str)
         meta = payload.get("meta") or {}
-        assert meta.get("encoder") == "tr"
+        assert meta.get("encoder") == "toon-tr"
         stats = meta.get("toon_stats") or {}
         assert stats.get("json_tokens") == 10
         assert stats.get("toon_tokens") == 5
