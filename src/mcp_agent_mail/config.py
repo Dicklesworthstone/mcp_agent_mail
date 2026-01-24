@@ -438,7 +438,7 @@ def get_settings() -> Settings:
         output_format_default=_decouple_config("MCP_AGENT_MAIL_OUTPUT_FORMAT", default="").strip().lower(),
         toon_default_format=_decouple_config("TOON_DEFAULT_FORMAT", default="").strip().lower(),
         toon_stats_enabled=_bool(_decouple_config("TOON_STATS", default="false"), default=False),
-        toon_tr_path=_decouple_config("TOON_TR_PATH", default="tr").strip(),
+        toon_tr_path=_decouple_config("TOON_TR_PATH", default="toon-tr").strip(),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
         tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),
         retention_report_enabled=_bool(_decouple_config("RETENTION_REPORT_ENABLED", default="false"), default=False),
