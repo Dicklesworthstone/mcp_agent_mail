@@ -74,6 +74,20 @@ Prefer a specific location or options? Add flags like `--dir <path>`, `--project
 
 Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--skip-bv` to bypass automatic installation.
 
+### Important: Beads Rust (br) Replaces Beads Go (bd)
+
+The installer automatically replaces `bd` (the original Go-based Beads CLI) with `br` (Beads Rust):
+
+1. **`br` is the actively maintained version.** Beads Rust is a complete reimplementation with ongoing development, while the original Go version is no longer actively maintained.
+
+2. **Existing `bd` users get automatic aliasing.** The installer creates a shell alias so that `bd` commands continue to work by redirecting to `br`. Your existing workflows and muscle memory are preserved.
+
+3. **A migration skill is installed for agents.** AI coding agents receive a `bd-br-migration` skill that helps them adapt to any CLI differences between the two implementations.
+
+4. **Same data format, compatible workflows.** Both implementations use the same `.beads/issues.jsonl` format, so your existing Beads data remains fully compatible.
+
+To opt out of this replacement, pass `--skip-beads` to the installer. See the [beads_rust repository](https://github.com/Dicklesworthstone/beads_rust) for detailed documentation on CLI differences.
+
 ### Starting the server in the future
 
 After installation, you can start the MCP Agent Mail server from **anywhere** by simply typing:
