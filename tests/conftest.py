@@ -3,11 +3,44 @@ import contextlib
 import gc
 from pathlib import Path
 
+import psutil
 import pytest
 
 from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.db import reset_database_state
 from mcp_agent_mail.storage import clear_repo_cache
+
+# CPU overload threshold - skip benchmark tests if ALL cores are at this level
+CPU_OVERLOAD_THRESHOLD = 95.0
+
+
+def is_cpu_overloaded() -> bool:
+    """Check if all CPU cores are at 95%+ utilization.
+
+    Returns True only when the system is under extreme load (all cores saturated),
+    which would make timing-based benchmark tests unreliable.
+    """
+    # Sample CPU usage over 200ms per-core
+    per_cpu = psutil.cpu_percent(interval=0.2, percpu=True)
+    if not per_cpu:
+        return False
+
+    overloaded = sum(1 for usage in per_cpu if usage >= CPU_OVERLOAD_THRESHOLD)
+    return overloaded == len(per_cpu)
+
+
+def skip_if_cpu_overloaded() -> None:
+    """Skip the current test if all CPU cores are at 95%+ utilization.
+
+    Use this at the start of any test that asserts on wall-clock time.
+    Prevents flaky benchmark tests when the system is under extreme load.
+    """
+    if is_cpu_overloaded():
+        cores = psutil.cpu_count()
+        pytest.skip(
+            f"Skipping benchmark: system under extreme CPU load "
+            f"(all {cores} cores at {CPU_OVERLOAD_THRESHOLD}%+ utilization)"
+        )
 
 
 @pytest.fixture(scope="function")
