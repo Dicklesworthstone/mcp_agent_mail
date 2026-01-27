@@ -6981,6 +6981,8 @@ def build_mcp_server() -> FastMCP:
 
         await ensure_schema()
         rows: list[Any] = []
+        fts_failed = False
+        fts_error_msg: str | None = None
         try:
             async with get_session() as session:
                 result = await session.execute(
@@ -7000,8 +7002,13 @@ def build_mcp_server() -> FastMCP:
                 )
                 rows = list(result.mappings().all())
         except Exception as fts_err:
-            # FTS query syntax error - return empty results instead of crashing
-            logger.warning("FTS query failed, returning empty results", extra={"query": sanitized_query, "error": str(fts_err)})
+            # FTS query syntax error - flag for fallback instead of crashing
+            fts_failed = True
+            fts_error_msg = str(fts_err)
+            logger.warning("FTS query failed, attempting LIKE fallback", extra={"query": sanitized_query, "error": fts_error_msg})
+
+        # Handle FTS failure with LIKE fallback (using a fresh session)
+        if fts_failed:
             fallback_terms = _extract_like_terms(query)
             if not fallback_terms:
                 await ctx.info(f"Search query '{query}' could not be executed (FTS syntax issue), returning empty results.")
@@ -7016,21 +7023,22 @@ def build_mcp_server() -> FastMCP:
                         f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
                     )
                 where_clause = " AND ".join(clauses)
-                result = await session.execute(
-                    text(
-                        f"""
-                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name
-                        FROM messages m
-                        JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id = :project_id AND {where_clause}
-                        ORDER BY m.created_ts DESC
-                        LIMIT :limit
-                        """
-                    ),
-                    params,
-                )
-                rows = list(result.mappings().all())
+                async with get_session() as session:
+                    result = await session.execute(
+                        text(
+                            f"""
+                            SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                   m.thread_id, a.name AS sender_name
+                            FROM messages m
+                            JOIN agents a ON m.sender_id = a.id
+                            WHERE m.project_id = :project_id AND {where_clause}
+                            ORDER BY m.created_ts DESC
+                            LIMIT :limit
+                            """
+                        ),
+                        params,
+                    )
+                    rows = list(result.mappings().all())
                 await ctx.info(
                     f"FTS query failed; used LIKE fallback with {len(fallback_terms)} term(s), returned {len(rows)} result(s)."
                 )
