@@ -5121,9 +5121,10 @@ def build_mcp_server() -> FastMCP:
                             continue
                     except Exception:
                         pass
-                    # If message requires acknowledgement and recipient is local, allow to proceed without a link
-                    if ack_required:
-                        continue
+                    # NOTE: Removed ack_required bypass here. Previously, setting ack_required=True
+                    # would bypass contact policy checks entirely. This was a security issue as any
+                    # sender could bypass contact restrictions by simply requesting acknowledgment.
+                    # Contact policy must be enforced regardless of ack_required flag.
                     blocked_recipients.append(rec.name)
 
             if blocked_recipients:
@@ -5184,7 +5185,7 @@ def build_mcp_server() -> FastMCP:
                                         )
                                         .limit(1)
                                     )
-                                    if link.first() is None and not ack_required:
+                                    if link.first() is None:
                                         blocked_recipients.append(rec.name)
                     except Exception:
                         pass
