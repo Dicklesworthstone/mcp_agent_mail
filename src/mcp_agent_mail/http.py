@@ -225,6 +225,15 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return True
         return False
 
+    @staticmethod
+    def _has_forwarded_headers(request: Request) -> bool:
+        """Detect proxy-forwarded headers to avoid trusting localhost behind proxies."""
+        headers = request.headers
+        return any(
+            name in headers
+            for name in ("x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "forwarded")
+        )
+
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
@@ -236,7 +245,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         except Exception:
             client_host = ""
         # Check for localhost bypass (including IPv4-mapped IPv6 addresses)
-        if self._allow_localhost and self._is_localhost(client_host):
+        if self._allow_localhost and self._is_localhost(client_host) and not self._has_forwarded_headers(request):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
         expected_header = f"Bearer {self._token}"
@@ -467,11 +476,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 client_host = request.client.host if request.client else ""
             except Exception:
                 client_host = ""
-            if bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
-                "127.0.0.1",
-                "::1",
-                "localhost",
-            }:
+            if (
+                bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
+                and client_host in {"127.0.0.1", "::1", "localhost"}
+                and not BearerAuthMiddleware._has_forwarded_headers(request)
+            ):
                 roles.add("writer")
 
         # RBAC enforcement (skip for localhost when allowed)
@@ -479,11 +488,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             client_host = request.client.host if request.client else ""
         except Exception:
             client_host = ""
-        is_local_ok = bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
-            "127.0.0.1",
-            "::1",
-            "localhost",
-        }
+        is_local_ok = (
+            bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
+            and client_host in {"127.0.0.1", "::1", "localhost"}
+            and not BearerAuthMiddleware._has_forwarded_headers(request)
+        )
         if self._rbac_enabled and not is_local_ok and kind in {"tools", "resources"}:
             is_reader = bool(roles & self._reader_roles)
             is_writer = bool(roles & self._writer_roles) or (not roles)
