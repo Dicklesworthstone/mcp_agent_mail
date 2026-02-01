@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hmac
 import importlib
 import json
 import logging
@@ -211,6 +212,19 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
         self._allow_localhost = allow_localhost
 
+    @staticmethod
+    def _is_localhost(host: str) -> bool:
+        """Check if host is a localhost address, including IPv4-mapped IPv6."""
+        if not host:
+            return False
+        # Standard localhost addresses
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return True
+        # IPv4-mapped IPv6 address (::ffff:127.0.0.1)
+        if host.lower().startswith("::ffff:") and host[7:] == "127.0.0.1":
+            return True
+        return False
+
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
@@ -221,10 +235,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             client_host = request.client.host if request.client else ""
         except Exception:
             client_host = ""
-        if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
+        # Check for localhost bypass (including IPv4-mapped IPv6 addresses)
+        if self._allow_localhost and self._is_localhost(client_host):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {self._token}":
+        expected_header = f"Bearer {self._token}"
+        # Use constant-time comparison to prevent timing attacks
+        if not hmac.compare_digest(auth_header, expected_header):
             return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
         return await call_next(request)
 
