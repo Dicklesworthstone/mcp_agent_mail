@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import random
 import string
+from typing import Any
 
 import pytest
 from fastmcp import Client
@@ -65,6 +66,15 @@ def get_inbox_items(result) -> list[dict]:
                 items.append(item.__dict__)
         return items
     return []
+
+
+def require_dict_result(result: object, label: str) -> dict[str, Any]:
+    """Ensure an asyncio.gather result is a dict, not an exception."""
+    if isinstance(result, Exception):
+        raise AssertionError(f"{label} failed: {result}")
+    if not isinstance(result, dict):
+        raise AssertionError(f"{label} returned non-dict result: {result}")
+    return result
 
 
 async def count_messages_in_db(project_id: int) -> int:
@@ -191,8 +201,8 @@ class TestConcurrentMessageSending:
 
             # Verify no exceptions and all sends succeeded
             for i, r in enumerate(results):
-                assert not isinstance(r, Exception), f"Agent {i} failed: {r}"
-                assert r["result"]["count"] >= 1, f"Agent {i} should have at least 1 delivery"
+                result = require_dict_result(r, f"Agent {i}")
+                assert result["result"]["count"] >= 1, f"Agent {i} should have at least 1 delivery"
 
             # Verify all expected subjects exist (data integrity)
             pid = await get_project_id(project_key)
@@ -367,9 +377,9 @@ class TestConcurrentFileReservations:
 
             # All should succeed with no conflicts
             for i, r in enumerate(results):
-                assert not isinstance(r, Exception), f"Agent {i} failed: {r}"
-                assert len(r["granted"]) == 1, f"Agent {i} should get reservation"
-                assert len(r["conflicts"]) == 0, f"Agent {i} should have no conflicts"
+                result = require_dict_result(r, f"Agent {i}")
+                assert len(result["granted"]) == 1, f"Agent {i} should get reservation"
+                assert len(result["conflicts"]) == 0, f"Agent {i} should have no conflicts"
 
 
 # ============================================================================
@@ -433,9 +443,9 @@ class TestConcurrentInboxFetches:
 
             # Verify no exceptions - fetches complete successfully
             for i, r in enumerate(results):
-                assert not isinstance(r, Exception), f"Agent {i} failed: {r}"
+                result = require_dict_result(r, f"Agent {i}")
                 # Each agent should have some messages in their inbox
-                assert r["count"] >= 0, f"Agent {i} fetch should return count"
+                assert result["count"] >= 0, f"Agent {i} fetch should return count"
 
     @pytest.mark.asyncio
     async def test_rapid_repeated_inbox_fetches(self, isolated_env):
@@ -901,8 +911,8 @@ class TestRaceConditions:
 
             # All should succeed (idempotent)
             for i, r in enumerate(results):
-                assert not isinstance(r, Exception), f"Attempt {i} failed: {r}"
-                assert r["read"] is True
+                result = require_dict_result(r, f"Attempt {i}")
+                assert result["read"] is True
 
     @pytest.mark.asyncio
     async def test_simultaneous_acknowledgement(self, isolated_env):
@@ -950,5 +960,5 @@ class TestRaceConditions:
 
             # All should succeed (idempotent)
             for i, r in enumerate(results):
-                assert not isinstance(r, Exception), f"Attempt {i} failed: {r}"
-                assert r["acknowledged"] is True
+                result = require_dict_result(r, f"Attempt {i}")
+                assert result["acknowledged"] is True
