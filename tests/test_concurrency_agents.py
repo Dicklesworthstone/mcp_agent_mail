@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import random
 import string
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fastmcp import Client
@@ -74,7 +74,7 @@ def require_dict_result(result: object, label: str) -> dict[str, Any]:
         raise AssertionError(f"{label} failed: {result}")
     if not isinstance(result, dict):
         raise AssertionError(f"{label} returned non-dict result: {result}")
-    return result
+    return cast(dict[str, Any], result)
 
 
 async def count_messages_in_db(project_id: int) -> int:
@@ -912,7 +912,7 @@ class TestRaceConditions:
             # All should succeed (idempotent)
             for i, r in enumerate(results):
                 result = require_dict_result(r, f"Attempt {i}")
-                assert result["read"] is True
+                assert result["read"]
 
     @pytest.mark.asyncio
     async def test_simultaneous_acknowledgement(self, isolated_env):
@@ -961,4 +961,4 @@ class TestRaceConditions:
             # All should succeed (idempotent)
             for i, r in enumerate(results):
                 result = require_dict_result(r, f"Attempt {i}")
-                assert result["acknowledged"] is True
+                assert result["acknowledged"]
