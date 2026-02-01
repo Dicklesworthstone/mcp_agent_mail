@@ -165,6 +165,110 @@ json_escape_string() {
   echo "$result"
 }
 
+# Merge MCP server config into existing settings JSON
+# Usage: json_merge_mcp_server <existing_json> <server_name> <server_config_json>
+# Returns: merged JSON preserving all existing keys
+json_merge_mcp_server() {
+  local existing="$1"
+  local server_name="$2"
+  local server_config="$3"
+
+  if command -v jq >/dev/null 2>&1; then
+    echo "$existing" | jq --arg name "$server_name" --argjson config "$server_config" \
+      '.mcpServers = (.mcpServers // {}) | .mcpServers[$name] = $config'
+  else
+    uv run python -c "
+import json
+import sys
+
+existing = json.loads('''$existing''')
+server_name = '''$server_name'''
+server_config = json.loads('''$server_config''')
+
+if 'mcpServers' not in existing:
+    existing['mcpServers'] = {}
+existing['mcpServers'][server_name] = server_config
+
+print(json.dumps(existing, indent=2))
+"
+  fi
+}
+
+# Append hook to existing hooks array without duplicating
+# Usage: json_append_hook <existing_json> <hook_type> <hook_json> <identifier>
+# hook_type: SessionStart, PreToolUse, PostToolUse
+# identifier: string to check for duplicates (e.g., "mcp-agent-mail")
+json_append_hook() {
+  local existing="$1"
+  local hook_type="$2"
+  local hook_json="$3"
+  local identifier="$4"
+
+  if command -v jq >/dev/null 2>&1; then
+    # Check if already exists
+    if echo "$existing" | jq -e ".hooks.${hook_type}[]? | .hooks[]? | .command | contains(\"${identifier}\")" >/dev/null 2>&1; then
+      # Already exists, return unchanged
+      echo "$existing"
+      return
+    fi
+    # Append new hook
+    echo "$existing" | jq --argjson hook "$hook_json" \
+      ".hooks = (.hooks // {}) | .hooks.${hook_type} = ((.hooks.${hook_type} // []) + [\$hook])"
+  else
+    uv run python -c "
+import json
+import sys
+
+existing = json.loads('''$existing''')
+hook_type = '''$hook_type'''
+hook = json.loads('''$hook_json''')
+identifier = '''$identifier'''
+
+if 'hooks' not in existing:
+    existing['hooks'] = {}
+if hook_type not in existing['hooks']:
+    existing['hooks'][hook_type] = []
+
+# Check for duplicate
+exists = any(
+    identifier in str(h.get('hooks', []))
+    for h in existing['hooks'][hook_type]
+)
+if not exists:
+    existing['hooks'][hook_type].append(hook)
+
+print(json.dumps(existing, indent=2))
+"
+  fi
+}
+
+# Ensure settings.local.json is in .gitignore
+# Usage: ensure_gitignore_entry <gitignore_path> <pattern>
+ensure_gitignore_entry() {
+  local gitignore="$1"
+  local pattern="$2"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] ensure ${pattern} in ${gitignore}"
+    return 0
+  fi
+
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -qF "$pattern" "$gitignore" 2>/dev/null; then
+      echo "" >> "$gitignore"
+      echo "# Claude Code local settings (contains secrets)" >> "$gitignore"
+      echo "$pattern" >> "$gitignore"
+      log_ok "Added ${pattern} to .gitignore"
+    fi
+  else
+    cat > "$gitignore" <<EOF
+# Claude Code local settings (contains secrets)
+${pattern}
+EOF
+    log_ok "Created .gitignore with ${pattern}"
+  fi
+}
+
 # Set file permissions to 600 with error checking
 set_secure_file() {
   local file="$1"
