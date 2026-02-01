@@ -629,7 +629,7 @@
       try {
         const encodedProjectId = encodeURIComponent(projectId);
         const encodedOtherId = encodeURIComponent(otherId);
-        const response = await fetch(`/api/projects/${encodedProjectId}/siblings/${encodedOtherId}`, {
+        const response = await fetch(`/mail/api/projects/${encodedProjectId}/siblings/${encodedOtherId}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action }),

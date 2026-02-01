@@ -4994,8 +4994,7 @@ def build_mcp_server() -> FastMCP:
         sender = await _get_agent(project, sender_name)
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
-        # Allow ack-required messages to bypass contact enforcement entirely
-        if settings_local.contact_enforcement_enabled and not ack_required:
+        if settings_local.contact_enforcement_enabled:
             # allow replies always; if thread present and recipient already on thread, allow
             auto_ok_names: set[str] = set()
             if thread_id:
@@ -5059,6 +5058,62 @@ def build_mcp_server() -> FastMCP:
             all_recipient_names = list(set(to + (cc or []) + (bcc or [])))
             recipient_agents = await _get_agents_batch_lenient(project, all_recipient_names)
             async with get_session() as s3:
+                recent_ok_names: set[str] = set()
+                ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
+                since_dt = now_utc - ttl
+                # Batch fetch recent contacts (sender -> recipients and recipients -> sender)
+                try:
+                    recipient_name_filter = list(all_recipient_names)
+                    if recipient_name_filter:
+                        sent_stmt = (
+                            select(Agent.name)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
+                            .join(Message, cast(Any, MessageRecipient.message_id) == Message.id)
+                            .where(
+                                cast(Any, Message.project_id) == project.id,
+                                cast(Any, Message.sender_id) == sender.id,
+                                cast(Any, Message.created_ts) > _naive_utc(since_dt),
+                                cast(Any, Agent.name).in_(recipient_name_filter),
+                            )
+                        )
+                        sent_rows = await s3.execute(sent_stmt)
+                        recent_ok_names.update({row[0] for row in sent_rows.all() if row[0]})
+
+                        sender_alias2 = aliased(Agent)
+                        recv_stmt = (
+                            select(sender_alias2.name)
+                            .join(Message, cast(Any, Message.sender_id) == sender_alias2.id)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.message_id) == Message.id)
+                            .where(
+                                cast(Any, Message.project_id) == project.id,
+                                cast(Any, MessageRecipient.agent_id) == sender.id,
+                                cast(Any, Message.created_ts) > _naive_utc(since_dt),
+                                cast(Any, sender_alias2.name).in_(recipient_name_filter),
+                            )
+                        )
+                        recv_rows = await s3.execute(recv_stmt)
+                        recent_ok_names.update({row[0] for row in recv_rows.all() if row[0]})
+                except Exception:
+                    recent_ok_names = set()
+                # Batch fetch approved agent links for these recipients
+                approved_link_ids: set[int] = set()
+                try:
+                    recipient_ids = [rec.id for rec in recipient_agents.values() if rec is not None and rec.id is not None]
+                    if recipient_ids:
+                        link_rows = await s3.execute(
+                            select(AgentLink.b_agent_id)
+                            .where(
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.b_project_id) == project.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, AgentLink.b_agent_id).in_(recipient_ids),
+                            )
+                        )
+                        approved_link_ids.update({row[0] for row in link_rows.all() if row and row[0] is not None})
+                except Exception:
+                    approved_link_ids = set()
+
                 for nm in to + (cc or []) + (bcc or []):
                     if nm in auto_ok_names:
                         continue
@@ -5080,50 +5135,12 @@ def build_mcp_server() -> FastMCP:
                             recoverable=True,
                         )
                     # contacts_only or auto -> must have approved link or prior contact within TTL
-                    ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
-                    recent_ok = False
-                    try:
-                        # check any message between these two within TTL
-                        since_dt = now_utc - ttl
-                        q = text(
-                            """
-                            SELECT 1 FROM messages m
-                            WHERE m.project_id = :pid
-                              AND m.created_ts > :since
-                              AND (
-                                   (m.sender_id = :sid AND EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :rname))
-                                   OR
-                                   (EXISTS (SELECT 1 FROM message_recipients mr JOIN agents a ON a.id = mr.agent_id WHERE mr.message_id=m.id AND a.name = :sname) AND m.sender_id = (SELECT id FROM agents WHERE project_id=:pid AND name=:rname))
-                              )
-                            LIMIT 1
-                            """
-                        )
-                        row = await s3.execute(q, {"pid": project.id, "since": since_dt, "sid": sender.id, "sname": sender.name, "rname": rec.name})
-                        recent_ok = row.first() is not None
-                    except Exception:
-                        recent_ok = False
+                    recent_ok = rec.name in recent_ok_names
                     if rec_policy == "auto" and recent_ok:
                         continue
                     # check approved AgentLink (local project)
-                    try:
-                        link = await s3.execute(
-                            select(AgentLink)
-                            .where(
-                                cast(Any, AgentLink.a_project_id) == project.id,
-                                cast(Any, AgentLink.a_agent_id) == sender.id,
-                                cast(Any, AgentLink.b_project_id) == project.id,
-                                cast(Any, AgentLink.b_agent_id) == rec.id,
-                                cast(Any, AgentLink.status == "approved"),
-                            )
-                            .limit(1)
-                        )
-                        if link.first() is not None:
-                            continue
-                    except Exception:
-                        pass
-                    # NOTE: Removed ack_required bypass here. Previously, setting ack_required=True
-                    # would bypass contact policy checks entirely. This was a security issue as any
-                    # sender could bypass contact restrictions by simply requesting acknowledgment.
+                    if rec.id is not None and rec.id in approved_link_ids:
+                        continue
                     # Contact policy must be enforced regardless of ack_required flag.
                     blocked_recipients.append(rec.name)
 

@@ -288,7 +288,7 @@ def get_settings() -> Settings:
     http_settings = HttpSettings(
         host=_decouple_config("HTTP_HOST", default="127.0.0.1"),
         port=_int(_decouple_config("HTTP_PORT", default="8765"), default=8765),
-        path=_decouple_config("HTTP_PATH", default="/mcp/"),
+        path=_decouple_config("HTTP_PATH", default="/api/"),
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
@@ -338,8 +338,9 @@ def get_settings() -> Settings:
         keep_original_images=_bool(_decouple_config("KEEP_ORIGINAL_IMAGES", default="false"), default=False),
     )
 
+    cors_default = "true" if environment.lower() == "development" else "false"
     cors_settings = CorsSettings(
-        enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default="false"), default=False),
+        enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default=cors_default), default=cors_default == "true"),
         origins=_csv("HTTP_CORS_ORIGINS", default=""),
         allow_credentials=_bool(_decouple_config("HTTP_CORS_ALLOW_CREDENTIALS", default="false"), default=False),
         allow_methods=_csv("HTTP_CORS_ALLOW_METHODS", default="*"),
