@@ -168,78 +168,46 @@ json_escape_string() {
 # Merge MCP server config into existing settings JSON
 # Usage: json_merge_mcp_server <existing_json> <server_name> <server_config_json>
 # Returns: merged JSON preserving all existing keys
+# Requires: jq (for safe JSON handling without quote injection vulnerabilities)
 json_merge_mcp_server() {
   local existing="$1"
   local server_name="$2"
   local server_config="$3"
 
-  if command -v jq >/dev/null 2>&1; then
-    echo "$existing" | jq --arg name "$server_name" --argjson config "$server_config" \
-      '.mcpServers = (.mcpServers // {}) | .mcpServers[$name] = $config'
-  else
-    uv run python -c "
-import json
-import sys
-
-existing = json.loads('''$existing''')
-server_name = '''$server_name'''
-server_config = json.loads('''$server_config''')
-
-if 'mcpServers' not in existing:
-    existing['mcpServers'] = {}
-existing['mcpServers'][server_name] = server_config
-
-print(json.dumps(existing, indent=2))
-"
+  if ! command -v jq >/dev/null 2>&1; then
+    log_err "jq is required for JSON merge. Install: brew install jq (macOS) or apt install jq (Linux)"
+    return 1
   fi
+
+  echo "$existing" | jq --arg name "$server_name" --argjson config "$server_config" \
+    '.mcpServers = (.mcpServers // {}) | .mcpServers[$name] = $config'
 }
 
 # Append hook to existing hooks array without duplicating
 # Usage: json_append_hook <existing_json> <hook_type> <hook_json> <identifier>
 # hook_type: SessionStart, PreToolUse, PostToolUse
 # identifier: string to check for duplicates (e.g., "mcp-agent-mail")
+# Requires: jq (for safe JSON handling without quote injection vulnerabilities)
 json_append_hook() {
   local existing="$1"
   local hook_type="$2"
   local hook_json="$3"
   local identifier="$4"
 
-  if command -v jq >/dev/null 2>&1; then
-    # Check if already exists
-    if echo "$existing" | jq -e ".hooks.${hook_type}[]? | .hooks[]? | .command | contains(\"${identifier}\")" >/dev/null 2>&1; then
-      # Already exists, return unchanged
-      echo "$existing"
-      return
-    fi
-    # Append new hook
-    echo "$existing" | jq --argjson hook "$hook_json" \
-      ".hooks = (.hooks // {}) | .hooks.${hook_type} = ((.hooks.${hook_type} // []) + [\$hook])"
-  else
-    uv run python -c "
-import json
-import sys
-
-existing = json.loads('''$existing''')
-hook_type = '''$hook_type'''
-hook = json.loads('''$hook_json''')
-identifier = '''$identifier'''
-
-if 'hooks' not in existing:
-    existing['hooks'] = {}
-if hook_type not in existing['hooks']:
-    existing['hooks'][hook_type] = []
-
-# Check for duplicate
-exists = any(
-    identifier in str(h.get('hooks', []))
-    for h in existing['hooks'][hook_type]
-)
-if not exists:
-    existing['hooks'][hook_type].append(hook)
-
-print(json.dumps(existing, indent=2))
-"
+  if ! command -v jq >/dev/null 2>&1; then
+    log_err "jq is required for JSON merge. Install: brew install jq (macOS) or apt install jq (Linux)"
+    return 1
   fi
+
+  # Check if already exists (use --arg to safely pass identifier)
+  if echo "$existing" | jq -e --arg id "$identifier" ".hooks.${hook_type}[]? | .hooks[]? | .command | contains(\$id)" >/dev/null 2>&1; then
+    # Already exists, return unchanged
+    echo "$existing"
+    return
+  fi
+  # Append new hook
+  echo "$existing" | jq --argjson hook "$hook_json" \
+    ".hooks = (.hooks // {}) | .hooks.${hook_type} = ((.hooks.${hook_type} // []) + [\$hook])"
 }
 
 # Ensure settings.local.json is in .gitignore

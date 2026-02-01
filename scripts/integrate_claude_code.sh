@@ -15,6 +15,7 @@ setup_traps
 parse_common_flags "$@"
 require_cmd uv
 require_cmd curl
+require_cmd jq  # Required for safe JSON merging (avoids quote injection vulnerabilities)
 
 log_step "Claude Code Integration (HTTP MCP + Hooks)"
 echo
@@ -173,8 +174,8 @@ INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}'
 EXISTING_SETTINGS="{}"
 if [[ -f "$SETTINGS_PATH" ]]; then
   EXISTING_SETTINGS=$(cat "$SETTINGS_PATH" 2>/dev/null || echo "{}")
-  # Validate JSON
-  if ! echo "$EXISTING_SETTINGS" | jq empty 2>/dev/null && ! uv run python -c "import json; json.loads('''$EXISTING_SETTINGS''')" 2>/dev/null; then
+  # Validate JSON (jq is required, so use it directly)
+  if ! echo "$EXISTING_SETTINGS" | jq empty 2>/dev/null; then
     log_warn "Existing settings.json has invalid JSON, starting fresh"
     EXISTING_SETTINGS="{}"
   fi
@@ -235,7 +236,9 @@ fi
 EXISTING_LOCAL="{}"
 if [[ -f "$LOCAL_SETTINGS_PATH" ]]; then
   EXISTING_LOCAL=$(cat "$LOCAL_SETTINGS_PATH" 2>/dev/null || echo "{}")
-  if ! echo "$EXISTING_LOCAL" | jq empty 2>/dev/null && ! uv run python -c "import json; json.loads('''$EXISTING_LOCAL''')" 2>/dev/null; then
+  # Validate JSON (jq is required, so use it directly)
+  if ! echo "$EXISTING_LOCAL" | jq empty 2>/dev/null; then
+    log_warn "Existing settings.local.json has invalid JSON, starting fresh"
     EXISTING_LOCAL="{}"
   fi
 fi
