@@ -2181,6 +2181,7 @@ This section has been removed to keep the README focused. See API Quick Referenc
   - When JWKS is configured (`HTTP_JWT_JWKS_URL`), incoming JWTs must include a matching `kid` header; tokens without `kid` or with unknown `kid` are rejected
   - Starter RBAC (reader vs writer) using role configuration; see `HTTP_RBAC_*` settings
   - Bearer-only RBAC note: when JWT is disabled, requests use `HTTP_RBAC_DEFAULT_ROLE` (default `reader`). That means non-localhost tool calls are read-only unless you set `HTTP_RBAC_DEFAULT_ROLE=writer`, disable RBAC (`HTTP_RBAC_ENABLED=false`), or switch to JWT roles. Localhost requests with `HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED=true` are auto-elevated to writer.
+  - Localhost bypass is disabled when proxy headers are present (`Forwarded` / `X-Forwarded-*`) to avoid auth bypass behind reverse proxies.
 - Reverse proxy + TLS (minimal example)
   - NGINX location block:
     ```nginx
