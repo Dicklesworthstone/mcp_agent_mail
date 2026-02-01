@@ -176,7 +176,7 @@ function timeTravelManager() {
       this.loadingAgents = true;
 
       try {
-        const response = await fetch(`/api/projects/${encodeURIComponent(project)}/agents`);
+        const response = await fetch(`/mail/api/projects/${encodeURIComponent(project)}/agents`);
         const data = await response.json();
 
         // Only update agents if this is still the current project

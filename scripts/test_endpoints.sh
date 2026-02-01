@@ -4,7 +4,7 @@ set -euo pipefail
 # Scripted integration tests for HTTP endpoints using curl.
 # Assumes server is running locally with defaults.
 
-BASE_URL=${BASE_URL:-http://127.0.0.1:8765/mcp/}
+BASE_URL=${BASE_URL:-http://127.0.0.1:8765/api/}
 
 call_tools() {
   local name=$1; shift
@@ -34,6 +34,5 @@ call_tools register_agent '{"project_key":"/tmp/demo-project","program":"demo","
 echo
 
 echo "[4/4] Environment resource"
-read_resource 'resource://config/environment'
+read_resource 'resource://config/environment?format=json'
 echo
-

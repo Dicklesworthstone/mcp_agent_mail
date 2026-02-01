@@ -13,7 +13,7 @@
 # Environment variables:
 #   AGENT_MAIL_PROJECT   - Project key (absolute path)
 #   AGENT_MAIL_AGENT     - Agent name
-#   AGENT_MAIL_URL       - Server URL (default: http://127.0.0.1:8765/mcp/)
+#   AGENT_MAIL_URL       - Server URL (default: http://127.0.0.1:8765/api/)
 #   AGENT_MAIL_TOKEN     - Bearer token
 #   AGENT_MAIL_INTERVAL  - Minimum seconds between checks (default: 120)
 
@@ -27,7 +27,7 @@ set -uo pipefail
 # Configuration with defaults
 PROJECT="${AGENT_MAIL_PROJECT:-}"
 AGENT="${AGENT_MAIL_AGENT:-}"
-URL="${AGENT_MAIL_URL:-http://127.0.0.1:8765/mcp/}"
+URL="${AGENT_MAIL_URL:-http://127.0.0.1:8765/api/}"
 TOKEN="${AGENT_MAIL_TOKEN:-}"
 INTERVAL="${AGENT_MAIL_INTERVAL:-120}"
 

@@ -2008,7 +2008,7 @@ decouple_config = DecoupleConfig(RepositoryEnv(".env"))
 STORAGE_ROOT = decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo")
 HTTP_HOST = decouple_config("HTTP_HOST", default="127.0.0.1")
 HTTP_PORT = int(decouple_config("HTTP_PORT", default=8765))
-HTTP_PATH = decouple_config("HTTP_PATH", default="/mcp/")
+HTTP_PATH = decouple_config("HTTP_PATH", default="/api/")
 ```
 
 Common variables you may set:
@@ -2020,7 +2020,7 @@ Common variables you may set:
 | `STORAGE_ROOT` | `~/.mcp_agent_mail_git_mailbox_repo` | Root for per-project repos and SQLite DB |
 | `HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport |
 | `HTTP_PORT` | `8765` | Bind port for HTTP transport |
-| `HTTP_PATH` | `/mcp/` | HTTP path where MCP endpoint is mounted |
+| `HTTP_PATH` | `/api/` | HTTP path where MCP endpoint is mounted |
 | `HTTP_JWT_ENABLED` | `false` | Enable JWT validation middleware |
 | `HTTP_JWT_SECRET` |  | HMAC secret for HS* algorithms (dev) |
 | `HTTP_JWT_JWKS_URL` |  | JWKS URL for public key verification |
@@ -2139,7 +2139,7 @@ uv run python -m mcp_agent_mail.cli serve-http
 uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
-Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
+Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/api` and `/api/`.
 
 ## Search syntax tips (SQLite FTS5)
 
@@ -2188,7 +2188,7 @@ This section has been removed to keep the README focused. See API Quick Referenc
       server_name mcp.example.com;
       ssl_certificate /etc/letsencrypt/live/mcp.example.com/fullchain.pem;
       ssl_certificate_key /etc/letsencrypt/live/mcp.example.com/privkey.pem;
-      location /mcp/ { proxy_pass http://mcp_mail; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; }
+      location /api/ { proxy_pass http://mcp_mail; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; }
     }
     ```
 - Backups and retention
@@ -2589,7 +2589,7 @@ The inbox check hooks accept these environment variables (set automatically by t
 |----------|-------------|---------|
 | `AGENT_MAIL_PROJECT` | Project key (absolute path) | *required* |
 | `AGENT_MAIL_AGENT` | Agent name | *required* |
-| `AGENT_MAIL_URL` | Server URL | `http://127.0.0.1:8765/mcp/` |
+| `AGENT_MAIL_URL` | Server URL | `http://127.0.0.1:8765/api/` |
 | `AGENT_MAIL_TOKEN` | Bearer token | *none* |
 | `AGENT_MAIL_INTERVAL` | Seconds between checks | `120` |
 

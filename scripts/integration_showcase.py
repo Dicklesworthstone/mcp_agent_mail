@@ -150,7 +150,7 @@ def _build_environment() -> dict[str, Any]:
         "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": "8765",
-        "HTTP_PATH": "/mcp/",
+        "HTTP_PATH": "/api/",
         "STORAGE_ROOT": str(storage_root),
         "GIT_AUTHOR_NAME": "integration-bot",
         "GIT_AUTHOR_EMAIL": "integration-bot@example.com",

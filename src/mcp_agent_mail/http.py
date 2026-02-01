@@ -18,8 +18,10 @@ from typing import Any, Protocol, cast
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import NoResultFound
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -1063,11 +1065,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
-                    with contextlib.suppress(Exception):
+                    if not server_task.done():
+                        server_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await server_task
 
     # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
-    mount_base = settings.http.path or "/mcp"
+    mount_base = settings.http.path or "/api"
     if not mount_base.startswith("/"):
         mount_base = "/" + mount_base
     base_no_slash = mount_base.rstrip("/") or "/"
@@ -1544,7 +1548,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 results=matched_messages,
             )
 
-        @fastapi_app.post("/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
+        @fastapi_app.post("/mail/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
         async def update_project_sibling(project_id: int, other_id: int, request: Request) -> JSONResponse:
             try:
                 payload = await request.json()
@@ -2823,7 +2827,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             finally:
                 repo.close()
 
-        @fastapi_app.get("/api/projects/{project}/agents")
+        @fastapi_app.get("/mail/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
             """Get list of agents for a project."""
             # Validate project slug
@@ -2909,6 +2913,37 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         with contextlib.suppress(Exception):
             structlog.get_logger("ui").error("ui_init_failed", error=str(exc))
         pass
+
+    # Static web UI (SPA) routing support
+    def _resolve_web_root() -> Path | None:
+        candidates: list[Path] = []
+        try:
+            candidates.append(Path(__file__).resolve().parents[3] / "web")
+        except Exception:
+            pass
+        candidates.append(Path.cwd() / "web")
+        for candidate in candidates:
+            try:
+                if candidate.exists() and (candidate / "index.html").exists():
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    web_root = _resolve_web_root()
+    if web_root is not None:
+        fastapi_app.mount("/", StaticFiles(directory=str(web_root), html=True), name="web")
+
+        def _is_api_path(path: str) -> bool:
+            if base_no_slash == "/":
+                return True
+            return path == base_no_slash or path.startswith(base_no_slash + "/")
+
+        @fastapi_app.exception_handler(HTTPException)
+        async def spa_fallback(request: Request, exc: HTTPException):
+            if exc.status_code == status.HTTP_404_NOT_FOUND and not _is_api_path(request.url.path):
+                return FileResponse(web_root / "index.html")
+            return await http_exception_handler(request, exc)
 
     return fastapi_app
 
