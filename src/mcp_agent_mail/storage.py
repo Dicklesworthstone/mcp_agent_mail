@@ -1354,7 +1354,9 @@ async def _update_thread_digest(
                 f.write(f"# Thread {thread_id}\n\n")
             f.write(entry)
 
-    await _to_thread(_append)
+    lock_path = digest_path.with_suffix(f"{digest_path.suffix}.lock")
+    async with AsyncFileLock(lock_path):
+        await _to_thread(_append)
     return digest_path.relative_to(archive.repo_root).as_posix()
 
 
