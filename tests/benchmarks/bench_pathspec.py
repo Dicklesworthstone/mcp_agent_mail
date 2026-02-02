@@ -35,7 +35,6 @@ console = Console()
 # Import the actual functions we're benchmarking
 try:
     from mcp_agent_mail.app import (
-        GitWildMatchPattern,
         PathSpec,
         _compile_pathspec,
         _normalize_pathspec_pattern,
@@ -45,7 +44,6 @@ try:
 except ImportError:
     PATHSPEC_AVAILABLE = False
     PathSpec = None
-    GitWildMatchPattern = None
 
     def _compile_pathspec(pattern: str):
         return None
@@ -501,7 +499,7 @@ class TestUnionPathSpecBenchmark:
         individual_specs = [_compile_pathspec(p) for p in normalized_patterns]
 
         # Build union PathSpec
-        if PathSpec is not None and GitWildMatchPattern is not None:
+        if PathSpec is not None:
             union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             union_spec = None
@@ -610,7 +608,7 @@ class TestUnionPathSpecBenchmark:
 
         # Build union spec
         normalized_patterns = [_normalize_pathspec_pattern(p) for p in patterns]
-        if PathSpec is not None and GitWildMatchPattern is not None:
+        if PathSpec is not None:
             union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             pytest.skip("PathSpec not available")
@@ -675,7 +673,7 @@ class TestGuardHookPatternMatching:
         compiled_patterns = [(p, _compile_pathspec(p)) for p in normalized_patterns]
 
         # Build union spec for fast-path rejection
-        if PathSpec is not None and GitWildMatchPattern is not None:
+        if PathSpec is not None:
             union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             union_spec = None
