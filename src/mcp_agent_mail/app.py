@@ -82,15 +82,11 @@ from .utils import (
 )
 
 PathSpec: Any
-GitWildMatchPattern: Any
 try:
     from pathspec import PathSpec as _PathSpec
-    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GitWildMatchPattern
     PathSpec = _PathSpec
-    GitWildMatchPattern = _GitWildMatchPattern
 except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None
-    GitWildMatchPattern = None
 
 logger = logging.getLogger(__name__)
 
@@ -3575,7 +3571,7 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
     # If either side is a glob, treat both as patterns and check for overlap conservatively
     if _contains_glob(candidate_norm) or _contains_glob(existing_norm):
         return _patterns_overlap(existing_norm, candidate_norm)
-    if PathSpec is not None and GitWildMatchPattern is not None:
+    if PathSpec is not None:
         spec = _compile_pathspec(_normalize_pathspec_pattern(existing.path_pattern))
         if spec is not None:
             return spec.match_file(candidate_norm)
@@ -3596,9 +3592,9 @@ def _compile_pathspec(pattern: str) -> "PathSpec | None":
 
     Returns None if PathSpec is not available.
     """
-    if PathSpec is None or GitWildMatchPattern is None:
+    if PathSpec is None:
         return None
-    return PathSpec.from_lines("gitwildmatch", [pattern])
+    return PathSpec.from_lines("gitignore", [pattern])
 
 
 def _patterns_overlap(a: str, b: str) -> bool:
@@ -3674,7 +3670,7 @@ def _build_reservation_union_spec(
     - It belongs to a different agent (agent_id != exclude_agent_id)
     - Either the existing or candidate reservation is exclusive
     """
-    if PathSpec is None or GitWildMatchPattern is None:
+    if PathSpec is None:
         return None
 
     patterns: list[str] = []
@@ -3695,7 +3691,7 @@ def _build_reservation_union_spec(
         return None
 
     # Build union PathSpec matching ANY of these patterns
-    return PathSpec.from_lines("gitwildmatch", patterns)
+    return PathSpec.from_lines("gitignore", patterns)
 
 
 async def _list_inbox(

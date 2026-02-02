@@ -502,7 +502,7 @@ class TestUnionPathSpecBenchmark:
 
         # Build union PathSpec
         if PathSpec is not None and GitWildMatchPattern is not None:
-            union_spec = PathSpec.from_lines("gitwildmatch", normalized_patterns)
+            union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             union_spec = None
 
@@ -611,7 +611,7 @@ class TestUnionPathSpecBenchmark:
         # Build union spec
         normalized_patterns = [_normalize_pathspec_pattern(p) for p in patterns]
         if PathSpec is not None and GitWildMatchPattern is not None:
-            union_spec = PathSpec.from_lines("gitwildmatch", normalized_patterns)
+            union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             pytest.skip("PathSpec not available")
             return
@@ -676,7 +676,7 @@ class TestGuardHookPatternMatching:
 
         # Build union spec for fast-path rejection
         if PathSpec is not None and GitWildMatchPattern is not None:
-            union_spec = PathSpec.from_lines("gitwildmatch", normalized_patterns)
+            union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
         else:
             union_spec = None
 
