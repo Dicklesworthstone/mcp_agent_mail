@@ -56,7 +56,7 @@ class _CommitRequest:
     settings: Settings
     message: str
     rel_paths: list[str]
-    future: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+    future: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     created_at: float = field(default_factory=time.monotonic)
 
 
