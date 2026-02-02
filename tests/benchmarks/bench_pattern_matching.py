@@ -64,7 +64,7 @@ async def test_bench_pathspec_compile():
 
     async def operation(_i: int) -> None:
         for pattern in patterns:
-            PathSpec.from_lines("gitwildmatch", [pattern])
+            PathSpec.from_lines("gitignore", [pattern])
 
     await run_benchmark(
         name="pathspec_compile",
@@ -140,8 +140,8 @@ async def test_bench_union_pathspec_matching():
     seed = DEFAULT_SEED
     patterns = [f"src/module{i}/**/*.py" for i in range(100)]
     paths = [f"src/module{i}/file{j}.py" for i in range(10) for j in range(10)]
-    specs = [PathSpec.from_lines("gitwildmatch", [pattern]) for pattern in patterns]
-    union_spec = PathSpec.from_lines("gitwildmatch", patterns)
+    specs = [PathSpec.from_lines("gitignore", [pattern]) for pattern in patterns]
+    union_spec = PathSpec.from_lines("gitignore", patterns)
 
     async def individual_operation(_i: int) -> None:
         for path in paths:

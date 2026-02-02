@@ -3292,7 +3292,7 @@ def guard_check(
         patt = pattern.lower() if ignorecase else pattern
         if _PS is not None:
             try:
-                return _PS.from_lines("gitwildmatch", [patt])
+                return _PS.from_lines("gitignore", [patt])
             except Exception:
                 return None
         return None
