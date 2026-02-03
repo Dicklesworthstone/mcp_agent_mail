@@ -221,9 +221,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if host in {"127.0.0.1", "::1", "localhost"}:
             return True
         # IPv4-mapped IPv6 address (::ffff:127.0.0.1)
-        if host.lower().startswith("::ffff:") and host[7:] == "127.0.0.1":
-            return True
-        return False
+        return bool(host.lower().startswith("::ffff:") and host[7:] == "127.0.0.1")
 
     @staticmethod
     def _has_forwarded_headers(request: Request) -> bool:
@@ -2943,10 +2941,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Static web UI (SPA) routing support
     def _resolve_web_root() -> Path | None:
         candidates: list[Path] = []
-        try:
+        with contextlib.suppress(Exception):
             candidates.append(Path(__file__).resolve().parents[3] / "web")
-        except Exception:
-            pass
         candidates.append(Path.cwd() / "web")
         for candidate in candidates:
             try:
