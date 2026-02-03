@@ -32,11 +32,13 @@ cd "$ROOT_DIR"
 
 log_step "Resolving HTTP endpoint from settings"
 eval "$(uv run python - <<'PY'
+import shlex
 from mcp_agent_mail.config import get_settings
 s = get_settings()
-print(f"export _HTTP_HOST='{s.http.host}'")
-print(f"export _HTTP_PORT='{s.http.port}'")
-print(f"export _HTTP_PATH='{s.http.path}'")
+print(f"export _HTTP_HOST={shlex.quote(str(s.http.host))}")
+print(f"export _HTTP_PORT={shlex.quote(str(s.http.port))}")
+print(f"export _HTTP_PATH={shlex.quote(str(s.http.path))}")
+print(f"export _HTTP_BEARER_TOKEN={shlex.quote(str(s.http.bearer_token or ''))}")
 PY
 )"
 
@@ -49,11 +51,8 @@ fi
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 log_ok "Detected MCP HTTP endpoint: ${_URL}"
 
-_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
 _TOKEN_GENERATED=0
-if [[ -z "${_TOKEN}" && -f .env ]]; then
-  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//' | tr -d '\r') || true
-fi
+_TOKEN="${INTEGRATION_BEARER_TOKEN:-${_HTTP_BEARER_TOKEN:-}}"
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
     _TOKEN=$(openssl rand -hex 32)
@@ -66,7 +65,7 @@ PY
   _TOKEN_GENERATED=1
   log_ok "Generated bearer token."
 fi
-if [[ "${_TOKEN_GENERATED}" == "1" && -f .env ]]; then
+if [[ "${_TOKEN_GENERATED}" == "1" ]]; then
   # Keep local integrations consistent by persisting the generated token to .env.
   # This ensures scripts/run_server_with_token.sh and Codex configs use the same token.
   if update_env_var "HTTP_BEARER_TOKEN" "${_TOKEN}"; then
@@ -257,7 +256,7 @@ except Exception:
 lines = text.splitlines(keepends=True)
 
 target_header_re = re.compile(
-    r'^\s*\[mcp_servers(?:\.mcp_agent_mail|\."mcp_agent_mail"|\.\'mcp_agent_mail\'|\."mcp-agent-mail"|\.\'mcp-agent-mail\')\]\s*(?:#.*)?$'
+    r'^\s*\[mcp_servers(?:\.mcp_agent_mail|\."mcp_agent_mail"|\.\'mcp_agent_mail\'|\.mcp-agent-mail|\."mcp-agent-mail"|\.\'mcp-agent-mail\')\]\s*(?:#.*)?$'
 )
 table_header_re = re.compile(r"^\s*\[.*\]\s*(?:#.*)?$")
 url_line_re = re.compile(
