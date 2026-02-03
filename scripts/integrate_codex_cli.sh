@@ -50,8 +50,9 @@ _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 log_ok "Detected MCP HTTP endpoint: ${_URL}"
 
 _TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
+_TOKEN_GENERATED=0
 if [[ -z "${_TOKEN}" && -f .env ]]; then
-  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
+  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//' | tr -d '\r') || true
 fi
 if [[ -z "${_TOKEN}" ]]; then
   if command -v openssl >/dev/null 2>&1; then
@@ -62,7 +63,17 @@ import secrets; print(secrets.token_hex(32))
 PY
 )
   fi
+  _TOKEN_GENERATED=1
   log_ok "Generated bearer token."
+fi
+if [[ "${_TOKEN_GENERATED}" == "1" && -f .env ]]; then
+  # Keep local integrations consistent by persisting the generated token to .env.
+  # This ensures scripts/run_server_with_token.sh and Codex configs use the same token.
+  if update_env_var "HTTP_BEARER_TOKEN" "${_TOKEN}"; then
+    log_ok "Saved bearer token to .env"
+  else
+    log_warn "Failed to save bearer token to .env (continuing)"
+  fi
 fi
 
 OUT_JSON="${TARGET_DIR}/codex.mcp.json"
@@ -246,11 +257,11 @@ except Exception:
 lines = text.splitlines(keepends=True)
 
 target_header_re = re.compile(
-    r'^\s*\[mcp_servers(?:\.mcp_agent_mail|\."mcp_agent_mail"|\.\'mcp_agent_mail\')\]\s*(?:#.*)?$'
+    r'^\s*\[mcp_servers(?:\.mcp_agent_mail|\."mcp_agent_mail"|\.\'mcp_agent_mail\'|\."mcp-agent-mail"|\.\'mcp-agent-mail\')\]\s*(?:#.*)?$'
 )
 table_header_re = re.compile(r"^\s*\[.*\]\s*(?:#.*)?$")
 url_line_re = re.compile(
-    r'^(?P<indent>\s*)url\s*=\s*(?:"[^"]*"|\'[^\']*\')(?P<comment>\s*#.*)?\s*$'
+    r'^(?P<indent>\s*)url\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s#]+)(?P<comment>\s*#.*)?\s*$'
 )
 
 out: list[str] = []
