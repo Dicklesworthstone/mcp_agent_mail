@@ -224,16 +224,83 @@ else
   log_warn "notify already configured in ${USER_TOML}, skipping"
 fi
 
-# Add MCP server section if not present (sections come after top-level keys)
-if ! grep -q "^\[mcp_servers.mcp_agent_mail\]" "$USER_TOML" 2>/dev/null; then
-  {
-    echo ""
-    echo "# MCP servers configuration (mcp-agent-mail)"
-    echo "[mcp_servers.mcp_agent_mail]"
-    echo "url = \"${_URL}\""
-    # Headers omitted for local dev (server allows localhost without Authorization)
-  } >> "$USER_TOML"
-fi
+# Ensure MCP server section exists and points at the detected endpoint (idempotent).
+# Always upsert the MCP URL in-place.
+# Rationale: older installs wrote /mcp/ but the server defaults to /api/. Re-running this installer
+# should fix stale URLs automatically without requiring users to edit config by hand.
+_UPDATED_USER_TOML="$(uv run python - "$USER_TOML" "$_URL" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+url = sys.argv[2]
+
+try:
+    text = path.read_text(encoding="utf-8")
+except FileNotFoundError:
+    text = ""
+except Exception:
+    text = path.read_text(encoding="utf-8", errors="replace")
+
+lines = text.splitlines(keepends=True)
+
+target_header_re = re.compile(
+    r'^\s*\[mcp_servers(?:\.mcp_agent_mail|\."mcp_agent_mail"|\.\'mcp_agent_mail\')\]\s*(?:#.*)?$'
+)
+table_header_re = re.compile(r"^\s*\[.*\]\s*(?:#.*)?$")
+url_line_re = re.compile(
+    r'^(?P<indent>\s*)url\s*=\s*(?:"[^"]*"|\'[^\']*\')(?P<comment>\s*#.*)?\s*$'
+)
+
+out: list[str] = []
+in_target = False
+target_found = False
+url_written = False
+
+
+def emit_url(indent: str = "", comment: str = "") -> None:
+    out.append(f'{indent}url = "{url}"{comment}\n')
+
+
+for line in lines:
+    if in_target and table_header_re.match(line):
+        if not url_written:
+            emit_url()
+        in_target = False
+
+    if target_header_re.match(line):
+        in_target = True
+        target_found = True
+        url_written = False
+        out.append(line if line.endswith("\n") else line + "\n")
+        continue
+
+    if in_target:
+        m = url_line_re.match(line.rstrip("\r\n"))
+        if m:
+            emit_url(indent=m.group("indent") or "", comment=m.group("comment") or "")
+            url_written = True
+            continue
+
+    out.append(line if line.endswith("\n") else line + "\n")
+
+if in_target and not url_written:
+    emit_url()
+
+if not target_found:
+    if out and out[-1].strip():
+        out.append("\n")
+    out.append("# MCP servers configuration (mcp-agent-mail)\n")
+    out.append("[mcp_servers.mcp_agent_mail]\n")
+    emit_url()
+
+sys.stdout.write("".join(out))
+PY
+)"
+
+# Write atomically so partially-written configs never happen.
+write_atomic "$USER_TOML" <<<"$_UPDATED_USER_TOML"
 
 # Also write project-local .codex/config.toml for portability
 LOCAL_CODEX_DIR="${TARGET_DIR}/.codex"
