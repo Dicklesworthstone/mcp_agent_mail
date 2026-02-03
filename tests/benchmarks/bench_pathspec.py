@@ -499,10 +499,7 @@ class TestUnionPathSpecBenchmark:
         individual_specs = [_compile_pathspec(p) for p in normalized_patterns]
 
         # Build union PathSpec
-        if PathSpec is not None:
-            union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
-        else:
-            union_spec = None
+        union_spec = PathSpec.from_lines("gitignore", normalized_patterns) if PathSpec is not None else None
 
         # Benchmark individual matching (check all patterns for each path)
         individual_times_ms: list[float] = []
@@ -673,10 +670,7 @@ class TestGuardHookPatternMatching:
         compiled_patterns = [(p, _compile_pathspec(p)) for p in normalized_patterns]
 
         # Build union spec for fast-path rejection
-        if PathSpec is not None:
-            union_spec = PathSpec.from_lines("gitignore", normalized_patterns)
-        else:
-            union_spec = None
+        union_spec = PathSpec.from_lines("gitignore", normalized_patterns) if PathSpec is not None else None
 
         latencies_ms: list[float] = []
         conflicts_found: list[int] = []
