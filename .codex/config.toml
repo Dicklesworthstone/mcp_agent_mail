@@ -6,5 +6,5 @@ notify = ["/data/projects/mcp_agent_mail/.codex/hooks/notify_wrapper.sh"]
 
 # MCP servers configuration
 [mcp_servers.mcp_agent_mail]
-url = "http://127.0.0.1:8765/mcp/"
+url = "http://127.0.0.1:8765/api/"
 # headers can be added if needed; localhost allowed without Authorization
