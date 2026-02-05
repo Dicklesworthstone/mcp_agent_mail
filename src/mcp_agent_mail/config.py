@@ -189,6 +189,10 @@ class Settings:
     llm: LlmSettings
     tool_filter: ToolFilterSettings
     notifications: NotificationSettings
+    agent_heartbeat_enabled: bool
+    agent_heartbeat_interval_seconds: int
+    agent_heartbeat_alive_seconds: int
+    agent_heartbeat_stale_seconds: int
     # Background maintenance toggles
     file_reservations_cleanup_enabled: bool
     file_reservations_cleanup_interval_seconds: int
@@ -419,6 +423,10 @@ def get_settings() -> Settings:
         llm=llm_settings,
         tool_filter=tool_filter_settings,
         notifications=notification_settings,
+        agent_heartbeat_enabled=_bool(_decouple_config("AGENT_HEARTBEAT_ENABLED", default="true"), default=True),
+        agent_heartbeat_interval_seconds=_int(_decouple_config("AGENT_HEARTBEAT_INTERVAL_SECONDS", default="30"), default=30),
+        agent_heartbeat_alive_seconds=_int(_decouple_config("AGENT_HEARTBEAT_ALIVE_SECONDS", default="90"), default=90),
+        agent_heartbeat_stale_seconds=_int(_decouple_config("AGENT_HEARTBEAT_STALE_SECONDS", default="300"), default=300),
         file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
         file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
         file_reservation_inactivity_seconds=_int(_decouple_config("FILE_RESERVATION_INACTIVITY_SECONDS", default="1800"), default=1800),

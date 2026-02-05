@@ -66,6 +66,7 @@ class Agent(SQLModel, table=True):
     task_description: str = Field(default="", max_length=2048)
     inception_ts: datetime = Field(default_factory=_utcnow_naive)
     last_active_ts: datetime = Field(default_factory=_utcnow_naive)
+    last_heartbeat_ts: Optional[datetime] = Field(default=None)
     attachments_policy: str = Field(default="auto", max_length=16)
     contact_policy: str = Field(default="auto", max_length=16)  # open | auto | contacts_only | block_all
 

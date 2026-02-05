@@ -311,10 +311,16 @@
         </div>
       </div>
       {% if agents %}
-        <span class="px-4 py-2 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 text-sm font-bold rounded-full flex items-center gap-2">
-          <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
-          {{ agents|length }} active
-        </span>
+        <div class="flex items-center gap-3">
+          <label class="inline-flex items-center gap-2 px-3 py-2 bg-slate-100 dark:bg-slate-800 rounded-lg text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+            <input id="agents-active-only" type="checkbox" class="accent-emerald-600">
+            <span>Active only</span>
+          </label>
+          <span id="agents-count" class="px-4 py-2 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 text-sm font-bold rounded-full flex items-center gap-2">
+            <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
+            <span id="agents-count-text">{{ agents|length }} active</span>
+          </span>
+        </div>
       {% endif %}
     </div>
 
@@ -322,6 +328,7 @@
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {% for a in agents %}
           <div class="group relative bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-success-400 dark:hover:border-success-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
+               data-heartbeat="{{ a.heartbeat_status or 'unknown' }}"
                style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
 
             <!-- Decorative gradient blob -->
@@ -340,6 +347,28 @@
                   <span class="truncate">{{ a.program }}</span>
                   <span class="text-slate-300 dark:text-slate-600">•</span>
                   <span class="truncate">{{ a.model }}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400 mt-2">
+                  {% set hb = a.heartbeat_status or 'unknown' %}
+                  <span class="relative flex h-2.5 w-2.5">
+                    <span class="absolute inline-flex h-full w-full rounded-full opacity-60
+                      {% if hb == 'alive' %} bg-emerald-400 animate-ping
+                      {% elif hb == 'stale' %} bg-amber-400
+                      {% elif hb == 'offline' %} bg-rose-400
+                      {% else %} bg-slate-400
+                      {% endif %}"></span>
+                    <span class="relative inline-flex rounded-full h-2.5 w-2.5
+                      {% if hb == 'alive' %} bg-emerald-500
+                      {% elif hb == 'stale' %} bg-amber-500
+                      {% elif hb == 'offline' %} bg-rose-500
+                      {% else %} bg-slate-400
+                      {% endif %}"></span>
+                  </span>
+                  <span class="uppercase tracking-wide font-semibold">{{ hb }}</span>
+                  {% if a.heartbeat_age_seconds is not none %}
+                    <span class="text-slate-300 dark:text-slate-600">•</span>
+                    <span>{{ a.heartbeat_age_seconds }}s</span>
+                  {% endif %}
                 </div>
               </div>
             </div>
@@ -421,6 +450,30 @@
         }
       }, 800);
     });
+
+    // Active-only agent filter
+    const activeToggle = document.getElementById('agents-active-only');
+    const agentCards = Array.from(document.querySelectorAll('[data-heartbeat]'));
+    const agentsCountText = document.getElementById('agents-count-text');
+
+    const renderAgentFilter = () => {
+      if (!activeToggle || agentCards.length === 0) return;
+      const activeOnly = activeToggle.checked;
+      let visible = 0;
+      agentCards.forEach((card) => {
+        const status = (card.getAttribute('data-heartbeat') || '').toLowerCase();
+        const isActive = status === 'alive' || status === 'stale';
+        const show = activeOnly ? isActive : true;
+        card.classList.toggle('hidden', !show);
+        if (show) visible += 1;
+      });
+      if (agentsCountText) {
+        agentsCountText.textContent = `${visible} active`;
+      }
+    };
+
+    activeToggle?.addEventListener('change', renderAgentFilter);
+    renderAgentFilter();
   });
 </script>
 {% endblock %}

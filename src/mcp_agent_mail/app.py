@@ -1638,8 +1638,37 @@ def _project_to_dict(project: Project) -> dict[str, Any]:
         "created_at": _iso(project.created_at),
     }
 
+def _heartbeat_status(agent: Agent, settings: Settings, now: Optional[datetime] = None) -> dict[str, Any]:
+    if not getattr(settings, "agent_heartbeat_enabled", True):
+        return {
+            "status": "disabled",
+            "last_heartbeat_ts": _iso(agent.last_heartbeat_ts),
+            "age_seconds": None,
+        }
+    last = _ensure_utc(agent.last_heartbeat_ts)
+    if last is None:
+        return {
+            "status": "unknown",
+            "last_heartbeat_ts": None,
+            "age_seconds": None,
+        }
+    now_utc = _ensure_utc(now) or datetime.now(timezone.utc)
+    age = max(0.0, (now_utc - last).total_seconds())
+    if age <= settings.agent_heartbeat_alive_seconds:
+        status = "alive"
+    elif age <= settings.agent_heartbeat_stale_seconds:
+        status = "stale"
+    else:
+        status = "offline"
+    return {
+        "status": status,
+        "last_heartbeat_ts": _iso(last),
+        "age_seconds": int(age),
+    }
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
+    settings = get_settings()
+    heartbeat = _heartbeat_status(agent, settings)
     return {
         "id": agent.id,
         "name": agent.name,
@@ -1648,6 +1677,12 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "task_description": agent.task_description,
         "inception_ts": _iso(agent.inception_ts),
         "last_active_ts": _iso(agent.last_active_ts),
+        "last_heartbeat_ts": heartbeat.get("last_heartbeat_ts"),
+        "heartbeat_status": heartbeat.get("status"),
+        "heartbeat_age_seconds": heartbeat.get("age_seconds"),
+        "heartbeat_interval_seconds": settings.agent_heartbeat_interval_seconds,
+        "heartbeat_alive_seconds": settings.agent_heartbeat_alive_seconds,
+        "heartbeat_stale_seconds": settings.agent_heartbeat_stale_seconds,
         "project_id": agent.project_id,
         "attachments_policy": getattr(agent, "attachments_policy", "auto"),
     }
@@ -2936,6 +2971,7 @@ async def _get_or_create_agent(
                 agent.model = model
                 agent.task_description = task_description
                 agent.last_active_ts = _naive_utc()
+                agent.last_heartbeat_ts = agent.last_active_ts
                 session.add(agent)
                 await session.commit()
                 await session.refresh(agent)
@@ -2947,6 +2983,7 @@ async def _get_or_create_agent(
                 program=program,
                 model=model,
                 task_description=task_description,
+                last_heartbeat_ts=_naive_utc(),
             )
             session.add(candidate)
             try:
@@ -2974,6 +3011,7 @@ async def _get_or_create_agent(
                     agent.model = model
                     agent.task_description = task_description
                     agent.last_active_ts = _naive_utc()
+                    agent.last_heartbeat_ts = agent.last_active_ts
                     session.add(agent)
                     await session.commit()
                     await session.refresh(agent)
@@ -4617,6 +4655,45 @@ def build_mcp_server() -> FastMCP:
                     await session.refresh(db_agent)
                     agent = db_agent
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
+        return _agent_to_dict(agent)
+
+    @mcp.tool(name="agent_heartbeat")
+    @_instrument_tool("agent_heartbeat", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, project_arg="project_key", agent_arg="agent_name")
+    async def agent_heartbeat(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        heartbeat_ts: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Record an active heartbeat for an agent.
+
+        Use this for liveness tracking. Clients should call this periodically
+        (default 30s) to keep agents marked as alive.
+        """
+        settings = get_settings()
+        if not settings.agent_heartbeat_enabled:
+            return {"ok": False, "error": "Agent heartbeat tracking is disabled."}
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        ts = _validate_iso_timestamp(heartbeat_ts, "heartbeat_ts") if heartbeat_ts else None
+        naive_ts = _naive_utc(ts)
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if not db_agent:
+                raise ToolExecutionError(
+                    "NOT_FOUND",
+                    f"Agent '{agent_name}' not found in project '{project.human_key}'.",
+                    recoverable=True,
+                )
+            db_agent.last_heartbeat_ts = naive_ts
+            db_agent.last_active_ts = naive_ts
+            session.add(db_agent)
+            await session.commit()
+            await session.refresh(db_agent)
+            agent = db_agent
+        await ctx.info(f"Heartbeat recorded for agent '{agent.name}'.")
         return _agent_to_dict(agent)
 
     @mcp.tool(name="whois")
@@ -8647,6 +8724,15 @@ def build_mcp_server() -> FastMCP:
                         "expected_frequency": "At the start of each automated work session.",
                         "required_capabilities": ["identity"],
                         "usage_examples": [{"hint": "Resume persona", "sample": "register_agent(project_key='/abs/path/backend', program='codex', model='gpt5')"}],
+                    },
+                    {
+                        "name": "agent_heartbeat",
+                        "summary": "Record liveness for an agent and update heartbeat timestamps.",
+                        "use_when": "Reporting active status from long-running or background agents.",
+                        "related": ["register_agent", "whois"],
+                        "expected_frequency": "Every 30s (or configured heartbeat interval).",
+                        "required_capabilities": ["identity"],
+                        "usage_examples": [{"hint": "Heartbeat", "sample": "agent_heartbeat(project_key='backend', agent_name='BlueLake')"}],
                     },
                     {
                         "name": "create_agent_identity",

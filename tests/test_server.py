@@ -78,6 +78,30 @@ async def test_messaging_flow(isolated_env):
         resource_blocks = await client.read_resource("resource://project/backend")
         assert resource_blocks
         text_payload = resource_blocks[0].text
+
+
+@pytest.mark.asyncio
+async def test_agent_heartbeat_updates_status(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "heartbeat test",
+            },
+        )
+        heartbeat = await client.call_tool(
+            "agent_heartbeat",
+            {"project_key": "Backend", "agent_name": "BlueLake"},
+        )
+        assert heartbeat.data["heartbeat_status"] in {"alive", "stale", "offline", "unknown"}
+        assert heartbeat.data["last_heartbeat_ts"] is not None
         assert "BlueLake" in text_payload
 
         storage_root = Path(get_settings().storage.root).expanduser().resolve()

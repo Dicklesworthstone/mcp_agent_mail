@@ -657,9 +657,17 @@ async def ensure_schema(settings: Settings | None = None) -> None:
             # Pure SQLModel: create tables from metadata
             # (WAL mode is set automatically via event listener in _build_engine)
             await conn.run_sync(SQLModel.metadata.create_all)
+            await conn.run_sync(_ensure_agent_heartbeat_columns)
             # Setup FTS and custom indexes
             await conn.run_sync(_setup_fts)
         _schema_ready = True
+
+
+def _ensure_agent_heartbeat_columns(connection: Any) -> None:
+    cols = [row[1] for row in connection.exec_driver_sql("PRAGMA table_info(agents)").fetchall()]
+    colset = {c.lower() for c in cols}
+    if "last_heartbeat_ts" not in colset:
+        connection.exec_driver_sql("ALTER TABLE agents ADD COLUMN last_heartbeat_ts DATETIME")
 
 
 def reset_database_state() -> None:

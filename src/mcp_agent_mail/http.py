@@ -64,6 +64,40 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
         return res[0] if res and res[0] else None
 
 
+def _parse_db_ts(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text_val = str(value).strip()
+        if not text_val:
+            return None
+        if text_val.endswith("Z"):
+            text_val = text_val[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text_val)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _heartbeat_status_from_ts(last_ts: Any, settings: Settings) -> dict[str, Any]:
+    if not settings.agent_heartbeat_enabled:
+        return {"status": "disabled", "age_seconds": None}
+    last = _parse_db_ts(last_ts)
+    if last is None:
+        return {"status": "unknown", "age_seconds": None}
+    now = datetime.now(timezone.utc)
+    age = max(0.0, (now - last).total_seconds())
+    if age <= settings.agent_heartbeat_alive_seconds:
+        status = "alive"
+    elif age <= settings.agent_heartbeat_stale_seconds:
+        status = "stale"
+    else:
+        status = "offline"
+    return {"status": status, "age_seconds": int(age)}
+
+
 __all__ = ["build_http_app", "main"]
 
 
@@ -1502,10 +1536,28 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     return await _render("error.html", message="Project not found")
                 pid = int(prow[0])
                 agents_q = await session.execute(
-                    text("SELECT id, name, program, model FROM agents WHERE project_id = :pid ORDER BY name"),
+                    text(
+                        "SELECT id, name, program, model, last_active_ts, last_heartbeat_ts "
+                        "FROM agents WHERE project_id = :pid ORDER BY name"
+                    ),
                     {"pid": pid},
                 )
-                agents = [{"id": r[0], "name": r[1], "program": r[2], "model": r[3]} for r in agents_q.fetchall()]
+                settings = get_settings()
+                agents = []
+                for r in agents_q.fetchall():
+                    heartbeat = _heartbeat_status_from_ts(r[5], settings)
+                    agents.append(
+                        {
+                            "id": r[0],
+                            "name": r[1],
+                            "program": r[2],
+                            "model": r[3],
+                            "last_active_ts": r[4],
+                            "last_heartbeat_ts": r[5],
+                            "heartbeat_status": heartbeat.get("status"),
+                            "heartbeat_age_seconds": heartbeat.get("age_seconds"),
+                        }
+                    )
                 matched_messages: list[dict] = []
                 if q and q.strip():
                     # Prefer FTS5 when available (fts_messages maintained by triggers)

@@ -2274,6 +2274,7 @@ Output format (all tools/resources):
 | `health_check` | `health_check()` | `{status, environment, http_host, http_port, database_url}` | Lightweight readiness probe |
 | `ensure_project` | `ensure_project(human_key: str)` | `{id, slug, human_key, created_at}` | Idempotently creates/ensures project |
 | `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
+| `agent_heartbeat` | `agent_heartbeat(project_key: str, agent_name: str, heartbeat_ts?: str)` | Agent profile dict | Records liveness; updates heartbeat timestamp |
 | `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
 | `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images. Non-absolute `attachment_paths` resolve relative to the project archive root. |
@@ -2303,6 +2304,30 @@ Output format (all tools/resources):
 Output format (resources):
 - Append `?format=toon` to any resource URI to receive `{format:"toon", data:"<TOON>", meta:{...}}`.
 - All resources declare `format` as an optional query parameter (FastMCP templates accept it).
+
+## Agent Heartbeats (Presence)
+
+Agent presence is tracked with an active heartbeat. When an agent pings, its
+`last_heartbeat_ts` is updated and a status is derived:
+
+- **alive**: heartbeat within `AGENT_HEARTBEAT_ALIVE_SECONDS` (default 90s)
+- **stale**: heartbeat within `AGENT_HEARTBEAT_STALE_SECONDS` (default 300s)
+- **offline**: heartbeat older than stale window
+- **unknown**: never seen a heartbeat
+
+Use this to route work only to active agents and avoid waking idle ones. The
+project UI shows a colored badge + age seconds per agent.
+
+Config (env):
+- `AGENT_HEARTBEAT_ENABLED=true`
+- `AGENT_HEARTBEAT_INTERVAL_SECONDS=30`
+- `AGENT_HEARTBEAT_ALIVE_SECONDS=90`
+- `AGENT_HEARTBEAT_STALE_SECONDS=300`
+
+Heartbeat call (every ~30s from each active agent):
+```
+agent_heartbeat(project_key="/abs/path/project", agent_name="BlueLake")
+```
 - For resources without path params (e.g., `resource://projects`), include `?format=json` or `?format=toon`.
 - Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
 
