@@ -1639,7 +1639,7 @@ Messages are GitHub-Flavored Markdown with JSON frontmatter (fenced by `---json`
 
 2) Send a message
 
-- `send_message(project_key, sender_name, to[], subject, body_md, cc?, bcc?, attachment_paths?, convert_images?, importance?, ack_required?, thread_id?, auto_contact_if_blocked?)`
+- `send_message(project_key, sender_name, to[], subject, body_md, cc?, bcc?, attachment_paths?, convert_images?, importance?, ack_required?, thread_id?, auto_contact_if_blocked?, allow_dead_recipients?)`
 - Writes a canonical message under `messages/YYYY/MM/`, an outbox copy for the sender, and inbox copies for each recipient; commits all artifacts.
 - Optionally converts images (local paths or data URIs) to WebP and embeds small ones inline.
 
@@ -2277,7 +2277,7 @@ Output format (all tools/resources):
 | `agent_heartbeat` | `agent_heartbeat(project_key: str, agent_name: str, heartbeat_ts?: str)` | Agent profile dict | Records liveness; updates heartbeat timestamp |
 | `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
-| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images. Non-absolute `attachment_paths` resolve relative to the project archive root. |
+| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool, allow_dead_recipients?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images. Non-absolute `attachment_paths` resolve relative to the project archive root. |
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | `{thread_id, reply_to, deliveries: list, count: int, attachments?}` | Preserves/creates thread, inherits flags |
 | `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int)` | Contact link dict | Request permission to message another agent |
 | `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int)` | Contact link dict | Approve or deny a contact request |
@@ -2341,7 +2341,8 @@ agent_heartbeat(project_key="/abs/path/project", agent_name="BlueLake")
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
 | `resource://projects{?format}` | — | `list[project]` | All projects |
-| `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
+| `resource://project/{slug}{?tz}` | `slug`, `tz?` | `{project..., agents[]}` | Project detail + agents (optional local time fields) |
+| `resource://agents/{project_key}{?tz}` | `project_key`, `tz?` | `{project, agents[]}` | Agents directory (optional local time fields) |
 | `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations plus staleness metadata (heuristics, last activity timestamps) |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
 | `resource://thread/{thread_id}{?project,include_bodies}` | `thread_id`, `project`, `include_bodies?` | `{project, thread_id, messages[]}` | Thread listing |

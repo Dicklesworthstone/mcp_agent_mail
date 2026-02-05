@@ -15,6 +15,7 @@ from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol, cast
+from zoneinfo import ZoneInfo
 
 import structlog
 import uvicorn
@@ -79,6 +80,34 @@ def _parse_db_ts(value: Any) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except Exception:
         return None
+
+
+def _resolve_timezone(value: str | None) -> str | None:
+    if value is None:
+        return None
+    tz = value.strip()
+    if not tz:
+        return None
+    try:
+        ZoneInfo(tz)
+        return tz
+    except Exception:
+        return "UTC"
+
+
+def _format_local(value: Any, tz: str | None) -> str | None:
+    if not tz:
+        return None
+    tz_name = _resolve_timezone(tz)
+    if not tz_name:
+        return None
+    parsed = _parse_db_ts(value)
+    if not parsed:
+        return None
+    try:
+        return parsed.astimezone(ZoneInfo(tz_name)).isoformat()
+    except Exception:
+        return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _heartbeat_status_from_ts(last_ts: Any, settings: Settings) -> dict[str, Any]:
@@ -1525,6 +1554,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             scope: str | None = None,
             order: str | None = None,
             boost: int | None = None,
+            tz: str | None = None,
         ) -> HTMLResponse:
             await ensure_schema()
             async with get_session() as session:
@@ -1537,12 +1567,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 pid = int(prow[0])
                 agents_q = await session.execute(
                     text(
-                        "SELECT id, name, program, model, last_active_ts, last_heartbeat_ts "
+                        "SELECT id, name, program, model, last_active_ts, last_heartbeat_ts, lifecycle_status "
                         "FROM agents WHERE project_id = :pid ORDER BY name"
                     ),
                     {"pid": pid},
                 )
                 settings = get_settings()
+                tz_name = _resolve_timezone(tz)
                 agents = []
                 for r in agents_q.fetchall():
                     heartbeat = _heartbeat_status_from_ts(r[5], settings)
@@ -1556,6 +1587,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             "last_heartbeat_ts": r[5],
                             "heartbeat_status": heartbeat.get("status"),
                             "heartbeat_age_seconds": heartbeat.get("age_seconds"),
+                            "lifecycle_status": r[6] or "active",
+                            "timezone": tz_name,
+                            "last_active_local": _format_local(r[4], tz_name),
+                            "last_heartbeat_local": _format_local(r[5], tz_name),
                         }
                     )
                 matched_messages: list[dict] = []
@@ -2084,6 +2119,61 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 import traceback
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {exc!s}") from exc
+
+        @fastapi_app.post("/mail/{project}/agents/{agent}/status")
+        async def set_agent_status(project: str, agent: str, request: Request) -> JSONResponse:
+            """Update an agent lifecycle status (active/dead)."""
+            await ensure_schema()
+            try:
+                payload = await request.json()
+                status_value = str(payload.get("status", "")).strip().lower()
+                if status_value not in {"active", "dead"}:
+                    raise HTTPException(status_code=400, detail="Invalid status. Use 'active' or 'dead'.")
+
+                async with get_session() as session:
+                    prow = (
+                        await session.execute(
+                            text("SELECT id, slug FROM projects WHERE slug = :k OR human_key = :k"),
+                            {"k": project},
+                        )
+                    ).fetchone()
+                    if not prow:
+                        raise HTTPException(status_code=404, detail="Project not found")
+
+                    pid = int(prow[0])
+                    arow = (
+                        await session.execute(
+                            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                            {"pid": pid, "name": agent},
+                        )
+                    ).fetchone()
+                    if not arow:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+
+                    aid = int(arow[0])
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    await session.execute(
+                        text(
+                            "UPDATE agents SET lifecycle_status = :status, last_active_ts = :ts WHERE id = :aid"
+                        ),
+                        {"status": status_value, "ts": now, "aid": aid},
+                    )
+                    await session.commit()
+
+                return JSONResponse(
+                    {
+                        "success": True,
+                        "agent": agent,
+                        "project": prow[1],
+                        "lifecycle_status": status_value,
+                    }
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(status_code=500, detail=f"Failed to update agent status: {exc!s}") from exc
 
         @fastapi_app.get("/mail/{project}/thread/{thread_id}", response_class=HTMLResponse)
         async def mail_thread(project: str, thread_id: str) -> HTMLResponse:

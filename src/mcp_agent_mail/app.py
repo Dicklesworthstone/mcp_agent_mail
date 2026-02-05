@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, AsyncContextManager, Callable, Optional, Protocol, cast
 from urllib.parse import parse_qsl
 import uuid
+from zoneinfo import ZoneInfo
 
 from fastmcp import Context, FastMCP
 from git import Repo
@@ -798,6 +799,58 @@ def _iso(dt: Any) -> str:
         return str(dt)
     except Exception:
         return str(dt)
+
+
+def _to_utc_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except Exception:
+            return None
+        if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    if hasattr(value, "tzinfo"):
+        dt = cast(datetime, value)
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    return None
+
+
+def _resolve_timezone(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    tz = value.strip()
+    if not tz:
+        return None
+    try:
+        ZoneInfo(tz)
+        return tz
+    except Exception:
+        return "UTC"
+
+
+def _format_local(dt: Any, tz: Optional[str]) -> Optional[str]:
+    if not tz:
+        return None
+    tz_name = _resolve_timezone(tz)
+    if not tz_name:
+        return None
+    utc_dt = _to_utc_datetime(dt)
+    if utc_dt is None:
+        return None
+    try:
+        return utc_dt.astimezone(ZoneInfo(tz_name)).isoformat()
+    except Exception:
+        return utc_dt.astimezone(timezone.utc).isoformat()
 
 
 def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
@@ -1666,9 +1719,11 @@ def _heartbeat_status(agent: Agent, settings: Settings, now: Optional[datetime] 
         "age_seconds": int(age),
     }
 
-def _agent_to_dict(agent: Agent) -> dict[str, Any]:
+def _agent_to_dict(agent: Agent, tz: Optional[str] = None) -> dict[str, Any]:
     settings = get_settings()
     heartbeat = _heartbeat_status(agent, settings)
+    tz_name = _resolve_timezone(tz)
+    lifecycle = getattr(agent, "lifecycle_status", None) or "active"
     return {
         "id": agent.id,
         "name": agent.name,
@@ -1685,6 +1740,16 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "heartbeat_stale_seconds": settings.agent_heartbeat_stale_seconds,
         "project_id": agent.project_id,
         "attachments_policy": getattr(agent, "attachments_policy", "auto"),
+        "lifecycle_status": lifecycle,
+        **(
+            {
+                "timezone": tz_name,
+                "last_active_local": _format_local(agent.last_active_ts, tz_name),
+                "last_heartbeat_local": _format_local(agent.last_heartbeat_ts, tz_name),
+            }
+            if tz_name
+            else {}
+        ),
     }
 
 
@@ -4696,6 +4761,72 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Heartbeat recorded for agent '{agent.name}'.")
         return _agent_to_dict(agent)
 
+    @mcp.tool(name="mark_agent_dead")
+    @_instrument_tool("mark_agent_dead", cluster=CLUSTER_IDENTITY, capabilities={"identity", "write"}, project_arg="project_key", agent_arg="agent_name")
+    async def mark_agent_dead(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        reason: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Mark an agent as dead (soft state)."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        now = _naive_utc()
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if not db_agent:
+                raise ToolExecutionError(
+                    "NOT_FOUND",
+                    f"Agent '{agent_name}' not found in project '{project.human_key}'.",
+                    recoverable=True,
+                )
+            db_agent.lifecycle_status = "dead"
+            db_agent.last_active_ts = now
+            session.add(db_agent)
+            await session.commit()
+            await session.refresh(db_agent)
+            agent = db_agent
+        if reason:
+            await ctx.info(f"Marked agent '{agent.name}' as dead. Reason: {reason}")
+        else:
+            await ctx.info(f"Marked agent '{agent.name}' as dead.")
+        return _agent_to_dict(agent)
+
+    @mcp.tool(name="revive_agent")
+    @_instrument_tool("revive_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity", "write"}, project_arg="project_key", agent_arg="agent_name")
+    async def revive_agent(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        reason: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Revive a dead agent (soft state)."""
+        project = await _get_project_by_identifier(project_key)
+        agent = await _get_agent(project, agent_name)
+        now = _naive_utc()
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if not db_agent:
+                raise ToolExecutionError(
+                    "NOT_FOUND",
+                    f"Agent '{agent_name}' not found in project '{project.human_key}'.",
+                    recoverable=True,
+                )
+            db_agent.lifecycle_status = "active"
+            db_agent.last_active_ts = now
+            session.add(db_agent)
+            await session.commit()
+            await session.refresh(db_agent)
+            agent = db_agent
+        if reason:
+            await ctx.info(f"Revived agent '{agent.name}'. Reason: {reason}")
+        else:
+            await ctx.info(f"Revived agent '{agent.name}'.")
+        return _agent_to_dict(agent)
+
     @mcp.tool(name="whois")
     @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
     async def whois(
@@ -4855,6 +4986,7 @@ def build_mcp_server() -> FastMCP:
         ack_required: bool = False,
         thread_id: Optional[str] = None,
         auto_contact_if_blocked: bool = False,
+        allow_dead_recipients: bool = False,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -4898,6 +5030,8 @@ def build_mcp_server() -> FastMCP:
             If true, recipients should call `acknowledge_message` after reading.
         thread_id : Optional[str]
             If provided, message will be associated with an existing thread.
+        allow_dead_recipients : bool
+            If true, bypasses the soft-block for recipients marked dead.
 
         Returns
         -------
@@ -5065,6 +5199,28 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
         sender = await _get_agent(project, sender_name)
+        # Soft-block recipients explicitly marked dead (unless override).
+        if not allow_dead_recipients:
+            all_recipients = list(set(to + (cc or []) + (bcc or [])))
+            recipient_agents = await _get_agents_batch_lenient(project, all_recipients)
+            dead_recipients = [
+                rec.name
+                for rec in recipient_agents.values()
+                if rec is not None and getattr(rec, "lifecycle_status", "active").lower() == "dead"
+            ]
+            if dead_recipients:
+                dead_list = ", ".join(sorted(set(dead_recipients)))
+                err_msg = (
+                    f"Recipients marked dead: {dead_list}. "
+                    "Retry with allow_dead_recipients=true to override."
+                )
+                await ctx.error(f"RECIPIENT_DEAD: {err_msg}")
+                raise ToolExecutionError(
+                    "RECIPIENT_DEAD",
+                    err_msg,
+                    recoverable=True,
+                    data={"recipients_blocked": sorted(set(dead_recipients)), "allow_override": True},
+                )
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
         if settings_local.contact_enforcement_enabled:
@@ -9208,8 +9364,8 @@ def build_mcp_server() -> FastMCP:
                 format_value=format,
             )
 
-    @mcp.resource("resource://project/{slug}{?format}", mime_type="application/json")
-    async def project_detail(slug: str, format: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://project/{slug}{?format,tz}", mime_type="application/json")
+    async def project_detail(slug: str, format: Optional[str] = None, tz: Optional[str] = None) -> dict[str, Any]:
         """
         Fetch a project and its agents by project slug or human key.
 
@@ -9236,6 +9392,7 @@ def build_mcp_server() -> FastMCP:
         """
         slug_value, query_params = _split_slug_and_query(slug)
         format_value = format or query_params.get("format")
+        tz_value = tz or query_params.get("tz")
         project = await _get_project_by_identifier(slug_value)
         await ensure_schema()
         async with get_session() as session:
@@ -9243,7 +9400,7 @@ def build_mcp_server() -> FastMCP:
             agents = result.scalars().all()
         payload = {
             **_project_to_dict(project),
-            "agents": [_agent_to_dict(agent) for agent in agents],
+            "agents": [_agent_to_dict(agent, tz=tz_value) for agent in agents],
         }
         return _apply_resource_output_format(
             payload,
@@ -9252,8 +9409,8 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://agents/{project_key}{?format}", mime_type="application/json")
-    async def agents_directory(project_key: str, format: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://agents/{project_key}{?format,tz}", mime_type="application/json")
+    async def agents_directory(project_key: str, format: Optional[str] = None, tz: Optional[str] = None) -> dict[str, Any]:
         """
         List all registered agents in a project for easy agent discovery.
 
@@ -9303,6 +9460,7 @@ def build_mcp_server() -> FastMCP:
         """
         key_value, query_params = _split_slug_and_query(project_key)
         format_value = format or query_params.get("format")
+        tz_value = tz or query_params.get("tz")
         project = await _get_project_by_identifier(key_value)
         await ensure_schema()
 
@@ -9331,7 +9489,7 @@ def build_mcp_server() -> FastMCP:
             # Build agent data with unread counts
             agent_data = []
             for agent in agents:
-                agent_dict = _agent_to_dict(agent)
+                agent_dict = _agent_to_dict(agent, tz=tz_value)
                 agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
                 agent_data.append(agent_dict)
 
