@@ -265,3 +265,5 @@ test_screenshot.png
 
 # Claude Code local settings (contains secrets)
 .claude/settings.local.json
+
+.worktrees/
