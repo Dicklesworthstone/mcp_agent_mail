@@ -83,3 +83,11 @@ def test_cli_list_projects_and_serve_http_overrides(isolated_env, monkeypatch):
     assert calls.get("port") == 9999
 
 
+def test_cli_agents_dead_and_list(isolated_env):
+    _seed_backend()
+    runner = CliRunner()
+    res = runner.invoke(app, ["agents", "dead", "Backend", "Blue", "--reason", "test"])
+    assert res.exit_code == 0
+    res2 = runner.invoke(app, ["agents", "list", "Backend", "--active-only"])
+    assert res2.exit_code == 0
+

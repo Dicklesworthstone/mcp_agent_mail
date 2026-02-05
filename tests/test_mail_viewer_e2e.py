@@ -34,8 +34,8 @@ async def _setup_test_data(settings: _config.Settings) -> dict:
         # Create agent
         await session.execute(
             text(
-                "INSERT INTO agents (name, project_id, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) "
-                "VALUES (:name, :pid, :prog, :model, :task, datetime('now'), datetime('now'), 'auto', 'auto')"
+                "INSERT INTO agents (name, project_id, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy, lifecycle_status) "
+                "VALUES (:name, :pid, :prog, :model, :task, datetime('now'), datetime('now'), 'auto', 'auto', 'active')"
             ),
             {"name": "BlueLake", "pid": project_id, "prog": "claude-code", "model": "opus-4", "task": "Testing"},
         )
@@ -207,6 +207,22 @@ async def test_mail_project_view(isolated_env):
         resp = await client.get("/mail/test-proj")
         assert resp.status_code == 200
         assert "text/html" in resp.headers.get("content-type", "")
+
+
+@pytest.mark.asyncio
+async def test_mail_project_view_has_agent_status_controls(isolated_env):
+    """Ensure agent status controls render in project view."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    await _setup_test_data(settings)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/mail/test-proj")
+        assert resp.status_code == 200
+        assert "Mark agent dead" in resp.text or "Revive agent" in resp.text
 
 
 @pytest.mark.asyncio

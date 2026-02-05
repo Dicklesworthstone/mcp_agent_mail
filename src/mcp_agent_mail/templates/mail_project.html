@@ -329,6 +329,7 @@
         {% for a in agents %}
           <div class="group relative bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-success-400 dark:hover:border-success-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
                data-heartbeat="{{ a.heartbeat_status or 'unknown' }}"
+               data-lifecycle="{{ a.lifecycle_status or 'active' }}"
                style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
 
             <!-- Decorative gradient blob -->
@@ -340,9 +341,16 @@
                 <i data-lucide="bot" class="w-7 h-7 text-white"></i>
               </div>
               <div class="flex-1 min-w-0">
-                <h3 class="text-lg font-bold text-slate-900 dark:text-white truncate group-hover:text-success-600 dark:group-hover:text-success-400 transition-colors">
-                  {{ a.name }}
-                </h3>
+                <div class="flex items-center gap-2">
+                  <h3 class="text-lg font-bold text-slate-900 dark:text-white truncate group-hover:text-success-600 dark:group-hover:text-success-400 transition-colors">
+                    {{ a.name }}
+                  </h3>
+                  {% if (a.lifecycle_status or 'active') == 'dead' %}
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+                      Dead
+                    </span>
+                  {% endif %}
+                </div>
                 <div class="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-400 mt-1">
                   <span class="truncate">{{ a.program }}</span>
                   <span class="text-slate-300 dark:text-slate-600">•</span>
@@ -370,6 +378,10 @@
                     <span>{{ a.heartbeat_age_seconds }}s</span>
                   {% endif %}
                 </div>
+                <div class="text-xs text-slate-600 dark:text-slate-400 mt-2">
+                  <span class="text-slate-400 dark:text-slate-500">Last active:</span>
+                  <span>{{ a.last_active_local or a.last_active_ts }}</span>
+                </div>
               </div>
             </div>
 
@@ -386,6 +398,14 @@
                       data-tippy-content="Copy agent name"
                       aria-label="Copy agent name">
                 <i data-lucide="copy" class="w-4 h-4"></i>
+              </button>
+              <button onclick="updateAgentStatus(this.dataset.agentName, this.dataset.nextStatus)"
+                      data-agent-name="{{ a.name }}"
+                      data-next-status="{% if (a.lifecycle_status or 'active') == 'dead' %}active{% else %}dead{% endif %}"
+                      class="p-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md"
+                      data-tippy-content="{% if (a.lifecycle_status or 'active') == 'dead' %}Revive agent{% else %}Mark dead{% endif %}"
+                      aria-label="{% if (a.lifecycle_status or 'active') == 'dead' %}Revive agent{% else %}Mark agent dead{% endif %}">
+                <i data-lucide="{% if (a.lifecycle_status or 'active') == 'dead' %}heart-pulse{% else %}skull{% endif %}" class="w-4 h-4"></i>
               </button>
             </div>
           </div>
@@ -451,6 +471,19 @@
       }, 800);
     });
 
+    // Auto-detect timezone and reload with tz param (once)
+    const tzAutoKey = 'agentmail_tz_autoset';
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get('tz') && !sessionStorage.getItem(tzAutoKey)) {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) {
+        sessionStorage.setItem(tzAutoKey, '1');
+        params.set('tz', tz);
+        const newUrl = `${window.location.pathname}?${params.toString()}`;
+        window.location.replace(newUrl);
+      }
+    }
+
     // Active-only agent filter
     const activeToggle = document.getElementById('agents-active-only');
     const agentCards = Array.from(document.querySelectorAll('[data-heartbeat]'));
@@ -462,7 +495,8 @@
       let visible = 0;
       agentCards.forEach((card) => {
         const status = (card.getAttribute('data-heartbeat') || '').toLowerCase();
-        const isActive = status === 'alive' || status === 'stale';
+        const lifecycle = (card.getAttribute('data-lifecycle') || 'active').toLowerCase();
+        const isActive = (status === 'alive' || status === 'stale') && lifecycle !== 'dead';
         const show = activeOnly ? isActive : true;
         card.classList.toggle('hidden', !show);
         if (show) visible += 1;
@@ -474,6 +508,27 @@
 
     activeToggle?.addEventListener('change', renderAgentFilter);
     renderAgentFilter();
+
+    window.updateAgentStatus = async (agentName, nextStatus) => {
+      if (!agentName || !nextStatus) return;
+      const resp = await fetch(`/mail/{{ project.slug }}/agents/${encodeURIComponent(agentName)}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!resp.ok) {
+        console.error('Failed to update agent status');
+        return;
+      }
+      const data = await resp.json();
+      const cards = Array.from(document.querySelectorAll('[data-lifecycle]'));
+      const card = cards.find((c) => c.querySelector('h3')?.textContent?.trim() === agentName);
+      if (card) {
+        card.setAttribute('data-lifecycle', data.lifecycle_status || nextStatus);
+      }
+      renderAgentFilter();
+      window.location.reload();
+    };
   });
 </script>
 {% endblock %}

@@ -150,6 +150,7 @@ acks_app = typer.Typer(help="Review acknowledgement status")
 share_app = typer.Typer(help="Export MCP Agent Mail data for static sharing")
 config_app = typer.Typer(help="Configure server settings")
 archive_app = typer.Typer(help="Archive and restore local mailbox states (lossless disaster-recovery bundles)")
+agents_app = typer.Typer(help="Agent lifecycle utilities")
 
 app.add_typer(guard_app, name="guard")
 app.add_typer(file_reservations_app, name="file_reservations")
@@ -157,6 +158,7 @@ app.add_typer(acks_app, name="acks")
 app.add_typer(share_app, name="share")
 app.add_typer(config_app, name="config")
 app.add_typer(archive_app, name="archive")
+app.add_typer(agents_app, name="agents")
 mail_app = typer.Typer(help="Mail diagnostics and routing status")
 app.add_typer(mail_app, name="mail")
 projects_app = typer.Typer(help="Project maintenance utilities")
@@ -235,6 +237,92 @@ def _ensure_utc_dt(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+@agents_app.command("list")
+def agents_list(
+    project: Annotated[str, typer.Argument(..., help="Project slug or human key")],
+    active_only: Annotated[bool, typer.Option("--active-only/--no-active-only", help="Hide agents marked dead")] = False,
+) -> None:
+    """List agents with lifecycle status."""
+
+    async def _list() -> list[Agent]:
+        proj = await _get_project_record(project)
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = select(Agent).where(cast(ColumnElement[bool], Agent.project_id == proj.id)).order_by(Agent.name)
+            if active_only:
+                stmt = stmt.where(cast(ColumnElement[bool], Agent.lifecycle_status != "dead"))
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
+    agents = _run_async(_list())
+    table = Table(title=f"Agents for {project}")
+    table.add_column("Name", style="bold")
+    table.add_column("Status")
+    table.add_column("Last Active (UTC)")
+    for agent in agents:
+        status = getattr(agent, "lifecycle_status", None) or "active"
+        table.add_row(agent.name, status, _iso(agent.last_active_ts))
+    console.print(table)
+
+
+@agents_app.command("dead")
+def agents_mark_dead(
+    project: Annotated[str, typer.Argument(..., help="Project slug or human key")],
+    agent: Annotated[str, typer.Argument(..., help="Agent name")],
+    reason: Annotated[Optional[str], typer.Option("--reason", "-r", help="Reason for marking dead")] = None,
+) -> None:
+    """Mark an agent as dead (soft state)."""
+
+    async def _mark() -> str:
+        proj = await _get_project_record(project)
+        target = await _get_agent_record(proj, agent)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with get_session() as session:
+            db_agent = await session.get(Agent, target.id)
+            if not db_agent:
+                raise ValueError(f"Agent '{agent}' not found in project '{proj.human_key}'")
+            db_agent.lifecycle_status = "dead"
+            db_agent.last_active_ts = now
+            session.add(db_agent)
+            await session.commit()
+        return target.name
+
+    name = _run_async(_mark())
+    if reason:
+        console.print(f"[yellow]Marked {name} dead[/] — {reason}")
+    else:
+        console.print(f"[yellow]Marked {name} dead[/]")
+
+
+@agents_app.command("revive")
+def agents_revive(
+    project: Annotated[str, typer.Argument(..., help="Project slug or human key")],
+    agent: Annotated[str, typer.Argument(..., help="Agent name")],
+    reason: Annotated[Optional[str], typer.Option("--reason", "-r", help="Reason for reviving")] = None,
+) -> None:
+    """Revive a dead agent (soft state)."""
+
+    async def _revive() -> str:
+        proj = await _get_project_record(project)
+        target = await _get_agent_record(proj, agent)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        async with get_session() as session:
+            db_agent = await session.get(Agent, target.id)
+            if not db_agent:
+                raise ValueError(f"Agent '{agent}' not found in project '{proj.human_key}'")
+            db_agent.lifecycle_status = "active"
+            db_agent.last_active_ts = now
+            session.add(db_agent)
+            await session.commit()
+        return target.name
+
+    name = _run_async(_revive())
+    if reason:
+        console.print(f"[green]Revived {name}[/] — {reason}")
+    else:
+        console.print(f"[green]Revived {name}[/]")
 
 
 @products_app.command("ensure")

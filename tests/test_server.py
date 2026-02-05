@@ -78,6 +78,7 @@ async def test_messaging_flow(isolated_env):
         resource_blocks = await client.read_resource("resource://project/backend")
         assert resource_blocks
         text_payload = resource_blocks[0].text
+        assert "BlueLake" in text_payload
 
 
 @pytest.mark.asyncio
@@ -102,6 +103,9 @@ async def test_agent_heartbeat_updates_status(isolated_env):
         )
         assert heartbeat.data["heartbeat_status"] in {"alive", "stale", "offline", "unknown"}
         assert heartbeat.data["last_heartbeat_ts"] is not None
+        resource_blocks = await client.read_resource("resource://project/backend")
+        assert resource_blocks
+        text_payload = resource_blocks[0].text
         assert "BlueLake" in text_payload
 
         storage_root = Path(get_settings().storage.root).expanduser().resolve()
@@ -113,6 +117,113 @@ async def test_agent_heartbeat_updates_status(isolated_env):
         # Commit message is a rich panel; ensure the subject is captured
         assert '"subject": "Test"' in str(repo.head.commit.message)
 
+
+@pytest.mark.asyncio
+async def test_agent_lifecycle_status_default(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/lifecycle"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/lifecycle",
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "name": "BlueLake",
+            },
+        )
+        assert agent.data["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_agents_resource_local_time(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/agents-tz"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/agents-tz",
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "name": "BlueLake",
+            },
+        )
+        resource = await client.read_resource("resource://agents/test-agents-tz?tz=Asia/Kolkata")
+        payload = json.loads(resource[0].text)
+        agent = payload["agents"][0]
+        assert agent["timezone"] == "Asia/Kolkata"
+        assert "last_active_local" in agent
+
+
+@pytest.mark.asyncio
+async def test_mark_agent_dead_and_revive(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/agent-dead"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/agent-dead",
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "name": "BlueLake",
+            },
+        )
+        dead = await client.call_tool(
+            "mark_agent_dead",
+            {"project_key": "/test/agent-dead", "agent_name": "BlueLake"},
+        )
+        assert dead.data["lifecycle_status"] == "dead"
+        alive = await client.call_tool(
+            "revive_agent",
+            {"project_key": "/test/agent-dead", "agent_name": "BlueLake"},
+        )
+        assert alive.data["lifecycle_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_send_message_blocks_dead_recipient(isolated_env):
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/send-dead"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/send-dead",
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "name": "GreenLake",
+            },
+        )
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/send-dead",
+                "program": "codex-cli",
+                "model": "gpt-5",
+                "name": "BlueLake",
+            },
+        )
+        await client.call_tool(
+            "mark_agent_dead",
+            {"project_key": "/test/send-dead", "agent_name": "BlueLake"},
+        )
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/test/send-dead",
+                    "sender_name": "GreenLake",
+                    "to": ["BlueLake"],
+                    "subject": "Hi",
+                    "body_md": "Test",
+                },
+            )
 
 @pytest.mark.asyncio
 async def test_file_reservation_conflicts_and_release(isolated_env):
