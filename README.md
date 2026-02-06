@@ -78,7 +78,7 @@ Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--sk
 
 The installer automatically replaces `bd` (the original Go-based Beads CLI) with `br` (Beads Rust):
 
-1. **`br` is the actively maintained version.** Beads Rust is a complete reimplementation with ongoing development, while the original Go version is no longer actively maintained.
+1. **`br` is the recommended version.** Beads Rust is a complete reimplementation with ongoing development and is the default CLI installed by this setup.
 
 2. **Existing `bd` users get automatic aliasing.** The installer creates a shell alias so that `bd` commands continue to work by redirecting to `br`. Your existing workflows and muscle memory are preserved.
 
