@@ -992,7 +992,7 @@ main() {
   echo "  # or manually:"
   echo "  cd \"${REPO_DIR}\""
   echo "  source .venv/bin/activate"
-  echo "  bash scripts/run_server_with_token.sh"
+  echo "  uv run python -m mcp_agent_mail.cli"
 }
 
 # Handle three execution modes:
