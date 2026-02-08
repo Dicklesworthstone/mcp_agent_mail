@@ -379,8 +379,8 @@ class TestOAuthMetadataEndpoints:
     """Test OAuth metadata endpoint responses."""
 
     @pytest.mark.asyncio
-    async def test_oauth_metadata_root_returns_json(self, isolated_env):
-        """OAuth metadata endpoint returns proper JSON."""
+    async def test_oauth_metadata_root_returns_404(self, isolated_env):
+        """OAuth metadata endpoint returns 404 so clients skip OAuth discovery."""
         settings = _config.get_settings()
         server = build_mcp_server()
         app = build_http_app(settings, server)
@@ -388,13 +388,13 @@ class TestOAuthMetadataEndpoints:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/.well-known/oauth-authorization-server")
-            assert response.status_code == 200
+            assert response.status_code == 404
             data = response.json()
             assert data.get("mcp_oauth") is False
 
     @pytest.mark.asyncio
-    async def test_oauth_metadata_mcp_returns_json(self, isolated_env):
-        """OAuth metadata MCP endpoint returns proper JSON."""
+    async def test_oauth_metadata_mcp_returns_404(self, isolated_env):
+        """OAuth metadata MCP endpoint returns 404 so clients skip OAuth discovery."""
         settings = _config.get_settings()
         server = build_mcp_server()
         app = build_http_app(settings, server)
@@ -402,7 +402,7 @@ class TestOAuthMetadataEndpoints:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/.well-known/oauth-authorization-server/mcp")
-            assert response.status_code == 200
+            assert response.status_code == 404
             data = response.json()
             assert data.get("mcp_oauth") is False
 
