@@ -1027,14 +1027,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
-    # Well-known OAuth metadata endpoints (some clients probe these); return harmless JSON
+    # Well-known OAuth metadata endpoints: return 404 so clients skip OAuth discovery.
+    # Claude Code 2.1.37+ probes these and interprets 200 as "OAuth available",
+    # then Zod-validates expecting issuer/authorization_endpoint/etc. Per RFC 8414,
+    # 404 signals "no OAuth metadata" which is correct when OAuth is disabled.
     @fastapi_app.get("/.well-known/oauth-authorization-server")
     async def oauth_meta_root() -> JSONResponse:
-        return JSONResponse({"mcp_oauth": False})
+        return JSONResponse({"mcp_oauth": False}, status_code=404)
 
     @fastapi_app.get("/.well-known/oauth-authorization-server/mcp")
     async def oauth_meta_root_mcp() -> JSONResponse:
-        return JSONResponse({"mcp_oauth": False})
+        return JSONResponse({"mcp_oauth": False}, status_code=404)
 
     # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
     # and runs a fresh StreamableHTTP transport per request.
