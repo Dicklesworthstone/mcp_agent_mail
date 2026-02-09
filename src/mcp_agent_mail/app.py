@@ -1660,6 +1660,7 @@ def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, A
         "project_id": message.project_id,
         "sender_id": message.sender_id,
         "thread_id": message.thread_id,
+        "topic": message.topic,
         "subject": message.subject,
         "importance": message.importance,
         "ack_required": message.ack_required,
@@ -3331,6 +3332,7 @@ async def _create_message(
     ack_required: bool,
     thread_id: Optional[str],
     attachments: Sequence[dict[str, Any]],
+    topic: Optional[str] = None,
 ) -> Message:
     if project.id is None:
         raise ValueError("Project must have an id before creating messages.")
@@ -3346,6 +3348,7 @@ async def _create_message(
             importance=importance,
             ack_required=ack_required,
             thread_id=thread_id,
+            topic=topic,
             attachments=list(attachments),
         )
         session.add(message)
@@ -3835,6 +3838,7 @@ async def _list_inbox(
     urgent_only: bool,
     include_bodies: bool,
     since_ts: Optional[str],
+    topic: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     if project.id is None or agent.id is None:
         raise ValueError("Project and agent must have ids before listing inbox.")
@@ -3858,6 +3862,8 @@ async def _list_inbox(
             since_dt = _parse_iso(since_ts)
             if since_dt:
                 stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
+        if topic:
+            stmt = stmt.where(cast(Any, func.lower(Message.topic)) == topic.lower())
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
@@ -4292,6 +4298,7 @@ def build_mcp_server() -> FastMCP:
         importance: str,
         ack_required: bool,
         thread_id: Optional[str],
+        topic: Optional[str] = None,
     ) -> dict[str, Any]:
         # Re-fetch settings at call time so tests that mutate env + clear cache take effect
         settings = get_settings()
@@ -4435,6 +4442,7 @@ def build_mcp_server() -> FastMCP:
                 ack_required,
                 thread_id,
                 attachments_meta,
+                topic=topic,
             )
             frontmatter = _message_frontmatter(
                 message,
@@ -5122,6 +5130,8 @@ def build_mcp_server() -> FastMCP:
         importance: str = "normal",
         ack_required: bool = False,
         thread_id: Optional[str] = None,
+        broadcast: bool = False,
+        topic: Optional[str] = None,
         auto_contact_if_blocked: bool = False,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -5166,6 +5176,13 @@ def build_mcp_server() -> FastMCP:
             If true, recipients should call `acknowledge_message` after reading.
         thread_id : Optional[str]
             If provided, message will be associated with an existing thread.
+        broadcast : bool
+            If true and `to` is empty, expand recipients to all registered agents in the
+            project (excluding the sender). Mutually exclusive with explicit `to` recipients.
+            Respects contact_policy settings — agents with block_all are skipped.
+        topic : Optional[str]
+            Optional topic tag (alphanumeric + hyphens, max 64 chars). Stored on the message
+            for topic-based filtering via fetch_inbox(topic=...) or fetch_topic().
 
         Returns
         -------
@@ -5222,6 +5239,47 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+
+        # Validate topic format if provided
+        if topic is not None:
+            import re as _re
+            topic = topic.strip()
+            if not topic or len(topic) > 64 or not _re.fullmatch(r"[A-Za-z0-9_-]+", topic):
+                raise ToolExecutionError(
+                    "INVALID_TOPIC",
+                    f"Topic must be 1-64 alphanumeric/hyphen/underscore characters. Got: {topic!r}",
+                    recoverable=True,
+                    data={"argument": "topic", "provided": topic},
+                )
+
+        # Broadcast expansion: expand to = all agents in project (excluding sender)
+        if broadcast:
+            if to and any(t.strip() for t in to):
+                raise ToolExecutionError(
+                    "INVALID_ARGUMENT",
+                    "broadcast=true and explicit 'to' recipients are mutually exclusive. "
+                    "Set broadcast=true with an empty 'to' list, or provide explicit recipients without broadcast.",
+                    recoverable=True,
+                    data={"argument": "broadcast"},
+                )
+            await ensure_schema()
+            async with get_session() as _bcast_session:
+                _bcast_cutoff = _naive_utc() - timedelta(days=30)
+                _bcast_result = await _bcast_session.execute(
+                    select(Agent.name, Agent.contact_policy).where(
+                        cast(Any, Agent.project_id == project.id),
+                        cast(Any, Agent.last_active_ts > _bcast_cutoff),
+                    )
+                )
+                _bcast_rows = _bcast_result.all()
+            sender_lower = sender_name.lower().strip()
+            to = [
+                row[0] for row in _bcast_rows
+                if row[0].lower() != sender_lower
+                and (row[1] or "auto").lower() != "block_all"
+            ]
+            if not to:
+                await ctx.info("[warn] Broadcast: no eligible recipients found (sender is the only active agent).")
 
         # Normalize 'to' parameter - accept single string and convert to list
         if isinstance(to, str):
@@ -5987,6 +6045,7 @@ def build_mcp_server() -> FastMCP:
                 importance,
                 ack_required,
                 thread_id,
+                topic=topic,
             )
             deliveries.append({"project": project.human_key, "payload": payload_local})
         # External per-target project deliver (requires aliasing sender in target project)
@@ -6009,6 +6068,7 @@ def build_mcp_server() -> FastMCP:
                     importance,
                     ack_required,
                     thread_id,
+                    topic=topic,
                 )
                 deliveries.append({"project": p.human_key, "payload": payload_ext})
             except Exception:
@@ -6226,6 +6286,7 @@ def build_mcp_server() -> FastMCP:
                 importance=original.importance,
                 ack_required=original.ack_required,
                 thread_id=thread_key,
+                topic=original.topic,
             )
             deliveries.append({"project": project.human_key, "payload": payload_local})
 
@@ -6255,6 +6316,7 @@ def build_mcp_server() -> FastMCP:
                     importance=original.importance,
                     ack_required=original.ack_required,
                     thread_id=thread_key,
+                    topic=original.topic,
                 )
                 deliveries.append({"project": target_project.human_key, "payload": payload_ext})
             except Exception:
@@ -6599,6 +6661,7 @@ def build_mcp_server() -> FastMCP:
         urgent_only: bool = False,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
+        topic: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
@@ -6610,6 +6673,7 @@ def build_mcp_server() -> FastMCP:
         - `since_ts`: ISO-8601 timestamp string; messages strictly newer than this are returned
         - `limit`: max number of messages (default 20)
         - `include_bodies`: include full Markdown bodies in the payloads
+        - `topic`: filter to messages with this topic tag
 
         Usage patterns
         --------------
@@ -6659,7 +6723,7 @@ def build_mcp_server() -> FastMCP:
         try:
             project = await _get_project_by_identifier(project_key)
             agent = await _get_agent(project, agent_name)
-            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts)
+            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts, topic=topic)
             if settings.notifications.enabled:
                 with suppress(Exception):
                     await clear_notification_signal(settings, project.slug, agent.name)
@@ -6668,6 +6732,83 @@ def build_mcp_server() -> FastMCP:
         except Exception as exc:
             _rich_error_panel("fetch_inbox", {"error": str(exc)})
             raise
+
+    @mcp.tool(name="fetch_topic")
+    @_instrument_tool(
+        "fetch_topic",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "read"},
+        project_arg="project_key",
+    )
+    async def fetch_topic(
+        ctx: Context,
+        project_key: str,
+        topic_name: str,
+        limit: int = 50,
+        include_bodies: bool = True,
+        since_ts: Optional[str] = None,
+        format: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Fetch all messages in a project with a given topic tag, regardless of recipient.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        topic_name : str
+            The topic tag to filter by (case-insensitive).
+        limit : int
+            Max number of messages to return (default 50).
+        include_bodies : bool
+            Include full Markdown bodies in the payloads (default true).
+        since_ts : Optional[str]
+            ISO-8601 timestamp; only messages newer than this are returned.
+
+        Returns
+        -------
+        list[dict]
+            Each message includes: { id, subject, from, created_ts, importance, topic, [body_md] }
+        """
+        _validate_iso_timestamp(since_ts, "since_ts")
+        project = await _get_project_by_identifier(project_key)
+        if not topic_name or not topic_name.strip():
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "topic_name must be a non-empty string.",
+                recoverable=True,
+                data={"argument": "topic_name"},
+            )
+        if limit < 1:
+            limit = 1
+        if limit > 1000:
+            limit = 1000
+        sender_alias = aliased(Agent)
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(Message, sender_alias.name)
+                .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .where(
+                    cast(Any, Message.project_id) == project.id,
+                    cast(Any, func.lower(Message.topic)) == topic_name.strip().lower(),
+                )
+                .order_by(desc(Message.created_ts))
+                .limit(limit)
+            )
+            if since_ts:
+                since_dt = _parse_iso(since_ts)
+                if since_dt:
+                    stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
+            result = await session.execute(stmt)
+            rows = result.all()
+        messages: list[dict[str, Any]] = []
+        for message, sender_name in rows:
+            payload = _message_to_dict(message, include_body=include_bodies)
+            payload["from"] = sender_name
+            messages.append(payload)
+        await ctx.info(f"Fetched {len(messages)} messages with topic '{topic_name}'.")
+        return messages
 
     @mcp.tool(name="mark_message_read")
     @_instrument_tool(

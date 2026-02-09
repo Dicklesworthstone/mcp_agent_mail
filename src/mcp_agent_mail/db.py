@@ -792,6 +792,14 @@ def _setup_fts(connection: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_links_status "
         "ON agent_links(status)"
     )
+    # Migration: add topic column to messages table (bd-26w broadcast topics)
+    try:
+        connection.exec_driver_sql("ALTER TABLE messages ADD COLUMN topic TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_messages_project_topic ON messages(project_id, topic)"
+    )
 
 
 def get_database_path(settings: Settings | None = None) -> Path | None:
