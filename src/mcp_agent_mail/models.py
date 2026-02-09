@@ -144,6 +144,29 @@ class AgentLink(SQLModel, table=True):
     expires_ts: Optional[datetime] = None
 
 
+class WindowIdentity(SQLModel, table=True):
+    """Persistent window-based agent identity tied to a tmux/terminal window.
+
+    Agents that share the same window_uuid within a project share a persistent
+    identity that survives session restarts, eliminating per-session registration
+    overhead and enabling tracking of which window/pane is doing what.
+    """
+
+    __tablename__ = "window_identities"
+    __table_args__ = (
+        UniqueConstraint("project_id", "window_uuid", name="uq_window_identity_project_uuid"),
+        Index("idx_window_identities_project_active", "project_id", "expires_ts"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    window_uuid: str = Field(max_length=64, index=True)
+    display_name: str = Field(max_length=128)
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
+    last_active_ts: datetime = Field(default_factory=_utcnow_naive)
+    expires_ts: Optional[datetime] = Field(default=None)
+
+
 class ProjectSiblingSuggestion(SQLModel, table=True):
     """LLM-ranked sibling project suggestion (undirected pair)."""
 
