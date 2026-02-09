@@ -1201,16 +1201,28 @@ class FileReservationStatus:
 
 _GLOB_MARKERS: tuple[str, ...] = ("*", "?", "[")
 
+# Virtual namespace prefixes for non-filesystem reservations (bd-14z)
+_VIRTUAL_NS_PREFIXES: tuple[str, ...] = ("tool://", "resource://", "service://")
+
+
+def _is_virtual_namespace(pattern: str) -> bool:
+    """Check if a reservation pattern uses a virtual namespace (not a filesystem path)."""
+    return any(pattern.startswith(prefix) for prefix in _VIRTUAL_NS_PREFIXES)
+
 
 def _contains_glob(pattern: str) -> bool:
     return any(marker in pattern for marker in _GLOB_MARKERS)
 
 
 def _normalize_pattern(pattern: str) -> str:
+    if _is_virtual_namespace(pattern):
+        return pattern.strip()
     return pattern.lstrip("/").strip()
 
 
 def _collect_matching_paths(base: Path, pattern: str) -> list[Path]:
+    if _is_virtual_namespace(pattern):
+        return []  # Virtual namespaces have no filesystem presence
     if not base.exists():
         return []
     normalized = _normalize_pattern(pattern)
@@ -2400,6 +2412,10 @@ def _detect_suspicious_file_reservation(pattern: str) -> str | None:
     Returns a warning message or None if the pattern looks reasonable.
     """
     p = pattern.strip()
+
+    # Virtual namespace patterns are always valid (bd-14z)
+    if _is_virtual_namespace(p):
+        return None
 
     # Catch overly broad patterns
     if p in ("*", "**", "**/*", "**/**", "."):
@@ -3701,6 +3717,14 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
         return False
     if not existing.exclusive and not candidate_exclusive:
         return False
+    # Virtual namespace reservations use exact-match only (bd-14z)
+    candidate_virtual = _is_virtual_namespace(candidate_path)
+    existing_virtual = _is_virtual_namespace(existing.path_pattern)
+    if candidate_virtual or existing_virtual:
+        # Virtual vs filesystem never conflict; virtual vs virtual = exact match
+        if candidate_virtual != existing_virtual:
+            return False
+        return candidate_path.strip() == existing.path_pattern.strip()
     # Git wildmatch semantics; treat inputs as repo-root relative forward-slash paths
     def _normalize(p: str) -> str:
         return p.replace("\\", "/").lstrip("/")
@@ -3721,6 +3745,8 @@ def _file_reservations_conflict(existing: FileReservation, candidate_path: str, 
 
 def _normalize_pathspec_pattern(pattern: str) -> str:
     """Normalize a pattern for PathSpec caching (slash normalization + leading slash strip)."""
+    if _is_virtual_namespace(pattern):
+        return pattern  # Preserve virtual namespace scheme
     return pattern.replace("\\", "/").lstrip("/")
 
 
@@ -3821,6 +3847,9 @@ def _build_reservation_union_spec(
             continue
         # Skip non-exclusive if candidate is also non-exclusive
         if not record.exclusive and not candidate_exclusive:
+            continue
+        # Skip virtual namespace patterns (they use exact-match, not pathspec) (bd-14z)
+        if _is_virtual_namespace(record.path_pattern):
             continue
         # Add normalized pattern
         patterns.append(_normalize_pathspec_pattern(record.path_pattern))
