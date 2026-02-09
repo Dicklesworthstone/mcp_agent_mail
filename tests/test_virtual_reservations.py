@@ -16,7 +16,7 @@ import logging
 import pytest
 from fastmcp import Client
 
-from mcp_agent_mail.app import build_mcp_server, _is_virtual_namespace
+from mcp_agent_mail.app import _is_virtual_namespace, build_mcp_server
 
 logger = logging.getLogger(__name__)
 

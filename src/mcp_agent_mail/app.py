@@ -3121,16 +3121,15 @@ async def _get_or_create_agent(
     # enrich the archive profile.  We consolidate into a single block to avoid
     # redundant DB lookups (window_identity may already be set from the
     # priority-chain resolution above).
-    if window_uuid and _validate_window_uuid(window_uuid):
-        if window_identity is None and explicit_name_used:
-            # Explicit name was used with a window UUID — look up / create association
-            window_identity = await _get_window_identity(project, window_uuid)
-            if window_identity is None:
-                window_identity = await _create_window_identity(
-                    project, window_uuid, agent.name, ttl_days,
-                )
-            else:
-                await _touch_window_identity(window_identity, ttl_days)
+    if window_uuid and _validate_window_uuid(window_uuid) and window_identity is None and explicit_name_used:
+        # Explicit name was used with a window UUID — look up / create association
+        window_identity = await _get_window_identity(project, window_uuid)
+        if window_identity is None:
+            window_identity = await _create_window_identity(
+                project, window_uuid, agent.name, ttl_days,
+            )
+        else:
+            await _touch_window_identity(window_identity, ttl_days)
 
     archive = await ensure_archive(settings, project.slug)
     agent_dict = _agent_to_dict(agent)

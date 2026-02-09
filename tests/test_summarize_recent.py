@@ -74,7 +74,7 @@ async def test_summarize_empty_window(isolated_env):
     """No messages in window -> 'No activity' response, no LLM call."""
     server = build_mcp_server()
     async with Client(server) as client:
-        names = await _setup_project_with_agents(client, "/test/sum-empty", 1)
+        await _setup_project_with_agents(client, "/test/sum-empty", 1)
 
         result = await client.call_tool(
             "summarize_recent",
@@ -365,8 +365,7 @@ async def test_summarize_with_llm_mock(isolated_env, monkeypatch):
     """Mock LLM returns structured summary with key_decisions etc."""
     from contextlib import suppress
 
-    from mcp_agent_mail import config as _config
-    from mcp_agent_mail import app as app_mod
+    from mcp_agent_mail import app as app_mod, config as _config
 
     monkeypatch.setenv("LLM_ENABLED", "true")
     with suppress(Exception):
