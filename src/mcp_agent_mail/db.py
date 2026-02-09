@@ -800,6 +800,26 @@ def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_messages_project_topic ON messages(project_id, topic)"
     )
+    # Migration: create message_summaries table (bd-1ia on-demand summarization)
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE IF NOT EXISTS message_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES projects(id),
+            summary_text TEXT NOT NULL,
+            start_ts TIMESTAMP NOT NULL,
+            end_ts TIMESTAMP NOT NULL,
+            source_message_count INTEGER NOT NULL DEFAULT 0,
+            source_thread_ids TEXT NOT NULL DEFAULT '[]',
+            llm_model TEXT,
+            cost_usd REAL,
+            created_ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_summaries_project_end ON message_summaries(project_id, end_ts)"
+    )
 
 
 def get_database_path(settings: Settings | None = None) -> Path | None:

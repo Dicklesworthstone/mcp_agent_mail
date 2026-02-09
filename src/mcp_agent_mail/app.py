@@ -53,6 +53,7 @@ from .models import (
     FileReservation,
     Message,
     MessageRecipient,
+    MessageSummary,
     Project,
     ProjectSiblingSuggestion,
     Product,
@@ -7744,6 +7745,299 @@ def build_mcp_server() -> FastMCP:
 
         await ctx.info(f"Summarized {len(thread_ids)} thread(s) for project '{project.human_key}'.")
         return {"threads": thread_summaries, "aggregate": aggregate}
+
+    # ── On-demand project-wide summarization (bd-1ia) ────────────────────
+
+    @mcp.tool(name="summarize_recent")
+    @_instrument_tool(
+        "summarize_recent",
+        cluster=CLUSTER_SEARCH,
+        capabilities={"summarization", "search"},
+        project_arg="project_key",
+    )
+    async def summarize_recent(
+        ctx: Context,
+        project_key: str,
+        since_hours: float = 1.0,
+        llm_mode: bool = True,
+        llm_model: Optional[str] = None,
+        max_messages: int = 500,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Summarize all recent project messages within a time window.
+
+        Fetches messages from the last ``since_hours`` hours, groups them by
+        thread, and produces a combined project-wide summary.  Results are
+        stored in the ``message_summaries`` table for fast retrieval via
+        ``fetch_summary``.
+
+        Idempotent: if a summary already exists for the same time window
+        (within 5-minute tolerance) it is returned from cache.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier (slug or human key).
+        since_hours : float
+            How far back to look (default 1 hour).
+        llm_mode : bool
+            Use LLM to refine the summary (default True).
+        llm_model : str, optional
+            Override LLM model name.
+        max_messages : int
+            Maximum messages to include (default 500, capped at 500).
+        format : str, optional
+            Output format (json or toon).
+        """
+        import json as _json
+
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ToolExecutionError("PROJECT_NOT_FOUND", "Project has no id.", recoverable=True)
+
+        max_messages = min(max_messages, 500)
+        now = _naive_utc()
+        window_start = now - timedelta(hours=since_hours)
+
+        # ── Idempotency: check for cached summary within 5-min tolerance ──
+        await ensure_schema()
+        tolerance = timedelta(minutes=5)
+        async with get_session() as session:
+            cached_stmt = (
+                select(MessageSummary)
+                .where(
+                    cast(Any, MessageSummary.project_id) == project.id,
+                    cast(Any, MessageSummary.start_ts) >= (window_start - tolerance),
+                    cast(Any, MessageSummary.start_ts) <= (window_start + tolerance),
+                    cast(Any, MessageSummary.end_ts) >= (now - tolerance),
+                    cast(Any, MessageSummary.end_ts) <= (now + tolerance),
+                )
+                .order_by(desc(cast(Any, MessageSummary.created_ts)))
+                .limit(1)
+            )
+            cached_result = await session.execute(cached_stmt)
+            cached = cached_result.scalars().first()
+            if cached:
+                await ctx.info(f"Returning cached summary (id={cached.id}, created={_iso(cached.created_ts)}).")
+                return {
+                    "id": cached.id,
+                    "cached": True,
+                    "summary_text": cached.summary_text,
+                    "start_ts": _iso(cached.start_ts),
+                    "end_ts": _iso(cached.end_ts),
+                    "source_message_count": cached.source_message_count,
+                    "source_thread_ids": _json.loads(cached.source_thread_ids),
+                    "llm_model": cached.llm_model,
+                    "cost_usd": cached.cost_usd,
+                    "created_ts": _iso(cached.created_ts),
+                }
+
+        # ── Fetch messages in window ──
+        sender_alias = aliased(Agent)
+        async with get_session() as session:
+            stmt = (
+                select(Message, sender_alias.name)
+                .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .where(
+                    cast(Any, Message.project_id) == project.id,
+                    cast(Any, Message.created_ts) >= window_start,
+                )
+                .order_by(asc(cast(Any, Message.created_ts)))
+                .limit(max_messages)
+            )
+            result = await session.execute(stmt)
+            raw_rows = result.all()
+        rows = [(row[0], row[1]) for row in raw_rows]
+
+        if not rows:
+            await ctx.info(f"No messages in the last {since_hours}h for project '{project.human_key}'.")
+            return {
+                "id": None,
+                "cached": False,
+                "summary_text": f"No activity in the last {since_hours} hours.",
+                "start_ts": _iso(window_start),
+                "end_ts": _iso(now),
+                "source_message_count": 0,
+                "source_thread_ids": [],
+                "llm_model": None,
+                "cost_usd": None,
+                "created_ts": _iso(now),
+            }
+
+        truncated = len(raw_rows) >= max_messages
+
+        # ── Group by thread ──
+        threads: dict[str, list[tuple[Message, str]]] = {}
+        for msg, sender in rows:
+            tid = msg.thread_id or f"msg-{msg.id}"
+            threads.setdefault(tid, []).append((msg, sender))
+
+        thread_ids_list = sorted(threads.keys())
+
+        # ── Heuristic summary per thread ──
+        all_summaries: list[dict[str, Any]] = []
+        for tid, thread_msgs in threads.items():
+            s = _summarize_messages(thread_msgs)
+            s["thread_id"] = tid
+            s["message_count"] = len(thread_msgs)
+            all_summaries.append(s)
+
+        # ── Combine into project-wide summary ──
+        all_participants: set[str] = set()
+        all_key_points: list[str] = []
+        all_action_items: list[str] = []
+        total_open = 0
+        total_done = 0
+        for s in all_summaries:
+            all_participants.update(s.get("participants", []))
+            all_key_points.extend(s.get("key_points", []))
+            all_action_items.extend(s.get("action_items", []))
+            total_open += s.get("open_actions", 0)
+            total_done += s.get("done_actions", 0)
+
+        combined = {
+            "participants": sorted(all_participants),
+            "key_points": all_key_points[:20],
+            "action_items": all_action_items[:20],
+            "total_messages": len(rows),
+            "total_threads": len(threads),
+            "open_actions": total_open,
+            "done_actions": total_done,
+        }
+        if truncated:
+            combined["truncated"] = True
+            combined["truncation_note"] = f"Limited to {max_messages} most recent messages."
+
+        summary_text = _json.dumps(combined)
+        cost_usd: Optional[float] = None
+        used_model: Optional[str] = None
+
+        # ── LLM refinement ──
+        if llm_mode and get_settings().llm.enabled and rows:
+            try:
+                excerpts: list[str] = []
+                for msg, sender in rows[:30]:
+                    tid = msg.thread_id or f"msg-{msg.id}"
+                    excerpts.append(f"[{tid}] {sender}: {msg.subject}\n{msg.body_md[:400]}")
+                system = (
+                    "You are a senior engineering lead. Summarize the following project messages "
+                    "from the given time window into a concise JSON with keys: "
+                    "key_decisions[], blockers_resolved[], work_completed[], open_questions[], "
+                    "participants[], total_messages (int), total_threads (int). "
+                    "Be specific and actionable."
+                )
+                user = f"Time window: last {since_hours}h\n\n" + "\n\n".join(excerpts)
+                llm_resp = await complete_system_user(system, user, model=llm_model)
+                used_model = llm_resp.model
+                cost_usd = getattr(llm_resp, "estimated_cost_usd", None)
+                parsed = _parse_json_safely(llm_resp.content)
+                if parsed:
+                    # Preserve heuristic counts but use LLM text
+                    parsed["total_messages"] = len(rows)
+                    parsed["total_threads"] = len(threads)
+                    if truncated:
+                        parsed["truncated"] = True
+                    summary_text = _json.dumps(parsed)
+            except Exception as e:
+                await ctx.debug(f"summarize_recent.llm_skipped: {e}")
+
+        # ── Store summary ──
+        async with get_session() as session:
+            summary_row = MessageSummary(
+                project_id=project.id,
+                summary_text=summary_text,
+                start_ts=window_start,
+                end_ts=now,
+                source_message_count=len(rows),
+                source_thread_ids=_json.dumps(thread_ids_list),
+                llm_model=used_model,
+                cost_usd=cost_usd,
+            )
+            session.add(summary_row)
+            await session.commit()
+            await session.refresh(summary_row)
+
+        await ctx.info(
+            f"Summarized {len(rows)} messages across {len(threads)} threads "
+            f"for project '{project.human_key}' (id={summary_row.id})."
+        )
+        return {
+            "id": summary_row.id,
+            "cached": False,
+            "summary_text": summary_text,
+            "start_ts": _iso(window_start),
+            "end_ts": _iso(now),
+            "source_message_count": len(rows),
+            "source_thread_ids": thread_ids_list,
+            "llm_model": used_model,
+            "cost_usd": cost_usd,
+            "created_ts": _iso(summary_row.created_ts),
+        }
+
+    @mcp.tool(name="fetch_summary")
+    @_instrument_tool(
+        "fetch_summary",
+        cluster=CLUSTER_SEARCH,
+        capabilities={"summarization", "read"},
+        project_arg="project_key",
+    )
+    async def fetch_summary(
+        ctx: Context,
+        project_key: str,
+        since_hours: float = 24.0,
+        limit: int = 5,
+        format: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve stored project-wide summaries.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        since_hours : float
+            Return summaries whose end_ts is within this window (default 24h).
+        limit : int
+            Maximum summaries to return (default 5).
+        format : str, optional
+            Output format.
+        """
+        import json as _json
+
+        project = await _get_project_by_identifier(project_key)
+        if project.id is None:
+            raise ToolExecutionError("PROJECT_NOT_FOUND", "Project has no id.", recoverable=True)
+
+        cutoff = _naive_utc() - timedelta(hours=since_hours)
+        await ensure_schema()
+        async with get_session() as session:
+            stmt = (
+                select(MessageSummary)
+                .where(
+                    cast(Any, MessageSummary.project_id) == project.id,
+                    cast(Any, MessageSummary.end_ts) >= cutoff,
+                )
+                .order_by(desc(cast(Any, MessageSummary.created_ts)))
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            summaries = result.scalars().all()
+
+        items: list[dict[str, Any]] = []
+        for s in summaries:
+            items.append({
+                "id": s.id,
+                "summary_text": s.summary_text,
+                "start_ts": _iso(s.start_ts),
+                "end_ts": _iso(s.end_ts),
+                "source_message_count": s.source_message_count,
+                "source_thread_ids": _json.loads(s.source_thread_ids),
+                "llm_model": s.llm_model,
+                "cost_usd": s.cost_usd,
+                "created_ts": _iso(s.created_ts),
+            })
+
+        await ctx.info(f"Fetched {len(items)} stored summaries for project '{project.human_key}'.")
+        return items
 
     @mcp.tool(name="install_precommit_guard")
     @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")

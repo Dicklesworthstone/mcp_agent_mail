@@ -169,6 +169,26 @@ class WindowIdentity(SQLModel, table=True):
     expires_ts: Optional[datetime] = Field(default=None)
 
 
+class MessageSummary(SQLModel, table=True):
+    """Stored on-demand project-wide message summary."""
+
+    __tablename__ = "message_summaries"
+    __table_args__ = (
+        Index("idx_summaries_project_end", "project_id", "end_ts"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    summary_text: str
+    start_ts: datetime
+    end_ts: datetime
+    source_message_count: int = Field(default=0)
+    source_thread_ids: str = Field(default="[]")  # JSON array of thread IDs
+    llm_model: Optional[str] = Field(default=None, max_length=128)
+    cost_usd: Optional[float] = Field(default=None)
+    created_ts: datetime = Field(default_factory=_utcnow_naive)
+
+
 class ProjectSiblingSuggestion(SQLModel, table=True):
     """LLM-ranked sibling project suggestion (undirected pair)."""
 
