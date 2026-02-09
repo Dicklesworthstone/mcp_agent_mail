@@ -2832,7 +2832,12 @@ async def _create_window_identity(
     display_name: str,
     ttl_days: int = 30,
 ) -> WindowIdentity:
-    """Create a new window identity record."""
+    """Create a new window identity record.
+
+    Handles concurrent creation gracefully: if another caller inserts the same
+    (project_id, window_uuid) first, we catch the IntegrityError and return
+    the existing record instead of crashing.
+    """
     if project.id is None:
         raise ValueError("Project must have an id before creating window identities.")
     await ensure_schema()
@@ -2848,9 +2853,17 @@ async def _create_window_identity(
             expires_ts=expires,
         )
         session.add(identity)
-        await session.commit()
-        await session.refresh(identity)
-        return identity
+        try:
+            await session.commit()
+            await session.refresh(identity)
+            return identity
+        except IntegrityError:
+            await session.rollback()
+            # Concurrent insert won the race — fetch the existing record
+            existing = await _get_window_identity(project, window_uuid)
+            if existing is not None:
+                return existing
+            raise  # Should not happen, but don't swallow unexpected errors
 
 
 async def _touch_window_identity(
@@ -3086,23 +3099,26 @@ async def _get_or_create_agent(
                 continue
         else:
             raise RuntimeError("Failed to create a unique agent after multiple retries.")
-    # If an explicit name was provided but window UUID is set, associate agent with window
-    # for tracking purposes (the explicit name still takes precedence for display).
-    if window_uuid and _validate_window_uuid(window_uuid) and explicit_name_used and window_identity is None:
-        existing_wi = await _get_window_identity(project, window_uuid)
-        if existing_wi is None:
-            await _create_window_identity(project, window_uuid, agent.name, ttl_days)
-        else:
-            await _touch_window_identity(existing_wi, ttl_days)
+    # Post-creation: associate explicit-name agents with window identity and
+    # enrich the archive profile.  We consolidate into a single block to avoid
+    # redundant DB lookups (window_identity may already be set from the
+    # priority-chain resolution above).
+    if window_uuid and _validate_window_uuid(window_uuid):
+        if window_identity is None and explicit_name_used:
+            # Explicit name was used with a window UUID — look up / create association
+            window_identity = await _get_window_identity(project, window_uuid)
+            if window_identity is None:
+                window_identity = await _create_window_identity(
+                    project, window_uuid, agent.name, ttl_days,
+                )
+            else:
+                await _touch_window_identity(window_identity, ttl_days)
 
     archive = await ensure_archive(settings, project.slug)
     agent_dict = _agent_to_dict(agent)
-    # Attach window identity info to the agent profile if available
-    if window_uuid and _validate_window_uuid(window_uuid):
-        wi = await _get_window_identity(project, window_uuid)
-        if wi:
-            agent_dict["window_id"] = wi.window_uuid
-            agent_dict["window_display_name"] = wi.display_name
+    if window_identity is not None:
+        agent_dict["window_id"] = window_identity.window_uuid
+        agent_dict["window_display_name"] = window_identity.display_name
     async with _archive_write_lock(archive):
         await write_agent_profile(archive, agent_dict)
     return agent
@@ -4743,7 +4759,9 @@ def build_mcp_server() -> FastMCP:
                     agent = db_agent
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         result = _agent_to_dict(agent)
-        # Enrich with window identity info if MCP_AGENT_MAIL_WINDOW_ID is set
+        # Enrich with window identity info if MCP_AGENT_MAIL_WINDOW_ID is set.
+        # NOTE: _get_or_create_agent already resolved this for the archive profile,
+        # but propagating it via return type would churn 8+ callers for a cold-path query.
         window_uuid = getattr(settings, "window_identity_uuid", "") or ""
         if window_uuid and _validate_window_uuid(window_uuid):
             wi = await _get_window_identity(project, window_uuid)
