@@ -248,6 +248,11 @@ class Settings:
     messaging_auto_register_recipients: bool
     # When true, attempt a contact handshake automatically if delivery is blocked
     messaging_auto_handshake_on_block: bool
+    # Window-based agent identity
+    # UUID read from MCP_AGENT_MAIL_WINDOW_ID env var (empty string = not set)
+    window_identity_uuid: str
+    # Days of inactivity before a window identity expires (default 30)
+    window_identity_ttl_days: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -465,6 +470,8 @@ def get_settings() -> Settings:
         agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
         messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="true"), default=True),
         messaging_auto_handshake_on_block=_bool(_decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
+        window_identity_uuid=_decouple_config("MCP_AGENT_MAIL_WINDOW_ID", default="").strip(),
+        window_identity_ttl_days=_int(_decouple_config("MCP_AGENT_MAIL_WINDOW_TTL_DAYS", default="30"), default=30),
     )
 
 

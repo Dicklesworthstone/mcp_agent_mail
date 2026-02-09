@@ -57,6 +57,7 @@ from .models import (
     ProjectSiblingSuggestion,
     Product,
     ProductProjectLink,
+    WindowIdentity,
 )
 from .storage import (
     GitIndexLockError,
@@ -2805,6 +2806,77 @@ async def _agent_name_exists(project: Project, name: str) -> bool:
         return result.first() is not None
 
 
+async def _get_window_identity(
+    project: Project,
+    window_uuid: str,
+) -> Optional[WindowIdentity]:
+    """Look up an existing, non-expired window identity."""
+    if project.id is None:
+        return None
+    await ensure_schema()
+    now = _naive_utc()
+    async with get_session() as session:
+        result = await session.execute(
+            select(WindowIdentity).where(
+                cast(Any, WindowIdentity.project_id == project.id),
+                cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
+                cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+            )
+        )
+        return result.scalars().first()
+
+
+async def _create_window_identity(
+    project: Project,
+    window_uuid: str,
+    display_name: str,
+    ttl_days: int = 30,
+) -> WindowIdentity:
+    """Create a new window identity record."""
+    if project.id is None:
+        raise ValueError("Project must have an id before creating window identities.")
+    await ensure_schema()
+    now = _naive_utc()
+    expires = now + timedelta(days=ttl_days)
+    async with get_session() as session:
+        identity = WindowIdentity(
+            project_id=project.id,
+            window_uuid=window_uuid,
+            display_name=display_name,
+            created_ts=now,
+            last_active_ts=now,
+            expires_ts=expires,
+        )
+        session.add(identity)
+        await session.commit()
+        await session.refresh(identity)
+        return identity
+
+
+async def _touch_window_identity(
+    identity: WindowIdentity,
+    ttl_days: int = 30,
+) -> None:
+    """Update last_active_ts and extend expiry for a window identity."""
+    now = _naive_utc()
+    async with get_session() as session:
+        db_identity = await session.get(WindowIdentity, identity.id)
+        if db_identity:
+            db_identity.last_active_ts = now
+            db_identity.expires_ts = now + timedelta(days=ttl_days)
+            session.add(db_identity)
+            await session.commit()
+
+
+def _validate_window_uuid(value: str) -> bool:
+    """Validate that a string looks like a UUID."""
+    try:
+        uuid.UUID(value)
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 async def _generate_unique_agent_name(
     project: Project,
     settings: Settings,
@@ -2886,9 +2958,20 @@ async def _get_or_create_agent(
         raise ValueError("Project must have an id before creating agents.")
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     explicit_name_used = False
-    if mode == "always_auto" or name is None:
+    window_uuid = getattr(settings, "window_identity_uuid", "") or ""
+    ttl_days = getattr(settings, "window_identity_ttl_days", 30)
+    window_identity: Optional[WindowIdentity] = None
+
+    # Priority chain per bead bd-1tz:
+    # 1. Explicit agent_name parameter -> use as-is (highest priority)
+    # 2. MCP_AGENT_MAIL_WINDOW_ID set + window identity exists -> use window display_name
+    # 3. MCP_AGENT_MAIL_WINDOW_ID set + window identity NOT in DB -> create new, use generated name
+    # 4. No window ID, no explicit name -> auto-generate (current behavior)
+
+    if mode == "always_auto" and not window_uuid:
         desired_name = await _generate_unique_agent_name(project, settings, None)
-    else:
+    elif name is not None and mode != "always_auto":
+        # Priority 1: Explicit name provided
         sanitized = sanitize_agent_name(name)
         if not sanitized:
             if mode == "strict":
@@ -2900,7 +2983,6 @@ async def _get_or_create_agent(
                 explicit_name_used = True
             else:
                 if mode == "strict":
-                    # Check for common mistakes and provide specific guidance
                     mistake = _detect_agent_name_mistake(sanitized)
                     if mistake:
                         raise ToolExecutionError(
@@ -2918,8 +3000,28 @@ async def _get_or_create_agent(
                         recoverable=True,
                         data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
                     )
-                # coerce -> ignore invalid provided name and auto-generate
                 desired_name = await _generate_unique_agent_name(project, settings, None)
+    elif window_uuid:
+        # Priority 2/3: Window identity resolution
+        if not _validate_window_uuid(window_uuid):
+            logger.warning("MCP_AGENT_MAIL_WINDOW_ID is not a valid UUID: %s", window_uuid)
+            desired_name = await _generate_unique_agent_name(project, settings, None)
+        else:
+            window_identity = await _get_window_identity(project, window_uuid)
+            if window_identity:
+                # Priority 2: existing window identity -> reuse its display_name
+                desired_name = window_identity.display_name
+                explicit_name_used = True  # treat as explicit to avoid collision retries
+                await _touch_window_identity(window_identity, ttl_days)
+            else:
+                # Priority 3: new window identity -> generate name and create identity
+                desired_name = await _generate_unique_agent_name(project, settings, None)
+                window_identity = await _create_window_identity(
+                    project, window_uuid, desired_name, ttl_days,
+                )
+    else:
+        # Priority 4: no name, no window ID -> auto-generate
+        desired_name = await _generate_unique_agent_name(project, settings, None)
     await ensure_schema()
     async with get_session() as session:
         for _attempt in range(5):
@@ -2984,9 +3086,25 @@ async def _get_or_create_agent(
                 continue
         else:
             raise RuntimeError("Failed to create a unique agent after multiple retries.")
+    # If an explicit name was provided but window UUID is set, associate agent with window
+    # for tracking purposes (the explicit name still takes precedence for display).
+    if window_uuid and _validate_window_uuid(window_uuid) and explicit_name_used and window_identity is None:
+        existing_wi = await _get_window_identity(project, window_uuid)
+        if existing_wi is None:
+            await _create_window_identity(project, window_uuid, agent.name, ttl_days)
+        else:
+            await _touch_window_identity(existing_wi, ttl_days)
+
     archive = await ensure_archive(settings, project.slug)
+    agent_dict = _agent_to_dict(agent)
+    # Attach window identity info to the agent profile if available
+    if window_uuid and _validate_window_uuid(window_uuid):
+        wi = await _get_window_identity(project, window_uuid)
+        if wi:
+            agent_dict["window_id"] = wi.window_uuid
+            agent_dict["window_display_name"] = wi.display_name
     async with _archive_write_lock(archive):
-        await write_agent_profile(archive, _agent_to_dict(agent))
+        await write_agent_profile(archive, agent_dict)
     return agent
 
 
@@ -4322,6 +4440,13 @@ def build_mcp_server() -> FastMCP:
                     "attachments": attachments_meta,
                 }
             )
+            # Enrich payload with sender's window identity if available
+            _wi_uuid = getattr(settings, "window_identity_uuid", "") or ""
+            if _wi_uuid and _validate_window_uuid(_wi_uuid):
+                _wi = await _get_window_identity(project, _wi_uuid)
+                if _wi:
+                    payload["window_id"] = _wi.window_uuid
+                    payload["window_display_name"] = _wi.display_name
             result_snapshot: dict[str, Any] = {
                 "deliveries": [
                     {
@@ -4617,7 +4742,15 @@ def build_mcp_server() -> FastMCP:
                     await session.refresh(db_agent)
                     agent = db_agent
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
-        return _agent_to_dict(agent)
+        result = _agent_to_dict(agent)
+        # Enrich with window identity info if MCP_AGENT_MAIL_WINDOW_ID is set
+        window_uuid = getattr(settings, "window_identity_uuid", "") or ""
+        if window_uuid and _validate_window_uuid(window_uuid):
+            wi = await _get_window_identity(project, window_uuid)
+            if wi:
+                result["window_id"] = wi.window_uuid
+                result["window_display_name"] = wi.display_name
+        return result
 
     @mcp.tool(name="whois")
     @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
@@ -4754,6 +4887,200 @@ def build_mcp_server() -> FastMCP:
             await write_agent_profile(archive, _agent_to_dict(agent))
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         return _agent_to_dict(agent)
+
+    @mcp.tool(name="list_window_identities")
+    @_instrument_tool(
+        "list_window_identities",
+        cluster=CLUSTER_IDENTITY,
+        capabilities={"identity"},
+        project_arg="project_key",
+        complexity="low",
+    )
+    async def list_window_identities(
+        ctx: Context,
+        project_key: str,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        List active window identities for a project.
+
+        Returns all non-expired window identities with their display names,
+        last activity timestamps, and age.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+
+        Returns
+        -------
+        dict
+            { identities: [{ id, window_uuid, display_name, created_ts, last_active_ts, expires_ts }] }
+        """
+        project = await _get_project_by_identifier(project_key)
+        await ensure_schema()
+        now = _naive_utc()
+        async with get_session() as session:
+            result = await session.execute(
+                select(WindowIdentity).where(
+                    cast(Any, WindowIdentity.project_id == project.id),
+                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                )
+            )
+            identities = result.scalars().all()
+        items = []
+        for wi in identities:
+            items.append({
+                "id": wi.id,
+                "window_uuid": wi.window_uuid,
+                "display_name": wi.display_name,
+                "created_ts": _iso(wi.created_ts),
+                "last_active_ts": _iso(wi.last_active_ts),
+                "expires_ts": _iso(wi.expires_ts) if wi.expires_ts else None,
+                "age_days": (now - wi.created_ts).days if wi.created_ts else None,
+            })
+        return {"identities": items, "count": len(items)}
+
+    @mcp.tool(name="rename_window")
+    @_instrument_tool(
+        "rename_window",
+        cluster=CLUSTER_IDENTITY,
+        capabilities={"identity", "write"},
+        project_arg="project_key",
+    )
+    async def rename_window(
+        ctx: Context,
+        project_key: str,
+        window_uuid: str,
+        new_display_name: str,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Update the display name of a window identity.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        window_uuid : str
+            The UUID of the window identity to rename.
+        new_display_name : str
+            New display name (must be a valid adjective+noun agent name).
+
+        Returns
+        -------
+        dict
+            Updated window identity record.
+        """
+        if not _validate_window_uuid(window_uuid):
+            raise ToolExecutionError(
+                "INVALID_WINDOW_UUID",
+                f"Invalid window UUID format: '{window_uuid}'.",
+                recoverable=True,
+            )
+        sanitized = sanitize_agent_name(new_display_name)
+        if not sanitized or not validate_agent_name_format(sanitized):
+            raise ToolExecutionError(
+                "INVALID_DISPLAY_NAME",
+                f"Display name must be a valid adjective+noun combination (e.g., 'BlueLake'). Got: '{new_display_name}'.",
+                recoverable=True,
+            )
+        project = await _get_project_by_identifier(project_key)
+        await ensure_schema()
+        now = _naive_utc()
+        async with get_session() as session:
+            result = await session.execute(
+                select(WindowIdentity).where(
+                    cast(Any, WindowIdentity.project_id == project.id),
+                    cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
+                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                )
+            )
+            wi = result.scalars().first()
+            if not wi:
+                raise ToolExecutionError(
+                    "WINDOW_NOT_FOUND",
+                    f"No active window identity found for UUID '{window_uuid}'.",
+                    recoverable=True,
+                )
+            old_name = wi.display_name
+            wi.display_name = sanitized
+            wi.last_active_ts = now
+            session.add(wi)
+            await session.commit()
+            await session.refresh(wi)
+        await ctx.info(f"Renamed window '{window_uuid}' from '{old_name}' to '{sanitized}'.")
+        return {
+            "id": wi.id,
+            "window_uuid": wi.window_uuid,
+            "display_name": wi.display_name,
+            "old_display_name": old_name,
+            "last_active_ts": _iso(wi.last_active_ts),
+        }
+
+    @mcp.tool(name="expire_window")
+    @_instrument_tool(
+        "expire_window",
+        cluster=CLUSTER_IDENTITY,
+        capabilities={"identity", "write"},
+        project_arg="project_key",
+    )
+    async def expire_window(
+        ctx: Context,
+        project_key: str,
+        window_uuid: str,
+        format: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Mark a window identity as expired.
+
+        Parameters
+        ----------
+        project_key : str
+            Project identifier.
+        window_uuid : str
+            The UUID of the window identity to expire.
+
+        Returns
+        -------
+        dict
+            { window_uuid, expired: bool, expired_at }
+        """
+        if not _validate_window_uuid(window_uuid):
+            raise ToolExecutionError(
+                "INVALID_WINDOW_UUID",
+                f"Invalid window UUID format: '{window_uuid}'.",
+                recoverable=True,
+            )
+        project = await _get_project_by_identifier(project_key)
+        await ensure_schema()
+        now = _naive_utc()
+        async with get_session() as session:
+            result = await session.execute(
+                select(WindowIdentity).where(
+                    cast(Any, WindowIdentity.project_id == project.id),
+                    cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
+                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                )
+            )
+            wi = result.scalars().first()
+            if not wi:
+                raise ToolExecutionError(
+                    "WINDOW_NOT_FOUND",
+                    f"No active window identity found for UUID '{window_uuid}'.",
+                    recoverable=True,
+                )
+            wi.expires_ts = now
+            session.add(wi)
+            await session.commit()
+            await session.refresh(wi)
+        await ctx.info(f"Expired window identity '{wi.display_name}' ({window_uuid}).")
+        return {
+            "window_uuid": wi.window_uuid,
+            "display_name": wi.display_name,
+            "expired": True,
+            "expired_at": _iso(now),
+        }
 
     @mcp.tool(name="send_message")
     @_instrument_tool(
