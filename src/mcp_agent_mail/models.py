@@ -88,12 +88,14 @@ class Message(SQLModel, table=True):
     __table_args__ = (
         Index("idx_messages_project_created", "project_id", "created_ts"),
         Index("idx_messages_project_sender_created", "project_id", "sender_id", "created_ts"),
+        Index("idx_messages_project_topic", "project_id", "topic"),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.id", index=True)
     sender_id: int = Field(foreign_key="agents.id", index=True)
     thread_id: Optional[str] = Field(default=None, index=True, max_length=128)
+    topic: Optional[str] = Field(default=None, max_length=64)
     subject: str = Field(max_length=512)
     body_md: str
     importance: str = Field(default="normal", max_length=16)
