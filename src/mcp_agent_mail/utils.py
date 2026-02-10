@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import random
 import re
+import sqlite3
+from collections import defaultdict
+from pathlib import Path
 from typing import Iterable, Optional
 
 # Agent name word lists - used to generate memorable adjective+noun combinations
@@ -165,6 +168,21 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _AGENT_NAME_RE = re.compile(r"[^A-Za-z0-9]+")
 _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
+
+def _build_words_by_letter(words: Iterable[str]) -> dict[str, list[str]]:
+    """Organize words into a dictionary keyed by uppercase first letter."""
+    by_letter: dict[str, list[str]] = defaultdict(list)
+    for word in words:
+        if word:
+            by_letter[word[0].upper()].append(word)
+    return dict(by_letter)
+
+
+# Organize word lists by first letter for efficient initial-based lookup.
+ADJECTIVES_BY_LETTER: dict[str, list[str]] = _build_words_by_letter(ADJECTIVES)
+NOUNS_BY_LETTER: dict[str, list[str]] = _build_words_by_letter(NOUNS)
+
+
 # Pre-built frozenset of all valid agent names (lowercase) for O(1) validation lookup.
 # This is computed once at module load time rather than O(n*m) per validation call.
 _VALID_AGENT_NAMES: frozenset[str] = frozenset(
@@ -179,8 +197,92 @@ def slugify(value: str) -> str:
     return slug or "project"
 
 
-def generate_agent_name() -> str:
-    """Return a random adjective+noun combination."""
+def parse_beads_prefix_to_initials(prefix: str) -> Optional[str]:
+    """Parse a Beads issue prefix into two uppercase initials.
+
+    Examples:
+        "td-core" -> "TC"
+        "beads" -> "BE"
+        "my-app-name" -> "MA" (first two segments only)
+        "" -> None
+        None -> None
+
+    Returns None if the prefix is empty or cannot be parsed.
+    """
+    if not prefix:
+        return None
+
+    prefix = prefix.strip()
+    if not prefix:
+        return None
+
+    segments = prefix.split("-")
+    if len(segments) >= 2:
+        # Take first letter of first two segments
+        first = segments[0][0] if segments[0] else ""
+        second = segments[1][0] if segments[1] else ""
+    else:
+        # Single segment: take first two letters
+        first = prefix[0] if len(prefix) >= 1 else ""
+        second = prefix[1] if len(prefix) >= 2 else ""
+
+    if not first or not second:
+        return None
+
+    return (first + second).upper()
+
+
+def get_beads_issue_prefix(project_path: str) -> Optional[str]:
+    """Read the issue_prefix from a project's Beads configuration.
+
+    Looks for .beads/beads.db in the project directory and queries
+    the config table for the issue_prefix value.
+
+    Returns None if Beads is not configured or the prefix is not set.
+    """
+    beads_db = Path(project_path) / ".beads" / "beads.db"
+    if not beads_db.exists():
+        return None
+
+    try:
+        conn = sqlite3.connect(str(beads_db))
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM config WHERE key = 'issue_prefix'")
+        row = cursor.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except (sqlite3.Error, OSError):
+        pass
+
+    return None
+
+
+def generate_agent_name(initials: Optional[str] = None) -> str:
+    """Return a random adjective+noun combination.
+
+    If initials are provided (e.g., "TC"), generates a name where:
+    - The adjective starts with the first letter (e.g., "T" -> "Teal")
+    - The noun starts with the second letter (e.g., "C" -> "Canyon")
+
+    Falls back to fully random generation if:
+    - No initials provided
+    - Initials are invalid (not exactly 2 letters)
+    - No words available for the given initials
+    """
+    if initials and len(initials) == 2 and initials.isalpha():
+        first_letter = initials[0].upper()
+        second_letter = initials[1].upper()
+
+        adjectives = ADJECTIVES_BY_LETTER.get(first_letter, [])
+        nouns = NOUNS_BY_LETTER.get(second_letter, [])
+
+        if adjectives and nouns:
+            adjective = random.choice(adjectives)
+            noun = random.choice(nouns)
+            return f"{adjective}{noun}"
+
+    # Fallback to random generation
     adjective = random.choice(tuple(ADJECTIVES))
     noun = random.choice(tuple(NOUNS))
     return f"{adjective}{noun}"

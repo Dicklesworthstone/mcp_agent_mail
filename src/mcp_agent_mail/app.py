@@ -77,6 +77,8 @@ from .storage import (
 )
 from .utils import (
     generate_agent_name,
+    get_beads_issue_prefix,
+    parse_beads_prefix_to_initials,
     sanitize_agent_name,
     slugify,
     validate_agent_name_format,
@@ -2946,8 +2948,15 @@ async def _generate_unique_agent_name(
             if mode == "strict":
                 raise ValueError("Name hint must contain alphanumeric characters.")
 
+    # Try to use Beads-based initials for project-specific naming
+    initials = None
+    if project.human_key:
+        beads_prefix = get_beads_issue_prefix(project.human_key)
+        if beads_prefix:
+            initials = parse_beads_prefix_to_initials(beads_prefix)
+
     for _ in range(1024):
-        candidate = sanitize_agent_name(generate_agent_name())
+        candidate = sanitize_agent_name(generate_agent_name(initials))
         if candidate and await available(candidate):
             return candidate
     raise RuntimeError("Unable to generate a unique agent name.")
