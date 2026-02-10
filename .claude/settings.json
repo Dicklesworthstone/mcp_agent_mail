@@ -1,28 +1,41 @@
 {
-  "mcpServers": {
-    "mcp-agent-mail": {
-      "type": "http",
-      "url": "http://127.0.0.1:8765/mcp/",
-      "headers": {        "Authorization": "Bearer YOUR_BEARER_TOKEN"}
-    }
-  },
   "hooks": {
     "SessionStart": [
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations active '/home/ubuntu/mcp_agent_mail'" },
-          { "type": "command", "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli acks pending '/home/ubuntu/mcp_agent_mail' 'IvoryOwl' --limit 20" }
+          {
+            "type": "command",
+            "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations active '/home/ubuntu/mcp_agent_mail'"
+          },
+          {
+            "type": "command",
+            "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli acks pending '/home/ubuntu/mcp_agent_mail' 'RedPond' --limit 20"
+          }
         ]
       }
     ],
     "PreToolUse": [
-      { "matcher": "Edit", "hooks": [ { "type": "command", "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations soon '/home/ubuntu/mcp_agent_mail' --minutes 10" } ] }
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations soon '/home/ubuntu/mcp_agent_mail' --minutes 10"
+          }
+        ]
+      }
     ],
     "PostToolUse": [
-      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "AGENT_MAIL_PROJECT='/home/ubuntu/mcp_agent_mail' AGENT_MAIL_AGENT='IvoryOwl' AGENT_MAIL_URL='http://127.0.0.1:8765/mcp/' AGENT_MAIL_TOKEN='YOUR_BEARER_TOKEN' AGENT_MAIL_INTERVAL='120' '/home/ubuntu/mcp_agent_mail/.claude/hooks/check_inbox.sh'" } ] },
-      { "matcher": "mcp__mcp-agent-mail__send_message", "hooks": [ { "type": "command", "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli list-acks --project '/home/ubuntu/mcp_agent_mail' --agent 'IvoryOwl' --limit 10" } ] },
-      { "matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [ { "type": "command", "command": "cd '/home/ubuntu/mcp_agent_mail' && uv run python -m mcp_agent_mail.cli file_reservations list '/home/ubuntu/mcp_agent_mail'" } ] }
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AGENT_MAIL_PROJECT='/home/ubuntu/mcp_agent_mail' AGENT_MAIL_AGENT='RedPond' AGENT_MAIL_URL='http://127.0.0.1:8765/api/' AGENT_MAIL_TOKEN='dc5029ac32a9f350508a565af683205cf99f25c896b07c07bc53a9517877ce8c' AGENT_MAIL_INTERVAL='120' '/home/ubuntu/mcp_agent_mail/.claude/hooks/check_inbox.sh'"
+          }
+        ]
+      }
     ]
   }
 }

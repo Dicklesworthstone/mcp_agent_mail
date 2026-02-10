@@ -102,7 +102,14 @@ def _run_async(coro: Any) -> Any:
         reset_database_state()
 
 
-app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.")
+app = typer.Typer(help="Developer utilities for the MCP Agent Mail service.", invoke_without_command=True)
+
+
+@app.callback()
+def _app_callback(ctx: typer.Context) -> None:
+    """Default to ``serve-http`` when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        serve_http(host=None, port=None, path=None)
 
 # ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
 # Provide lightweight wrappers to keep type checking focused on our code.
