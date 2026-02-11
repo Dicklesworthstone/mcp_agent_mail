@@ -391,7 +391,7 @@ install_am_alias() {
 
   local marker="# >>> MCP Agent Mail alias"
   local end_marker="# <<< MCP Agent Mail alias"
-  local alias_cmd="alias am='cd \"${repo_dir}\" && uv run python -m mcp_agent_mail.cli'"
+  local alias_cmd="alias am='cd \"${repo_dir}\" && scripts/run_server_with_token.sh'"
   local snippet=""
   printf -v snippet '%s\n%s\n%s\n' "${marker}" "${alias_cmd}" "${end_marker}"
 
@@ -429,7 +429,7 @@ install_am_alias() {
 
   # Also define it for the current session
   # shellcheck disable=SC2139
-  alias am="cd \"${repo_dir}\" && uv run python -m mcp_agent_mail.cli" 2>/dev/null || true
+  alias am="cd \"${repo_dir}\" && scripts/run_server_with_token.sh" 2>/dev/null || true
 
   return 0
 }
