@@ -400,7 +400,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=pool_timeout,  # Extended timeout for SQLite checkpoint scenarios
-        pool_recycle=1800,  # Recycle connections every 30 minutes (was 1 hour)
+        pool_recycle=600,  # Recycle connections every 10 minutes to prevent stale handle buildup under sustained load
         pool_reset_on_return="rollback",  # Ensure uncommitted transactions are rolled back on return
         connect_args=connect_args,
     )

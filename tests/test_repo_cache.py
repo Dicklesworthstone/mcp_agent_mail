@@ -8,7 +8,7 @@ Reference: mcp_agent_mail-jto (Bug: File handle exhaustion)
 
 from __future__ import annotations
 
-import sys
+import time
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -115,7 +115,7 @@ class TestLRURepoCacheEviction:
         # (depending on refcount at cleanup time). Key assertion is it's no longer in cache.
 
     def test_evicted_repos_added_to_evicted_list(self):
-        """Evicted repos should be tracked for later cleanup."""
+        """Evicted repos should be tracked for later cleanup with timestamps."""
         cache = _LRURepoCache(maxsize=1)
         repo1 = MagicMock()
         repo2 = MagicMock()
@@ -125,10 +125,10 @@ class TestLRURepoCacheEviction:
         # Mock cleanup to prevent immediate cleanup and verify eviction mechanism
         evicted_during_put: list = []
         original_cleanup = cache._cleanup_evicted
-        def tracking_cleanup() -> int:
+        def tracking_cleanup(**kwargs: Any) -> int:
             # Record what's in evicted list before cleanup runs
             evicted_during_put.extend(cache._evicted)
-            return original_cleanup()
+            return original_cleanup(**kwargs)
         cache_any = cast(Any, cache)
         cache_any._cleanup_evicted = tracking_cleanup
 
@@ -136,8 +136,9 @@ class TestLRURepoCacheEviction:
 
         assert len(cache) == 1
         assert "repo2" in cache
-        # Verify repo1 was added to evicted list (captured before cleanup ran)
-        assert repo1 in evicted_during_put
+        # Verify repo1 was added to evicted list as (repo, timestamp) tuple
+        evicted_repos = [r for r, _ts in evicted_during_put]
+        assert repo1 in evicted_repos
 
     def test_duplicate_put_updates_lru_order(self):
         """Putting same key again should update LRU order without eviction."""
@@ -157,35 +158,47 @@ class TestLRURepoCacheCleanup:
     """Test cleanup behavior for evicted repos."""
 
     def test_cleanup_evicted_returns_count(self):
-        """_cleanup_evicted should return count of closed repos."""
+        """_cleanup_evicted should return count of closed repos after grace period."""
         cache = _LRURepoCache(maxsize=1)
 
-        # Add a mock repo to evicted list with low refcount
+        # Add a mock repo to evicted list with a timestamp far in the past
         mock_repo = MagicMock()
-        cache._evicted.append(mock_repo)
+        cache._evicted.append((mock_repo, time.monotonic() - cache.EVICTION_GRACE_SECONDS - 10))
 
-        # Mock sys.getrefcount to return low value
-        with patch.object(sys, 'getrefcount', return_value=2):
-            closed = cache._cleanup_evicted()
+        closed = cache._cleanup_evicted()
 
         assert closed == 1
         mock_repo.close.assert_called_once()
         assert len(cache._evicted) == 0
 
-    def test_cleanup_keeps_in_use_repos(self):
-        """Repos still in use (high refcount) should not be closed."""
+    def test_cleanup_keeps_recently_evicted_repos(self):
+        """Repos still within their grace period should not be closed."""
         cache = _LRURepoCache(maxsize=1)
 
         mock_repo = MagicMock()
-        cache._evicted.append(mock_repo)
+        # Evicted just now -- well within the grace period
+        cache._evicted.append((mock_repo, time.monotonic()))
 
-        # Mock sys.getrefcount to return high value (still in use)
-        with patch.object(sys, 'getrefcount', return_value=10):
-            closed = cache._cleanup_evicted()
+        closed = cache._cleanup_evicted()
 
         assert closed == 0
         mock_repo.close.assert_not_called()
-        assert mock_repo in cache._evicted
+        evicted_repos = [r for r, _ts in cache._evicted]
+        assert mock_repo in evicted_repos
+
+    def test_force_cleanup_ignores_grace_period(self):
+        """force=True should close repos regardless of grace period."""
+        cache = _LRURepoCache(maxsize=1)
+
+        mock_repo = MagicMock()
+        # Evicted just now -- still in grace period
+        cache._evicted.append((mock_repo, time.monotonic()))
+
+        closed = cache._cleanup_evicted(force=True)
+
+        assert closed == 1
+        mock_repo.close.assert_called_once()
+        assert len(cache._evicted) == 0
 
     def test_clear_closes_all_repos(self):
         """Clear should close all cached and evicted repos."""
@@ -196,7 +209,7 @@ class TestLRURepoCacheCleanup:
 
         cache.put("repo1", repo1)
         cache.put("repo2", repo2)
-        cache._evicted.append(evicted_repo)
+        cache._evicted.append((evicted_repo, time.monotonic()))
 
         count = cache.clear()
 
@@ -216,15 +229,15 @@ class TestLRURepoCacheStats:
         cache = _LRURepoCache(maxsize=1)
         assert cache.evicted_count == 0
 
-        cache._evicted.append(MagicMock())
-        cache._evicted.append(MagicMock())
+        cache._evicted.append((MagicMock(), time.monotonic()))
+        cache._evicted.append((MagicMock(), time.monotonic()))
         assert cache.evicted_count == 2
 
     def test_stats_property(self):
         """stats should return cache statistics."""
         cache = _LRURepoCache(maxsize=8)
         cache.put("repo1", MagicMock())
-        cache._evicted.append(MagicMock())
+        cache._evicted.append((MagicMock(), time.monotonic()))
 
         stats = cache.stats
         assert stats == {"cached": 1, "evicted": 1, "maxsize": 8}
@@ -296,19 +309,15 @@ class TestLRURepoCacheWarningLogging:
 
         cache = _LRURepoCache(maxsize=2)
 
-        # Add many repos to evicted list
+        # Add many repos to evicted list, all recently evicted (within grace period)
+        now = time.monotonic()
         for _ in range(5):
             mock_repo = MagicMock()
-            cache._evicted.append(mock_repo)
+            cache._evicted.append((mock_repo, now))
 
-        # Mock getrefcount to keep all repos in evicted list
-        with (
-            patch.object(sys, 'getrefcount', return_value=10),
-            patch.object(logging, 'getLogger') as mock_get_logger,
-        ):
-            mock_logger = MagicMock()
-            mock_get_logger.return_value = mock_logger
-
+        # Repos are within grace period so they won't be cleaned up,
+        # and the warning should fire because len(still_pending) > maxsize
+        with patch("mcp_agent_mail.storage._logger") as mock_logger:
             cache._cleanup_evicted()
 
             # Warning should have been logged
