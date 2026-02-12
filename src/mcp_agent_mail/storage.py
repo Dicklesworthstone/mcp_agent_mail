@@ -1760,6 +1760,7 @@ async def _commit_direct(
 
     actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
     repo = Repo(str(repo_root))
+    attempt_repo = repo  # May diverge from `repo` during EMFILE recovery
 
     def _perform_commit(target_repo: Repo) -> None:
         target_repo.index.add(rel_paths)
@@ -1880,6 +1881,13 @@ async def _commit_direct(
         # Always close the repo we opened, even if an exception occurred.
         # This prevents file descriptor leaks when exceptions are thrown
         # between Repo() creation and the previous (non-finally) close.
+        #
+        # Also close attempt_repo if EMFILE recovery created a separate handle.
+        # Without this, a non-OSError exception after EMFILE recovery would leak
+        # the replacement repo (the original is already closed by recovery).
+        if attempt_repo is not repo:
+            with contextlib.suppress(Exception):
+                attempt_repo.close()
         with contextlib.suppress(Exception):
             repo.close()
 
