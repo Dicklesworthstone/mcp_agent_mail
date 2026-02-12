@@ -362,18 +362,24 @@ class _LRURepoCache:
     This prevents file descriptor leaks by:
     1. Limiting the number of cached repos (default: 16)
     2. Evicting oldest repos when at capacity
-    3. Aggressively cleaning up evicted repos when reference counts drop
+    3. Closing evicted repos after a grace period (time-based, not refcount-based)
 
     IMPORTANT: Evicted repos are NOT closed immediately because they may still be in use
-    by other coroutines. They will be closed when garbage collected or when clear() is called.
+    by other coroutines. They are given a grace period (default 60s) before being closed.
     Cleanup runs opportunistically on both get() and put() operations.
     """
+
+    # Grace period in seconds before evicted repos are forcibly closed.
+    # This replaces the unreliable sys.getrefcount() heuristic which created
+    # phantom references from iteration, locals, and stack frames, causing
+    # evicted repos to accumulate indefinitely and leak file descriptors.
+    EVICTION_GRACE_SECONDS: float = 60.0
 
     def __init__(self, maxsize: int = 16) -> None:
         self._maxsize = max(1, maxsize)
         self._cache: dict[str, Repo] = {}
         self._order: list[str] = []  # LRU order: oldest first
-        self._evicted: list[Repo] = []  # Evicted repos pending close
+        self._evicted: list[tuple[Repo, float]] = []  # (repo, eviction_timestamp) pairs
         self._cleanup_counter: int = 0  # Track operations for periodic cleanup
 
     def peek(self, key: str) -> Repo | None:
@@ -425,8 +431,8 @@ class _LRURepoCache:
             old_repo = self._cache.pop(oldest_key, None)
             if old_repo is not None:
                 # Don't close immediately - repo may still be in use by another coroutine
-                # Add to evicted list for later cleanup
-                self._evicted.append(old_repo)
+                # Record eviction time for time-based cleanup
+                self._evicted.append((old_repo, time.monotonic()))
 
         self._cache[key] = repo
         self._order.append(key)
@@ -434,29 +440,38 @@ class _LRURepoCache:
         # Opportunistically try to close evicted repos that are no longer referenced
         self._cleanup_evicted()
 
-    def _cleanup_evicted(self) -> int:
-        """Try to close evicted repos that have only one reference (ours).
+    def _cleanup_evicted(self, *, force: bool = False) -> int:
+        """Close evicted repos whose grace period has expired.
+
+        Uses a time-based approach: repos are closed after EVICTION_GRACE_SECONDS
+        have elapsed since eviction. This replaces the previous sys.getrefcount()
+        heuristic which was unreliable -- Python refcounting creates phantom
+        references from iteration, locals, and frames, causing evicted repos to
+        accumulate indefinitely and leak file descriptors.
+
+        Args:
+            force: If True, close ALL evicted repos regardless of age (used
+                   during emergency FD cleanup).
 
         Returns count of repos closed. Logs warning if evicted list grows large.
         """
-        still_in_use: list[Repo] = []
+        still_pending: list[tuple[Repo, float]] = []
         closed = 0
-        for repo in self._evicted:
-            # If refcount is 2 (our list + the getrefcount call), it's safe to close
-            # In practice, we use 3 as threshold to be safe (list + local var + getrefcount)
-            if sys.getrefcount(repo) <= 3:
+        now = time.monotonic()
+        for repo, evicted_at in self._evicted:
+            age = now - evicted_at
+            if force or age >= self.EVICTION_GRACE_SECONDS:
                 with contextlib.suppress(Exception):
                     repo.close()
                     closed += 1
             else:
-                still_in_use.append(repo)
-        self._evicted = still_in_use
+                still_pending.append((repo, evicted_at))
+        self._evicted = still_pending
         # Warn if evicted list is growing large (potential file handle pressure)
-        if len(still_in_use) > self._maxsize:
-            import logging
-            logging.getLogger(__name__).warning(
+        if len(still_pending) > self._maxsize:
+            _logger.warning(
                 "repo_cache.evicted_backlog",
-                extra={"evicted_count": len(still_in_use), "maxsize": self._maxsize},
+                extra={"evicted_count": len(still_pending), "maxsize": self._maxsize},
             )
         return closed
 
@@ -491,7 +506,7 @@ class _LRURepoCache:
         self._cache.clear()
         self._order.clear()
         # Also close any evicted repos still in pending list
-        for repo in self._evicted:
+        for repo, _evicted_at in self._evicted:
             with contextlib.suppress(Exception):
                 repo.close()
                 count += 1
@@ -577,8 +592,8 @@ def proactive_fd_cleanup(*, threshold: int = 100) -> int:
     if headroom >= threshold:
         # Sufficient headroom, no cleanup needed
         return 0
-    # Low headroom - force cleanup of evicted repos
-    freed = _REPO_CACHE._cleanup_evicted()
+    # Low headroom - force cleanup of ALL evicted repos (bypass grace period)
+    freed = _REPO_CACHE._cleanup_evicted(force=True)
     # If still low, clear some cached repos too
     new_headroom = get_fd_headroom()
     if new_headroom >= 0 and new_headroom < threshold // 2:
@@ -1779,91 +1794,94 @@ async def _commit_direct(
     commit_lock_path = _commit_lock_path(repo_root, rel_paths)
     await _to_thread(commit_lock_path.parent.mkdir, parents=True, exist_ok=True)
 
-    async with AsyncFileLock(commit_lock_path):
-        attempt_repo = repo
-        # Maximum retries for git index.lock contention (happens with concurrent agents)
-        max_index_lock_retries = 5
-        index_lock_attempts = 0
-        last_index_lock_exc: OSError | None = None
-        did_last_resort_clean = False
+    try:
+        async with AsyncFileLock(commit_lock_path):
+            attempt_repo = repo
+            # Maximum retries for git index.lock contention (happens with concurrent agents)
+            max_index_lock_retries = 5
+            index_lock_attempts = 0
+            last_index_lock_exc: OSError | None = None
+            did_last_resort_clean = False
 
-        # +2 to allow: normal retries + 1 potential EMFILE recovery + 1 last resort after stale lock clean
-        for attempt in range(max(2, max_index_lock_retries + 2)):
-            try:
-                await _to_thread(_perform_commit, attempt_repo)
-                break
-            except OSError as exc:
-                # Handle EMFILE (too many open files)
-                if exc.errno == errno.EMFILE and attempt < 1:
-                    # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
-                    # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
-                    with contextlib.suppress(Exception):
-                        clear_repo_cache()
-                    with contextlib.suppress(Exception):
-                        import gc
+            # +2 to allow: normal retries + 1 potential EMFILE recovery + 1 last resort after stale lock clean
+            for attempt in range(max(2, max_index_lock_retries + 2)):
+                try:
+                    await _to_thread(_perform_commit, attempt_repo)
+                    break
+                except OSError as exc:
+                    # Handle EMFILE (too many open files)
+                    if exc.errno == errno.EMFILE and attempt < 1:
+                        # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
+                        # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
+                        with contextlib.suppress(Exception):
+                            clear_repo_cache()
+                        with contextlib.suppress(Exception):
+                            import gc
 
-                        gc.collect()
-                    await asyncio.sleep(0.05)
-                    with contextlib.suppress(Exception):
-                        attempt_repo.close()
-                    attempt_repo = Repo(str(repo_root))
-                    continue
+                            gc.collect()
+                        await asyncio.sleep(0.05)
+                        with contextlib.suppress(Exception):
+                            attempt_repo.close()
+                        attempt_repo = Repo(str(repo_root))
+                        continue
 
-                # Handle git index.lock contention (concurrent git operations)
-                if _is_git_index_lock_error(exc):
-                    index_lock_attempts += 1
-                    last_index_lock_exc = exc
+                    # Handle git index.lock contention (concurrent git operations)
+                    if _is_git_index_lock_error(exc):
+                        index_lock_attempts += 1
+                        last_index_lock_exc = exc
 
-                    if index_lock_attempts > max_index_lock_retries:
-                        # Already exhausted normal retries
-                        if not did_last_resort_clean:
-                            # Try cleaning stale lock as last resort (lower threshold: 60s instead of 5min)
-                            cleaned = _try_clean_stale_git_lock(repo_root, max_age_seconds=60.0)
-                            if cleaned:
-                                did_last_resort_clean = True
-                                continue  # Try one more time after cleaning
-                        # Give up with a helpful error
-                        lock_path = repo_root / ".git" / "index.lock"
-                        raise GitIndexLockError(
-                            f"Git index.lock contention after {index_lock_attempts} retries. "
-                            f"Another git operation may be in progress. "
-                            f"If this persists, manually remove: {lock_path}",
-                            lock_path=lock_path,
-                            attempts=index_lock_attempts,
-                        ) from exc
+                        if index_lock_attempts > max_index_lock_retries:
+                            # Already exhausted normal retries
+                            if not did_last_resort_clean:
+                                # Try cleaning stale lock as last resort (lower threshold: 60s instead of 5min)
+                                cleaned = _try_clean_stale_git_lock(repo_root, max_age_seconds=60.0)
+                                if cleaned:
+                                    did_last_resort_clean = True
+                                    continue  # Try one more time after cleaning
+                            # Give up with a helpful error
+                            lock_path = repo_root / ".git" / "index.lock"
+                            raise GitIndexLockError(
+                                f"Git index.lock contention after {index_lock_attempts} retries. "
+                                f"Another git operation may be in progress. "
+                                f"If this persists, manually remove: {lock_path}",
+                                lock_path=lock_path,
+                                attempts=index_lock_attempts,
+                            ) from exc
 
-                    # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
-                    # (index_lock_attempts is 1-indexed here, so 2^0=1 -> 0.1s first)
-                    delay = 0.1 * (2 ** (index_lock_attempts - 1))
-                    await asyncio.sleep(delay)
+                        # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
+                        # (index_lock_attempts is 1-indexed here, so 2^0=1 -> 0.1s first)
+                        delay = 0.1 * (2 ** (index_lock_attempts - 1))
+                        await asyncio.sleep(delay)
 
-                    # Try cleaning stale lock (only if older than 5 minutes)
-                    with contextlib.suppress(Exception):
-                        _try_clean_stale_git_lock(repo_root, max_age_seconds=300.0)
-                    continue
+                        # Try cleaning stale lock (only if older than 5 minutes)
+                        with contextlib.suppress(Exception):
+                            _try_clean_stale_git_lock(repo_root, max_age_seconds=300.0)
+                        continue
 
-                # Other OSError - re-raise
-                raise
-        else:
-            # Loop exhausted without break - should only happen for unexpected error patterns
-            if last_index_lock_exc is not None:
-                lock_path = repo_root / ".git" / "index.lock"
-                raise GitIndexLockError(
-                    f"Git index.lock contention after {index_lock_attempts} retries. "
-                    f"Another git operation may be in progress. "
-                    f"If this persists, manually remove: {lock_path}",
-                    lock_path=lock_path,
-                    attempts=index_lock_attempts,
-                ) from last_index_lock_exc
-            raise RuntimeError("git commit failed after recovery attempts")
+                    # Other OSError - re-raise
+                    raise
+            else:
+                # Loop exhausted without break - should only happen for unexpected error patterns
+                if last_index_lock_exc is not None:
+                    lock_path = repo_root / ".git" / "index.lock"
+                    raise GitIndexLockError(
+                        f"Git index.lock contention after {index_lock_attempts} retries. "
+                        f"Another git operation may be in progress. "
+                        f"If this persists, manually remove: {lock_path}",
+                        lock_path=lock_path,
+                        attempts=index_lock_attempts,
+                    ) from last_index_lock_exc
+                raise RuntimeError("git commit failed after recovery attempts")
 
-        if attempt_repo is not repo:
-            with contextlib.suppress(Exception):
-                attempt_repo.close()
-
-    # Close the repo we opened
-    with contextlib.suppress(Exception):
-        repo.close()
+            if attempt_repo is not repo:
+                with contextlib.suppress(Exception):
+                    attempt_repo.close()
+    finally:
+        # Always close the repo we opened, even if an exception occurred.
+        # This prevents file descriptor leaks when exceptions are thrown
+        # between Repo() creation and the previous (non-finally) close.
+        with contextlib.suppress(Exception):
+            repo.close()
 
 
 async def _commit(
