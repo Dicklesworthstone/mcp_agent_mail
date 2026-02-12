@@ -45,11 +45,15 @@ from .storage import (
     get_agent_communication_graph,
     get_archive_tree,
     get_commit_detail,
+    get_fd_headroom,
+    get_fd_usage,
     get_file_content,
     get_historical_inbox_snapshot,
     get_message_commit_sha,
     get_recent_commits,
+    get_repo_cache_stats,
     get_timeline_commits,
+    proactive_fd_cleanup,
     write_agent_profile,
     write_file_reservation_record,
 )
@@ -552,15 +556,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
-        if not (
-            settings.file_reservations_cleanup_enabled
-            or settings.ack_ttl_enabled
-            or settings.retention_report_enabled
-            or settings.quota_enabled
-            or settings.tool_metrics_emit_enabled
-        ):
-            fastapi_app.state._background_tasks = []
-            return
+        # Note: no early return here -- the FD health monitor always runs,
+        # even when optional workers are disabled by feature flags.
 
         async def _worker_cleanup() -> None:
             while True:
@@ -888,7 +885,75 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 )
                 await asyncio.sleep(max(60, settings.retention_report_interval_seconds))
 
+        async def _worker_fd_health() -> None:
+            """Periodic file descriptor health monitor.
+
+            Checks FD headroom every 30 seconds and proactively cleans up
+            resources when headroom drops below safe thresholds. This prevents
+            the EMFILE -> socket closed -> unreachable cascade that occurs
+            under sustained multi-agent load.
+
+            Thresholds:
+            - 30% headroom: warning logged
+            - 20% headroom: proactive cleanup triggered
+            - 15% headroom: error logged, aggressive cleanup
+            """
+            _fd_logger = structlog.get_logger("fd_health")
+            while True:
+                try:
+                    current, limit = get_fd_usage()
+                    if current >= 0 and limit > 0:
+                        headroom_pct = (limit - current) / limit
+                        cache_stats = get_repo_cache_stats()
+
+                        if headroom_pct < 0.15:
+                            # Critical: aggressive cleanup
+                            _fd_logger.error(
+                                "fd_health.critical",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                            freed = proactive_fd_cleanup(threshold=limit)
+                            if freed:
+                                _fd_logger.warning(
+                                    "fd_health.emergency_cleanup",
+                                    freed=freed,
+                                    new_headroom=get_fd_headroom(),
+                                )
+                        elif headroom_pct < 0.20:
+                            # Low: proactive cleanup
+                            _fd_logger.warning(
+                                "fd_health.low",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                            freed = proactive_fd_cleanup(threshold=int(limit * 0.25))
+                            if freed:
+                                _fd_logger.info(
+                                    "fd_health.proactive_cleanup",
+                                    freed=freed,
+                                    new_headroom=get_fd_headroom(),
+                                )
+                        elif headroom_pct < 0.30:
+                            # Warning only
+                            _fd_logger.warning(
+                                "fd_health.warning",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                except Exception:
+                    pass
+                await asyncio.sleep(30)
+
         tasks = []
+        # FD health monitor always runs - it's critical for preventing EMFILE cascades
+        tasks.append(asyncio.create_task(_worker_fd_health()))
         if settings.file_reservations_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
         if settings.ack_ttl_enabled:
@@ -2698,12 +2763,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             if not (repo_root / ".git").exists():
                 return await _render("archive_activity.html", commits=[])
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 commits = await get_recent_commits(repo, limit=limit)
                 return await _render("archive_activity.html", commits=commits)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
@@ -2766,12 +2833,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if row:
                     project_name = row[0]
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 commits = await get_timeline_commits(repo, project, limit=100)
                 return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -2847,12 +2916,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if row:
                     project_name = row[0]
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 graph = await get_agent_communication_graph(repo, project, limit=200)
                 return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
