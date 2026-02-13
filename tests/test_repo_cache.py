@@ -305,8 +305,6 @@ class TestLRURepoCacheWarningLogging:
 
     def test_warning_logged_when_evicted_exceeds_maxsize(self):
         """Warning should be logged when evicted list exceeds maxsize."""
-        import logging
-
         cache = _LRURepoCache(maxsize=2)
 
         # Add many repos to evicted list, all recently evicted (within grace period)
