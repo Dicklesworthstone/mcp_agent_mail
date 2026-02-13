@@ -5418,7 +5418,7 @@ def build_mcp_server() -> FastMCP:
                 )
                 c.print(Panel(body, title=title, border_style="green"))
             except Exception:
-                pass
+                logger.debug("Failed to log send_message call with rich console", exc_info=True)
         sender = await _get_agent(project, sender_name)
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
@@ -5434,8 +5434,8 @@ def build_mcp_server() -> FastMCP:
                     try:
                         seed_id = int(thread_id)
                         criteria.append(cast(Any, Message.id) == seed_id)
-                    except Exception:
-                        pass
+                    except (ValueError, TypeError):
+                        pass  # thread_id is not numeric — expected for UUID-style IDs
                     async with get_session() as s:
                         stmt = (
                             select(Message, sender_alias.name)
@@ -5456,7 +5456,7 @@ def build_mcp_server() -> FastMCP:
                         participants.update({row[0] for row in recipient_rows.all() if row[0]})
                     auto_ok_names.update(participants)
                 except Exception:
-                    pass
+                    logger.exception("Failed to fetch thread participants for contact auto-allow (thread_id=%s)", thread_id)
             # allow recent overlapping file_reservations contact (shared surfaces) by default
             # best-effort: if both agents hold any file_reservation currently active, auto allow
             now_utc = datetime.now(timezone.utc)
@@ -5479,7 +5479,7 @@ def build_mcp_server() -> FastMCP:
                     if sender_file_reservations and their and _file_reservations_patterns_overlap(sender_file_reservations, their):
                         auto_ok_names.add(nm)
             except Exception:
-                pass
+                logger.exception("Failed to check file reservation overlap for contact auto-allow")
             # For each recipient, require link unless policy/open or in auto_ok
             blocked_recipients: list[str] = []
             # Batch-fetch all recipient agents in a single query (eliminates N+1)
@@ -5522,6 +5522,7 @@ def build_mcp_server() -> FastMCP:
                         recv_rows = await s3.execute(recv_stmt)
                         recent_ok_names.update({row[0] for row in recv_rows.all() if row[0]})
                 except Exception:
+                    logger.exception("Failed to batch fetch recent contacts for auto-allow heuristics")
                     recent_ok_names = set()
                 # Batch fetch approved agent links for these recipients
                 approved_link_ids: set[int] = set()
@@ -5540,6 +5541,7 @@ def build_mcp_server() -> FastMCP:
                         )
                         approved_link_ids.update({row[0] for row in link_rows.all() if row and row[0] is not None})
                 except Exception:
+                    logger.exception("Failed to batch fetch approved agent links")
                     approved_link_ids = set()
 
                 for nm in to + (cc or []) + (bcc or []):
@@ -5601,7 +5603,7 @@ def build_mcp_server() -> FastMCP:
                                 )
                                 attempted.append(nm)
                             except Exception:
-                                pass
+                                logger.exception("Failed to run auto-handshake for recipient %r", nm)
 
                         # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
                         if settings_local.contact_auto_retry_enabled and attempted:
@@ -5633,7 +5635,7 @@ def build_mcp_server() -> FastMCP:
                                     if link.first() is None:
                                         blocked_recipients.append(rec.name)
                     except Exception:
-                        pass
+                        logger.exception("Failed to run auto-handshakes or re-evaluate contacts after approval attempts")
                 if blocked_recipients:
                     err_type: str = "CONTACT_REQUIRED"
                     blocked_sorted = sorted(set(blocked_recipients))
@@ -5695,7 +5697,7 @@ def build_mcp_server() -> FastMCP:
                                 )
                             err_data["suggested_tool_calls"] = examples
                     except Exception:
-                        pass
+                        logger.exception("Failed to build suggestion examples for blocked recipients")
                     await ctx.error(f"{err_type}: {err_msg}")
                     raise ToolExecutionError(
                         err_type,
@@ -5766,6 +5768,7 @@ def build_mcp_server() -> FastMCP:
                             target_project_label = target_project_override.human_key or target_project_override.slug
                             agent_fragment = agent_part
                         except Exception:
+                            logger.debug("Failed to parse explicit external address: %s", candidate, exc_info=True)
                             label = slug_part.strip() if "slug_part" in locals() and slug_part.strip() else "(invalid project)"
                             unknown_external[label].append(candidate.strip() or candidate)
                             continue
@@ -5780,6 +5783,7 @@ def build_mcp_server() -> FastMCP:
                                 agent_fragment = name_part
                                 explicit_override = True
                             except Exception:
+                                logger.debug("Failed to resolve external project %r for %r", project_part.strip(), name_part, exc_info=True)
                                 label = project_part.strip() or "(invalid project)"
                                 unknown_external[label].append(candidate.strip() or candidate)
                                 continue
@@ -5896,7 +5900,7 @@ def build_mcp_server() -> FastMCP:
                             )
                             newly_registered.add(missing)
                         except Exception:
-                            pass
+                            logger.exception("Failed to auto-register recipient %r in project %r", missing, project.human_key)
                     unknown_local.difference_update(newly_registered)
                     # Re-run routing for any that were registered
                     if newly_registered:
@@ -5915,6 +5919,7 @@ def build_mcp_server() -> FastMCP:
                             try:
                                 target_proj = await _get_project_by_identifier(label)
                             except Exception:
+                                logger.debug("Failed to resolve external project %r for handshake", label, exc_info=True)
                                 continue
                             for nm in list(names):
                                 try:
@@ -5934,7 +5939,7 @@ def build_mcp_server() -> FastMCP:
                                     )
                                     attempted_external.append(f"{nm}@{label}")
                                 except Exception:
-                                    pass
+                                    logger.exception("Failed to run auto-handshake for external recipient %r@%r", nm, label)
                         # Re-route any that we attempted to handshake for
                         if attempted_external:
                             from contextlib import suppress
@@ -5948,6 +5953,7 @@ def build_mcp_server() -> FastMCP:
                                         try:
                                             tproj = await _get_project_by_identifier(label)
                                         except Exception:
+                                            logger.debug("Failed to verify approved links for project %r", label, exc_info=True)
                                             continue
                                         remaining: list[str] = []
                                         for nm in list(names):
@@ -5972,9 +5978,9 @@ def build_mcp_server() -> FastMCP:
                                         else:
                                             unknown_external.pop(label, None)
                             except Exception:
-                                pass
+                                logger.exception("Failed to purge resolved unknown_external entries after auto-handshakes")
                 except Exception:
-                    pass
+                    logger.exception("Failed to run auto-handshakes for unknown external recipients")
                 # If everything resolved after auto-actions, skip error path
                 still_unknown = bool(unknown_local) or any(v for v in unknown_external.values())
                 if not still_unknown:
@@ -6047,7 +6053,7 @@ def build_mcp_server() -> FastMCP:
                         if suggestions:
                             data_payload["suggested_tool_calls"] = suggestions
                     except Exception:
-                        pass
+                        logger.exception("Failed to build suggestion tool calls for recipient errors")
                     await ctx.error(f"RECIPIENT_NOT_FOUND: {message}")
                     raise ToolExecutionError(
                         "RECIPIENT_NOT_FOUND",
@@ -6101,6 +6107,7 @@ def build_mcp_server() -> FastMCP:
                 )
                 deliveries.append({"project": p.human_key, "payload": payload_ext})
             except Exception:
+                logger.exception("Failed to deliver message to external project %r", p.human_key)
                 continue
 
         # If a single delivery returned a structured error payload, bubble it up to top-level
