@@ -265,3 +265,6 @@ test_screenshot.png
 
 # Claude Code local settings (contains secrets)
 .claude/settings.local.json
+
+# Literal tilde directory (created by agent mail git mailbox init)
+~/
