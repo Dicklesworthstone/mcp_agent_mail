@@ -441,8 +441,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         if request.method.upper() == "POST":
             try:
                 body_bytes = await request.body()
+                body_sent = False
 
                 async def _receive() -> dict:
+                    nonlocal body_sent
+                    if body_sent:
+                        return {"type": "http.request", "body": b"", "more_body": False}
+                    body_sent = True
                     return {"type": "http.request", "body": body_bytes, "more_body": False}
 
                 cast(Any, request)._receive = _receive
@@ -1162,61 +1167,81 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await server_task
 
-    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
+    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests.
+    # Also mount compatibility aliases for both '/api' and '/mcp' regardless of configured base.
     mount_base = settings.http.path or "/api"
     if not mount_base.startswith("/"):
         mount_base = "/" + mount_base
     base_no_slash = mount_base.rstrip("/") or "/"
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = StatelessMCPASGIApp(server)
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_no_slash, stateless_app)
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_with_slash, stateless_app)
+
+    mount_paths = [base_no_slash, base_with_slash]
+    for compat_base in ("/api", "/mcp"):
+        compat_no_slash = compat_base.rstrip("/") or "/"
+        compat_with_slash = compat_no_slash if compat_no_slash == "/" else compat_no_slash + "/"
+        if compat_no_slash not in mount_paths:
+            mount_paths.append(compat_no_slash)
+        if compat_with_slash not in mount_paths:
+            mount_paths.append(compat_with_slash)
+
+    for mount_path in mount_paths:
+        with contextlib.suppress(Exception):
+            fastapi_app.mount(mount_path, stateless_app)
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
 
-    # Add a direct route at the base path without redirect to tolerate clients omitting trailing slash
-    @fastapi_app.post(base_no_slash)
-    async def _base_passthrough(request: Request) -> JSONResponse:
-        # Re-dispatch to mounted stateless app by calling it directly
-        response_body: dict[str, Any] = {}
-        status_code = 200
-        headers: dict[str, str] = {}
+    # Add direct routes at no-slash base paths to tolerate clients omitting trailing slashes.
+    def _register_base_passthrough(base_path_no_slash: str, base_path_with_slash: str) -> None:
+        @fastapi_app.post(base_path_no_slash)
+        async def _base_passthrough(request: Request) -> JSONResponse:
+            # Re-dispatch to mounted stateless app by calling it directly
+            response_body: dict[str, Any] = {}
+            status_code = 200
+            headers: dict[str, str] = {}
 
-        async def _send(message: MutableMapping[str, Any]) -> None:
-            nonlocal response_body, status_code, headers
-            if message.get("type") == "http.response.start":
-                status_code = int(message.get("status", 200))
-                hdrs = message.get("headers") or []
-                for k, v in hdrs:
-                    headers[k.decode("latin1")] = v.decode("latin1")
-            elif message.get("type") == "http.response.body":
-                body = message.get("body") or b""
-                try:
-                    response_body = json.loads(body.decode("utf-8")) if body else {}
-                except Exception:
-                    response_body = {}
+            async def _send(message: MutableMapping[str, Any]) -> None:
+                nonlocal response_body, status_code, headers
+                if message.get("type") == "http.response.start":
+                    status_code = int(message.get("status", 200))
+                    hdrs = message.get("headers") or []
+                    for k, v in hdrs:
+                        headers[k.decode("latin1")] = v.decode("latin1")
+                elif message.get("type") == "http.response.body":
+                    body = message.get("body") or b""
+                    try:
+                        response_body = json.loads(body.decode("utf-8")) if body else {}
+                    except Exception:
+                        response_body = {}
 
-        # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
-        scope = dict(request.scope)
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
-            scope_headers = list(scope.get("headers") or [])
-            has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
-            if not has_auth and settings.http.bearer_token:
-                scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
-            scope["headers"] = scope_headers
-        await stateless_app(
-            {**scope, "path": base_with_slash},  # ensure mounted path
-            request.receive,
-            _send,
-        )
-        return JSONResponse(response_body, status_code=status_code, headers=headers)
+            # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
+            scope = dict(request.scope)
+            try:
+                client_host = request.client.host if request.client else ""
+            except Exception:
+                client_host = ""
+            if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+                scope_headers = list(scope.get("headers") or [])
+                has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
+                if not has_auth and settings.http.bearer_token:
+                    scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
+                scope["headers"] = scope_headers
+            await stateless_app(
+                {**scope, "path": base_path_with_slash},  # ensure mounted path
+                request.receive,
+                _send,
+            )
+            return JSONResponse(response_body, status_code=status_code, headers=headers)
+
+    passthrough_pairs: list[tuple[str, str]] = [(base_no_slash, base_with_slash)]
+    for compat_base in ("/api", "/mcp"):
+        compat_no_slash = compat_base.rstrip("/") or "/"
+        compat_with_slash = compat_no_slash if compat_no_slash == "/" else compat_no_slash + "/"
+        if (compat_no_slash, compat_with_slash) not in passthrough_pairs:
+            passthrough_pairs.append((compat_no_slash, compat_with_slash))
+    for no_slash, with_slash in passthrough_pairs:
+        _register_base_passthrough(no_slash, with_slash)
 
     # ----- Simple SSR Mail UI -----
     def _register_mail_ui() -> None:

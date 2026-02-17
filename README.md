@@ -2020,7 +2020,7 @@ Common variables you may set:
 | `STORAGE_ROOT` | `~/.mcp_agent_mail_git_mailbox_repo` | Root for per-project repos and SQLite DB |
 | `HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport |
 | `HTTP_PORT` | `8765` | Bind port for HTTP transport |
-| `HTTP_PATH` | `/mcp/` | HTTP path where MCP endpoint is mounted |
+| `HTTP_PATH` | `/mcp/` | Preferred MCP endpoint mount path (`/api` and `/mcp` aliases are also mounted) |
 | `HTTP_JWT_ENABLED` | `false` | Enable JWT validation middleware |
 | `HTTP_JWT_SECRET` |  | HMAC secret for HS* algorithms (dev) |
 | `HTTP_JWT_JWKS_URL` |  | JWKS URL for public key verification |
@@ -2139,7 +2139,7 @@ uv run python -m mcp_agent_mail.cli serve-http
 uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
-Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
+Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates `/api`, `/api/`, `/mcp`, and `/mcp/`.
 
 ## Search syntax tips (SQLite FTS5)
 

@@ -23,6 +23,13 @@ def test_config_csv_and_bool_parsing(monkeypatch):
     assert s.http.rate_limit_enabled is True
 
 
+def test_database_pool_size_default_is_50(monkeypatch):
+    monkeypatch.delenv("DATABASE_POOL_SIZE", raising=False)
+    clear_settings_cache()
+    s = get_settings()
+    assert s.database.pool_size == 50
+
+
 def test_db_engine_reset_and_reinit(isolated_env):
     # Reset and ensure engine can be re-initialized and schema ensured
     reset_database_state()
@@ -30,5 +37,4 @@ def test_db_engine_reset_and_reinit(isolated_env):
     _ = get_engine()
     # Ensure schema executes without error
     asyncio.run(ensure_schema())
-
 
