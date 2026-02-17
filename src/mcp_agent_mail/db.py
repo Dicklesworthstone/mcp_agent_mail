@@ -385,10 +385,10 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         }
 
     # SQLite concurrency tuning:
-    # - Smaller pool to prevent FD exhaustion (3 base + 4 overflow = 7 max connections)
+    # - Larger pool to support high-concurrency multi-agent workloads (50 base + 4 overflow = 54 max connections)
     # - Longer timeout to handle WAL checkpoint blocking
     # For non-SQLite (PostgreSQL, etc.), use larger pools
-    pool_size = settings.pool_size if settings.pool_size is not None else (3 if is_sqlite else 25)
+    pool_size = settings.pool_size if settings.pool_size is not None else (50 if is_sqlite else 25)
     max_overflow = settings.max_overflow if settings.max_overflow is not None else (4 if is_sqlite else 25)
     pool_timeout = settings.pool_timeout if settings.pool_timeout is not None else (45 if is_sqlite else 30)
 
@@ -400,7 +400,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=pool_timeout,  # Extended timeout for SQLite checkpoint scenarios
-        pool_recycle=600,  # Recycle connections every 10 minutes to prevent stale handle buildup under sustained load
+        pool_recycle=1800,  # Recycle connections every 30 minutes (was 1 hour)
         pool_reset_on_return="rollback",  # Ensure uncommitted transactions are rolled back on return
         connect_args=connect_args,
     )
@@ -791,32 +791,6 @@ def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_agent_links_status "
         "ON agent_links(status)"
-    )
-    # Migration: add topic column to messages table (bd-26w broadcast topics)
-    with suppress(Exception):
-        connection.exec_driver_sql("ALTER TABLE messages ADD COLUMN topic TEXT DEFAULT NULL")
-    connection.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS idx_messages_project_topic ON messages(project_id, topic)"
-    )
-    # Migration: create message_summaries table (bd-1ia on-demand summarization)
-    connection.exec_driver_sql(
-        """
-        CREATE TABLE IF NOT EXISTS message_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL REFERENCES projects(id),
-            summary_text TEXT NOT NULL,
-            start_ts TIMESTAMP NOT NULL,
-            end_ts TIMESTAMP NOT NULL,
-            source_message_count INTEGER NOT NULL DEFAULT 0,
-            source_thread_ids TEXT NOT NULL DEFAULT '[]',
-            llm_model TEXT,
-            cost_usd REAL,
-            created_ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    connection.exec_driver_sql(
-        "CREATE INDEX IF NOT EXISTS idx_summaries_project_end ON message_summaries(project_id, end_ts)"
     )
 
 
