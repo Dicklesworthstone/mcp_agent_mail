@@ -63,6 +63,21 @@ class TestServerConfiguration:
         assert app is not None
 
     @pytest.mark.asyncio
+    async def test_server_mounts_api_and_mcp_aliases(self, isolated_env, monkeypatch):
+        """Server always exposes MCP transport on both /api and /mcp aliases."""
+        monkeypatch.setenv("HTTP_PATH", "/custom-mcp/")
+        with contextlib.suppress(Exception):
+            _config.clear_settings_cache()
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        mounted_paths = {getattr(route, "path", "") for route in app.routes}
+        assert "/custom-mcp" in mounted_paths
+        assert "/api" in mounted_paths
+        assert "/mcp" in mounted_paths
+
+    @pytest.mark.asyncio
     async def test_server_builds_with_custom_host_port(self, isolated_env, monkeypatch):
         """Server configuration accepts custom host and port."""
         monkeypatch.setenv("HTTP_HOST", "0.0.0.0")

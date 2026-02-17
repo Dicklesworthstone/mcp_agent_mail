@@ -329,7 +329,7 @@ def get_settings() -> Settings:
     database_settings = DatabaseSettings(
         url=_decouple_config("DATABASE_URL", default="sqlite+aiosqlite:///./storage.sqlite3"),
         echo=_bool(_decouple_config("DATABASE_ECHO", default="false"), default=False),
-        pool_size=_int_optional(_decouple_config("DATABASE_POOL_SIZE", default="")),
+        pool_size=_int_optional(_decouple_config("DATABASE_POOL_SIZE", default="50")),
         max_overflow=_int_optional(_decouple_config("DATABASE_MAX_OVERFLOW", default="")),
         pool_timeout=_int_optional(_decouple_config("DATABASE_POOL_TIMEOUT", default="")),
     )

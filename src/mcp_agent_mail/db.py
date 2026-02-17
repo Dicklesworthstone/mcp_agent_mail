@@ -325,7 +325,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     - cache_size=-32768: 32MB page cache for better read performance
 
     Pool Tuning:
-    - Conservative pool size (3 base + 4 overflow = 7 max) to prevent FD exhaustion
+    - Higher default pool size for bursty multi-agent workloads (50 base for SQLite)
     - 45s pool timeout - long enough for checkpoint but not indefinite
     - pool_pre_ping: Detect and recycle stale connections
     """
@@ -387,7 +387,7 @@ def _build_engine(settings: DatabaseSettings) -> AsyncEngine:
     # SQLite concurrency tuning:
     # - Larger pool to support high-concurrency multi-agent workloads (50 base + 4 overflow = 54 max connections)
     # - Longer timeout to handle WAL checkpoint blocking
-    # For non-SQLite (PostgreSQL, etc.), use larger pools
+    # For non-SQLite (PostgreSQL, etc.), keep existing defaults unless overridden
     pool_size = settings.pool_size if settings.pool_size is not None else (50 if is_sqlite else 25)
     max_overflow = settings.max_overflow if settings.max_overflow is not None else (4 if is_sqlite else 25)
     pool_timeout = settings.pool_timeout if settings.pool_timeout is not None else (45 if is_sqlite else 30)
