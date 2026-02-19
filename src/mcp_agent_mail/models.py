@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -68,6 +69,7 @@ class Agent(SQLModel, table=True):
     last_active_ts: datetime = Field(default_factory=_utcnow_naive)
     attachments_policy: str = Field(default="auto", max_length=16)
     contact_policy: str = Field(default="auto", max_length=16)  # open | auto | contacts_only | block_all
+    registration_token: Optional[str] = Field(default=None, max_length=64, index=True)
 
 
 class MessageRecipient(SQLModel, table=True):
