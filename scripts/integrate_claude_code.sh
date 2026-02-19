@@ -211,11 +211,11 @@ HOOKJSON
 
 # Merge hooks into existing config (preserves permissions, plugins, other hooks)
 MERGED_SETTINGS="$EXISTING_SETTINGS"
-MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "SessionStart" "$SESSION_START_HOOK" "mcp_agent_mail")
-MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PreToolUse" "$PRE_TOOL_USE_HOOK" "mcp_agent_mail")
-MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_BASH_HOOK" "mcp_agent_mail")
-MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_MSG_HOOK" "mcp_agent_mail")
-MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_RES_HOOK" "mcp_agent_mail")
+MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "SessionStart" "$SESSION_START_HOOK" "mcp_agent_mail.cli acks pending")
+MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PreToolUse" "$PRE_TOOL_USE_HOOK" "mcp_agent_mail.cli file_reservations soon")
+MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_BASH_HOOK" "check_inbox.sh")
+MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_MSG_HOOK" "mcp_agent_mail.cli list-acks")
+MERGED_SETTINGS=$(json_append_hook "$MERGED_SETTINGS" "PostToolUse" "$POST_TOOL_USE_RES_HOOK" "mcp_agent_mail.cli file_reservations list")
 
 # NOTE: No mcpServers in settings.json - token goes in settings.local.json only
 # This prevents credential leaks to git
