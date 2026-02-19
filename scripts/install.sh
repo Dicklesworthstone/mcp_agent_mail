@@ -798,10 +798,20 @@ ensure_beads() {
     exit 1
   fi
 
-  if ! curl -fsSL "${BEADS_INSTALL_URL}?$(date +%s)" | bash; then
+  # Download first, then execute — avoids nested curl|bash stdin corruption
+  local br_tmp_script
+  br_tmp_script=$(mktemp "${TMPDIR:-/tmp}/br-install.XXXXXX.sh")
+  if ! curl -fsSL "${BEADS_INSTALL_URL}?$(date +%s)" -o "${br_tmp_script}"; then
+    rm -f "${br_tmp_script}"
+    err "Failed to download Beads Rust installer. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
+    exit 1
+  fi
+  if ! bash "${br_tmp_script}"; then
+    rm -f "${br_tmp_script}"
     err "Failed to install Beads Rust automatically. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
     exit 1
   fi
+  rm -f "${br_tmp_script}"
 
   hash -r 2>/dev/null || true
 
@@ -900,11 +910,16 @@ ensure_bv() {
     return 0
   fi
 
-  if ! curl -fsSL "${BV_INSTALL_URL}" | bash; then
+  # Download first, then execute — avoids nested curl|bash stdin corruption
+  local bv_tmp_script
+  bv_tmp_script=$(mktemp "${TMPDIR:-/tmp}/bv-install.XXXXXX.sh")
+  if ! curl -fsSL "${BV_INSTALL_URL}" -o "${bv_tmp_script}" || ! bash "${bv_tmp_script}"; then
+    rm -f "${bv_tmp_script}"
     warn "Beads Viewer installation failed (non-fatal). You can install manually via: curl -fsSL ${BV_INSTALL_URL} | bash"
     record_summary "Beads Viewer: installation failed (optional)"
     return 0
   fi
+  rm -f "${bv_tmp_script}"
 
   hash -r 2>/dev/null || true
 
