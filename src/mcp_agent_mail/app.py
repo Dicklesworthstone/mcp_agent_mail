@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import re
+import secrets
 import shlex
 import subprocess
 import time
@@ -30,7 +31,7 @@ import uuid
 from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
-from sqlalchemy import asc as _sa_asc, bindparam, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
+from sqlalchemy import asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import aliased
 
@@ -112,6 +113,10 @@ def select(*entities: Any, **kwargs: Any) -> Any:
 
 def update(*args: Any, **kwargs: Any) -> Any:
     return _sa_update(*args, **kwargs)
+
+
+def delete(*args: Any, **kwargs: Any) -> Any:
+    return _sa_delete(*args, **kwargs)
 
 
 def or_(*clauses: Any) -> Any:
@@ -4794,8 +4799,19 @@ def build_mcp_server() -> FastMCP:
                     await session.commit()
                     await session.refresh(db_agent)
                     agent = db_agent
+        # Generate and persist a registration token for sender verification
+        token = secrets.token_urlsafe(32)
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.registration_token = token
+                session.add(db_agent)
+                await session.commit()
+                await session.refresh(db_agent)
+                agent = db_agent
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         result = _agent_to_dict(agent)
+        result["registration_token"] = token
         # Enrich with window identity info if MCP_AGENT_MAIL_WINDOW_ID is set.
         # NOTE: _get_or_create_agent already resolved this for the archive profile,
         # but propagating it via return type would churn 8+ callers for a cold-path query.
@@ -4806,6 +4822,46 @@ def build_mcp_server() -> FastMCP:
                 result["window_id"] = wi.window_uuid
                 result["window_display_name"] = wi.display_name
         return result
+
+    @mcp.tool(
+        name="deregister_agent",
+        description="Remove an agent from a project. Marks the agent as inactive and removes it from the active roster. "
+        "Messages from/to the agent are preserved for audit but the agent can no longer send or receive new messages.",
+    )
+    @_instrument_tool("deregister_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="agent_name", project_arg="project_key")
+    async def deregister_agent(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        registration_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Remove an agent from the active roster."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        agent = await _get_agent(project, agent_name)
+        if not agent:
+            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
+
+        # Verify registration token if the agent has one
+        if agent.registration_token and registration_token != agent.registration_token:
+            raise ValueError("Invalid registration_token — only the agent's owner can deregister it")
+
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.contact_policy = "block_all"
+                db_agent.task_description = f"[DEREGISTERED at {datetime.utcnow().isoformat()}] {db_agent.task_description}"
+                session.add(db_agent)
+                await session.commit()
+
+        await ctx.info(f"Deregistered agent '{agent_name}' from project '{project.human_key}'.")
+        return {
+            "status": "deregistered",
+            "agent_name": agent_name,
+            "project_key": project_key,
+        }
 
     @mcp.tool(name="whois")
     @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
@@ -4928,11 +4984,13 @@ def build_mcp_server() -> FastMCP:
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
         agent = await _create_agent_record(project, unique_name, program, model, task_description)
-        # Update attachments policy immediately
+        # Update attachments policy and generate registration token
+        token = secrets.token_urlsafe(32)
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
             if db_agent:
                 db_agent.attachments_policy = ap
+                db_agent.registration_token = token
                 session.add(db_agent)
                 await session.commit()
                 await session.refresh(db_agent)
@@ -4941,7 +4999,9 @@ def build_mcp_server() -> FastMCP:
         async with _archive_write_lock(archive):
             await write_agent_profile(archive, _agent_to_dict(agent))
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
-        return _agent_to_dict(agent)
+        result = _agent_to_dict(agent)
+        result["registration_token"] = token
+        return result
 
     @mcp.tool(name="list_window_identities")
     @_instrument_tool(
@@ -5162,6 +5222,7 @@ def build_mcp_server() -> FastMCP:
         broadcast: bool = False,
         topic: Optional[str] = None,
         auto_contact_if_blocked: bool = False,
+        sender_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -5420,6 +5481,13 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 logger.debug("Failed to log send_message call with rich console", exc_info=True)
         sender = await _get_agent(project, sender_name)
+        # Verify sender identity token if provided
+        verified_sender = False
+        if sender_token is not None:
+            if sender.registration_token and sender_token == sender.registration_token:
+                verified_sender = True
+            elif sender.registration_token:
+                raise ValueError(f"sender_token does not match registered token for agent '{sender_name}'")
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
         if settings_local.contact_enforcement_enabled:
@@ -6115,13 +6183,66 @@ def build_mcp_server() -> FastMCP:
             maybe_payload = deliveries[0].get("payload")
             if isinstance(maybe_payload, dict) and isinstance(maybe_payload.get("error"), dict):
                 return {"error": maybe_payload["error"]}
-        result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries)}
+        result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries), "verified_sender": verified_sender}
         # Back-compat: expose top-level attachments when a single local delivery exists
         if len(deliveries) == 1:
             payload = deliveries[0].get("payload") or {}
             if isinstance(payload, dict) and "attachments" in payload:
                 result["attachments"] = payload.get("attachments")
         return result
+
+    @mcp.tool(
+        name="purge_old_messages",
+        description="Delete messages older than the configured retention period. "
+        "Defaults to retention_max_age_days from config (180 days). "
+        "Returns count of messages purged.",
+    )
+    @_instrument_tool(
+        "purge_old_messages",
+        cluster=CLUSTER_MESSAGING,
+        capabilities={"messaging", "write"},
+        project_arg="project_key",
+    )
+    async def purge_old_messages(
+        ctx: Context,
+        project_key: str,
+        max_age_days: Optional[int] = None,
+        dry_run: bool = True,
+    ) -> dict[str, Any]:
+        """Purge messages older than max_age_days."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        age_limit = max_age_days if max_age_days is not None else settings.retention_max_age_days
+        cutoff = datetime.utcnow() - timedelta(days=age_limit)
+
+        async with get_session() as session:
+            count_result = await session.execute(
+                select(func.count()).select_from(Message).where(
+                    Message.project_id == project.id,
+                    Message.created_ts < cutoff,
+                )
+            )
+            count = count_result.scalar() or 0
+
+            if not dry_run and count > 0:
+                await session.execute(
+                    delete(Message).where(
+                        Message.project_id == project.id,
+                        Message.created_ts < cutoff,
+                    )
+                )
+                await session.commit()
+
+        status = "purged" if not dry_run else "dry_run"
+        await ctx.info(f"purge_old_messages: {status}, {count} messages affected (cutoff={cutoff.isoformat()})")
+        return {
+            "status": status,
+            "messages_affected": count,
+            "cutoff_date": cutoff.isoformat(),
+            "max_age_days": age_limit,
+        }
 
     @mcp.tool(name="reply_message")
     @_instrument_tool(

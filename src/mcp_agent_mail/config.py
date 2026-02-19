@@ -365,7 +365,7 @@ def get_settings() -> Settings:
             return default
 
     llm_settings = LlmSettings(
-        enabled=_bool(_decouple_config("LLM_ENABLED", default="true"), default=True),
+        enabled=_bool(_decouple_config("LLM_ENABLED", default="false"), default=False),
         default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-4o-mini"),
         temperature=_float(_decouple_config("LLM_TEMPERATURE", default="0.2"), default=0.2),
         max_tokens=_int(_decouple_config("LLM_MAX_TOKENS", default="512"), default=512),
@@ -424,7 +424,7 @@ def get_settings() -> Settings:
         llm=llm_settings,
         tool_filter=tool_filter_settings,
         notifications=notification_settings,
-        file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
+        file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="true"), default=True),
         file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
         file_reservation_inactivity_seconds=_int(_decouple_config("FILE_RESERVATION_INACTIVITY_SECONDS", default="1800"), default=1800),
         file_reservation_activity_grace_seconds=_int(_decouple_config("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", default="900"), default=900),
@@ -468,7 +468,7 @@ def get_settings() -> Settings:
             default="demo,test*,testproj*,testproject,backendproj*,frontendproj*",
         ),
         agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
-        messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="true"), default=True),
+        messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="false"), default=False),
         messaging_auto_handshake_on_block=_bool(_decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
         window_identity_uuid=_decouple_config("MCP_AGENT_MAIL_WINDOW_ID", default="").strip(),
         window_identity_ttl_days=_int(_decouple_config("MCP_AGENT_MAIL_WINDOW_TTL_DAYS", default="30"), default=30),
