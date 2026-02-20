@@ -49,6 +49,26 @@ def test_cli_serve_http_uses_settings(isolated_env, monkeypatch):
     assert result.exit_code == 0
     assert call_args["host"] == "127.0.0.1"
     assert call_args["port"] == 8765
+
+
+def test_cli_serve_stdio(isolated_env, monkeypatch):
+    """Test that serve-stdio invokes FastMCP.run with stdio transport."""
+    runner = CliRunner()
+    call_args: dict[str, Any] = {}
+
+    def fake_run(self, transport="stdio", **kwargs):
+        call_args["transport"] = transport
+        call_args["kwargs"] = kwargs
+
+    # Patch FastMCP.run on the class before build_mcp_server returns an instance
+    from fastmcp import FastMCP
+
+    monkeypatch.setattr(FastMCP, "run", fake_run)
+    result = runner.invoke(app, ["serve-stdio"])
+    assert result.exit_code == 0
+    assert call_args["transport"] == "stdio"
+
+
 def test_cli_migrate(monkeypatch):
     runner = CliRunner()
     invoked: dict[str, bool] = {"called": False}

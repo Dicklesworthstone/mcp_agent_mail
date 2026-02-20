@@ -1,5 +1,10 @@
-# Project-local Codex MCP configuration
+# Project-local Codex configuration
+# NOTE: Top-level keys must appear BEFORE any [section] headers in TOML
+
+# Notify hook for agent inbox reminders (fires on agent-turn-complete)
+notify = ["/data/projects/mcp_agent_mail/.codex/hooks/notify_wrapper.sh"]
+
+# MCP servers configuration
 [mcp_servers.mcp_agent_mail]
-transport = "http"
-url = "http://127.0.0.1:8765/mcp/"
+url = "http://127.0.0.1:8765/api/"
 # headers can be added if needed; localhost allowed without Authorization

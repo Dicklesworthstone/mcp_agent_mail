@@ -2,8 +2,8 @@ import asyncio
 import json
 from typing import Any
 
-from mcp_agent_mail.app import build_mcp_server  # type: ignore
-from mcp_agent_mail.config import clear_settings_cache  # type: ignore
+from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.config import clear_settings_cache
 from mcp_agent_mail.db import ensure_schema, reset_database_state
 
 
@@ -37,5 +37,4 @@ def test_ensure_product_and_link_project(tmp_path, monkeypatch) -> None:
     assert res_list and getattr(res_list[0], "content", None)
     payload = json.loads(res_list[0].content)
     assert any(p["slug"] == slug for p in payload.get("projects", []))
-
 

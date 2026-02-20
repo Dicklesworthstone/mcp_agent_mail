@@ -165,6 +165,78 @@ json_escape_string() {
   echo "$result"
 }
 
+# Merge MCP server config into existing settings JSON
+# Usage: json_merge_mcp_server <existing_json> <server_name> <server_config_json>
+# Returns: merged JSON preserving all existing keys
+# Requires: jq (for safe JSON handling without quote injection vulnerabilities)
+json_merge_mcp_server() {
+  local existing="$1"
+  local server_name="$2"
+  local server_config="$3"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_err "jq is required for JSON merge. Install: brew install jq (macOS) or apt install jq (Linux)"
+    return 1
+  fi
+
+  echo "$existing" | jq --arg name "$server_name" --argjson config "$server_config" \
+    '.mcpServers = (.mcpServers // {}) | .mcpServers[$name] = $config'
+}
+
+# Append hook to existing hooks array without duplicating
+# Usage: json_append_hook <existing_json> <hook_type> <hook_json> <identifier>
+# hook_type: SessionStart, PreToolUse, PostToolUse
+# identifier: string to check for duplicates (e.g., "mcp-agent-mail")
+# Requires: jq (for safe JSON handling without quote injection vulnerabilities)
+json_append_hook() {
+  local existing="$1"
+  local hook_type="$2"
+  local hook_json="$3"
+  local identifier="$4"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log_err "jq is required for JSON merge. Install: brew install jq (macOS) or apt install jq (Linux)"
+    return 1
+  fi
+
+  # Check if already exists (use --arg to safely pass identifier)
+  if echo "$existing" | jq -e --arg id "$identifier" ".hooks.${hook_type}[]? | .hooks[]? | .command | contains(\$id)" >/dev/null 2>&1; then
+    # Already exists, return unchanged
+    echo "$existing"
+    return
+  fi
+  # Append new hook
+  echo "$existing" | jq --argjson hook "$hook_json" \
+    ".hooks = (.hooks // {}) | .hooks.${hook_type} = ((.hooks.${hook_type} // []) + [\$hook])"
+}
+
+# Ensure settings.local.json is in .gitignore
+# Usage: ensure_gitignore_entry <gitignore_path> <pattern>
+ensure_gitignore_entry() {
+  local gitignore="$1"
+  local pattern="$2"
+
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    _print "[dry-run] ensure ${pattern} in ${gitignore}"
+    return 0
+  fi
+
+  if [[ -f "$gitignore" ]]; then
+    if ! grep -qF "$pattern" "$gitignore" 2>/dev/null; then
+      echo "" >> "$gitignore"
+      echo "# Claude Code local settings (contains secrets)" >> "$gitignore"
+      echo "$pattern" >> "$gitignore"
+      log_ok "Added ${pattern} to .gitignore"
+    fi
+  else
+    cat > "$gitignore" <<EOF
+# Claude Code local settings (contains secrets)
+${pattern}
+EOF
+    log_ok "Created .gitignore with ${pattern}"
+  fi
+}
+
 # Set file permissions to 600 with error checking
 set_secure_file() {
   local file="$1"

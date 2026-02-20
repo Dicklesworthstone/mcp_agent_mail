@@ -4,8 +4,10 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 from mcp_agent_mail.guard import render_precommit_script
+from mcp_agent_mail.storage import ProjectArchive
 
 
 class _DummyArchive:
@@ -48,7 +50,7 @@ def test_precommit_blocks_on_rename_conflict(tmp_path: Path, monkeypatch) -> Non
     (reservations / "r.json").write_text(json.dumps(res), encoding="utf-8")
     # Render and run hook in block mode
     hook = repo / "pre-commit-test.py"
-    script = render_precommit_script(_DummyArchive(archive_root))  # type: ignore[arg-type]
+    script = render_precommit_script(cast(ProjectArchive, _DummyArchive(archive_root)))
     hook.write_text(script, encoding="utf-8")
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
@@ -82,12 +84,10 @@ def test_precommit_warns_on_rename_conflict_in_warn_mode(tmp_path: Path, monkeyp
     }
     (reservations / "r.json").write_text(json.dumps(res), encoding="utf-8")
     hook = repo / "pre-commit-test.py"
-    hook.write_text(render_precommit_script(_DummyArchive(archive_root)), encoding="utf-8")  # type: ignore[arg-type]
+    hook.write_text(render_precommit_script(cast(ProjectArchive, _DummyArchive(archive_root))), encoding="utf-8")
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1"
     env["AGENT_MAIL_GUARD_MODE"] = "warn"
     env["AGENT_NAME"] = "BlueLake"  # Valid adjective+noun format
     rc = subprocess.run([sys.executable, str(hook)], cwd=str(repo), env=env).returncode
     assert rc == 0
-
-

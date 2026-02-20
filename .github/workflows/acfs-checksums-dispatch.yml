@@ -1,0 +1,37 @@
+name: Notify ACFS checksum monitor
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'install.sh'
+      - 'scripts/install.sh'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if dispatch token is available
+        id: check-token
+        env:
+          TOKEN: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::ACFS_REPO_DISPATCH_TOKEN not configured. Skipping dispatch."
+            echo "has_token=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Dispatch to ACFS
+        if: steps.check-token.outputs.has_token == 'true'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.ACFS_REPO_DISPATCH_TOKEN }}
+          repository: Dicklesworthstone/agentic_coding_flywheel_setup
+          event-type: upstream-changed
+          client-payload: |
+            {"repo":"${{ github.repository }}","ref":"${{ github.ref }}","sha":"${{ github.sha }}","event":"${{ github.event_name }}"}

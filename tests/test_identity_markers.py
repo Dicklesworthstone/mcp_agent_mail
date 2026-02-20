@@ -2,7 +2,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
-from mcp_agent_mail.app import _resolve_project_identity  # type: ignore
+from mcp_agent_mail.app import _resolve_project_identity
 from mcp_agent_mail.config import get_settings
 
 
@@ -14,7 +14,7 @@ def _git(cwd: Path, *args: str) -> str:
 def test_committed_marker_precedence(tmp_path: Path, monkeypatch) -> None:
     # Gate on worktrees so identity logic runs in modern mode
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -30,7 +30,7 @@ def test_committed_marker_precedence(tmp_path: Path, monkeypatch) -> None:
 
 def test_private_marker_used_when_committed_missing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
 
     repo = tmp_path / "repo2"
     repo.mkdir()
@@ -50,7 +50,7 @@ def test_private_marker_used_when_committed_missing(tmp_path: Path, monkeypatch)
 def test_remote_fingerprint_when_no_markers(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
     monkeypatch.delenv("PROJECT_IDENTITY_MODE", raising=False)
-    get_settings.cache_clear()  # type: ignore[attr-defined]
+    get_settings.cache_clear()
 
     repo = tmp_path / "repo3"
     repo.mkdir()
@@ -67,5 +67,4 @@ def test_remote_fingerprint_when_no_markers(tmp_path: Path, monkeypatch) -> None
     expected_uid = hashlib.sha1(expected_fingerprint.encode("utf-8")).hexdigest()[:20]
     ident = _resolve_project_identity(str(repo))
     assert ident["project_uid"] == expected_uid
-
 

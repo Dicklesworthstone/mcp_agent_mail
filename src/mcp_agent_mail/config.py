@@ -5,21 +5,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol, cast
 
-from decouple import (  # type: ignore[import-untyped,attr-defined]
+from decouple import (
     Config as DecoupleConfig,
     RepositoryEmpty,
     RepositoryEnv,
 )
 
 _DOTENV_PATH: Final[Path] = Path(".env")
-# Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository
-try:
-    _decouple_config: Final[DecoupleConfig] = DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
-except FileNotFoundError:
-    # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
-    _decouple_config = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type,misc]
+
+
+def _build_decouple_config() -> DecoupleConfig:
+    # Gracefully handle missing .env (e.g., in CI/tests) by falling back to an empty repository.
+    try:
+        return DecoupleConfig(RepositoryEnv(str(_DOTENV_PATH)))
+    except FileNotFoundError:
+        # Fall back to an empty repository (reads only os.environ; all .env lookups use defaults)
+        return DecoupleConfig(RepositoryEmpty())
+
+
+_decouple_config: Final[DecoupleConfig] = _build_decouple_config()
 
 
 @dataclass(slots=True, frozen=True)
@@ -68,6 +74,9 @@ class DatabaseSettings:
 
     url: str
     echo: bool
+    pool_size: int | None
+    max_overflow: int | None
+    pool_timeout: int | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -80,6 +89,7 @@ class StorageSettings:
     inline_image_max_bytes: int
     convert_images: bool
     keep_original_images: bool
+    allow_absolute_attachment_paths: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -108,6 +118,61 @@ class LlmSettings:
 
 
 @dataclass(slots=True, frozen=True)
+class ToolFilterSettings:
+    """Tool filtering configuration for context reduction.
+
+    When enabled, only a subset of tools are exposed to the MCP client,
+    reducing context overhead by up to ~70% for minimal workflows.
+
+    Profiles:
+        - "full": All tools exposed (default behavior)
+        - "core": Essential tools only (identity, messaging, file_reservations)
+        - "minimal": Bare minimum (identity, messaging basics)
+        - "messaging": Messaging-focused subset
+        - "custom": Use explicit include/exclude lists
+
+    Example .env:
+        TOOLS_FILTER_ENABLED=true
+        TOOLS_FILTER_PROFILE=core
+
+    Or for custom filtering:
+        TOOLS_FILTER_ENABLED=true
+        TOOLS_FILTER_PROFILE=custom
+        TOOLS_FILTER_MODE=include
+        TOOLS_FILTER_CLUSTERS=messaging,identity
+        TOOLS_FILTER_TOOLS=send_message,fetch_inbox
+    """
+
+    enabled: bool
+    profile: str  # "full" | "core" | "minimal" | "messaging" | "custom"
+    mode: str  # "include" | "exclude"
+    clusters: list[str]  # Cluster names to include/exclude
+    tools: list[str]  # Specific tool names to include/exclude
+
+
+@dataclass(slots=True, frozen=True)
+class NotificationSettings:
+    """Push notification configuration for local deployments.
+
+    When enabled, touching a signal file notifies agents of new messages.
+    Agents can watch these files using inotify/FSEvents/kqueue for instant
+    notification without polling.
+
+    Signal file location: {signals_dir}/{project_slug}/{agent_name}.signal
+    Signal files contain JSON metadata for the most recent notification.
+
+    Example .env:
+        NOTIFICATIONS_ENABLED=true
+        NOTIFICATIONS_SIGNALS_DIR=~/.mcp_agent_mail/signals
+    """
+
+    enabled: bool
+    signals_dir: str  # Directory for signal files
+    include_metadata: bool  # Include message metadata in signal file
+    debounce_ms: int  # Debounce multiple signals within this window
+
+
+@dataclass(slots=True, frozen=True)
 class Settings:
     """Top-level application settings."""
 
@@ -122,6 +187,8 @@ class Settings:
     storage: StorageSettings
     cors: CorsSettings
     llm: LlmSettings
+    tool_filter: ToolFilterSettings
+    notifications: NotificationSettings
     # Background maintenance toggles
     file_reservations_cleanup_enabled: bool
     file_reservations_cleanup_interval_seconds: int
@@ -148,8 +215,16 @@ class Settings:
     log_level: str
     log_include_trace: bool
     log_json_enabled: bool
+    # Output formatting
+    output_format_default: str
+    toon_default_format: str
+    toon_stats_enabled: bool
+    toon_bin: str
     # Tools logging
     tools_log_enabled: bool
+    # Query/latency instrumentation
+    instrumentation_enabled: bool
+    instrumentation_slow_query_ms: int
     # Tool metrics emission
     tool_metrics_emit_enabled: bool
     tool_metrics_emit_interval_seconds: int
@@ -173,6 +248,11 @@ class Settings:
     messaging_auto_register_recipients: bool
     # When true, attempt a contact handshake automatically if delivery is blocked
     messaging_auto_handshake_on_block: bool
+    # Window-based agent identity
+    # UUID read from MCP_AGENT_MAIL_WINDOW_ID env var (empty string = not set)
+    window_identity_uuid: str
+    # Days of inactivity before a window identity expires (default 30)
+    window_identity_ttl_days: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -191,6 +271,16 @@ def _int(value: str, *, default: int) -> int:
         return default
 
 
+def _int_optional(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached application settings."""
@@ -204,7 +294,7 @@ def get_settings() -> Settings:
     http_settings = HttpSettings(
         host=_decouple_config("HTTP_HOST", default="127.0.0.1"),
         port=_int(_decouple_config("HTTP_PORT", default="8765"), default=8765),
-        path=_decouple_config("HTTP_PATH", default="/mcp/"),
+        path=_decouple_config("HTTP_PATH", default="/api/"),
         bearer_token=_decouple_config("HTTP_BEARER_TOKEN", default="") or None,
         rate_limit_enabled=_bool(_decouple_config("HTTP_RATE_LIMIT_ENABLED", default="false"), default=False),
         rate_limit_per_minute=_int(_decouple_config("HTTP_RATE_LIMIT_PER_MINUTE", default="60"), default=60),
@@ -239,8 +329,12 @@ def get_settings() -> Settings:
     database_settings = DatabaseSettings(
         url=_decouple_config("DATABASE_URL", default="sqlite+aiosqlite:///./storage.sqlite3"),
         echo=_bool(_decouple_config("DATABASE_ECHO", default="false"), default=False),
+        pool_size=_int_optional(_decouple_config("DATABASE_POOL_SIZE", default="50")),
+        max_overflow=_int_optional(_decouple_config("DATABASE_MAX_OVERFLOW", default="")),
+        pool_timeout=_int_optional(_decouple_config("DATABASE_POOL_TIMEOUT", default="")),
     )
 
+    allow_abs_default = "true" if environment.lower() == "development" else "false"
     storage_settings = StorageSettings(
         # Default to a global, user-scoped archive directory outside the source tree
         root=_decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo"),
@@ -249,10 +343,15 @@ def get_settings() -> Settings:
         inline_image_max_bytes=_int(_decouple_config("INLINE_IMAGE_MAX_BYTES", default=str(64 * 1024)), default=64 * 1024),
         convert_images=_bool(_decouple_config("CONVERT_IMAGES", default="true"), default=True),
         keep_original_images=_bool(_decouple_config("KEEP_ORIGINAL_IMAGES", default="false"), default=False),
+        allow_absolute_attachment_paths=_bool(
+            _decouple_config("ALLOW_ABSOLUTE_ATTACHMENT_PATHS", default=allow_abs_default),
+            default=allow_abs_default == "true",
+        ),
     )
 
+    cors_default = "true" if environment.lower() == "development" else "false"
     cors_settings = CorsSettings(
-        enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default="false"), default=False),
+        enabled=_bool(_decouple_config("HTTP_CORS_ENABLED", default=cors_default), default=cors_default == "true"),
         origins=_csv("HTTP_CORS_ORIGINS", default=""),
         allow_credentials=_bool(_decouple_config("HTTP_CORS_ALLOW_CREDENTIALS", default="false"), default=False),
         allow_methods=_csv("HTTP_CORS_ALLOW_METHODS", default="*"),
@@ -266,14 +365,41 @@ def get_settings() -> Settings:
             return default
 
     llm_settings = LlmSettings(
-        enabled=_bool(_decouple_config("LLM_ENABLED", default="true"), default=True),
-        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-5-mini"),
+        enabled=_bool(_decouple_config("LLM_ENABLED", default="false"), default=False),
+        default_model=_decouple_config("LLM_DEFAULT_MODEL", default="gpt-4o-mini"),
         temperature=_float(_decouple_config("LLM_TEMPERATURE", default="0.2"), default=0.2),
         max_tokens=_int(_decouple_config("LLM_MAX_TOKENS", default="512"), default=512),
         cache_enabled=_bool(_decouple_config("LLM_CACHE_ENABLED", default="true"), default=True),
         cache_backend=_decouple_config("LLM_CACHE_BACKEND", default="memory"),
         cache_redis_url=_decouple_config("LLM_CACHE_REDIS_URL", default=""),
         cost_logging_enabled=_bool(_decouple_config("LLM_COST_LOGGING_ENABLED", default="true"), default=True),
+    )
+
+    def _tool_filter_profile(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in {"full", "core", "minimal", "messaging", "custom"}:
+            return v
+        return "full"
+
+    def _tool_filter_mode(value: str) -> str:
+        v = (value or "").strip().lower()
+        if v in {"include", "exclude"}:
+            return v
+        return "include"
+
+    tool_filter_settings = ToolFilterSettings(
+        enabled=_bool(_decouple_config("TOOLS_FILTER_ENABLED", default="false"), default=False),
+        profile=_tool_filter_profile(_decouple_config("TOOLS_FILTER_PROFILE", default="full")),
+        mode=_tool_filter_mode(_decouple_config("TOOLS_FILTER_MODE", default="include")),
+        clusters=_csv("TOOLS_FILTER_CLUSTERS", default=""),
+        tools=_csv("TOOLS_FILTER_TOOLS", default=""),
+    )
+
+    notification_settings = NotificationSettings(
+        enabled=_bool(_decouple_config("NOTIFICATIONS_ENABLED", default="false"), default=False),
+        signals_dir=_decouple_config("NOTIFICATIONS_SIGNALS_DIR", default="~/.mcp_agent_mail/signals"),
+        include_metadata=_bool(_decouple_config("NOTIFICATIONS_INCLUDE_METADATA", default="true"), default=True),
+        debounce_ms=_int(_decouple_config("NOTIFICATIONS_DEBOUNCE_MS", default="100"), default=100),
     )
 
     def _agent_name_mode(value: str) -> str:
@@ -296,7 +422,9 @@ def get_settings() -> Settings:
         storage=storage_settings,
         cors=cors_settings,
         llm=llm_settings,
-        file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="false"), default=False),
+        tool_filter=tool_filter_settings,
+        notifications=notification_settings,
+        file_reservations_cleanup_enabled=_bool(_decouple_config("FILE_RESERVATIONS_CLEANUP_ENABLED", default="true"), default=True),
         file_reservations_cleanup_interval_seconds=_int(_decouple_config("FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS", default="60"), default=60),
         file_reservation_inactivity_seconds=_int(_decouple_config("FILE_RESERVATION_INACTIVITY_SECONDS", default="1800"), default=1800),
         file_reservation_activity_grace_seconds=_int(_decouple_config("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", default="900"), default=900),
@@ -310,6 +438,8 @@ def get_settings() -> Settings:
         ack_escalation_claim_exclusive=_bool(_decouple_config("ACK_ESCALATION_CLAIM_EXCLUSIVE", default="false"), default=False),
         ack_escalation_claim_holder_name=_decouple_config("ACK_ESCALATION_CLAIM_HOLDER_NAME", default=""),
         tools_log_enabled=_bool(_decouple_config("TOOLS_LOG_ENABLED", default="true"), default=True),
+        instrumentation_enabled=_bool(_decouple_config("INSTRUMENTATION_ENABLED", default="false"), default=False),
+        instrumentation_slow_query_ms=_int(_decouple_config("INSTRUMENTATION_SLOW_QUERY_MS", default="250"), default=250),
         log_rich_enabled=_bool(_decouple_config("LOG_RICH_ENABLED", default="true"), default=True),
         log_level=_decouple_config("LOG_LEVEL", default="INFO"),
         log_include_trace=_bool(_decouple_config("LOG_INCLUDE_TRACE", default="false"), default=False),
@@ -317,6 +447,14 @@ def get_settings() -> Settings:
         contact_auto_ttl_seconds=_int(_decouple_config("CONTACT_AUTO_TTL_SECONDS", default="86400"), default=86400),
         contact_auto_retry_enabled=_bool(_decouple_config("CONTACT_AUTO_RETRY_ENABLED", default="true"), default=True),
         log_json_enabled=_bool(_decouple_config("LOG_JSON_ENABLED", default="false"), default=False),
+        output_format_default=_decouple_config("MCP_AGENT_MAIL_OUTPUT_FORMAT", default="").strip().lower(),
+        toon_default_format=_decouple_config("TOON_DEFAULT_FORMAT", default="").strip().lower(),
+        toon_stats_enabled=_bool(_decouple_config("TOON_STATS", default="false"), default=False),
+        toon_bin=(
+            _decouple_config("TOON_TRU_BIN", default="").strip()
+            or _decouple_config("TOON_BIN", default="").strip()
+            or "tru"
+        ),
         tool_metrics_emit_enabled=_bool(_decouple_config("TOOL_METRICS_EMIT_ENABLED", default="false"), default=False),
         tool_metrics_emit_interval_seconds=_int(_decouple_config("TOOL_METRICS_EMIT_INTERVAL_SECONDS", default="60"), default=60),
         retention_report_enabled=_bool(_decouple_config("RETENTION_REPORT_ENABLED", default="false"), default=False),
@@ -330,13 +468,19 @@ def get_settings() -> Settings:
             default="demo,test*,testproj*,testproject,backendproj*,frontendproj*",
         ),
         agent_name_enforcement_mode=_agent_name_mode(_decouple_config("AGENT_NAME_ENFORCEMENT_MODE", default="coerce")),
-        messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="true"), default=True),
+        messaging_auto_register_recipients=_bool(_decouple_config("MESSAGING_AUTO_REGISTER_RECIPIENTS", default="false"), default=False),
         messaging_auto_handshake_on_block=_bool(_decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
+        window_identity_uuid=_decouple_config("MCP_AGENT_MAIL_WINDOW_ID", default="").strip(),
+        window_identity_ttl_days=_int(_decouple_config("MCP_AGENT_MAIL_WINDOW_TTL_DAYS", default="30"), default=30),
     )
 
 
+class _CacheClearable(Protocol):
+    def cache_clear(self) -> None: ...
+
+
 def clear_settings_cache() -> None:
-    """Clear the lru_cache for get_settings in a mypy-friendly way."""
-    cache_clear = getattr(get_settings, "cache_clear", None)
+    """Clear the lru_cache for get_settings in a type-checker-friendly way."""
+    cache_clear = getattr(cast(_CacheClearable, get_settings), "cache_clear", None)
     if callable(cache_clear):
         cache_clear()

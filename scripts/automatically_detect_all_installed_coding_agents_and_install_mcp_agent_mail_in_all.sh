@@ -18,7 +18,7 @@ require_cmd curl
 
 log_step "MCP Agent Mail: Auto-detect and Integrate with Installed Coding Agents"
 echo
-echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.gemini and generate per-agent MCP configs."
+echo "This will detect local agent configs under ~/.claude, ~/.codex, ~/.cursor, ~/.factory, ~/.gemini and generate per-agent MCP configs."
 echo "It will also create scripts/run_server_with_token.sh to start the server with a bearer token."
 echo
 if ! confirm "Proceed?"; then log_warn "Aborted."; exit 1; fi
@@ -124,7 +124,8 @@ HAS_CURSOR=0; [[ -d "${HOME}/.cursor" ]] && HAS_CURSOR=1
 HAS_GEMINI=0; [[ -d "${HOME}/.gemini" ]] && HAS_GEMINI=1
 
 HAS_OPENCODE=0; command -v opencode >/dev/null 2>&1 && HAS_OPENCODE=1; [[ -d "${HOME}/.opencode" ]] && HAS_OPENCODE=1
-_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI} opencode=${HAS_OPENCODE}"
+HAS_FACTORY=0; [[ -d "${HOME}/.factory" ]] && HAS_FACTORY=1
+_print "Found: claude=${HAS_CLAUDE} codex=${HAS_CODEX} cursor=${HAS_CURSOR} gemini=${HAS_GEMINI} opencode=${HAS_OPENCODE} factory=${HAS_FACTORY}"
 
 if [[ $HAS_CLAUDE -eq 1 ]]; then
   echo "-- Integrating Claude Code..."
@@ -158,6 +159,13 @@ if [[ $HAS_OPENCODE -eq 1 ]]; then
   bash "${ROOT_DIR}/scripts/integrate_opencode.sh" --yes "$@" || echo "(warn) OpenCode integration reported a non-fatal issue"
 else
   echo "-- Skipping OpenCode: not detected (install opencode to enable)."
+fi
+
+if [[ $HAS_FACTORY -eq 1 ]]; then
+  echo "-- Integrating Factory Droid..."
+  bash "${ROOT_DIR}/scripts/integrate_factory_droid.sh" --yes "$@" || echo "(warn) Factory Droid integration reported a non-fatal issue"
+else
+  echo "-- Skipping Factory Droid: not detected (~/.factory not found)."
 fi
 
 # GitHub Copilot integration (best effort - typically in VS Code)

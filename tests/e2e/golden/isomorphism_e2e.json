@@ -1,0 +1,812 @@
+{
+  "contacts": {
+    "approve_contact": {
+      "approved": true,
+      "expires_ts": "2025-01-01T00:15:52+00:00",
+      "from": "BlueLake",
+      "to": "PurpleBear",
+      "updated": 1
+    },
+    "cross_send": {
+      "attachments": [],
+      "count": 1,
+      "deliveries": [
+        {
+          "payload": {
+            "ack_required": false,
+            "attachments": [],
+            "bcc": [],
+            "body_md": "approved path",
+            "cc": [],
+            "created_ts": "2025-01-01T00:03:26+00:00",
+            "from": "BlueLake",
+            "id": 6,
+            "importance": "normal",
+            "project_id": 2,
+            "sender_id": 7,
+            "subject": "Cross Project",
+            "thread_id": null,
+            "to": [
+              "PurpleBear"
+            ]
+          },
+          "project": "/beta"
+        }
+      ]
+    },
+    "denied_error": {
+      "error_type": "ToolError",
+      "message": "Error calling tool 'send_message': Unable to send message \u2014 external recipients missing approved contact links: JadePond @ /beta; Use resource://agents/alpha to list registered agents or register new identities."
+    },
+    "deny_contact": {
+      "approved": false,
+      "expires_ts": null,
+      "from": "BlueLake",
+      "to": "JadePond",
+      "updated": 1
+    },
+    "deny_request": {
+      "expires_ts": "2025-01-01T00:15:51+00:00",
+      "from": "BlueLake",
+      "from_project": "/alpha",
+      "status": "pending",
+      "to": "JadePond",
+      "to_project": "/beta"
+    },
+    "list_contacts": [
+      {
+        "expires_ts": "2025-01-01T00:15:51+00:00",
+        "reason": "deny-case",
+        "status": "blocked",
+        "to": "JadePond",
+        "updated_ts": "2025-01-01T00:15:01+00:00"
+      },
+      {
+        "expires_ts": "2025-01-01T00:15:52+00:00",
+        "reason": "e2e",
+        "status": "approved",
+        "to": "PurpleBear",
+        "updated_ts": "2025-01-01T00:15:02+00:00"
+      }
+    ],
+    "request_contact": {
+      "expires_ts": "2025-01-01T00:15:52+00:00",
+      "from": "BlueLake",
+      "from_project": "/alpha",
+      "status": "pending",
+      "to": "PurpleBear",
+      "to_project": "/beta"
+    }
+  },
+  "file_reservations": {
+    "conflict_attempt": {
+      "conflicts": [
+        {
+          "holders": [
+            {
+              "agent": "BlueLake",
+              "exclusive": true,
+              "expires_ts": "2025-01-01T00:10:01+00:00",
+              "path_pattern": "src/core.py"
+            }
+          ],
+          "path": "src/core.py"
+        }
+      ],
+      "granted": [
+        {
+          "exclusive": true,
+          "expires_ts": "2025-01-01T00:10:02+00:00",
+          "id": 2,
+          "path_pattern": "src/core.py",
+          "reason": "conflict"
+        }
+      ]
+    },
+    "initial_reservation": {
+      "conflicts": [],
+      "granted": [
+        {
+          "exclusive": true,
+          "expires_ts": "2025-01-01T00:10:01+00:00",
+          "id": 1,
+          "path_pattern": "src/core.py",
+          "reason": "e2e"
+        }
+      ]
+    },
+    "post_release": {
+      "conflicts": [],
+      "granted": [
+        {
+          "exclusive": true,
+          "expires_ts": "2025-01-01T00:10:03+00:00",
+          "id": 3,
+          "path_pattern": "src/core.py",
+          "reason": "after-release"
+        }
+      ]
+    },
+    "snapshot": [
+      {
+        "agent": "BlueLake",
+        "created_ts": "2025-01-01T00:08:21+00:00",
+        "exclusive": true,
+        "expires_ts": "2025-01-01T00:10:01+00:00",
+        "id": 1,
+        "last_agent_activity_ts": "2025-01-01T00:02:01+00:00",
+        "last_filesystem_activity_ts": null,
+        "last_git_activity_ts": null,
+        "last_mail_activity_ts": "2025-01-01T00:03:22+00:00",
+        "path_pattern": "src/core.py",
+        "reason": "e2e",
+        "released_ts": "2025-01-01T00:11:41+00:00",
+        "stale": false,
+        "stale_reasons": [
+          "agent_inactive>1800s",
+          "no_recent_mail_activity>900s",
+          "path_pattern_unmatched"
+        ]
+      },
+      {
+        "agent": "GreenCastle",
+        "created_ts": "2025-01-01T00:08:22+00:00",
+        "exclusive": true,
+        "expires_ts": "2025-01-01T00:10:02+00:00",
+        "id": 2,
+        "last_agent_activity_ts": "2025-01-01T00:02:03+00:00",
+        "last_filesystem_activity_ts": null,
+        "last_git_activity_ts": null,
+        "last_mail_activity_ts": null,
+        "path_pattern": "src/core.py",
+        "reason": "conflict",
+        "released_ts": "2025-01-01T00:11:42+00:00",
+        "stale": false,
+        "stale_reasons": [
+          "agent_inactive>1800s",
+          "no_recent_mail_activity>900s",
+          "path_pattern_unmatched"
+        ]
+      },
+      {
+        "agent": "GreenCastle",
+        "created_ts": "2025-01-01T00:08:23+00:00",
+        "exclusive": true,
+        "expires_ts": "2025-01-01T00:10:03+00:00",
+        "id": 3,
+        "last_agent_activity_ts": "2025-01-01T00:02:03+00:00",
+        "last_filesystem_activity_ts": null,
+        "last_git_activity_ts": null,
+        "last_mail_activity_ts": null,
+        "path_pattern": "src/core.py",
+        "reason": "after-release",
+        "released_ts": "2025-01-01T00:11:43+00:00",
+        "stale": false,
+        "stale_reasons": [
+          "agent_inactive>1800s",
+          "no_recent_mail_activity>900s",
+          "path_pattern_unmatched"
+        ]
+      }
+    ]
+  },
+  "identity": {
+    "ensure_project_alpha": {
+      "branch": null,
+      "canonical_path": "/alpha",
+      "core_ignorecase": null,
+      "created_at": "2025-01-01T00:00:01+00:00",
+      "discovery": null,
+      "git_common_dir": null,
+      "human_key": "/alpha",
+      "id": 1,
+      "identity_mode_used": "dir",
+      "normalized_remote": null,
+      "project_uid": "a164c0c98d6a913b0814",
+      "repo_root": null,
+      "slug": "alpha",
+      "worktree_name": null
+    },
+    "ensure_project_beta": {
+      "branch": null,
+      "canonical_path": "/beta",
+      "core_ignorecase": null,
+      "created_at": "2025-01-01T00:00:02+00:00",
+      "discovery": null,
+      "git_common_dir": null,
+      "human_key": "/beta",
+      "id": 2,
+      "identity_mode_used": "dir",
+      "normalized_remote": null,
+      "project_uid": "a78ae1d5150177e0bb6f",
+      "repo_root": null,
+      "slug": "beta",
+      "worktree_name": null
+    },
+    "project_resource_alpha": {
+      "agents": [
+        {
+          "attachments_policy": "auto",
+          "id": 1,
+          "inception_ts": "2025-01-01T00:01:41+00:00",
+          "last_active_ts": "2025-01-01T00:02:01+00:00",
+          "model": "gpt-5",
+          "name": "BlueLake",
+          "program": "codex",
+          "project_id": 1,
+          "task_description": ""
+        },
+        {
+          "attachments_policy": "auto",
+          "id": 3,
+          "inception_ts": "2025-01-01T00:01:43+00:00",
+          "last_active_ts": "2025-01-01T00:02:03+00:00",
+          "model": "gpt-5",
+          "name": "GreenCastle",
+          "program": "codex",
+          "project_id": 1,
+          "task_description": ""
+        },
+        {
+          "attachments_policy": "auto",
+          "id": 2,
+          "inception_ts": "2025-01-01T00:01:42+00:00",
+          "last_active_ts": "2025-01-01T00:02:02+00:00",
+          "model": "gpt-5",
+          "name": "RedStone",
+          "program": "codex",
+          "project_id": 1,
+          "task_description": ""
+        },
+        {
+          "attachments_policy": "auto",
+          "id": 4,
+          "inception_ts": "2025-01-01T00:01:44+00:00",
+          "last_active_ts": "2025-01-01T00:02:04+00:00",
+          "model": "gpt-5",
+          "name": "StormyCanyon",
+          "program": "codex",
+          "project_id": 1,
+          "task_description": ""
+        }
+      ],
+      "created_at": "2025-01-01T00:00:01+00:00",
+      "human_key": "/alpha",
+      "id": 1,
+      "slug": "alpha"
+    },
+    "project_resource_beta": {
+      "agents": [
+        {
+          "attachments_policy": "auto",
+          "id": 7,
+          "inception_ts": "2025-01-01T00:01:47+00:00",
+          "last_active_ts": "2025-01-01T00:02:07+00:00",
+          "model": "gpt-5",
+          "name": "BlueLake",
+          "program": "codex",
+          "project_id": 2,
+          "task_description": ""
+        },
+        {
+          "attachments_policy": "auto",
+          "id": 6,
+          "inception_ts": "2025-01-01T00:01:46+00:00",
+          "last_active_ts": "2025-01-01T00:02:06+00:00",
+          "model": "gpt-5",
+          "name": "JadePond",
+          "program": "codex",
+          "project_id": 2,
+          "task_description": ""
+        },
+        {
+          "attachments_policy": "auto",
+          "id": 5,
+          "inception_ts": "2025-01-01T00:01:45+00:00",
+          "last_active_ts": "2025-01-01T00:02:05+00:00",
+          "model": "gpt-5",
+          "name": "PurpleBear",
+          "program": "codex",
+          "project_id": 2,
+          "task_description": ""
+        }
+      ],
+      "created_at": "2025-01-01T00:00:02+00:00",
+      "human_key": "/beta",
+      "id": 2,
+      "slug": "beta"
+    },
+    "whois": {
+      "attachments_policy": "auto",
+      "id": 1,
+      "inception_ts": "2025-01-01T00:01:41+00:00",
+      "last_active_ts": "2025-01-01T00:02:01+00:00",
+      "model": "gpt-5",
+      "name": "BlueLake",
+      "program": "codex",
+      "project_id": 1,
+      "recent_commits": [],
+      "task_description": ""
+    }
+  },
+  "inbox_outbox": {
+    "fetch_inbox": [
+      {
+        "ack_required": true,
+        "attachments": [
+          {
+            "media_type": "image/png",
+            "type": "inline"
+          },
+          {
+            "bytes": 68,
+            "data_base64": "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoEAAQAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=",
+            "height": 4,
+            "media_type": "image/webp",
+            "sha1": "9fa5713ea2cb17dc17e8473b45a4bbcb2d17670f",
+            "type": "inline",
+            "width": 4
+          },
+          {
+            "bytes": 116,
+            "data_base64": "UklGRmwAAABXRUJQVlA4IGAAAAAwBwCdASqAAIAAPm02mUmkIyKhIIgAgA2JaW7hdJlwH4AfgAABPbYi8yr89sReIKjntiLxBUc9sReIKjntiLxBT0AA/v3xB//+0shCuv+g1//9ehwuyvxCYaOpSAAAAAA=",
+            "height": 128,
+            "media_type": "image/webp",
+            "sha1": "21dad3ecf5af553fe9b26dadeaca22f9ba64b8d5",
+            "type": "inline",
+            "width": 128
+          }
+        ],
+        "body_md": "Launch kickoff\n\n![inline](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=)\n",
+        "created_ts": "2025-01-01T00:03:21+00:00",
+        "from": "BlueLake",
+        "id": 1,
+        "importance": "normal",
+        "kind": "to",
+        "project_id": 1,
+        "sender_id": 1,
+        "subject": "Launch Plan",
+        "thread_id": "THREAD-1"
+      },
+      {
+        "ack_required": false,
+        "attachments": [],
+        "body_md": "Follow up details",
+        "created_ts": "2025-01-01T00:03:22+00:00",
+        "from": "BlueLake",
+        "id": 2,
+        "importance": "normal",
+        "kind": "to",
+        "project_id": 1,
+        "sender_id": 1,
+        "subject": "Follow Up",
+        "thread_id": "THREAD-1"
+      }
+    ],
+    "fetch_inbox_since": "2025-01-01T00:03:21",
+    "mailbox": {
+      "agent": "RedStone",
+      "count": 2,
+      "messages": [
+        {
+          "ack_required": true,
+          "attachments": [
+            {
+              "media_type": "image/png",
+              "type": "inline"
+            },
+            {
+              "bytes": 68,
+              "data_base64": "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoEAAQAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=",
+              "height": 4,
+              "media_type": "image/webp",
+              "sha1": "9fa5713ea2cb17dc17e8473b45a4bbcb2d17670f",
+              "type": "inline",
+              "width": 4
+            },
+            {
+              "bytes": 116,
+              "data_base64": "UklGRmwAAABXRUJQVlA4IGAAAAAwBwCdASqAAIAAPm02mUmkIyKhIIgAgA2JaW7hdJlwH4AfgAABPbYi8yr89sReIKjntiLxBUc9sReIKjntiLxBT0AA/v3xB//+0shCuv+g1//9ehwuyvxCYaOpSAAAAAA=",
+              "height": 128,
+              "media_type": "image/webp",
+              "sha1": "21dad3ecf5af553fe9b26dadeaca22f9ba64b8d5",
+              "type": "inline",
+              "width": 128
+            }
+          ],
+          "commit": {
+            "hexsha": "<commit_hexsha>",
+            "summary": "\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 \u2705 MCP TOOL CALL COMPLETED \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+          },
+          "created_ts": "2025-01-01T00:03:21+00:00",
+          "from": "BlueLake",
+          "id": 1,
+          "importance": "normal",
+          "kind": "to",
+          "project_id": 1,
+          "sender_id": 1,
+          "subject": "Launch Plan",
+          "thread_id": "THREAD-1"
+        },
+        {
+          "ack_required": false,
+          "attachments": [],
+          "commit": {
+            "hexsha": "<commit_hexsha>",
+            "summary": "\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 \u2705 MCP TOOL CALL COMPLETED \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+          },
+          "created_ts": "2025-01-01T00:03:22+00:00",
+          "from": "BlueLake",
+          "id": 2,
+          "importance": "normal",
+          "kind": "to",
+          "project_id": 1,
+          "sender_id": 1,
+          "subject": "Follow Up",
+          "thread_id": "THREAD-1"
+        }
+      ],
+      "project": "/alpha"
+    },
+    "outbox": {
+      "agent": "BlueLake",
+      "count": 2,
+      "messages": [
+        {
+          "ack_required": true,
+          "attachments": [
+            {
+              "media_type": "image/png",
+              "type": "inline"
+            },
+            {
+              "bytes": 68,
+              "data_base64": "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoEAAQAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=",
+              "height": 4,
+              "media_type": "image/webp",
+              "sha1": "9fa5713ea2cb17dc17e8473b45a4bbcb2d17670f",
+              "type": "inline",
+              "width": 4
+            },
+            {
+              "bytes": 116,
+              "data_base64": "UklGRmwAAABXRUJQVlA4IGAAAAAwBwCdASqAAIAAPm02mUmkIyKhIIgAgA2JaW7hdJlwH4AfgAABPbYi8yr89sReIKjntiLxBUc9sReIKjntiLxBT0AA/v3xB//+0shCuv+g1//9ehwuyvxCYaOpSAAAAAA=",
+              "height": 128,
+              "media_type": "image/webp",
+              "sha1": "21dad3ecf5af553fe9b26dadeaca22f9ba64b8d5",
+              "type": "inline",
+              "width": 128
+            }
+          ],
+          "bcc": [
+            "StormyCanyon"
+          ],
+          "cc": [
+            "GreenCastle"
+          ],
+          "created_ts": "2025-01-01T00:03:21+00:00",
+          "from": "BlueLake",
+          "id": 1,
+          "importance": "normal",
+          "project_id": 1,
+          "sender_id": 1,
+          "subject": "Launch Plan",
+          "thread_id": "THREAD-1",
+          "to": [
+            "RedStone"
+          ]
+        },
+        {
+          "ack_required": false,
+          "attachments": [],
+          "bcc": [],
+          "cc": [],
+          "created_ts": "2025-01-01T00:03:22+00:00",
+          "from": "BlueLake",
+          "id": 2,
+          "importance": "normal",
+          "project_id": 1,
+          "sender_id": 1,
+          "subject": "Follow Up",
+          "thread_id": "THREAD-1",
+          "to": [
+            "RedStone"
+          ]
+        }
+      ],
+      "project": "/alpha"
+    }
+  },
+  "messaging": {
+    "beta_message": {
+      "ack_required": false,
+      "attachments": [],
+      "body_md": "beta side",
+      "created_ts": "2025-01-01T00:03:23+00:00",
+      "from": "PurpleBear",
+      "id": 3,
+      "importance": "normal",
+      "project_id": 2,
+      "sender_id": 5,
+      "subject": "Beta Hello",
+      "thread_id": "THREAD-1"
+    },
+    "followup": {
+      "ack_required": false,
+      "attachments": [],
+      "body_md": "Follow up details",
+      "created_ts": "2025-01-01T00:03:22+00:00",
+      "from": "BlueLake",
+      "id": 2,
+      "importance": "normal",
+      "project_id": 1,
+      "sender_id": 1,
+      "subject": "Follow Up",
+      "thread_id": "THREAD-1"
+    },
+    "message": {
+      "ack_required": true,
+      "attachments": [
+        {
+          "media_type": "image/png",
+          "type": "inline"
+        },
+        {
+          "bytes": 68,
+          "data_base64": "UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoEAAQAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=",
+          "height": 4,
+          "media_type": "image/webp",
+          "sha1": "9fa5713ea2cb17dc17e8473b45a4bbcb2d17670f",
+          "type": "inline",
+          "width": 4
+        },
+        {
+          "bytes": 116,
+          "data_base64": "UklGRmwAAABXRUJQVlA4IGAAAAAwBwCdASqAAIAAPm02mUmkIyKhIIgAgA2JaW7hdJlwH4AfgAABPbYi8yr89sReIKjntiLxBUc9sReIKjntiLxBT0AA/v3xB//+0shCuv+g1//9ehwuyvxCYaOpSAAAAAA=",
+          "height": 128,
+          "media_type": "image/webp",
+          "sha1": "21dad3ecf5af553fe9b26dadeaca22f9ba64b8d5",
+          "type": "inline",
+          "width": 128
+        }
+      ],
+      "body_md": "Launch kickoff\n\n![inline](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=)\n",
+      "created_ts": "2025-01-01T00:03:21+00:00",
+      "from": "BlueLake",
+      "id": 1,
+      "importance": "normal",
+      "project_id": 1,
+      "sender_id": 1,
+      "subject": "Launch Plan",
+      "thread_id": "THREAD-1"
+    }
+  },
+  "product_bus": {
+    "inbox": [
+      {
+        "ack_required": false,
+        "attachments": [],
+        "body_md": "beta side",
+        "created_ts": "2025-01-01T00:03:23+00:00",
+        "from": "PurpleBear",
+        "id": 3,
+        "importance": "normal",
+        "kind": "to",
+        "project_id": 2,
+        "sender_id": 5,
+        "subject": "Beta Hello",
+        "thread_id": "THREAD-1"
+      }
+    ],
+    "link_alpha": {
+      "linked": true,
+      "product": {
+        "id": 1,
+        "name": "Acme Suite",
+        "product_uid": "<product_uid>"
+      },
+      "project": {
+        "human_key": "/alpha",
+        "id": 1,
+        "slug": "alpha"
+      }
+    },
+    "link_beta": {
+      "linked": true,
+      "product": {
+        "id": 1,
+        "name": "Acme Suite",
+        "product_uid": "<product_uid>"
+      },
+      "project": {
+        "human_key": "/beta",
+        "id": 2,
+        "slug": "beta"
+      }
+    },
+    "product": {
+      "created_at": "2025-01-01T00:00:51+00:00",
+      "id": 1,
+      "name": "Acme Suite",
+      "product_uid": "<product_uid>"
+    },
+    "resource": {
+      "created_at": "2025-01-01T00:00:51+00:00",
+      "id": 1,
+      "name": "Acme Suite",
+      "product_uid": "<product_uid>",
+      "projects": [
+        {
+          "created_at": "2025-01-01T00:00:01+00:00",
+          "human_key": "/alpha",
+          "id": 1,
+          "slug": "alpha"
+        },
+        {
+          "created_at": "2025-01-01T00:00:02+00:00",
+          "human_key": "/beta",
+          "id": 2,
+          "slug": "beta"
+        }
+      ]
+    },
+    "thread_summary": {
+      "examples": [
+        {
+          "created_ts": "2025-01-01T00:03:21+00:00",
+          "from": "BlueLake",
+          "id": 1,
+          "subject": "Launch Plan"
+        },
+        {
+          "created_ts": "2025-01-01T00:03:22+00:00",
+          "from": "BlueLake",
+          "id": 2,
+          "subject": "Follow Up"
+        },
+        {
+          "created_ts": "2025-01-01T00:03:23+00:00",
+          "from": "PurpleBear",
+          "id": 3,
+          "subject": "Beta Hello"
+        }
+      ],
+      "summary": {
+        "action_items": [],
+        "done_actions": 0,
+        "key_points": [],
+        "mentions": [],
+        "open_actions": 0,
+        "participants": [
+          "BlueLake",
+          "PurpleBear"
+        ],
+        "total_messages": 3
+      },
+      "thread_id": "THREAD-1"
+    }
+  },
+  "search": {
+    "http_fts": {
+      "has_snippet_block": true,
+      "hits_badge_count": 0,
+      "mark_count": 1,
+      "subject_count": 17,
+      "subjects_sample": [
+        "Multiple AI Assistants",
+        "Coordinate & Communicate",
+        "Prevent Conflicts"
+      ]
+    },
+    "http_like_fallback": {
+      "has_snippet_block": false,
+      "hits_badge_count": 0,
+      "mark_count": 0,
+      "subject_count": 16,
+      "subjects_sample": [
+        "Multiple AI Assistants",
+        "Coordinate & Communicate",
+        "Prevent Conflicts"
+      ]
+    },
+    "tool_results": {
+      "result": [
+        {
+          "ack_required": 1,
+          "created_ts": "2025-01-01T00:03:21+00:00",
+          "from": "BlueLake",
+          "id": 1,
+          "importance": "normal",
+          "subject": "Launch Plan",
+          "thread_id": "THREAD-1"
+        }
+      ]
+    }
+  },
+  "share_export": {
+    "bundle_artifacts": {
+      "attachments_manifest": {
+        "config": {
+          "detach_threshold": 26214400,
+          "inline_threshold": 65536
+        },
+        "items": [],
+        "stats": {
+          "bytes_copied": 0,
+          "copied": 0,
+          "externalized": 0,
+          "inline": 0,
+          "missing": 0
+        }
+      },
+      "chunk_manifest": null,
+      "viewer_data": {
+        "messages": "viewer/data/messages.json",
+        "meta": "viewer/data/meta.json",
+        "meta_info": {
+          "fts_enabled": false,
+          "generated_at": "2025-01-01T12:00:00+00:00",
+          "message_count": 6,
+          "messages_cached": 6
+        }
+      }
+    },
+    "preview_status": {
+      "files_indexed": 24,
+      "last_modified_iso": "2024-08-30T06:40:22+00:00",
+      "last_modified_ns": 1725000022000000000,
+      "manifest_iso": "2024-08-30T06:40:06+00:00",
+      "manifest_ns": 1725000006000000000,
+      "manual_token": 0,
+      "signature": "c59d7b3c965d2d4edc9bcaa24ddc4d10f7d1cdc4fdb32912e3b1d6dfcaef0085"
+    },
+    "scrub_summary": {
+      "ack_flags_cleared": 6,
+      "agent_links_removed": 2,
+      "agents_pseudonymized": 0,
+      "agents_total": 8,
+      "attachments_cleared": 0,
+      "attachments_sanitized": 0,
+      "bodies_redacted": 0,
+      "file_reservations_removed": 5,
+      "preset": "standard",
+      "pseudonym_salt": "standard",
+      "recipients_cleared": 8,
+      "secrets_replaced": 0
+    },
+    "summary": {
+      "attachments": {
+        "external_candidates": 0,
+        "inline_candidates": 0,
+        "largest_bytes": 0,
+        "missing": 0,
+        "total": 0
+      },
+      "importance": {
+        "normal": 6
+      },
+      "messages": 6,
+      "projects": [
+        {
+          "human_key": "/<phase2_project>",
+          "slug": "<phase2_project>"
+        },
+        {
+          "human_key": "/alpha",
+          "slug": "alpha"
+        },
+        {
+          "human_key": "/beta",
+          "slug": "beta"
+        }
+      ],
+      "threads": 4
+    },
+    "verify": {
+      "bundle": "<bundle_root>",
+      "signature_checked": false,
+      "signature_verified": false,
+      "sri_checked": true
+    }
+  }
+}

@@ -26,7 +26,7 @@ This project provides a lightweight, interoperable layer so agents can:
 - Declare advisory file reservations (leases) on files/globs to signal intent
 - Inspect a directory of active agents, programs/models, and activity
 
-It's designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, etc.) coordinating across one or more codebases.
+It's designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI, Factory Droid, etc.) coordinating across one or more codebases.
 
 ## From Idea Spark to Shipping Swarm
 
@@ -45,7 +45,7 @@ Watch the full 23-minute walkthrough (https://youtu.be/68VVcqMEDrs?si=pCm6AiJAnd
 One disciplined hour of GPT-5 Codex—when it isn’t waiting on human prompts—often produces 10–20 “human hours” of work because the agents reason and type at machine speed. Agent Mail multiplies that advantage in two layers:
 
 1. **Base OSS server:** Git-backed mailboxes, advisory file reservations, Typer CLI helpers, and searchable archives keep independent agents aligned without babysitting. Every instruction, lease, and attachment is auditable.
-2. **Companion stack (commercial):** The iOS app + host automation can provision, pair, and steer heterogeneous fleets (Claude Code, Codex, Gemini CLI, etc.) from your phone using customizable Message Stacks, Human Overseer broadcasts, Beads awareness, and plan editing tools—no manual tmux choreography required. The automation closes the loop by scheduling prompts, honoring Limited Mode, and enforcing Double-Arm confirmations for destructive work.
+2. **Companion stack (commercial):** The iOS app + host automation can provision, pair, and steer heterogeneous fleets (Claude Code, Codex, Gemini CLI, Factory Droid, etc.) from your phone using customizable Message Stacks, Human Overseer broadcasts, Beads awareness, and plan editing tools—no manual tmux choreography required. The automation closes the loop by scheduling prompts, honoring Limited Mode, and enforcing Double-Arm confirmations for destructive work.
 
 Result: you invest 1–2 hours of human supervision, but dozens of agent-hours execute in parallel with clear audit trails and conflict-avoidance baked in.
 
@@ -60,18 +60,33 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/m
 What this does:
 
 - Installs uv if missing and updates your PATH for this session
+- Installs jq if missing (needed for safe config merging; auto-detects your package manager)
 - Creates a Python 3.14 virtual environment and installs dependencies with uv
 - Runs the auto-detect integration to wire up supported agent tools
 - Starts the MCP HTTP server on port 8765 and prints a masked bearer token
 - Creates helper scripts under `scripts/` (including `run_server_with_token.sh`)
 - Adds an `am` shell alias to your `.zshrc` or `.bashrc` for quick server startup (just type `am` in a new terminal!)
-- Installs/updates, verifies, and wires the Beads `bd` CLI into your PATH via its official curl installer so the task planner is ready out of the box (pass `--skip-beads` to opt out or install manually)
+- Installs **Beads Rust (`br`)**, a Rust reimplementation of the Beads task tracker, and creates a `bd` shell alias pointing to `br` for backwards compatibility. This replaces any existing `bd` (Go) installation. Pass `--skip-beads` to opt out. See [beads_rust](https://github.com/Dicklesworthstone/beads_rust) for details on CLI differences.
 - Installs/updates the Beads Viewer `bv` TUI for interactive task browsing and AI-friendly robot commands (pass `--skip-bv` to opt out)
 - Prints a short on-exit summary of each setup step so you immediately know what changed
 
 Prefer a specific location or options? Add flags like `--dir <path>`, `--project-dir <path>`, `--no-start`, `--start-only`, `--port <number>`, or `--token <hex>`.
 
 Already have Beads or Beads Viewer installed? Append `--skip-beads` and/or `--skip-bv` to bypass automatic installation.
+
+### Important: Beads Rust (br) Replaces Beads Go (bd)
+
+The installer automatically replaces `bd` (the original Go-based Beads CLI) with `br` (Beads Rust):
+
+1. **`br` is the actively maintained version.** Beads Rust is a complete reimplementation with ongoing development, while the original Go version is no longer actively maintained.
+
+2. **Existing `bd` users get automatic aliasing.** The installer creates a shell alias so that `bd` commands continue to work by redirecting to `br`. Your existing workflows and muscle memory are preserved.
+
+3. **A migration skill is installed for agents.** AI coding agents receive a `bd-br-migration` skill that helps them adapt to any CLI differences between the two implementations.
+
+4. **Same data format, compatible workflows.** Both implementations use the same `.beads/issues.jsonl` format, so your existing Beads data remains fully compatible.
+
+To opt out of this replacement, pass `--skip-beads` to the installer. See the [beads_rust repository](https://github.com/Dicklesworthstone/beads_rust) for detailed documentation on CLI differences.
 
 ### Starting the server in the future
 
@@ -90,11 +105,13 @@ That's it! The `am` alias (added to your `.zshrc` or `.bashrc` during installati
 
 **Port conflicts?** Use `--port` to specify a different port (default: 8765):
 
-```bash
-# Install with custom port
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+Install with custom port:
 
-# Or use the CLI command after installation
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+```
+
+Or use the CLI command after installation:
 uv run python -m mcp_agent_mail.cli config set-port 9000
 ```
 
@@ -102,8 +119,9 @@ uv run python -m mcp_agent_mail.cli config set-port 9000
 
 Clone the repo, set up and install with uv in a python 3.14 venv (install uv if you don't have it already), and then run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh`. This will automatically set things up for your various installed coding agent tools and start the MCP server on port 8765. If you want to run the MCP server again in the future, simply run `scripts/run_server_with_token.sh`:
 
+Install uv (if you don't have it already):
+
 ```bash
-# Install uv (if you don't have it already)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -112,6 +130,7 @@ git clone https://github.com/Dicklesworthstone/mcp_agent_mail
 cd mcp_agent_mail
 
 # Create a Python 3.14 virtual environment and install dependencies
+# Note: If you have an older uv version, run `uv self update` first
 uv python install 3.14
 uv venv -p 3.14
 source .venv/bin/activate
@@ -168,12 +187,14 @@ Common pitfalls
 
 ## Integrating with Beads (dependency-aware task planning)
 
-Beads is a lightweight task planner (`bd` CLI) that complements Agent Mail by keeping status and dependencies in one place while Mail handles messaging, file reservations, and audit trails. Project: [steveyegge/beads](https://github.com/steveyegge/beads)
+Beads is a lightweight task planner that complements Agent Mail by keeping status and dependencies in one place while Mail handles messaging, file reservations, and audit trails.
+
+**Note on implementations:** The MCP Agent Mail installer installs [Beads Rust (`br`)](https://github.com/Dicklesworthstone/beads_rust), a Rust reimplementation, and creates a `bd` alias for backwards compatibility. The original Go implementation is at [steveyegge/beads](https://github.com/steveyegge/beads). Both share the same data format (`.beads/issues.jsonl`) but have some CLI differences. Use `--skip-beads` during installation if you prefer to manage this yourself.
 
 Highlights:
 - Beads owns task prioritization; Agent Mail carries the conversations and artifacts.
 - Shared identifiers (e.g., `bd-123`) keep Beads issues, Mail threads, and commits aligned.
-- Install the `bd` CLI via prebuilt release or Go build; see the repository for platform specifics.
+- The `br` CLI (aliased as `bd`) provides similar functionality to the original with some enhancements.
 
 Copy/paste blurb for agent-facing docs (leave as-is for reuse):
 
@@ -235,7 +256,7 @@ While `bd` (Beads CLI) handles task CRUD operations, `bv` provides **precomputed
 - **Cycle detection**: Spot circular dependencies before they cause deadlocks
 - **Parallel track planning**: Determine which tasks can run concurrently
 
-Instead of agents parsing `.beads/beads.jsonl` directly or attempting to compute graph metrics (risking hallucinated results), they can call bv's deterministic robot flags and get JSON output they can trust.
+Instead of agents parsing `.beads/issues.jsonl` directly or attempting to compute graph metrics (risking hallucinated results), they can call bv's deterministic robot flags and get JSON output they can trust. Legacy `.beads/beads.jsonl` is deprecated in this repo.
 
 ### Robot Flags for AI Integration
 
@@ -701,6 +722,163 @@ Every archive writes a `metadata.json` manifest describing the projects captured
 ### Reset safety net
 
 `clear-and-reset-everything` now offers to create one of these archives before deleting anything. By default it prompts interactively; pass `--archive/--no-archive` to force a choice, and pair with `--force --no-archive` for non-interactive automation. When an archive is created successfully, the CLI prints both the path and the restore command so you can undo the reset later.
+
+## Mailbox Health: `am doctor`
+
+The `doctor` command group provides comprehensive diagnostics and repair capabilities for maintaining mailbox health. It emphasizes **data safety**—creating backups before any destructive operation and using semi-automatic repair to prevent accidental data loss.
+
+### Why `am doctor`?
+
+Over time, mailbox state can drift:
+- **Stale locks**: Process crashes leave behind `.archive.lock` or `.commit.lock` files that block operations
+- **Orphaned records**: Agents get deleted but their message recipients remain in the database
+- **FTS index desync**: Full-text search index falls out of sync with actual messages
+- **Expired file reservations**: Reservations expire but aren't cleaned up
+- **WAL files**: SQLite WAL/SHM files accumulate (normal during operation, but worth monitoring)
+
+The doctor commands detect these issues and offer safe, automatic repair.
+
+### Diagnostic checks
+
+Run comprehensive diagnostics on your mailbox:
+
+```bash
+# Check all projects
+uv run python -m mcp_agent_mail.cli doctor check
+
+# Check with verbose output
+uv run python -m mcp_agent_mail.cli doctor check --verbose
+
+# JSON output for automation
+uv run python -m mcp_agent_mail.cli doctor check --json
+```
+
+**What it checks:**
+
+| Check | Status | Description |
+|-------|--------|-------------|
+| Locks | OK/WARN | Detects stale archive and commit locks from crashed processes |
+| Database | OK/ERROR | Runs `PRAGMA integrity_check` for SQLite corruption |
+| Orphaned Records | OK/WARN | Finds message recipients without corresponding agents |
+| FTS Index | OK/WARN | Compares message count vs FTS index entries |
+| File Reservations | OK/INFO | Counts expired reservations pending cleanup |
+| WAL Files | OK/INFO | Reports presence of SQLite WAL/SHM files |
+
+**Example output:**
+
+```
+MCP Agent Mail Doctor - Diagnostic Report
+==================================================
+
+Check         Status    Details
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Locks         OK        No stale locks found
+Database      OK        Database integrity check passed
+Orphaned      OK        No orphaned records found
+FTS Index     OK        FTS index synchronized (1,234 messages)
+File Res.     INFO      4 expired reservation(s) pending cleanup
+WAL Files     OK        No orphan WAL/SHM files
+
+All checks passed!
+```
+
+### Semi-automatic repair
+
+The repair command uses a **semi-automatic approach**:
+- **Safe repairs** (locks, expired reservations) are applied automatically
+- **Data-affecting repairs** (orphan cleanup) require confirmation
+- A **backup is created before any changes**
+
+```bash
+# Preview what would be repaired (dry-run)
+uv run python -m mcp_agent_mail.cli doctor repair --dry-run
+
+# Run repairs with prompts for data changes
+uv run python -m mcp_agent_mail.cli doctor repair
+
+# Auto-confirm all repairs (for automation)
+uv run python -m mcp_agent_mail.cli doctor repair --yes
+
+# Specify custom backup location
+uv run python -m mcp_agent_mail.cli doctor repair --backup-dir /path/to/backups
+```
+
+**Repair workflow:**
+
+1. **Create backup** — Git bundle + SQLite copy created before any changes
+2. **Safe repairs** (auto-applied):
+   - Heal stale locks (removes orphaned `.archive.lock`, `.commit.lock` files)
+   - Release expired file reservations (marks `released_ts` in database)
+3. **Data repairs** (require confirmation):
+   - Delete orphaned message recipients
+   - Rebuild FTS index (if needed)
+
+### Backup management
+
+Doctor creates timestamped backups before repairs. You can also manage backups directly:
+
+```bash
+# List all available backups
+uv run python -m mcp_agent_mail.cli doctor backups
+
+# JSON output for scripting
+uv run python -m mcp_agent_mail.cli doctor backups --json
+```
+
+**Backup contents:**
+
+Each backup includes:
+- `database.sqlite3` — Complete SQLite database copy
+- `database.sqlite3-wal`, `database.sqlite3-shm` — WAL files if present
+- `archive.bundle` or `{project}.bundle` — Git bundle of the archive repository
+- `manifest.json` — Metadata: when created, why, what's included, restore instructions
+
+**Directory structure:**
+
+```
+{storage_root}/backups/
+  2026-01-06T12-30-45_doctor-repair/
+    manifest.json
+    database.sqlite3
+    archive.bundle
+```
+
+### Restore from backup
+
+If something goes wrong, restore from any backup:
+
+```bash
+# Preview what would be restored
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --dry-run
+
+# Restore (prompts for confirmation)
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup
+
+# Skip confirmation prompt
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --yes
+```
+
+**Restore process:**
+
+1. Validates backup manifest exists and is readable
+2. Shows backup metadata (creation time, reason, contents)
+3. **Creates a pre-restore backup** of current state (safety net)
+4. Restores SQLite database from backup
+5. Restores Git archive from bundle
+6. Reports any errors encountered
+
+**Safety features:**
+
+- Current database saved as `*.sqlite3.pre-restore` before overwrite
+- Current archive saved as `*.pre-restore` directory before overwrite
+- Errors during restore are captured and reported
+
+### Best practices
+
+1. **Run diagnostics regularly**: `am doctor check` is fast and non-destructive
+2. **Review before repair**: Use `--dry-run` first to see what would change
+3. **Keep backups**: Don't delete old backups until you've verified the system is healthy
+4. **Automate checks**: Include `am doctor check --json` in your CI/monitoring for early warning
 
 ### Quick Start: Interactive Deployment Wizard
 
@@ -1526,7 +1704,7 @@ sequenceDiagram
   - Subject lines are prefixed (e.g., `Re:`) for readability in mailboxes
 - Attachments
   - Image references (file path or data URI) are converted to WebP; small images embed inline when policy allows
-  - Non-absolute paths resolve relative to the project repo root
+  - Non-absolute `attachment_paths` (and markdown image paths) resolve relative to the project archive root under `STORAGE_ROOT/projects/<slug>/`, not the code repo root
   - Stored under `attachments/<xx>/<sha1>.webp` and referenced by relative path in frontmatter
 - File Reservations
   - TTL-based; exclusive means "please don't modify overlapping surfaces" for others until expiry or release
@@ -1785,11 +1963,13 @@ Configuration is loaded from an existing `.env` via `python-decouple`. Do not us
 If port 8765 is already in use (e.g., by Cursor's Python extension), you can change it:
 
 **Option 1: During installation**
-```bash
-# One-liner with custom port
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+One-liner with custom port:
 
-# Or with local script
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/mcp_agent_mail/main/scripts/install.sh?$(date +%s)" | bash -s -- --port 9000 --yes
+```
+
+Or with local script:
 ./scripts/install.sh --port 9000 --yes
 ```
 
@@ -1840,7 +2020,7 @@ Common variables you may set:
 | `STORAGE_ROOT` | `~/.mcp_agent_mail_git_mailbox_repo` | Root for per-project repos and SQLite DB |
 | `HTTP_HOST` | `127.0.0.1` | Bind host for HTTP transport |
 | `HTTP_PORT` | `8765` | Bind port for HTTP transport |
-| `HTTP_PATH` | `/mcp/` | HTTP path where MCP endpoint is mounted |
+| `HTTP_PATH` | `/mcp/` | Preferred MCP endpoint mount path (`/api` and `/mcp` aliases are also mounted) |
 | `HTTP_JWT_ENABLED` | `false` | Enable JWT validation middleware |
 | `HTTP_JWT_SECRET` |  | HMAC secret for HS* algorithms (dev) |
 | `HTTP_JWT_JWKS_URL` |  | JWKS URL for public key verification |
@@ -1863,6 +2043,11 @@ Common variables you may set:
 | `HTTP_RATE_LIMIT_REDIS_URL` |  | Redis URL for multi-worker limits |
 | `HTTP_REQUEST_LOG_ENABLED` | `false` | Print request logs (Rich + JSON) |
 | `LOG_JSON_ENABLED` | `false` | Output structlog JSON logs |
+| `MCP_AGENT_MAIL_OUTPUT_FORMAT` |  | Default output format for tools/resources (`json` or `toon`) |
+| `TOON_DEFAULT_FORMAT` |  | Global default output format fallback (`json` or `toon`) |
+| `TOON_STATS` | `false` | Emit TOON token stats (uses `tru --stats`) |
+| `TOON_TRU_BIN` |  | Explicit path/command for the `tru` encoder (overrides `TOON_BIN`) |
+| `TOON_BIN` | `tru` | Path/command for toon_rust encoder (Node `toon` is rejected) |
 | `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
 | `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
@@ -1880,6 +2065,9 @@ Common variables you may set:
 | `APP_ENVIRONMENT` | `development` | Environment name (development/production) |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./storage.sqlite3` | SQLAlchemy async database URL |
 | `DATABASE_ECHO` | `false` | Echo SQL statements for debugging |
+| `DATABASE_POOL_SIZE` | `50 (sqlite) / 25 (other)` | Base SQLAlchemy pool size (optional override) |
+| `DATABASE_MAX_OVERFLOW` | `4 (sqlite) / 25 (other)` | Extra connections allowed beyond pool_size |
+| `DATABASE_POOL_TIMEOUT` | `45 (sqlite) / 30 (other)` | Seconds to wait for a pool connection before failing |
 | `GIT_AUTHOR_NAME` | `mcp-agent` | Git commit author name |
 | `GIT_AUTHOR_EMAIL` | `mcp-agent@example.com` | Git commit author email |
 | `LLM_ENABLED` | `true` | Enable LiteLLM for thread summaries and discovery |
@@ -1894,7 +2082,7 @@ Common variables you may set:
 | `FILE_RESERVATIONS_CLEANUP_INTERVAL_SECONDS` | `60` | Interval for file reservations cleanup task |
 | `FILE_RESERVATION_INACTIVITY_SECONDS` | `1800` | Inactivity threshold (seconds) before a reservation is considered stale |
 | `FILE_RESERVATION_ACTIVITY_GRACE_SECONDS` | `900` | Grace window for recent mail/filesystem/git activity to keep a reservation active |
-| `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations |
+| `FILE_RESERVATIONS_ENFORCEMENT_ENABLED` | `true` | Block message writes on conflicting file reservations targeting mail archive paths (agents/, messages/, attachments/) |
 | `ACK_TTL_ENABLED` | `false` | Enable overdue ACK scanning (logs/panels; see views/resources) |
 | `ACK_TTL_SECONDS` | `1800` | Age threshold (seconds) for overdue ACKs |
 | `ACK_TTL_SCAN_INTERVAL_SECONDS` | `60` | Scan interval for overdue ACKs |
@@ -1951,7 +2139,7 @@ uv run python -m mcp_agent_mail.cli serve-http
 uv run python -m mcp_agent_mail.http --host 127.0.0.1 --port 8765
 ```
 
-Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates both `/mcp` and `/mcp/`.
+Connect with your MCP client using the HTTP (Streamable HTTP) transport on the configured host/port. The endpoint tolerates `/api`, `/api/`, `/mcp`, and `/mcp/`.
 
 ## Search syntax tips (SQLite FTS5)
 
@@ -1990,6 +2178,7 @@ This section has been removed to keep the README focused. See API Quick Referenc
   - Static bearer token (`HTTP_BEARER_TOKEN`) is independent of JWT; when set, BearerAuth protects all routes (including UI). You may use it alone or together with JWT.
   - When JWKS is configured (`HTTP_JWT_JWKS_URL`), incoming JWTs must include a matching `kid` header; tokens without `kid` or with unknown `kid` are rejected
   - Starter RBAC (reader vs writer) using role configuration; see `HTTP_RBAC_*` settings
+  - Bearer-only RBAC note: when JWT is disabled, requests use `HTTP_RBAC_DEFAULT_ROLE` (default `reader`). That means non-localhost tool calls are read-only unless you set `HTTP_RBAC_DEFAULT_ROLE=writer`, disable RBAC (`HTTP_RBAC_ENABLED=false`), or switch to JWT roles. Localhost requests with `HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED=true` are auto-elevated to writer.
 - Reverse proxy + TLS (minimal example)
   - NGINX location block:
     ```nginx
@@ -2032,7 +2221,7 @@ This section has been removed to keep the README focused. Client code samples be
 - Why Git and SQLite together?
   - Git provides human-auditable artifacts and history; SQLite provides fast queries and FTS search. Each is great at what the other isn't.
 - Are file reservations enforced?
-  - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists (`FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true`, default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo.
+  - Yes, optionally. The server can block message writes when a conflicting active exclusive reservation exists for mail archive paths (agents/, messages/, attachments/) when `FILE_RESERVATIONS_ENFORCEMENT_ENABLED=true` (default). Reservations themselves are advisory and always return both `granted` and `conflicts`. The optional pre-commit hook adds local enforcement at commit time in your code repo for project file paths.
 - Why HTTP-only?
   - Streamable HTTP is the modern remote transport for MCP; avoiding extra transports reduces complexity and encourages a uniform integration path.
 
@@ -2070,7 +2259,12 @@ This section has been removed to keep the README focused. Client code samples be
 
 ### Tools
 
-> Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory`.
+> Tip: to see tools grouped by workflow with recommended playbooks, fetch `resource://tooling/directory?format=json`.
+
+Output format (all tools/resources):
+- Tools accept optional `format` = `json` | `toon`; resources accept `?format=toon`.
+- TOON returns `{format:"toon", data:"<TOON>", meta:{...}}` (fallback: `{format:"json", ... , meta:{toon_error:"..."}}`).
+- Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
 
 | Name | Signature | Returns | Notes |
 | :-- | :-- | :-- | :-- |
@@ -2079,7 +2273,7 @@ This section has been removed to keep the README focused. Client code samples be
 | `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
 | `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
-| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images |
+| `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images. Non-absolute `attachment_paths` resolve relative to the project archive root. |
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str)` | `{thread_id, reply_to, deliveries: list, count: int, attachments?}` | Preserves/creates thread, inherits flags |
 | `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int)` | Contact link dict | Request permission to message another agent |
 | `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int)` | Contact link dict | Approve or deny a contact request |
@@ -2103,16 +2297,22 @@ This section has been removed to keep the README focused. Client code samples be
 
 ### Resources
 
+Output format (resources):
+- Append `?format=toon` to any resource URI to receive `{format:"toon", data:"<TOON>", meta:{...}}`.
+- All resources declare `format` as an optional query parameter (FastMCP templates accept it).
+- For resources without path params (e.g., `resource://projects`), include `?format=json` or `?format=toon`.
+- Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
+
 | URI | Params | Returns | Notes |
 | :-- | :-- | :-- | :-- |
-| `resource://config/environment` | — | `{environment, database_url, http}` | Inspect server settings |
-| `resource://tooling/directory` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
-| `resource://tooling/schemas` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
-| `resource://tooling/metrics` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
-| `resource://tooling/locks` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
+| `resource://config/environment{?format}` | — | `{environment, database_url, http}` | Inspect server settings |
+| `resource://tooling/directory{?format}` | — | `{generated_at, metrics_uri, clusters[], playbooks[]}` | Grouped tool directory + workflow playbooks |
+| `resource://tooling/schemas{?format}` | — | `{tools: {<name>: {required[], optional[], aliases{}}}}` | Argument hints for tools |
+| `resource://tooling/metrics{?format}` | — | `{generated_at, tools[]}` | Aggregated call/error counts per tool |
+| `resource://tooling/locks{?format}` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
-| `resource://projects` | — | `list[project]` | All projects |
+| `resource://projects{?format}` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations plus staleness metadata (heuristics, last activity timestamps) |
 | `resource://message/{id}{?project}` | `id`, `project` | `message` | Single message with body |
@@ -2128,9 +2328,9 @@ This section has been removed to keep the README focused. Client code samples be
 
 ### Client Integration Guide
 
-1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory` (and optionally `resource://tooling/metrics`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
+1. **Fetch onboarding metadata first.** Issue `resources/read` for `resource://tooling/directory?format=json` (and optionally `resource://tooling/metrics?format=json`) before exposing tools to an agent. Use the returned clusters and playbooks to render a narrow tool palette for the current workflow rather than dumping every verb into the UI.
 2. **Scope tools per workflow.** When the agent enters a new phase (e.g., "Messaging Lifecycle"), remount only the cluster's tools in your MCP client. This mirrors the workflow macros already provided and prevents "tool overload."
-3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
+3. **Monitor real usage.** Periodically pull or subscribe to log streams containing the `tool_metrics_snapshot` events emitted by the server (or query `resource://tooling/metrics?format=json`) so you can detect high-error-rate tools and decide whether to expose macros or extra guidance.
 4. **Fallback to macros for smaller models.** If you're routing work to a lightweight model, prefer the macro helpers (`macro_start_session`, `macro_prepare_thread`, `macro_file_reservation_cycle`, `macro_contact_handshake`) and hide the granular verbs until the agent explicitly asks for them.
 5. **Show recent actions.** Read `resource://tooling/recent/60?agent=<name>&project=<slug>` (adjust window as needed) to display the last few successful tool invocations relevant to the agent/project.
 
@@ -2139,10 +2339,10 @@ See `examples/client_bootstrap.py` for a runnable reference implementation that 
 ```json
 {
   "steps": [
-    "resources/read -> resource://tooling/directory",
+    "resources/read -> resource://tooling/directory?format=json",
     "select active cluster (e.g. messaging)",
     "mount tools listed in cluster.tools plus macros if model size <= S",
-    "optional: resources/read -> resource://tooling/metrics for dashboard display",
+    "optional: resources/read -> resource://tooling/metrics?format=json for dashboard display",
     "optional: resources/read -> resource://tooling/recent/60?agent=<name>&project=<slug> for UI hints"
   ]
 }
@@ -2260,6 +2460,10 @@ The project exposes a developer CLI for common operations:
 - `file_reservations list <project> [--active-only/--no-active-only]`: list file reservations
 - `file_reservations active <project> [--limit N]`: list active file reservations
 - `file_reservations soon <project> [--minutes N]`: show file reservations expiring soon
+- `doctor check [PROJECT] [--verbose] [--json]`: run comprehensive diagnostics on mailbox health
+- `doctor repair [PROJECT] [--dry-run] [--yes] [--backup-dir PATH]`: semi-automatic repair with backup before changes
+- `doctor backups [--json]`: list available diagnostic backups
+- `doctor restore <backup_path> [--dry-run] [--yes]`: restore from a diagnostic backup
 
 Examples:
 
@@ -2291,6 +2495,21 @@ uv run python -m mcp_agent_mail.cli guard install /abs/path/backend /abs/path/ba
 # List pending acknowledgements for an agent
 uv run python -m mcp_agent_mail.cli acks pending /abs/path/backend BlueLake --limit 10
 
+# Run mailbox health diagnostics
+uv run python -m mcp_agent_mail.cli doctor check
+
+# Preview repairs without making changes
+uv run python -m mcp_agent_mail.cli doctor repair --dry-run
+
+# Run repairs (creates backup first, prompts for data changes)
+uv run python -m mcp_agent_mail.cli doctor repair
+
+# List available backups
+uv run python -m mcp_agent_mail.cli doctor backups
+
+# Restore from a backup
+uv run python -m mcp_agent_mail.cli doctor restore /path/to/backup --dry-run
+
 # WARNING: Destructive reset (clean slate)
 uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 ```
@@ -2298,3 +2517,82 @@ uv run python -m mcp_agent_mail.cli clear-and-reset-everything --force
 ## Client integrations
 
 Use the automated installer to wire up supported tools automatically (e.g., Claude Code, Cline, Windsurf, OpenCode). Run `scripts/automatically_detect_all_installed_coding_agents_and_install_mcp_agent_mail_in_all.sh` or the one-liner in the Quickstart above.
+
+### Tool-specific integration scripts
+
+For manual integration or customization, dedicated scripts are available:
+
+| Tool | Script | What it configures |
+|------|--------|-------------------|
+| Claude Code | `scripts/integrate_claude_code.sh` | `.claude/settings.json`, hooks, MCP server |
+| Codex CLI | `scripts/integrate_codex_cli.sh` | `~/.codex/config.toml`, MCP server, notify handler |
+| Gemini CLI | `scripts/integrate_gemini_cli.sh` | `~/.gemini/settings.json`, MCP server, hooks |
+| Factory Droid | `scripts/integrate_factory_droid.sh` | `~/.factory/settings.json`, MCP server, hooks |
+
+Each script:
+- Detects the MCP server endpoint from your settings
+- Generates or reuses a bearer token for authentication
+- Configures the MCP server connection
+- Installs hooks/notify handlers for inbox reminders
+- Bootstraps your project and agent identity on the server
+
+### Automatic inbox reminders
+
+Agents often get absorbed in their work and forget to check their mail. The integration scripts install lightweight hooks that periodically remind agents when they have unread messages.
+
+**How it works:**
+
+- A rate-limited hook script (`scripts/hooks/check_inbox.sh`) runs after certain tool invocations
+- It checks the inbox via a fast curl call (avoids Python import overhead)
+- If there are unread messages, it outputs a brief reminder
+- Rate limited to at most once per 2 minutes to avoid noise
+
+**Claude Code / Gemini CLI:**
+
+The hook is configured as a `PostToolUse` hook that fires after `Bash` or `shell` tool invocations:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "...check_inbox.sh" }]
+      }
+    ]
+  }
+}
+```
+
+**Codex CLI:**
+
+Uses the top-level `notify` configuration in `config.toml` (must appear before any `[section]` headers) to fire on `agent-turn-complete` events:
+
+```toml
+notify = ["/path/to/.codex/hooks/notify_wrapper.sh"]
+```
+
+**Additional hooks (Claude Code only):**
+
+| Event | What it does |
+|-------|-------------|
+| `SessionStart` | Shows active file reservations and pending acknowledgments |
+| `PreToolUse` (Edit) | Warns about file reservations expiring within 10 minutes |
+| `PostToolUse` (send_message) | Lists recent acknowledgment requests |
+| `PostToolUse` (file_reservation_paths) | Shows current file reservations |
+
+### Environment variables for hooks
+
+The inbox check hooks accept these environment variables (set automatically by the integration scripts):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AGENT_MAIL_PROJECT` | Project key (absolute path) | *required* |
+| `AGENT_MAIL_AGENT` | Agent name | *required* |
+| `AGENT_MAIL_URL` | Server URL | `http://127.0.0.1:8765/mcp/` |
+| `AGENT_MAIL_TOKEN` | Bearer token | *none* |
+| `AGENT_MAIL_INTERVAL` | Seconds between checks | `120` |
+
+---
+
+> *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.

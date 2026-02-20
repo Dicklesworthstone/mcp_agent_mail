@@ -1,0 +1,89 @@
+{
+  "$schema": "baselines-schema.json",
+  "version": 1,
+  "description": "Performance baselines for CI regression detection. Failing thresholds will cause CI to fail.",
+  "thresholds": {
+    "latency_regression_percent": 15,
+    "query_count_regression_percent": 20
+  },
+  "baselines": {
+    "send_message": {
+      "description": "Send a single message to one recipient",
+      "dataset": {
+        "message_size": 512,
+        "recipients": 1
+      },
+      "latency_ms": {
+        "p95_max": 500,
+        "p99_max": 750,
+        "mean_max": 200
+      },
+      "query_stats": {
+        "avg_per_op_max": 5,
+        "total_max_per_iteration": 5
+      }
+    },
+    "fetch_inbox": {
+      "description": "Fetch inbox with 100 messages",
+      "dataset": {
+        "message_count": 100,
+        "limit": 20
+      },
+      "latency_ms": {
+        "p95_max": 500,
+        "p99_max": 750,
+        "mean_max": 200
+      },
+      "query_stats": {
+        "avg_per_op_max": 3,
+        "total_max_per_iteration": 3
+      }
+    },
+    "list_outbox": {
+      "description": "List outbox with messages (currently slow, needs optimization)",
+      "dataset": {
+        "message_count": 100,
+        "limit": 20
+      },
+      "latency_ms": {
+        "p95_max": 5000,
+        "p99_max": 6000,
+        "mean_max": 4500
+      },
+      "query_stats": {
+        "avg_per_op_max": 3,
+        "total_max_per_iteration": 3
+      }
+    },
+    "search_messages": {
+      "description": "FTS search over messages",
+      "dataset": {
+        "message_count": 100
+      },
+      "latency_ms": {
+        "p95_max": 1000,
+        "p99_max": 1500,
+        "mean_max": 500
+      },
+      "query_stats": {
+        "avg_per_op_max": 3,
+        "total_max_per_iteration": 3
+      }
+    },
+    "summarize_thread": {
+      "description": "Summarize a thread with messages",
+      "dataset": {
+        "message_count": 20
+      },
+      "latency_ms": {
+        "p95_max": 1500,
+        "p99_max": 2000,
+        "mean_max": 750
+      },
+      "query_stats": {
+        "avg_per_op_max": 5,
+        "total_max_per_iteration": 5
+      }
+    }
+  }
+}

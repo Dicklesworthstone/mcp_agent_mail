@@ -39,7 +39,7 @@ async def test_readiness_error_path_returns_503(isolated_env, monkeypatch):
     # Force readiness failure
     import mcp_agent_mail.http as http_mod
 
-    async def fail_readiness() -> None:  # type: ignore[unused-ignore]
+    async def fail_readiness() -> None:
         raise RuntimeError("db down")
 
     monkeypatch.setattr(http_mod, "readiness_check", fail_readiness)
@@ -71,4 +71,3 @@ async def test_rbac_denies_when_tool_name_missing(isolated_env, monkeypatch):
         r = await client.post(settings.http.path, json=_rpc("tools/call", {"arguments": {}}))
         # Accept either 401 (Unauthorized) or 403 (Forbidden) - both indicate access denied
         assert r.status_code in {401, 403}, f"Expected 401 or 403, got {r.status_code}"
-

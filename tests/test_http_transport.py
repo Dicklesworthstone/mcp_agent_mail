@@ -78,7 +78,7 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
     public_jwk = JsonWebKey.import_key(private_jwk).as_dict(is_private=False)
     jwks_payload = {"keys": [public_jwk]}
 
-    async def fake_get(self, url: str):  # type: ignore[override]
+    async def fake_get(self, url: str):
         class _Resp:
             status_code = 200
             def json(self) -> dict[str, Any]:
@@ -98,7 +98,7 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
     app = build_http_app(settings, server)
 
     # Patch httpx.AsyncClient.get used in JWKS fetch path
-    import httpx  # type: ignore
+    import httpx
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get, raising=False)
 
     transport = ASGITransport(app=app)
@@ -162,4 +162,3 @@ async def test_http_lock_status_endpoint(isolated_env):
         entry = next(item for item in locks if item.get("path") == str(lock_path))
         assert entry.get("metadata", {}).get("pid") == 999_999
         assert entry.get("stale_suspected") is True
-

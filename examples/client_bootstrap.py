@@ -31,7 +31,7 @@ async def main() -> None:
     # Supply capability tokens for this agent (examples/capability template in
     # deploy/capabilities/agent_capabilities.example.yaml). Most MCP client
     # libraries accept metadata at connection time; refer to your client docs.
-    async with Client("http://127.0.0.1:8765/mcp/") as client:
+    async with Client("http://127.0.0.1:8765/api/") as client:
         directory_blocks = await client.read_resource("resource://tooling/directory")
         directory_payload = json.loads(getattr(directory_blocks[0], "text", "{}"))
         print("==> Loaded tooling directory; clusters available:")

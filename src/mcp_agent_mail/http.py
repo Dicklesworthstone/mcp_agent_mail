@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hmac
 import importlib
 import json
 import logging
@@ -13,13 +14,15 @@ import re
 from collections.abc import MutableMapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import NoResultFound
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -42,11 +45,15 @@ from .storage import (
     get_agent_communication_graph,
     get_archive_tree,
     get_commit_detail,
+    get_fd_headroom,
+    get_fd_usage,
     get_file_content,
     get_historical_inbox_snapshot,
     get_message_commit_sha,
     get_recent_commits,
+    get_repo_cache_stats,
     get_timeline_commits,
+    proactive_fd_cleanup,
     write_agent_profile,
     write_file_reservation_record,
 )
@@ -64,18 +71,31 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
 __all__ = ["build_http_app", "main"]
 
 
+class _FastMCPHttpApp(Protocol):
+    def http_app(self, *args: Any, **kwargs: Any) -> FastAPI: ...
+
+
+class _FastAPILifespan(Protocol):
+    def lifespan(self, app: FastAPI) -> Any: ...
+
+
 def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
     """Return decoded JWT header without verifying signature."""
     try:
         segment = token.split(".", 1)[0]
         padded = segment + "=" * (-len(segment) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii"))
-        return json.loads(raw.decode("utf-8"))  # type: ignore[no-any-return]
+        return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
 
 
 _LOGGING_CONFIGURED = False
+
+# Pre-compiled regex patterns for HTTP validators
+_SLUG_VALIDATOR_RE = re.compile(r"^[a-z0-9_-]+$", re.IGNORECASE)
+_AGENT_NAME_VALIDATOR_RE = re.compile(r"^[A-Za-z0-9]+$")
+_TIMESTAMP_VALIDATOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
 
 def _configure_logging(settings: Settings) -> None:
@@ -94,7 +114,7 @@ def _configure_logging(settings: Settings) -> None:
     else:
         processors.append(structlog.processors.KeyValueRenderer(key_order=["event", "path", "status"]))
     structlog.configure(
-        processors=processors,  # type: ignore[arg-type]
+        processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.log_level.upper(), logging.INFO)),
         cache_logger_on_first_use=True,
     )
@@ -118,6 +138,74 @@ def _configure_logging(settings: Settings) -> None:
     # Suppress SSE ping keepalive debug logs (periodic noise every 15s)
     logging.getLogger("sse_starlette.sse").setLevel(logging.INFO)
 
+    # Add filter to suppress verbose tracebacks for expected/recoverable errors
+    # FastMCP's tool_manager uses logger.exception() which prints full tracebacks
+    # even for expected errors like "agent not found" or "git lock contention".
+    # This filter intercepts those and removes the traceback for cleaner logs.
+    class ExpectedErrorFilter(logging.Filter):
+        """Filter that suppresses tracebacks for expected/recoverable tool errors.
+
+        Expected errors include:
+        - ToolExecutionError with recoverable=True
+        - Agent not found / project not found
+        - Git index.lock contention
+        - Resource busy / database lock
+
+        These are normal operational conditions in multi-agent environments
+        and don't need full stack traces cluttering the logs.
+        """
+
+        # Keywords that indicate an expected/recoverable error
+        _EXPECTED_PATTERNS = (
+            "not found in project",
+            "index.lock",
+            "git_index_lock",
+            "resource_busy",
+            "temporarily locked",
+            "recoverable=true",
+            "use register_agent",
+            "available agents:",
+        )
+
+        def filter(self, record: logging.LogRecord) -> bool:
+            # Only process records from FastMCP tool_manager with exception info
+            if not record.exc_info or record.exc_info[1] is None:
+                return True
+
+            exc = record.exc_info[1]
+            exc_str = str(exc).lower()
+
+            # Check if this is an expected error based on message content
+            is_expected = any(pattern in exc_str for pattern in self._EXPECTED_PATTERNS)
+
+            # Also check for our ToolExecutionError with recoverable flag
+            if hasattr(exc, "recoverable") and exc.recoverable:
+                is_expected = True
+
+            # Check the cause chain for ToolExecutionError
+            cause = getattr(exc, "__cause__", None)
+            if cause is not None:
+                cause_str = str(cause).lower()
+                if any(pattern in cause_str for pattern in self._EXPECTED_PATTERNS):
+                    is_expected = True
+                if hasattr(cause, "recoverable") and cause.recoverable:
+                    is_expected = True
+
+            if is_expected:
+                # Clear exc_info to prevent traceback printing, but keep the log message
+                record.exc_info = None
+                record.exc_text = None
+                # Downgrade from ERROR to INFO for expected errors
+                if record.levelno >= logging.ERROR:
+                    record.levelno = logging.INFO
+                    record.levelname = "INFO"
+
+            return True
+
+    # Apply filter to FastMCP's tool_manager logger
+    fastmcp_logger = logging.getLogger("fastmcp.tools.tool_manager")
+    fastmcp_logger.addFilter(ExpectedErrorFilter())
+
     # mark configured
     _LOGGING_CONFIGURED = True
 
@@ -128,7 +216,27 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         self._token = token
         self._allow_localhost = allow_localhost
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+    @staticmethod
+    def _is_localhost(host: str) -> bool:
+        """Check if host is a localhost address, including IPv4-mapped IPv6."""
+        if not host:
+            return False
+        # Standard localhost addresses
+        if host in {"127.0.0.1", "::1", "localhost"}:
+            return True
+        # IPv4-mapped IPv6 address (::ffff:127.0.0.1)
+        return bool(host.lower().startswith("::ffff:") and host[7:] == "127.0.0.1")
+
+    @staticmethod
+    def _has_forwarded_headers(request: Request) -> bool:
+        """Detect proxy-forwarded headers to avoid trusting localhost behind proxies."""
+        headers = request.headers
+        return any(
+            name in headers
+            for name in ("x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "forwarded")
+        )
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
         if request.method == "OPTIONS":  # allow CORS preflight
             return await call_next(request)
         if request.url.path.startswith("/health/"):
@@ -138,10 +246,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             client_host = request.client.host if request.client else ""
         except Exception:
             client_host = ""
-        if self._allow_localhost and client_host in {"127.0.0.1", "::1", "localhost"}:
+        # Check for localhost bypass (including IPv4-mapped IPv6 addresses)
+        if self._allow_localhost and self._is_localhost(client_host) and not self._has_forwarded_headers(request):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {self._token}":
+        expected_header = f"Bearer {self._token}"
+        # Use constant-time comparison to prevent timing attacks
+        if not hmac.compare_digest(auth_header, expected_header):
             return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
         return await call_next(request)
 
@@ -168,6 +279,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
 
         self._monotonic = monotonic
         self._buckets: dict[str, tuple[float, float]] = {}
+        self._last_cleanup = monotonic()
         # Redis client (optional)
         self._redis = None
         if getattr(settings.http, "rate_limit_backend", "memory") == "redis" and getattr(
@@ -179,6 +291,16 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 self._redis = Redis.from_url(settings.http.rate_limit_redis_url)
             except Exception:
                 self._redis = None
+
+    def _cleanup_buckets(self, now: float) -> None:
+        """Remove stale buckets to prevent memory leaks."""
+        # Evict buckets not accessed in the last hour
+        expiration = 3600.0
+        cutoff = now - expiration
+        # Create list of keys to remove to avoid runtime modification errors during iteration
+        to_remove = [k for k, (_, ts) in self._buckets.items() if ts < cutoff]
+        for k in to_remove:
+            self._buckets.pop(k, None)
 
     async def _decode_jwt(self, token: str) -> dict | None:
         """Validate and decode JWT, returning claims or None on failure."""
@@ -237,7 +359,7 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 params = payload.get("params", {}) or {}
                 tool_name = params.get("name")
                 return "tools", tool_name if isinstance(tool_name, str) else None
-            if rpc_method == "resources/read":
+            if rpc_method.startswith("resources/"):
                 return "resources", None
             return "other", None
         return "other", None
@@ -277,7 +399,10 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                     "local delta = now - ts\n"
                     "tokens = math.min(burst, tokens + delta * rate)\n"
                     "local allowed = 0\n"
-                    "if tokens >= 1 then tokens = tokens - 1 allowed = 1 end\n"
+                    "if tokens >= 1 then\n"
+                    "  tokens = tokens - 1\n"
+                    "  allowed = 1\n"
+                    "end\n"
                     "redis.call('HMSET', key, 'tokens', tokens, 'ts', now)\n"
                     "redis.call('EXPIRE', key, math.ceil(burst / math.max(rate, 0.001)))\n"
                     "return allowed\n"
@@ -299,7 +424,14 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         self._buckets[key] = (tokens, now)
         return True
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
+        # Perform periodic cleanup of in-memory rate limit buckets
+        if self._redis is None:
+            now = self._monotonic()
+            if now - self._last_cleanup > 60.0:
+                self._cleanup_buckets(now)
+                self._last_cleanup = now
+
         # Allow CORS preflight and health endpoints
         if request.method == "OPTIONS" or request.url.path.startswith("/health/"):
             return await call_next(request)
@@ -309,8 +441,13 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         if request.method.upper() == "POST":
             try:
                 body_bytes = await request.body()
+                body_sent = False
 
                 async def _receive() -> dict:
+                    nonlocal body_sent
+                    if body_sent:
+                        return {"type": "http.request", "body": b"", "more_body": False}
+                    body_sent = True
                     return {"type": "http.request", "body": body_bytes, "more_body": False}
 
                 cast(Any, request)._receive = _receive
@@ -346,11 +483,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 client_host = request.client.host if request.client else ""
             except Exception:
                 client_host = ""
-            if bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
-                "127.0.0.1",
-                "::1",
-                "localhost",
-            }:
+            if (
+                bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
+                and client_host in {"127.0.0.1", "::1", "localhost"}
+                and not BearerAuthMiddleware._has_forwarded_headers(request)
+            ):
                 roles.add("writer")
 
         # RBAC enforcement (skip for localhost when allowed)
@@ -358,11 +495,11 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             client_host = request.client.host if request.client else ""
         except Exception:
             client_host = ""
-        is_local_ok = bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)) and client_host in {
-            "127.0.0.1",
-            "::1",
-            "localhost",
-        }
+        is_local_ok = (
+            bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
+            and client_host in {"127.0.0.1", "::1", "localhost"}
+            and not BearerAuthMiddleware._has_forwarded_headers(request)
+        )
         if self._rbac_enabled and not is_local_ok and kind in {"tools", "resources"}:
             is_reader = bool(roles & self._reader_roles)
             is_writer = bool(roles & self._writer_roles) or (not roles)
@@ -407,28 +544,25 @@ async def readiness_check() -> None:
         await session.execute(text("SELECT 1"))
 
 
-def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[no-untyped-def]
+def build_http_app(settings: Settings, server=None) -> FastAPI:
     # Configure logging once
     _configure_logging(settings)
     if server is None:
         server = build_mcp_server()
 
     # Build MCP HTTP sub-app with stateless mode for ASGI test transports
-    mcp_http_app = server.http_app(path="/", stateless_http=True, json_response=True)
+    mcp_http_app = cast(_FastMCPHttpApp, server).http_app(
+        path="/",
+        stateless_http=True,
+        json_response=True,
+    )
 
     # no-op wrapper removed; using explicit stateless adapter below
 
     # Background workers lifecycle
     async def _startup() -> None:  # pragma: no cover - service lifecycle
-        if not (
-            settings.file_reservations_cleanup_enabled
-            or settings.ack_ttl_enabled
-            or settings.retention_report_enabled
-            or settings.quota_enabled
-            or settings.tool_metrics_emit_enabled
-        ):
-            fastapi_app.state._background_tasks = []
-            return
+        # Note: no early return here -- the FD health monitor always runs,
+        # even when optional workers are disabled by feature flags.
 
         async def _worker_cleanup() -> None:
             while True:
@@ -485,6 +619,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                         )
                         rows = result.fetchall()
                     now = _dt.datetime.now(_dt.timezone.utc)
+                    now_naive = now.replace(tzinfo=None)
                     for mid, project_id, created_ts, agent_id in rows:
                         # Normalize to timezone-aware UTC before arithmetic; SQLite may yield naive datetimes
                         ts = created_ts
@@ -550,8 +685,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                             if recipient_name != "*"
                                             else f"agents/*/inbox/{y_dir}/{m_dir}/*.md"
                                         )
+                                        project_slug = await _project_slug_from_id(project_id)
                                         holder_agent_id = int(agent_id)
+                                        holder_agent_name = recipient_name
                                         if settings.ack_escalation_claim_holder_name:
+                                            claim_name = settings.ack_escalation_claim_holder_name
                                             async with get_session() as s_holder:
                                                 hid_row = await s_holder.execute(
                                                     text(
@@ -559,25 +697,28 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                     ),
                                                     {
                                                         "pid": project_id,
-                                                        "name": settings.ack_escalation_claim_holder_name,
+                                                        "name": claim_name,
                                                     },
                                                 )
                                                 hid = hid_row.scalar_one_or_none()
                                                 if isinstance(hid, int):
                                                     holder_agent_id = hid
+                                                    holder_agent_name = claim_name
                                                 else:
                                                     # Auto-create ops holder in DB and write profile.json
                                                     await s_holder.execute(
                                                         text(
-                                                            "INSERT INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts) VALUES (:pid, :name, :program, :model, :task, :ts, :ts)"
+                                                            "INSERT OR IGNORE INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) VALUES (:pid, :name, :program, :model, :task, :ts, :ts, :attachments_policy, :contact_policy)"
                                                         ),
                                                         {
                                                             "pid": project_id,
-                                                            "name": settings.ack_escalation_claim_holder_name,
+                                                            "name": claim_name,
                                                             "program": "ops",
                                                             "model": "system",
                                                             "task": "ops-escalation",
-                                                            "ts": now,
+                                                            "ts": now_naive,
+                                                            "attachments_policy": "auto",
+                                                            "contact_policy": "auto",
                                                         },
                                                     )
                                                     await s_holder.commit()
@@ -587,33 +728,32 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                         ),
                                                         {
                                                             "pid": project_id,
-                                                            "name": settings.ack_escalation_claim_holder_name,
+                                                            "name": claim_name,
                                                         },
                                                     )
                                                     hid2 = hid_row2.scalar_one_or_none()
                                                     if isinstance(hid2, int):
                                                         holder_agent_id = hid2
+                                                        holder_agent_name = claim_name
                                                         # Write profile.json to archive
-                                                        archive = await ensure_archive(
-                                                            settings, (await _project_slug_from_id(project_id)) or ""
-                                                        )
-                                                        async with archive_write_lock(archive):
-                                                            await write_agent_profile(
-                                                                archive,
-                                                                {
-                                                                    "id": holder_agent_id,
-                                                                    "name": settings.ack_escalation_claim_holder_name,
-                                                                    "program": "ops",
-                                                                    "model": "system",
-                                                                    "project_slug": (
-                                                                        await _project_slug_from_id(project_id)
-                                                                    )
-                                                                    or "",
-                                                                    "inception_ts": now.astimezone().isoformat(),
-                                                                    "inception_iso": now.astimezone().isoformat(),
-                                                                    "task": "ops-escalation",
-                                                                },
-                                                            )
+                                                        if project_slug:
+                                                            archive = await ensure_archive(settings, project_slug)
+                                                            async with archive_write_lock(archive):
+                                                                await write_agent_profile(
+                                                                    archive,
+                                                                    {
+                                                                        "id": holder_agent_id,
+                                                                        "name": holder_agent_name,
+                                                                        "program": "ops",
+                                                                        "model": "system",
+                                                                        "task_description": "ops-escalation",
+                                                                        "inception_ts": now.isoformat(),
+                                                                        "last_active_ts": now.isoformat(),
+                                                                        "project_id": project_id,
+                                                                        "attachments_policy": "auto",
+                                                                        "contact_policy": "auto",
+                                                                    },
+                                                                )
                                         async with get_session() as s2:
                                             await s2.execute(
                                                 text(
@@ -628,14 +768,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                     "pattern": pattern,
                                                     "exclusive": 1 if settings.ack_escalation_claim_exclusive else 0,
                                                     "reason": "ack-overdue",
-                                                    "cts": now,
-                                                    "ets": now
+                                                    "cts": now_naive,
+                                                    "ets": now_naive
                                                     + _dt.timedelta(seconds=settings.ack_escalation_claim_ttl_seconds),
                                                 },
                                             )
                                             await s2.commit()
                                         # Also write JSON artifact to archive
-                                        project_slug = (await _project_slug_from_id(project_id)) or ""
+                                        if not project_slug:
+                                            raise ValueError(f"Project id {project_id} has no slug; cannot write archive artifacts.")
                                         archive = await ensure_archive(settings, project_slug)
                                         expires_at = now + _dt.timedelta(
                                             seconds=settings.ack_escalation_claim_ttl_seconds
@@ -645,12 +786,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                                 archive,
                                                 {
                                                     "project": project_slug,
-                                                    "agent": settings.ack_escalation_claim_holder_name or "ops",
+                                                    "agent": holder_agent_name,
                                                     "path_pattern": pattern,
                                                     "exclusive": settings.ack_escalation_claim_exclusive,
                                                     "reason": "ack-overdue",
-                                                    "created_ts": now.astimezone().isoformat(),
-                                                    "expires_ts": expires_at.astimezone().isoformat(),
+                                                    "created_ts": now.isoformat(),
+                                                    "expires_ts": expires_at.isoformat(),
                                                 },
                                             )
                                     except Exception:
@@ -749,7 +890,75 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 )
                 await asyncio.sleep(max(60, settings.retention_report_interval_seconds))
 
+        async def _worker_fd_health() -> None:
+            """Periodic file descriptor health monitor.
+
+            Checks FD headroom every 30 seconds and proactively cleans up
+            resources when headroom drops below safe thresholds. This prevents
+            the EMFILE -> socket closed -> unreachable cascade that occurs
+            under sustained multi-agent load.
+
+            Thresholds:
+            - 30% headroom: warning logged
+            - 20% headroom: proactive cleanup triggered
+            - 15% headroom: error logged, aggressive cleanup
+            """
+            _fd_logger = structlog.get_logger("fd_health")
+            while True:
+                try:
+                    current, limit = get_fd_usage()
+                    if current >= 0 and limit > 0:
+                        headroom_pct = (limit - current) / limit
+                        cache_stats = get_repo_cache_stats()
+
+                        if headroom_pct < 0.15:
+                            # Critical: aggressive cleanup
+                            _fd_logger.error(
+                                "fd_health.critical",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                            freed = proactive_fd_cleanup(threshold=limit)
+                            if freed:
+                                _fd_logger.warning(
+                                    "fd_health.emergency_cleanup",
+                                    freed=freed,
+                                    new_headroom=get_fd_headroom(),
+                                )
+                        elif headroom_pct < 0.20:
+                            # Low: proactive cleanup
+                            _fd_logger.warning(
+                                "fd_health.low",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                            freed = proactive_fd_cleanup(threshold=int(limit * 0.25))
+                            if freed:
+                                _fd_logger.info(
+                                    "fd_health.proactive_cleanup",
+                                    freed=freed,
+                                    new_headroom=get_fd_headroom(),
+                                )
+                        elif headroom_pct < 0.30:
+                            # Warning only
+                            _fd_logger.warning(
+                                "fd_health.warning",
+                                current_fds=current,
+                                fd_limit=limit,
+                                headroom_pct=round(headroom_pct * 100, 1),
+                                repo_cache=cache_stats,
+                            )
+                except Exception:
+                    pass
+                await asyncio.sleep(30)
+
         tasks = []
+        # FD health monitor always runs - it's critical for preventing EMFILE cascades
+        tasks.append(asyncio.create_task(_worker_fd_health()))
         if settings.file_reservations_cleanup_enabled:
             tasks.append(asyncio.create_task(_worker_cleanup()))
         if settings.ack_ttl_enabled:
@@ -771,9 +980,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
     from contextlib import asynccontextmanager
 
     @asynccontextmanager
-    async def lifespan_context(app: FastAPI):  # type: ignore[no-untyped-def]
+    async def lifespan_context(app: FastAPI):
         # Ensure the mounted MCP app initializes its internal task group
-        async with mcp_http_app.lifespan(mcp_http_app):
+        mcp_lifespan_app = cast(_FastAPILifespan, mcp_http_app)
+        async with mcp_lifespan_app.lifespan(mcp_http_app):
             await _startup()
             try:
                 yield
@@ -788,7 +998,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         import time as _time
 
         class RequestLoggingMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):  # type: ignore[override,no-untyped-def]
+            async def dispatch(self, request: Request, call_next: RequestResponseEndpoint):
                 start = _time.time()
                 response = await call_next(request)
                 dur_ms = int((_time.time() - start) * 1000)
@@ -831,7 +1041,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     print(f"http method={method} path={path} status={status_code} ms={dur_ms} client={client}")
                 return response
 
-        fastapi_app.add_middleware(RequestLoggingMiddleware)  # type: ignore[arg-type]
+        app_any = cast(Any, fastapi_app)
+        app_any.add_middleware(RequestLoggingMiddleware)
 
     # Unified JWT/RBAC and robust rate limiter middleware
     if (
@@ -839,7 +1050,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         or getattr(settings.http, "jwt_enabled", False)
         or getattr(settings.http, "rbac_enabled", True)
     ):
-        fastapi_app.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)  # type: ignore[arg-type]
+        app_any = cast(Any, fastapi_app)
+        app_any.add_middleware(SecurityAndRateLimitMiddleware, settings=settings)
     # Bearer auth for non-localhost only; allow localhost unauth optionally for seamless local dev
     if settings.http.bearer_token:
         from typing import Any as _Any, cast as _cast  # local type-only import
@@ -885,21 +1097,24 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
-    # Well-known OAuth metadata endpoints (some clients probe these); return harmless JSON
+    # Well-known OAuth metadata endpoints: return 404 so clients skip OAuth discovery.
+    # Claude Code 2.1.37+ probes these and interprets 200 as "OAuth available",
+    # then Zod-validates expecting issuer/authorization_endpoint/etc. Per RFC 8414,
+    # 404 signals "no OAuth metadata" which is correct when OAuth is disabled.
     @fastapi_app.get("/.well-known/oauth-authorization-server")
     async def oauth_meta_root() -> JSONResponse:
-        return JSONResponse({"mcp_oauth": False})
+        return JSONResponse({"mcp_oauth": False}, status_code=404)
 
     @fastapi_app.get("/.well-known/oauth-authorization-server/mcp")
     async def oauth_meta_root_mcp() -> JSONResponse:
-        return JSONResponse({"mcp_oauth": False})
+        return JSONResponse({"mcp_oauth": False}, status_code=404)
 
     # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
     # and runs a fresh StreamableHTTP transport per request.
     from mcp.server.streamable_http import StreamableHTTPServerTransport
 
     class StatelessMCPASGIApp:
-        def __init__(self, mcp_server) -> None:  # type: ignore[no-untyped-def]
+        def __init__(self, mcp_server) -> None:
             self._server = mcp_server
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -947,75 +1162,100 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 finally:
                     with contextlib.suppress(Exception):
                         await http_transport.terminate()
-                    with contextlib.suppress(Exception):
+                    if not server_task.done():
+                        server_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await server_task
 
-    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests
-    mount_base = settings.http.path or "/mcp"
+    # Mount at both '/base' and '/base/' to tolerate either form from clients/tests.
+    # Also mount compatibility aliases for both '/api' and '/mcp' regardless of configured base.
+    mount_base = settings.http.path or "/api"
     if not mount_base.startswith("/"):
         mount_base = "/" + mount_base
     base_no_slash = mount_base.rstrip("/") or "/"
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = StatelessMCPASGIApp(server)
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_no_slash, stateless_app)
-    with contextlib.suppress(Exception):
-        fastapi_app.mount(base_with_slash, stateless_app)
+
+    mount_paths = [base_no_slash, base_with_slash]
+    for compat_base in ("/api", "/mcp"):
+        compat_no_slash = compat_base.rstrip("/") or "/"
+        compat_with_slash = compat_no_slash if compat_no_slash == "/" else compat_no_slash + "/"
+        if compat_no_slash not in mount_paths:
+            mount_paths.append(compat_no_slash)
+        if compat_with_slash not in mount_paths:
+            mount_paths.append(compat_with_slash)
+
+    for mount_path in mount_paths:
+        with contextlib.suppress(Exception):
+            fastapi_app.mount(mount_path, stateless_app)
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
 
-    # Add a direct route at the base path without redirect to tolerate clients omitting trailing slash
-    @fastapi_app.post(base_no_slash)
-    async def _base_passthrough(request: Request) -> JSONResponse:
-        # Re-dispatch to mounted stateless app by calling it directly
-        response_body: dict[str, Any] = {}
-        status_code = 200
-        headers: dict[str, str] = {}
+    # Add direct routes at no-slash base paths to tolerate clients omitting trailing slashes.
+    def _register_base_passthrough(base_path_no_slash: str, base_path_with_slash: str) -> None:
+        @fastapi_app.post(base_path_no_slash)
+        async def _base_passthrough(request: Request) -> JSONResponse:
+            # Re-dispatch to mounted stateless app by calling it directly
+            response_body: dict[str, Any] = {}
+            status_code = 200
+            headers: dict[str, str] = {}
 
-        async def _send(message: MutableMapping[str, Any]) -> None:
-            nonlocal response_body, status_code, headers
-            if message.get("type") == "http.response.start":
-                status_code = int(message.get("status", 200))
-                hdrs = message.get("headers") or []
-                for k, v in hdrs:
-                    headers[k.decode("latin1")] = v.decode("latin1")
-            elif message.get("type") == "http.response.body":
-                body = message.get("body") or b""
-                try:
-                    response_body = json.loads(body.decode("utf-8")) if body else {}
-                except Exception:
-                    response_body = {}
+            async def _send(message: MutableMapping[str, Any]) -> None:
+                nonlocal response_body, status_code, headers
+                if message.get("type") == "http.response.start":
+                    status_code = int(message.get("status", 200))
+                    hdrs = message.get("headers") or []
+                    for k, v in hdrs:
+                        headers[k.decode("latin1")] = v.decode("latin1")
+                elif message.get("type") == "http.response.body":
+                    body = message.get("body") or b""
+                    try:
+                        response_body = json.loads(body.decode("utf-8")) if body else {}
+                    except Exception:
+                        response_body = {}
 
-        # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
-        scope = dict(request.scope)
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
-            scope_headers = list(scope.get("headers") or [])
-            has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
-            if not has_auth and settings.http.bearer_token:
-                scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
-            scope["headers"] = scope_headers
-        await stateless_app(
-            {**scope, "path": base_with_slash},  # ensure mounted path
-            request.receive,
-            _send,
-        )
-        return JSONResponse(response_body, status_code=status_code, headers=headers)
+            # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
+            scope = dict(request.scope)
+            try:
+                client_host = request.client.host if request.client else ""
+            except Exception:
+                client_host = ""
+            if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+                scope_headers = list(scope.get("headers") or [])
+                has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
+                if not has_auth and settings.http.bearer_token:
+                    scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
+                scope["headers"] = scope_headers
+            await stateless_app(
+                {**scope, "path": base_path_with_slash},  # ensure mounted path
+                request.receive,
+                _send,
+            )
+            return JSONResponse(response_body, status_code=status_code, headers=headers)
+
+    passthrough_pairs: list[tuple[str, str]] = [(base_no_slash, base_with_slash)]
+    for compat_base in ("/api", "/mcp"):
+        compat_no_slash = compat_base.rstrip("/") or "/"
+        compat_with_slash = compat_no_slash if compat_no_slash == "/" else compat_no_slash + "/"
+        if (compat_no_slash, compat_with_slash) not in passthrough_pairs:
+            passthrough_pairs.append((compat_no_slash, compat_with_slash))
+    for no_slash, with_slash in passthrough_pairs:
+        _register_base_passthrough(no_slash, with_slash)
 
     # ----- Simple SSR Mail UI -----
     def _register_mail_ui() -> None:
-        import bleach  # type: ignore
-        import markdown2  # type: ignore
+        import bleach
+        import markdown2
 
         try:
-            from bleach.css_sanitizer import CSSSanitizer  # type: ignore
+            from bleach.css_sanitizer import CSSSanitizer as _CSSSanitizerImport
         except Exception:  # tinycss2 may be missing; degrade gracefully
-            CSSSanitizer = None  # type: ignore
-        from jinja2 import Environment, FileSystemLoader, select_autoescape  # type: ignore
+            _CSSSanitizer = None
+        else:
+            _CSSSanitizer = _CSSSanitizerImport
+        CSSSanitizer = cast(Any, _CSSSanitizer)
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
 
         templates_root = Path(__file__).resolve().parent / "templates"
         env = Environment(
@@ -1108,14 +1348,23 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             def _quote(s: str) -> str:
                 return '"' + s.replace('"', '""') + '"'
 
+            def _like_escape(term: str) -> str:
+                return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
             for p in parts:
                 key = None
                 val = p
                 if ":" in p and not p.startswith('"'):
-                    key, val = p.split(":", 1)
+                    maybe_key, maybe_val = p.split(":", 1)
+                    if maybe_key in {"subject", "body"}:
+                        key = maybe_key
+                        val = maybe_val
                 val = val.strip()
                 val_inner = val[1:-1] if val.startswith('"') and val.endswith('"') and len(val) >= 2 else val
-                like_terms.append(val_inner)
+
+                # For LIKE pattern, we want literal matching of the user's term
+                like_terms.append(_like_escape(val_inner))
+
                 if key in {"subject", "body"}:
                     exprs.append(f"{key}:{_quote(val_inner)}")
                     tokens.append({"field": key, "value": val_inner})
@@ -1357,8 +1606,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                     fts_sql = (
                         "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet, "
-                        "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18), '<mark>', ''))) / 6 AS hits "
+                        "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet "
                         "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
                         "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                         + (
@@ -1379,18 +1627,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 "importance": r[4],
                                 "thread_id": r[5],
                                 "snippet": r[6],
-                                "hits": int(r[7] or 0),
+                                "hits": (r[6] or "").count("<mark>"),
                             }
                             for r in search.fetchall()
                         ]
                     except Exception:
                         # Fallback to LIKE if FTS not available
                         if like_scope == "subject":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
                         elif like_scope == "body":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
                         else:
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT 10000"
                         search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
                         matched_messages = [
                             {
@@ -1417,7 +1665,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 results=matched_messages,
             )
 
-        @fastapi_app.post("/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
+        @fastapi_app.post("/mail/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
         async def update_project_sibling(project_id: int, other_id: int, request: Request) -> JSONResponse:
             try:
                 payload = await request.json()
@@ -1776,7 +2024,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     aid = int(arow[0])
 
                     # Mark specific messages as read
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
                     # Use IN clause with parameter binding
                     placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
@@ -1797,7 +2046,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+                    count = int(getattr(result, "rowcount", 0) or 0)
 
                     return JSONResponse({
                         "success": True,
@@ -1846,7 +2095,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     aid = int(arow[0])
 
                     # Mark all unread messages as read
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
                     result = await session.execute(
                         text(
                             """
@@ -1860,7 +2110,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     )
                     await session.commit()
 
-                    count = result.rowcount if result.rowcount is not None else 0  # type: ignore[attr-defined]
+                    count = int(getattr(result, "rowcount", 0) or 0)
 
                     return JSONResponse({
                         "success": True,
@@ -1995,8 +2245,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                 fts_sql = (
                     "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
-                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet, "
-                    "(length(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22)) - length(replace(snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22), '<mark>', ''))) / 6 AS hits "
+                    "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet "
                     "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
                     "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                     + (
@@ -2017,17 +2266,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                             "importance": r[4],
                             "thread_id": r[5],
                             "snippet": r[6],
-                            "hits": int(r[7] or 0),
+                            "hits": (r[6] or "").count("<mark>"),
                         }
                         for r in rows.fetchall()
                     ]
                 except Exception:
                     if like_scope == "subject":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
                     elif like_scope == "body":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
                     else:
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat OR m.body_md LIKE :pat) ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT :lim"
                     rows = await session.execute(
                         text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%", "lim": limit}
                     )
@@ -2110,8 +2359,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 )
                 items = []
                 for r in rows.fetchall():
+                    attachments: list[dict[str, Any]] = []
                     try:
-                        attachments = r[3] or []
+                        raw = r[3]
+                        if isinstance(raw, str):
+                            try:
+                                parsed = json.loads(raw)
+                            except json.JSONDecodeError:
+                                parsed = []
+                        else:
+                            parsed = raw
+                        if isinstance(parsed, list):
+                            attachments = [a for a in parsed if isinstance(a, dict)]
                     except Exception:
                         attachments = []
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
@@ -2268,7 +2527,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 "task": "Human operator providing guidance and oversight to agents",
                                 "policy": "open",
                                 "attachments_policy": "auto",
-                                "ts": datetime.now(timezone.utc),
+                                # Use naive UTC datetime for SQLite compatibility
+                                "ts": datetime.now(timezone.utc).replace(tzinfo=None),
                             },
                         )
                         # Don't commit yet - wait until message is successfully created and written to Git
@@ -2288,7 +2548,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     overseer_id = overseer_row[0]
                     # Insert message into database
                     message_id = None
-                    now = datetime.now(timezone.utc)
+                    # Use naive UTC datetime for SQLite compatibility
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
                     result = await session.execute(
                         text("""
@@ -2420,7 +2681,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
 
         def _validate_project_slug(slug: str) -> bool:
             """Validate project slug format to prevent path traversal."""
-            import re
 
             # Slugs should only contain lowercase letters, numbers, hyphens, underscores
             # No path separators or relative path components
@@ -2431,7 +2691,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             if "/" in slug or "\\" in slug or ".." in slug:
                 return False
             # Should match safe slug pattern
-            return bool(re.match(r"^[a-z0-9_-]+$", slug, re.IGNORECASE))
+            return bool(_SLUG_VALIDATOR_RE.match(slug))
 
         @fastapi_app.get("/mail/archive/guide", response_class=HTMLResponse)
         async def archive_guide() -> HTMLResponse:
@@ -2469,7 +2729,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     import asyncio as _asyncio
                     import subprocess as _subprocess
                     try:
-                        def _run_du():  # type: ignore[no-untyped-def]
+                        def _run_du():
                             return _subprocess.run(
                                 ["du", "-sh", str(repo_root)],
                                 capture_output=True,
@@ -2488,8 +2748,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 except Exception:
                     total_commits = "0"
                     project_count = 0
-                    repo_size = "Unknown"
-                    last_commit_time = "Unknown"
+                    repo_size = "0 MB"
+                    last_commit_time = "Never"
                 finally:
                     if repo is not None:
                         repo.close()
@@ -2528,12 +2788,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
             if not (repo_root / ".git").exists():
                 return await _render("archive_activity.html", commits=[])
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 commits = await get_recent_commits(repo, limit=limit)
                 return await _render("archive_activity.html", commits=commits)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
@@ -2596,12 +2858,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 if row:
                     project_name = row[0]
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 commits = await get_timeline_commits(repo, project, limit=100)
                 return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -2677,14 +2941,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 if row:
                     project_name = row[0]
 
-            repo = GitRepo(str(repo_root))
+            repo = None
             try:
+                repo = GitRepo(str(repo_root))
                 graph = await get_agent_communication_graph(repo, project, limit=200)
                 return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
             finally:
-                repo.close()
+                if repo is not None:
+                    repo.close()
 
-        @fastapi_app.get("/api/projects/{project}/agents")
+        @fastapi_app.get("/mail/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
             """Get list of agents for a project."""
             # Validate project slug
@@ -2728,11 +2994,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                 raise HTTPException(status_code=400, detail="Invalid project identifier")
 
             # Validate agent name (alphanumeric only)
-            if not agent or not re.match(r"^[A-Za-z0-9]+$", agent):
+            if not agent or not _AGENT_NAME_VALIDATOR_RE.match(agent):
                 raise HTTPException(status_code=400, detail="Invalid agent name format")
 
             # Validate timestamp format (basic ISO 8601 check)
-            if not timestamp or not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", timestamp):
+            if not timestamp or not _TIMESTAMP_VALIDATOR_RE.match(timestamp):
                 raise HTTPException(status_code=400, detail="Invalid timestamp format. Use ISO 8601 format (YYYY-MM-DDTHH:MM)")
 
             try:
@@ -2770,6 +3036,35 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
         with contextlib.suppress(Exception):
             structlog.get_logger("ui").error("ui_init_failed", error=str(exc))
         pass
+
+    # Static web UI (SPA) routing support
+    def _resolve_web_root() -> Path | None:
+        candidates: list[Path] = []
+        with contextlib.suppress(Exception):
+            candidates.append(Path(__file__).resolve().parents[3] / "web")
+        candidates.append(Path.cwd() / "web")
+        for candidate in candidates:
+            try:
+                if candidate.exists() and (candidate / "index.html").exists():
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    web_root = _resolve_web_root()
+    if web_root is not None:
+        fastapi_app.mount("/", StaticFiles(directory=str(web_root), html=True), name="web")
+
+        def _is_api_path(path: str) -> bool:
+            if base_no_slash == "/":
+                return True
+            return path == base_no_slash or path.startswith(base_no_slash + "/")
+
+        @fastapi_app.exception_handler(HTTPException)
+        async def spa_fallback(request: Request, exc: HTTPException):
+            if exc.status_code == status.HTTP_404_NOT_FOUND and not _is_api_path(request.url.path):
+                return FileResponse(web_root / "index.html")
+            return await http_exception_handler(request, exc)
 
     return fastapi_app
 

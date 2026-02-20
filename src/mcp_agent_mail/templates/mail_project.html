@@ -52,7 +52,7 @@
 {% block content %}
 <div class="space-y-8 page-transition">
   <!-- Project Hero Header -->
-  <div class="card relative overflow-hidden p-6">
+  <div class="relative overflow-hidden bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border border-slate-200 dark:border-slate-700">
     <div class="flex items-start justify-between">
       <div class="flex-1">
         <div class="flex items-center gap-4 mb-4">
@@ -84,8 +84,8 @@
   </div>
 
   <!-- Enhanced Search Section -->
-  <div class="card p-8"
-       x-data="{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ 'true' if (q is not none and q != '') else 'false' }} }">
+  <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700"
+       x-data='{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ 'true' if (q is not none and q != '') else 'false' }} }'>
 
     <div class="flex items-center justify-between mb-6">
       <div class="flex items-center gap-3">
@@ -149,7 +149,7 @@
       <div x-show="isExpanded" x-transition:enter="transition ease-out duration-200"
            x-transition:enter-start="opacity-0 transform -translate-y-2"
            x-transition:enter-end="opacity-100 transform translate-y-0"
-           class="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+           class="grid grid-cols-1 md:grid-cols-2 gap-6 p-6 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
         <!-- Scope Filters -->
         <div class="space-y-3">
           <label class="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2">
@@ -290,7 +290,7 @@
         </div>
       </div>
     {% elif results is defined %}
-      <div class="mt-8 text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-lg border border-slate-200 dark:border-slate-700">
+      <div class="mt-8 text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
         <div class="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
           <i data-lucide="search-x" class="w-8 h-8 text-slate-400"></i>
         </div>
@@ -311,7 +311,7 @@
         </div>
       </div>
       {% if agents %}
-        <span class="badge variant-success text-sm flex items-center gap-2">
+        <span class="px-4 py-2 bg-success-100 dark:bg-success-900/30 text-success-700 dark:text-success-300 text-sm font-bold rounded-full flex items-center gap-2">
           <span class="w-2 h-2 bg-success-500 rounded-full animate-pulse"></span>
           {{ agents|length }} active
         </span>
@@ -321,7 +321,7 @@
     {% if agents %}
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {% for a in agents %}
-          <div class="group card relative p-6 border-2 border-slate-200 dark:border-slate-700 hover:border-success-400 dark:hover:border-success-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
+          <div class="group relative bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border-2 border-slate-200 dark:border-slate-700 hover:border-success-400 dark:hover:border-success-600 transition-all duration-300 card-hover overflow-hidden stagger-item"
                style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
 
             <!-- Decorative gradient blob -->
@@ -365,7 +365,7 @@
 
     {% else %}
       <!-- Premium Empty State for Agents -->
-      <div class="card bg-gradient-to-br from-white to-slate-50 dark:from-slate-800 dark:to-slate-800/50 p-16 text-center">
+      <div class="bg-gradient-to-br from-white to-slate-50 dark:from-slate-800 dark:to-slate-800/50 rounded-2xl p-16 shadow-soft border border-slate-200 dark:border-slate-700 text-center">
         <div class="relative inline-flex mb-6">
           <div class="absolute inset-0 flex items-center justify-center">
             <div class="w-32 h-32 bg-success-500/10 rounded-full animate-pulse"></div>

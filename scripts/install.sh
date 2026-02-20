@@ -25,10 +25,10 @@ INTEGRATION_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
 HTTP_PORT_OVERRIDE=""
 SKIP_BEADS=0
 SKIP_BV=0
-BEADS_INSTALL_URL="https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh"
+BEADS_INSTALL_URL="https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh"
 BV_INSTALL_URL="https://raw.githubusercontent.com/Dicklesworthstone/beads_viewer/main/install.sh"
 SUMMARY_LINES=()
-LAST_BD_VERSION=""
+LAST_BR_VERSION=""
 LAST_BV_VERSION=""
 
 usage() {
@@ -39,7 +39,7 @@ Options:
   --dir DIR              Clone/use repo at DIR (default: ./mcp_agent_mail)
   --branch NAME          Git branch to clone (default: main)
   --port PORT            HTTP server port (default: 8765); sets HTTP_PORT in .env
-  --skip-beads           Do not install the Beads (bd) CLI automatically
+  --skip-beads           Do not install the Beads Rust (br) CLI automatically
   --skip-bv              Do not install the Beads Viewer (bv) TUI automatically
   -y, --yes              Non-interactive; assume Yes where applicable
   --no-start             Do not run integration/start; just set up venv + deps
@@ -116,13 +116,13 @@ print_summary() {
   done
 }
 
-find_bd_binary() {
-  if command -v bd >/dev/null 2>&1; then
-    command -v bd
+find_br_binary() {
+  if command -v br >/dev/null 2>&1; then
+    command -v br
     return 0
   fi
 
-  local candidates=("${HOME}/.local/bin/bd" "${HOME}/bin/bd" "/usr/local/bin/bd")
+  local candidates=("${HOME}/.local/bin/br" "${HOME}/bin/br" "/usr/local/bin/br")
   local candidate
   for candidate in "${candidates[@]}"; do
     if [[ -x "${candidate}" ]]; then
@@ -134,13 +134,13 @@ find_bd_binary() {
   return 1
 }
 
-maybe_add_bd_path() {
+maybe_add_br_path() {
   local binary_path="$1"
   local dir
   dir=$(dirname "${binary_path}")
   if [[ ":${PATH}:" != *":${dir}:"* ]]; then
     export PATH="${dir}:${PATH}"
-    ok "Temporarily added ${dir} to PATH so this session can invoke 'bd' immediately"
+    ok "Temporarily added ${dir} to PATH so this session can invoke 'br' immediately"
   fi
 }
 
@@ -200,8 +200,8 @@ append_path_snippet() {
     return 1
   fi
 
-  local marker="# >>> MCP Agent Mail bd path ${dir}"
-  local end_marker="# <<< MCP Agent Mail bd path"
+  local marker="# >>> MCP Agent Mail br path ${dir}"
+  local end_marker="# <<< MCP Agent Mail br path"
   local snippet=""
   printf -v snippet '%s\nif [[ ":$PATH:" != *":%s:"* ]]; then\n  export PATH="%s:$PATH"\nfi\n%s\n' \
     "${marker}" "${dir}" "${dir}" "${end_marker}"
@@ -227,7 +227,7 @@ append_path_snippet() {
   return 0
 }
 
-persist_bd_path() {
+persist_br_path() {
   local binary_path="$1"
   local dir
   dir=$(dirname "${binary_path}")
@@ -246,7 +246,7 @@ persist_bd_path() {
   rc_candidates+=("~/.bashrc" "~/.zshrc" "~/.profile")
 
   local appended=0
-  declare -A seen_rc=()
+  local seen_rc=""
   local rc
   for rc in "${rc_candidates[@]}"; do
     [[ -n "${rc}" ]] || continue
@@ -255,10 +255,11 @@ persist_bd_path() {
     if [[ -z "${rc_path}" ]]; then
       continue
     fi
-    if [[ -n "${seen_rc["${rc_path}"]:-}" ]]; then
+    # Check if we've already seen this path (Bash 3.2 compatible string matching)
+    if [[ ":${seen_rc}:" == *":${rc_path}:"* ]]; then
       continue
     fi
-    seen_rc["${rc_path}"]=1
+    seen_rc="${seen_rc}:${rc_path}"
     if append_path_snippet "${dir}" "${rc_path}"; then
       appended=1
       break
@@ -270,10 +271,95 @@ persist_bd_path() {
   fi
 }
 
-ensure_bd_path_ready() {
+ensure_br_path_ready() {
   local binary_path="$1"
-  maybe_add_bd_path "${binary_path}"
-  persist_bd_path "${binary_path}"
+  maybe_add_br_path "${binary_path}"
+  persist_br_path "${binary_path}"
+}
+
+install_bd_alias() {
+  # Install 'bd' alias pointing to 'br' for backwards compatibility
+  local shell_name=""
+  if [[ -n "${SHELL:-}" ]]; then
+    shell_name=$(basename "${SHELL}")
+  fi
+
+  # Always check for and remove any old bd binary that might shadow the alias
+  # This runs every time to catch cases where bd was reinstalled after a previous run
+  local old_bd_paths=("${HOME}/.local/bin/bd" "${HOME}/bin/bd" "/usr/local/bin/bd")
+  for old_bd_path in "${old_bd_paths[@]}"; do
+    if [[ -x "${old_bd_path}" ]] && [[ ! -L "${old_bd_path}" ]]; then
+      # It's an executable file (not a symlink), rename it
+      info "Found old bd binary at ${old_bd_path}, renaming to bd.old"
+      mv "${old_bd_path}" "${old_bd_path}.old" 2>/dev/null || warn "Could not rename old bd binary at ${old_bd_path}"
+    fi
+  done
+
+  # Determine target RC file based on shell
+  local rc_file=""
+  if [[ "${shell_name}" == "zsh" ]]; then
+    rc_file="${HOME}/.zshrc"
+  elif [[ "${shell_name}" == "bash" ]]; then
+    rc_file="${HOME}/.bashrc"
+  else
+    # Fallback: try zshrc first (common on macOS), then bashrc
+    if [[ -f "${HOME}/.zshrc" ]]; then
+      rc_file="${HOME}/.zshrc"
+    elif [[ -f "${HOME}/.bashrc" ]]; then
+      rc_file="${HOME}/.bashrc"
+    else
+      warn "Could not determine shell RC file for 'bd' alias"
+      record_summary "Alias 'bd -> br': skipped (no shell RC file found)"
+      return 1
+    fi
+  fi
+
+  local marker="# >>> MCP Agent Mail bd alias"
+  local end_marker="# <<< MCP Agent Mail bd alias"
+  local alias_cmd="alias bd='br'"
+  local snippet=""
+  printf -v snippet '%s\n%s\n%s\n' "${marker}" "${alias_cmd}" "${end_marker}"
+
+  # Check if marker already exists
+  if [[ -f "${rc_file}" ]] && grep -Fq "${marker}" "${rc_file}"; then
+    # Update existing snippet
+    if rewrite_path_snippet "${rc_file}" "${marker}" "${end_marker}" "${snippet}"; then
+      ok "Updated 'bd' alias in ${rc_file}"
+      record_summary "Alias 'bd -> br': updated in ${rc_file}"
+      # Also define it for the current session
+      alias bd='br' 2>/dev/null || true
+      return 0
+    fi
+    warn "Existing 'bd' alias in ${rc_file} could not be updated automatically"
+    record_summary "Alias 'bd -> br': update failed in ${rc_file}"
+    return 1
+  fi
+
+  # Check if user has a different 'bd' alias already (without our markers)
+  if [[ -f "${rc_file}" ]] && grep -q "^alias bd=" "${rc_file}"; then
+    warn "An existing 'bd' alias was found in ${rc_file}; skipping to avoid conflict"
+    record_summary "Alias 'bd -> br': skipped (existing alias found)"
+    return 0
+  fi
+
+  # Append new snippet
+  if ! touch "${rc_file}" >/dev/null 2>&1; then
+    warn "Could not write to ${rc_file}"
+    record_summary "Alias 'bd -> br': failed (cannot write to ${rc_file})"
+    return 1
+  fi
+
+  {
+    printf '\n%s' "${snippet}"
+  } >> "${rc_file}"
+
+  ok "Added 'bd' alias (bd -> br) to ${rc_file}"
+  record_summary "Alias 'bd -> br': added to ${rc_file}"
+
+  # Also define it for the current session
+  alias bd='br' 2>/dev/null || true
+
+  return 0
 }
 
 install_am_alias() {
@@ -348,20 +434,20 @@ install_am_alias() {
   return 0
 }
 
-verify_bd_binary() {
+verify_br_binary() {
   local binary_path="$1"
-  if ! "${binary_path}" version >/dev/null 2>&1; then
-    err "Beads CLI at ${binary_path} failed 'bd version'. You can retry or rerun the installer with --skip-beads to handle it yourself."
+  if ! "${binary_path}" --version >/dev/null 2>&1; then
+    err "Beads Rust CLI at ${binary_path} failed 'br --version'. You can retry or rerun the installer with --skip-beads to handle it yourself."
     return 1
   fi
 
   local version_line
-  version_line=$("${binary_path}" version 2>/dev/null | head -n 1 || true)
+  version_line=$("${binary_path}" --version 2>/dev/null | head -n 1 || true)
   if [[ -z "${version_line}" ]]; then
-    version_line="bd version command succeeded"
+    version_line="br --version command succeeded"
   fi
-  LAST_BD_VERSION="${version_line}"
-  ok "Beads CLI ready (${version_line})"
+  LAST_BR_VERSION="${version_line}"
+  ok "Beads Rust CLI ready (${version_line})"
 }
 
 find_bv_binary() {
@@ -420,6 +506,75 @@ ensure_uv() {
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="${HOME}/.local/bin:${PATH}"
   if need_cmd uv; then ok "uv installed"; record_summary "uv: installed"; else err "uv install failed"; exit 1; fi
+}
+
+ensure_jq() {
+  # jq is needed for safe JSON merging in integration scripts
+  if need_cmd jq; then
+    ok "jq is already installed"
+    record_summary "jq: already installed"
+    return 0
+  fi
+
+  info "jq not found - needed for safe config merging"
+
+  # Try to install automatically
+  local installed=0
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # macOS - use Homebrew
+    if need_cmd brew; then
+      info "Installing jq via Homebrew"
+      if brew install jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/debian_version ]]; then
+    # Debian/Ubuntu
+    if need_cmd apt-get; then
+      info "Installing jq via apt"
+      if sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/fedora-release ]] || [[ -f /etc/redhat-release ]]; then
+    # Fedora/RHEL
+    if need_cmd dnf; then
+      info "Installing jq via dnf"
+      if sudo dnf install -y -q jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    elif need_cmd yum; then
+      info "Installing jq via yum"
+      if sudo yum install -y -q jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  elif [[ -f /etc/alpine-release ]]; then
+    # Alpine
+    if need_cmd apk; then
+      info "Installing jq via apk"
+      if sudo apk add --quiet jq >/dev/null 2>&1; then
+        installed=1
+      fi
+    fi
+  fi
+
+  if [[ ${installed} -eq 1 ]] && need_cmd jq; then
+    ok "jq installed"
+    record_summary "jq: installed"
+    return 0
+  fi
+
+  # Couldn't auto-install
+  warn "Could not auto-install jq"
+  warn "Integration scripts will fall back to safe mode (won't overwrite existing configs)"
+  warn "To install manually:"
+  warn "  macOS:   brew install jq"
+  warn "  Ubuntu:  sudo apt install jq"
+  warn "  Fedora:  sudo dnf install jq"
+  record_summary "jq: not installed (manual install recommended)"
+  return 0  # Don't fail the installer, just warn
 }
 
 update_existing_repo() {
@@ -623,40 +778,52 @@ run_integration_and_start() {
 
 ensure_beads() {
   if [[ "${SKIP_BEADS}" -eq 1 ]]; then
-    warn "--skip-beads specified; not installing Beads CLI"
-    record_summary "Beads CLI: skipped (--skip-beads)"
+    warn "--skip-beads specified; not installing Beads Rust CLI"
+    record_summary "Beads Rust CLI: skipped (--skip-beads)"
     return 0
   fi
 
-  local bd_path
-  if bd_path=$(find_bd_binary); then
-    verify_bd_binary "${bd_path}" || exit 1
-    ensure_bd_path_ready "${bd_path}"
-    record_summary "Beads CLI: ${LAST_BD_VERSION}"
+  local br_path
+  if br_path=$(find_br_binary); then
+    verify_br_binary "${br_path}" || exit 1
+    ensure_br_path_ready "${br_path}"
+    install_bd_alias
+    record_summary "Beads Rust CLI: ${LAST_BR_VERSION}"
     return 0
   fi
 
-  info "Installing Beads (bd) CLI"
+  info "Installing Beads Rust (br) CLI"
   if ! need_cmd curl; then
-    err "curl is required to install Beads automatically"
+    err "curl is required to install Beads Rust automatically"
     exit 1
   fi
 
-  if ! curl -fsSL "${BEADS_INSTALL_URL}" | bash; then
-    err "Failed to install Beads automatically. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
+  # Download first, then execute — avoids nested curl|bash stdin corruption
+  local br_tmp_script
+  br_tmp_script=$(mktemp "${TMPDIR:-/tmp}/br-install.XXXXXX.sh")
+  if ! curl -fsSL "${BEADS_INSTALL_URL}?$(date +%s)" -o "${br_tmp_script}"; then
+    rm -f "${br_tmp_script}"
+    err "Failed to download Beads Rust installer. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
     exit 1
   fi
+  if ! bash "${br_tmp_script}"; then
+    rm -f "${br_tmp_script}"
+    err "Failed to install Beads Rust automatically. You can install manually via: curl -fsSL ${BEADS_INSTALL_URL} | bash"
+    exit 1
+  fi
+  rm -f "${br_tmp_script}"
 
   hash -r 2>/dev/null || true
 
-  if bd_path=$(find_bd_binary); then
-    verify_bd_binary "${bd_path}" || exit 1
-    ensure_bd_path_ready "${bd_path}"
-    record_summary "Beads CLI: ${LAST_BD_VERSION}"
+  if br_path=$(find_br_binary); then
+    verify_br_binary "${br_path}" || exit 1
+    ensure_br_path_ready "${br_path}"
+    install_bd_alias
+    record_summary "Beads Rust CLI: ${LAST_BR_VERSION}"
     return 0
   fi
 
-  err "Beads installer finished but 'bd' was not detected. Ensure its install directory is on PATH or rerun with --skip-beads to handle installation manually."
+  err "Beads Rust installer finished but 'br' was not detected. Ensure its install directory is on PATH or rerun with --skip-beads to handle installation manually."
   exit 1
 }
 
@@ -743,11 +910,16 @@ ensure_bv() {
     return 0
   fi
 
-  if ! curl -fsSL "${BV_INSTALL_URL}" | bash; then
+  # Download first, then execute — avoids nested curl|bash stdin corruption
+  local bv_tmp_script
+  bv_tmp_script=$(mktemp "${TMPDIR:-/tmp}/bv-install.XXXXXX.sh")
+  if ! curl -fsSL "${BV_INSTALL_URL}" -o "${bv_tmp_script}" || ! bash "${bv_tmp_script}"; then
+    rm -f "${bv_tmp_script}"
     warn "Beads Viewer installation failed (non-fatal). You can install manually via: curl -fsSL ${BV_INSTALL_URL} | bash"
     record_summary "Beads Viewer: installation failed (optional)"
     return 0
   fi
+  rm -f "${bv_tmp_script}"
 
   hash -r 2>/dev/null || true
 
@@ -811,6 +983,7 @@ main() {
   fi
 
   ensure_uv
+  ensure_jq
   ensure_beads
   ensure_bv
   install_cli_stub
@@ -834,7 +1007,7 @@ main() {
   echo "  # or manually:"
   echo "  cd \"${REPO_DIR}\""
   echo "  source .venv/bin/activate"
-  echo "  bash scripts/run_server_with_token.sh"
+  echo "  uv run python -m mcp_agent_mail.cli"
 }
 
 # Handle three execution modes:

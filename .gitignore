@@ -158,6 +158,7 @@ sec_insiders.db-shm
 sec_insiders.db-wal
 file_analysis_*.json
 finviz_test_results_*.json
+tests/e2e/logs/
 presentation_test_results*.json
 *.bak
 
@@ -201,6 +202,7 @@ vendor/*
 benchmarks/tmp_*
 benchmarks/results/**/*.json
 benchmarks/**/*.json
+tests/benchmarks/results/**/*.json
 data/baselines/*
 *.sqlite3
 .env
@@ -223,9 +225,16 @@ out/
 signing-*.key
 signing-*.pub
 
+# IDE settings
+.vscode/
+.idea/
+
 # Local agent configuration directories (per-user, not project config)
+# We track .template files as examples; actual settings.json is user-specific
 .claude/
+!.claude/settings.json.template
 .codex/
+!.codex/config.toml
 .cursor/
 .gemini/
 
@@ -236,3 +245,26 @@ AGENTS.md.backup
 # SQLite WAL/SHM temp files (test databases)
 test.sqlite3-shm
 test.sqlite3-wal
+
+# bv (beads viewer) local config and caches
+.bv/
+tests/benchmarks/regression_reports/
+
+# Ephemeral files
+a.out
+.beads/.bv.lock
+
+# Ephemeral/temporary files (agent workflow artifacts)
+RESEARCH_FINDINGS.md
+TOON_INTEGRATION_BRIEF.md
+cov_*.out
+rustc-ice-*.txt
+*.snap.new
+sweep_*.png
+test_screenshot.png
+
+# Claude Code local settings (contains secrets)
+.claude/settings.local.json
+
+# Literal tilde directory (created by agent mail git mailbox init)
+~/

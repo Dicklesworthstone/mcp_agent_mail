@@ -1,4 +1,17 @@
-"""Filesystem and Git archive helpers for MCP Agent Mail."""
+"""Filesystem and Git archive helpers for MCP Agent Mail.
+
+Concurrency Architecture:
+- Per-project archive locks (.archive.lock) serialize archive mutations
+- Per-project commit locks (.commit.lock) serialize git commit operations
+- Commit queue with batching reduces lock contention under high load
+- Adaptive retry with exponential backoff + jitter for transient failures
+
+Key Design Decisions:
+1. File locks use SoftFileLock (cross-platform, doesn't require OS support)
+2. Lock metadata (.owner.json) enables stale lock detection and cleanup
+3. Process-level asyncio.Lock prevents re-entrant acquisition within same process
+4. Git index.lock errors are retried with exponential backoff + stale cleanup
+"""
 
 from __future__ import annotations
 
@@ -7,15 +20,17 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import os
+import random
 import re
 import sys
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar
+from pathlib import Path, PurePosixPath
+from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar, cast
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
@@ -23,8 +38,301 @@ from git.objects.tree import Tree
 from PIL import Image
 
 from .config import Settings
+from .utils import validate_thread_id_format
 
+_logger = logging.getLogger(__name__)
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
+_SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+# =============================================================================
+# Commit Queue - Batches multiple commits to reduce lock contention
+# =============================================================================
+
+@dataclass
+class _CommitRequest:
+    """A pending commit request in the queue."""
+    repo_root: Path
+    settings: Settings
+    message: str
+    rel_paths: list[str]
+    future: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    created_at: float = field(default_factory=time.monotonic)
+
+
+class _CommitQueue:
+    """Batches and serializes git commit operations to reduce lock contention.
+
+    Instead of each operation acquiring a lock, performing a commit, and releasing,
+    this queue batches multiple pending commits into a single git operation when
+    the paths don't conflict. This dramatically reduces lock contention under
+    high concurrency.
+
+    Design:
+    - Commits are queued with asyncio.Future for result notification
+    - A background task processes the queue periodically or when full
+    - Non-conflicting commits (different file paths) are batched together
+    - Conflicting commits are processed sequentially
+
+    Usage:
+        queue = _CommitQueue()
+        await queue.start()
+        await queue.enqueue(repo_root, settings, message, rel_paths)
+        await queue.stop()
+    """
+
+    def __init__(
+        self,
+        max_batch_size: int = 10,
+        max_wait_ms: float = 50.0,
+        max_queue_size: int = 100,
+    ) -> None:
+        self._queue: asyncio.Queue[_CommitRequest] = asyncio.Queue(maxsize=max_queue_size)
+        self._max_batch_size = max_batch_size
+        self._max_wait_ms = max_wait_ms
+        self._max_queue_size = max_queue_size
+        self._task: asyncio.Task[None] | None = None
+        self._stopped = False
+        self._lock = asyncio.Lock()
+        self._enqueued = 0
+        self._batched = 0
+        self._commits = 0
+        self._batch_sizes: list[int] = []  # Rolling window of last 100 batch sizes
+
+    @property
+    def stats(self) -> dict[str, Any]:
+        """Return queue statistics for monitoring."""
+        batch_sizes = self._batch_sizes
+        avg_batch = sum(batch_sizes) / len(batch_sizes) if batch_sizes else 0.0
+        return {
+            "enqueued": self._enqueued,
+            "batched": self._batched,
+            "commits": self._commits,
+            "avg_batch_size": round(avg_batch, 2),
+            "queue_size": self._queue.qsize(),
+            "running": self._task is not None and not self._task.done(),
+        }
+
+    async def start(self) -> None:
+        """Start the background queue processor."""
+        if self._task is not None:
+            return
+        self._stopped = False
+        self._task = asyncio.create_task(self._process_loop())
+
+    async def stop(self, timeout_seconds: float = 5.0) -> None:
+        """Stop the queue processor, draining pending commits."""
+        self._stopped = True
+        if self._task is not None:
+            # Signal the processor to wake up and check stopped flag
+            with contextlib.suppress(asyncio.QueueFull):
+                self._queue.put_nowait(_CommitRequest(
+                    repo_root=Path("/dev/null"),  # Sentinel
+                    settings=None,  # type: ignore
+                    message="",
+                    rel_paths=[],
+                ))
+            try:
+                async with asyncio.timeout(timeout_seconds):
+                    await self._task
+            except TimeoutError:
+                self._task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._task
+            self._task = None
+
+    async def enqueue(
+        self,
+        repo_root: Path,
+        settings: Settings,
+        message: str,
+        rel_paths: Sequence[str],
+    ) -> None:
+        """Enqueue a commit request and wait for completion.
+
+        Args:
+            repo_root: Path to git repository root
+            settings: Application settings
+            message: Commit message
+            rel_paths: Relative paths to add and commit
+
+        Raises:
+            asyncio.QueueFull: If queue is at capacity
+            Exception: Any exception from the actual commit operation
+        """
+        if not rel_paths:
+            return
+
+        request = _CommitRequest(
+            repo_root=repo_root,
+            settings=settings,
+            message=message,
+            rel_paths=list(rel_paths),
+        )
+        self._enqueued += 1
+
+        # If queue processor isn't running, fall back to direct commit
+        if self._task is None or self._task.done():
+            await _commit_direct(repo_root, settings, message, rel_paths)
+            return
+
+        try:
+            self._queue.put_nowait(request)
+        except asyncio.QueueFull:
+            # Queue is full - fall back to direct commit
+            _logger.warning("commit_queue.full", extra={"queue_size": self._queue.qsize()})
+            await _commit_direct(repo_root, settings, message, rel_paths)
+            return
+
+        # Wait for the commit to complete
+        await request.future
+
+    async def _process_loop(self) -> None:
+        """Background loop that processes queued commits."""
+        while not self._stopped:
+            try:
+                # Wait for first request with timeout
+                try:
+                    first = await asyncio.wait_for(
+                        self._queue.get(),
+                        timeout=self._max_wait_ms / 1000.0,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
+                # Skip sentinel requests
+                if first.settings is None:
+                    continue
+
+                # Collect more requests if available (non-blocking)
+                batch = [first]
+                deadline = time.monotonic() + (self._max_wait_ms / 1000.0)
+
+                while len(batch) < self._max_batch_size and time.monotonic() < deadline:
+                    try:
+                        request = self._queue.get_nowait()
+                        if request.settings is not None:  # Skip sentinels
+                            batch.append(request)
+                    except asyncio.QueueEmpty:
+                        # Brief wait to allow more requests to arrive
+                        await asyncio.sleep(0.005)
+                        break
+
+                # Process the batch
+                await self._process_batch(batch)
+
+            except Exception as e:
+                _logger.exception("commit_queue.error", extra={"error": str(e)})
+                await asyncio.sleep(0.1)  # Back off on errors
+
+    async def _process_batch(self, batch: list[_CommitRequest]) -> None:
+        """Process a batch of commit requests.
+
+        Attempts to merge non-conflicting commits into a single git operation.
+        Falls back to sequential commits for conflicts.
+        """
+        if not batch:
+            return
+
+        self._batched += len(batch)
+
+        # Group by repo root (commits to same repo can potentially be batched)
+        by_repo: dict[str, list[_CommitRequest]] = {}
+        for req in batch:
+            key = str(req.repo_root)
+            by_repo.setdefault(key, []).append(req)
+
+        for _repo_path, requests in by_repo.items():
+            if len(requests) == 1:
+                # Single request - just commit it directly
+                req = requests[0]
+                try:
+                    await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
+                    req.future.set_result(None)
+                    self._commits += 1
+                except Exception as e:
+                    req.future.set_exception(e)
+            else:
+                # Multiple requests to same repo - try to batch if no path conflicts
+                all_paths: set[str] = set()
+                can_batch = True
+                for req in requests:
+                    path_set = set(req.rel_paths)
+                    if all_paths & path_set:  # Overlap detected
+                        can_batch = False
+                        break
+                    all_paths.update(path_set)
+
+                if can_batch and len(requests) <= 5:  # Only batch small groups
+                    # Merge into single commit
+                    merged_paths: list[str] = []
+                    merged_messages: list[str] = []
+                    for req in requests:
+                        merged_paths.extend(req.rel_paths)
+                        merged_messages.append(req.message.split("\n")[0])  # First line only
+
+                    combined_message = f"batch: {len(requests)} commits\n\n" + "\n".join(
+                        f"- {msg}" for msg in merged_messages
+                    )
+
+                    try:
+                        await _commit_direct(
+                            requests[0].repo_root,
+                            requests[0].settings,
+                            combined_message,
+                            merged_paths,
+                        )
+                        for req in requests:
+                            req.future.set_result(None)
+                        self._commits += 1
+                        # Record batch size
+                        self._batch_sizes.append(len(requests))
+                        if len(self._batch_sizes) > 100:
+                            self._batch_sizes.pop(0)
+                    except Exception as e:
+                        for req in requests:
+                            req.future.set_exception(e)
+                else:
+                    # Process sequentially (conflicts or large batch)
+                    for req in requests:
+                        try:
+                            await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
+                            req.future.set_result(None)
+                            self._commits += 1
+                        except Exception as e:
+                            req.future.set_exception(e)
+
+
+# Global commit queue instance (lazily initialized)
+_COMMIT_QUEUE: _CommitQueue | None = None
+_COMMIT_QUEUE_LOCK: asyncio.Lock | None = None
+
+
+def _get_commit_queue_lock() -> asyncio.Lock:
+    """Get or create commit queue lock."""
+    global _COMMIT_QUEUE_LOCK
+    if _COMMIT_QUEUE_LOCK is None:
+        _COMMIT_QUEUE_LOCK = asyncio.Lock()
+    return _COMMIT_QUEUE_LOCK
+
+
+async def _get_commit_queue() -> _CommitQueue:
+    """Get or create the global commit queue."""
+    global _COMMIT_QUEUE
+    if _COMMIT_QUEUE is not None:
+        return _COMMIT_QUEUE
+    async with _get_commit_queue_lock():
+        if _COMMIT_QUEUE is None:
+            _COMMIT_QUEUE = _CommitQueue()
+            await _COMMIT_QUEUE.start()
+        return _COMMIT_QUEUE
+
+
+def get_commit_queue_stats() -> dict[str, Any]:
+    """Get commit queue statistics for monitoring."""
+    if _COMMIT_QUEUE is None:
+        return {"running": False, "initialized": False}
+    return _COMMIT_QUEUE.stats
 
 
 @dataclass(slots=True)
@@ -52,18 +360,27 @@ class _LRURepoCache:
     """LRU cache for Git Repo objects with size limit.
 
     This prevents file descriptor leaks by:
-    1. Limiting the number of cached repos (default: 8)
-    2. Evicting oldest repos when at capacity (they will be GC'd when no longer referenced)
+    1. Limiting the number of cached repos (default: 16)
+    2. Evicting oldest repos when at capacity
+    3. Closing evicted repos after a grace period (time-based, not refcount-based)
 
     IMPORTANT: Evicted repos are NOT closed immediately because they may still be in use
-    by other coroutines. They will be closed when garbage collected or when clear() is called.
+    by other coroutines. They are given a grace period (default 60s) before being closed.
+    Cleanup runs opportunistically on both get() and put() operations.
     """
 
-    def __init__(self, maxsize: int = 8) -> None:
+    # Grace period in seconds before evicted repos are forcibly closed.
+    # This replaces the unreliable sys.getrefcount() heuristic which created
+    # phantom references from iteration, locals, and stack frames, causing
+    # evicted repos to accumulate indefinitely and leak file descriptors.
+    EVICTION_GRACE_SECONDS: float = 60.0
+
+    def __init__(self, maxsize: int = 16) -> None:
         self._maxsize = max(1, maxsize)
         self._cache: dict[str, Repo] = {}
         self._order: list[str] = []  # LRU order: oldest first
-        self._evicted: list[Repo] = []  # Evicted repos pending close
+        self._evicted: list[tuple[Repo, float]] = []  # (repo, eviction_timestamp) pairs
+        self._cleanup_counter: int = 0  # Track operations for periodic cleanup
 
     def peek(self, key: str) -> Repo | None:
         """Check if key exists and return value WITHOUT updating LRU order.
@@ -76,12 +393,18 @@ class _LRURepoCache:
         """Get a repo from cache, updating LRU order.
 
         Should only be called while holding the external lock.
+        Also performs opportunistic cleanup of evicted repos.
         """
         if key in self._cache:
             # Move to end (most recently used)
             with contextlib.suppress(ValueError):
                 self._order.remove(key)
             self._order.append(key)
+            # Opportunistically try to clean up evicted repos every 4th access
+            self._cleanup_counter += 1
+            if self._cleanup_counter >= 4:
+                self._cleanup_counter = 0
+                self._cleanup_evicted()
             return self._cache[key]
         return None
 
@@ -90,6 +413,10 @@ class _LRURepoCache:
 
         Should only be called while holding the external lock.
         Evicted repos are added to a pending list for later cleanup.
+
+        Note: If the key already exists, only the LRU order is updated;
+        the cached repo value is NOT replaced. This is intentional since
+        the cache is only used by _ensure_repo which checks existence first.
         """
         if key in self._cache:
             # Already exists, just update LRU order
@@ -104,8 +431,8 @@ class _LRURepoCache:
             old_repo = self._cache.pop(oldest_key, None)
             if old_repo is not None:
                 # Don't close immediately - repo may still be in use by another coroutine
-                # Add to evicted list for later cleanup
-                self._evicted.append(old_repo)
+                # Record eviction time for time-based cleanup
+                self._evicted.append((old_repo, time.monotonic()))
 
         self._cache[key] = repo
         self._order.append(key)
@@ -113,25 +440,54 @@ class _LRURepoCache:
         # Opportunistically try to close evicted repos that are no longer referenced
         self._cleanup_evicted()
 
-    def _cleanup_evicted(self) -> int:
-        """Try to close evicted repos that have only one reference (ours).
+    def _cleanup_evicted(self, *, force: bool = False) -> int:
+        """Close evicted repos whose grace period has expired.
 
-        Returns count of repos closed.
+        Uses a time-based approach: repos are closed after EVICTION_GRACE_SECONDS
+        have elapsed since eviction. This replaces the previous sys.getrefcount()
+        heuristic which was unreliable -- Python refcounting creates phantom
+        references from iteration, locals, and frames, causing evicted repos to
+        accumulate indefinitely and leak file descriptors.
+
+        Args:
+            force: If True, close ALL evicted repos regardless of age (used
+                   during emergency FD cleanup).
+
+        Returns count of repos closed. Logs warning if evicted list grows large.
         """
-        import sys
-        still_in_use: list[Repo] = []
+        still_pending: list[tuple[Repo, float]] = []
         closed = 0
-        for repo in self._evicted:
-            # If refcount is 2 (our list + the getrefcount call), it's safe to close
-            # In practice, we use 3 as threshold to be safe (list + local var + getrefcount)
-            if sys.getrefcount(repo) <= 3:
+        now = time.monotonic()
+        for repo, evicted_at in self._evicted:
+            age = now - evicted_at
+            if force or age >= self.EVICTION_GRACE_SECONDS:
                 with contextlib.suppress(Exception):
                     repo.close()
                     closed += 1
             else:
-                still_in_use.append(repo)
-        self._evicted = still_in_use
+                still_pending.append((repo, evicted_at))
+        self._evicted = still_pending
+        # Warn if evicted list is growing large (potential file handle pressure)
+        if len(still_pending) > self._maxsize:
+            _logger.warning(
+                "repo_cache.evicted_backlog",
+                extra={"evicted_count": len(still_pending), "maxsize": self._maxsize},
+            )
         return closed
+
+    @property
+    def evicted_count(self) -> int:
+        """Number of evicted repos waiting to be closed."""
+        return len(self._evicted)
+
+    @property
+    def stats(self) -> dict[str, int]:
+        """Return cache statistics for monitoring."""
+        return {
+            "cached": len(self._cache),
+            "evicted": len(self._evicted),
+            "maxsize": self._maxsize,
+        }
 
     def __contains__(self, key: str) -> bool:
         return key in self._cache
@@ -150,7 +506,7 @@ class _LRURepoCache:
         self._cache.clear()
         self._order.clear()
         # Also close any evicted repos still in pending list
-        for repo in self._evicted:
+        for repo, _evicted_at in self._evicted:
             with contextlib.suppress(Exception):
                 repo.close()
                 count += 1
@@ -163,9 +519,15 @@ class _LRURepoCache:
 
 
 # LRU cache for Repo objects with automatic cleanup
-# Limits to 8 concurrent repos to prevent file handle exhaustion
-_REPO_CACHE: _LRURepoCache = _LRURepoCache(maxsize=8)
+# Limits to 16 concurrent repos to prevent file handle exhaustion under heavy load
+# Increased from 8 to handle multi-project scenarios better (GitHub issue #59)
+_REPO_CACHE: _LRURepoCache = _LRURepoCache()  # Uses default maxsize=16
 _REPO_CACHE_LOCK: asyncio.Lock | None = None
+
+# Semaphore to limit concurrent repo operations (prevents FD exhaustion under high concurrency)
+# This acts as a second line of defense beyond the LRU cache
+_REPO_SEMAPHORE: asyncio.Semaphore | None = None
+_REPO_SEMAPHORE_LIMIT: int = 32  # Max concurrent repo operations
 
 
 def _get_repo_cache_lock() -> asyncio.Lock:
@@ -174,6 +536,70 @@ def _get_repo_cache_lock() -> asyncio.Lock:
     if _REPO_CACHE_LOCK is None:
         _REPO_CACHE_LOCK = asyncio.Lock()
     return _REPO_CACHE_LOCK
+
+
+def _get_repo_semaphore() -> asyncio.Semaphore:
+    """Get or create the repo semaphore (must be called from async context)."""
+    global _REPO_SEMAPHORE
+    if _REPO_SEMAPHORE is None:
+        _REPO_SEMAPHORE = asyncio.Semaphore(_REPO_SEMAPHORE_LIMIT)
+    return _REPO_SEMAPHORE
+
+
+def get_fd_usage() -> tuple[int, int]:
+    """Get current and maximum file descriptor counts.
+
+    Returns (current_count, max_limit) tuple.
+    On platforms where this isn't available, returns (-1, -1).
+    """
+    try:
+        import resource
+        soft_limit, _hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Count open file descriptors by checking /proc/self/fd (Linux) or /dev/fd (macOS)
+        fd_dir = Path("/dev/fd") if sys.platform == "darwin" else Path("/proc/self/fd")
+        if fd_dir.exists():
+            current = len(list(fd_dir.iterdir()))
+            return (current, soft_limit)
+        return (-1, soft_limit)
+    except (ImportError, OSError, AttributeError):
+        return (-1, -1)
+
+
+def get_fd_headroom() -> int:
+    """Get remaining file descriptor headroom before hitting the limit.
+
+    Returns -1 if unable to determine.
+    """
+    current, limit = get_fd_usage()
+    if current < 0 or limit < 0:
+        return -1
+    return max(0, limit - current)
+
+
+def proactive_fd_cleanup(*, threshold: int = 100) -> int:
+    """Proactively cleanup resources if file descriptor headroom is low.
+
+    Args:
+        threshold: Minimum headroom required; cleanup runs if below this.
+
+    Returns:
+        Number of repos freed (0 if no cleanup needed or unable to check).
+    """
+    headroom = get_fd_headroom()
+    if headroom < 0:
+        # Can't determine headroom, skip cleanup
+        return 0
+    if headroom >= threshold:
+        # Sufficient headroom, no cleanup needed
+        return 0
+    # Low headroom - force cleanup of ALL evicted repos (bypass grace period)
+    freed = _REPO_CACHE._cleanup_evicted(force=True)
+    # If still low, clear some cached repos too
+    new_headroom = get_fd_headroom()
+    if new_headroom >= 0 and new_headroom < threshold // 2:
+        # Critical: clear all cached repos
+        freed += _REPO_CACHE.clear()
+    return freed
 
 
 def clear_repo_cache() -> int:
@@ -185,8 +611,31 @@ def clear_repo_cache() -> int:
     return _REPO_CACHE.clear()
 
 
+def get_repo_cache_stats() -> dict[str, int]:
+    """Get repository cache statistics for monitoring.
+
+    Returns dict with 'cached', 'evicted', and 'maxsize' counts.
+    Useful for diagnosing file handle pressure.
+    """
+    return _REPO_CACHE.stats
+
+
 class AsyncFileLock:
-    """Async-friendly wrapper around SoftFileLock with metadata tracking."""
+    """Async-friendly wrapper around SoftFileLock with metadata tracking and adaptive retries.
+
+    Features:
+    - Metadata tracking (.owner.json) enables stale lock detection
+    - Process-level asyncio.Lock prevents re-entrant acquisition
+    - Adaptive retry with exponential backoff on acquisition failure
+    - Stale lock cleanup when owner process is dead or lock is too old
+
+    Adaptive Timeout Strategy:
+    - Initial attempt uses short timeout (10% of total)
+    - Failed attempts trigger stale lock cleanup check
+    - Subsequent attempts use progressively longer timeouts
+    - This allows fast acquisition when lock is free while still handling
+      edge cases like stale locks or slow I/O
+    """
 
     def __init__(
         self,
@@ -194,20 +643,40 @@ class AsyncFileLock:
         *,
         timeout_seconds: float = 60.0,
         stale_timeout_seconds: float = 180.0,
+        max_retries: int = 5,
     ) -> None:
         self._path = Path(path)
         self._lock = SoftFileLock(str(self._path))
         self._timeout = float(timeout_seconds)
         self._stale_timeout = float(max(stale_timeout_seconds, 0.0))
+        self._max_retries = max_retries
         self._pid = os.getpid()
         self._metadata_path = self._path.parent / f"{self._path.name}.owner.json"
         self._held = False
         self._lock_key = str(self._path.resolve())
+        self._acquisition_start: float | None = None
+        self._acquisition_attempts: int = 0
         self._loop_key: tuple[int, str] | None = None
         self._process_lock: asyncio.Lock | None = None
         self._process_lock_held = False
 
     async def __aenter__(self) -> None:
+        """Acquire the file lock with adaptive retry and stale lock detection.
+
+        Adaptive Retry Strategy:
+        1. First attempt: Short timeout (10% of total) - fast path for uncontested locks
+        2. On timeout: Check for stale locks and clean up if found
+        3. Subsequent attempts: Exponential backoff with longer per-attempt timeouts
+        4. Final attempt: Full remaining timeout
+
+        This strategy optimizes for:
+        - Fast acquisition when lock is free (common case)
+        - Graceful handling of stale locks from crashed processes
+        - Avoiding thundering herd with jittered backoff
+        """
+        self._acquisition_start = time.monotonic()
+        self._acquisition_attempts = 0
+
         loop = asyncio.get_running_loop()
         self._loop_key = (id(loop), self._lock_key)
         process_lock = _PROCESS_LOCKS.get(self._loop_key)
@@ -224,24 +693,107 @@ class AsyncFileLock:
         self._process_lock_held = True
         _PROCESS_LOCK_OWNERS[self._loop_key] = current_task_id
         try:
-            while True:
+            total_timeout = self._timeout if self._timeout > 0 else 60.0
+            remaining = total_timeout
+
+            for attempt in range(self._max_retries + 1):
+                self._acquisition_attempts = attempt + 1
+
+                # Adaptive timeout per attempt:
+                # - First attempt: 10% of total (fast path)
+                # - Middle attempts: progressively longer
+                # - Last attempt: all remaining time
+                if attempt == 0:
+                    per_attempt_timeout = min(total_timeout * 0.1, 5.0)  # 10%, max 5s
+                elif attempt == self._max_retries:
+                    per_attempt_timeout = remaining  # Use all remaining
+                else:
+                    # Exponential growth: 0.5s, 1s, 2s, 4s, ...
+                    per_attempt_timeout = min(0.5 * (2 ** attempt), remaining)
+
                 try:
                     if self._timeout <= 0:
                         await _to_thread(self._lock.acquire)
                     else:
-                        await _to_thread(self._lock.acquire, self._timeout)
+                        await _to_thread(self._lock.acquire, per_attempt_timeout)
                     self._held = True
                     await _to_thread(self._write_metadata)
-                    break
+
+                    # Log successful acquisition if it took retries
+                    if attempt > 0:
+                        elapsed = time.monotonic() - self._acquisition_start
+                        _logger.info(
+                            "file_lock.acquired_after_retry",
+                            extra={
+                                "path": str(self._path),
+                                "attempts": attempt + 1,
+                                "elapsed_seconds": round(elapsed, 2),
+                            },
+                        )
+                    return None
+
                 except Timeout:
+                    elapsed = time.monotonic() - self._acquisition_start
+                    remaining = total_timeout - elapsed
+
+                    if remaining <= 0 or attempt >= self._max_retries:
+                        # Final attempt failed - try one last stale cleanup
+                        cleaned = await _to_thread(self._cleanup_if_stale)
+                        if cleaned:
+                            # Stale lock was cleaned - try once more with short timeout
+                            try:
+                                await _to_thread(self._lock.acquire, 1.0)
+                                self._held = True
+                                await _to_thread(self._write_metadata)
+                                _logger.info(
+                                    "file_lock.acquired_after_stale_cleanup",
+                                    extra={"path": str(self._path)},
+                                )
+                                return None
+                            except Timeout:
+                                pass  # Fall through to timeout error
+                        raise TimeoutError(
+                            f"Timed out acquiring lock {self._path} after {elapsed:.2f}s "
+                            f"({attempt + 1} attempts). No stale owner detected."
+                        ) from None
+
+                    # Check for stale lock before retrying
                     cleaned = await _to_thread(self._cleanup_if_stale)
                     if cleaned:
+                        _logger.info(
+                            "file_lock.stale_cleaned",
+                            extra={"path": str(self._path), "attempt": attempt + 1},
+                        )
+                        # Don't add backoff delay - immediately retry after cleanup
                         continue
-                    raise TimeoutError(
-                        f"Timed out acquiring lock {self._path} after {self._timeout:.2f}s "
-                        "and no stale owner detected."
-                    ) from None
-        except Exception:
+
+                    # Add jittered backoff before retry (0.05s to 0.5s)
+                    backoff = min(0.05 * (2 ** attempt), 0.5)
+                    jitter = backoff * 0.25 * (2 * random.random() - 1)
+                    await asyncio.sleep(backoff + jitter)
+
+        except BaseException:
+            # Best-effort cleanup on any failure (including cancellation) to avoid leaking
+            # lock file handles and process-level locks.
+            if self._held:
+                task = asyncio.create_task(_to_thread(self._lock.release))
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await task
+                self._held = False
+                for cleanup_coro in (
+                    _to_thread(self._metadata_path.unlink, missing_ok=True),
+                    _to_thread(self._path.unlink, missing_ok=True),
+                ):
+                    task = asyncio.create_task(cleanup_coro)
+                    try:
+                        await asyncio.shield(task)
+                    except BaseException:
+                        with contextlib.suppress(Exception):
+                            await task
+
             if self._loop_key is not None:
                 _PROCESS_LOCK_OWNERS.pop(self._loop_key, None)
             if self._process_lock_held and self._process_lock:
@@ -255,7 +807,6 @@ class AsyncFileLock:
                 _PROCESS_LOCKS.pop(self._loop_key, None)
             self._process_lock = None
             raise
-        return None
 
     def _cleanup_if_stale(self) -> bool:
         """Remove lock and metadata when the lock is stale.
@@ -320,22 +871,22 @@ class AsyncFileLock:
 
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         if self._held:
-            # Release the file lock first
-            with contextlib.suppress(Exception):
-                await _to_thread(self._lock.release)
-
-            # Small delay on Windows to ensure file handles are released
-            if sys.platform == 'win32':
-                await asyncio.sleep(0.01)
-
-            # Delete metadata file
-            with contextlib.suppress(Exception):
-                await _to_thread(self._metadata_path.unlink, missing_ok=True)
-
-            # Delete lock file
-            with contextlib.suppress(Exception):
-                await _to_thread(self._path.unlink, missing_ok=True)
-
+            # Release/unlink must be cancellation-safe; otherwise cancelled tasks can leak
+            # lock file handles and wedge subsequent operations.
+            for cleanup_coro in (
+                _to_thread(self._lock.release),
+                asyncio.sleep(0.01) if sys.platform == "win32" else None,
+                _to_thread(self._metadata_path.unlink, missing_ok=True),
+                _to_thread(self._path.unlink, missing_ok=True),
+            ):
+                if cleanup_coro is None:
+                    continue
+                task = asyncio.create_task(cleanup_coro)
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await task
             self._held = False
 
         # Clean up process-level locks
@@ -362,7 +913,7 @@ class AsyncFileLock:
 
         # Try psutil first if available (most reliable cross-platform method)
         try:
-            import psutil  # type: ignore[import-not-found]
+            import psutil
             return bool(psutil.pid_exists(pid))
         except ImportError:
             pass
@@ -401,16 +952,26 @@ class AsyncFileLock:
 @asynccontextmanager
 async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
     """Context manager for safely mutating archive surfaces."""
-
     lock = AsyncFileLock(archive.lock_path, timeout_seconds=timeout_seconds)
     await lock.__aenter__()
+    exc_type: type[BaseException] | None = None
+    exc: BaseException | None = None
+    tb: object | None = None
     try:
         yield
-    except Exception as exc:
-        await lock.__aexit__(type(exc), exc, exc.__traceback__)
+    except BaseException as raised:
+        exc_type = type(raised)
+        exc = raised
+        tb = raised.__traceback__
         raise
-    else:
-        await lock.__aexit__(None, None, None)
+    finally:
+        # Ensure lock release even under task cancellation (Python 3.14: CancelledError is BaseException).
+        task = asyncio.create_task(lock.__aexit__(exc_type, exc, tb))
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await task
 
 
 T = TypeVar('T')
@@ -533,7 +1094,13 @@ async def ensure_archive(settings: Settings, slug: str) -> ProjectArchive:
 
 
 async def _ensure_repo(root: Path, settings: Settings) -> Repo:
-    """Get or create a Repo for the given root, with caching to prevent file handle leaks."""
+    """Get or create a Repo for the given root, with caching to prevent file handle leaks.
+
+    This function implements multiple layers of protection against file descriptor exhaustion:
+    1. LRU cache limits total cached repos
+    2. Semaphore limits concurrent repo operations
+    3. Proactive cleanup runs before creating new repos when FD headroom is low
+    """
     cache_key = str(root.resolve())
 
     # Fast path: check cache without lock using peek() which doesn't modify LRU order
@@ -541,34 +1108,46 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     if cached is not None:
         return cached
 
-    # Slow path: acquire lock and check/create
-    async with _get_repo_cache_lock():
-        # Double-check after acquiring lock, use get() to update LRU order
-        cached = _REPO_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
+    # Acquire semaphore to limit concurrent repo operations
+    semaphore = _get_repo_semaphore()
+    async with semaphore:
+        # Slow path: acquire lock and check/create
+        async with _get_repo_cache_lock():
+            # Double-check after acquiring lock, use get() to update LRU order
+            cached = _REPO_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
 
-        git_dir = root / ".git"
-        if git_dir.exists():
-            repo = Repo(str(root))
+            # Proactive cleanup: ensure we have headroom before creating a new repo
+            # This prevents hitting EMFILE by cleaning up before it's too late
+            proactive_fd_cleanup(threshold=100)
+
+            git_dir = root / ".git"
+            if git_dir.exists():
+                repo = Repo(str(root))
+                _REPO_CACHE.put(cache_key, repo)
+                return repo
+
+            # Initialize new repo and put in cache while holding the lock.
+            # Keep the returned Repo instance to avoid leaking an extra Repo handle.
+            repo = await _to_thread(Repo.init, str(root))
             _REPO_CACHE.put(cache_key, repo)
-            return repo
+            # Flag that this is a newly created repo needing initialization
+            needs_init = True
 
-        repo_result = await _to_thread(Repo.init, str(root))
-        repo = Repo(repo_result.working_dir) if hasattr(repo_result, 'working_dir') else repo_result
-        # Ensure deterministic, non-interactive commits (disable GPG signing)
-        try:
-            def _configure_repo() -> None:
-                with repo.config_writer() as cw:
-                    cw.set_value("commit", "gpgsign", "false")
-            await _to_thread(_configure_repo)
-        except Exception:
-            pass
-        attributes_path = root / ".gitattributes"
-        if not attributes_path.exists():
-            await _write_text(attributes_path, "*.json text\n*.md text\n")
-        await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
-        _REPO_CACHE.put(cache_key, repo)
+        # Configure the repo outside the lock (idempotent operations)
+        if needs_init:
+            try:
+                def _configure_repo() -> None:
+                    with repo.config_writer() as cw:
+                        cw.set_value("commit", "gpgsign", "false")
+                await _to_thread(_configure_repo)
+            except Exception:
+                pass
+            attributes_path = root / ".gitattributes"
+            if not attributes_path.exists():
+                await _write_text(attributes_path, "*.json text\n*.md text\n")
+            await _commit(repo, settings, "chore: initialize archive", [".gitattributes"])
         return repo
 
 
@@ -579,23 +1158,51 @@ async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object])
     await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [rel])
 
 
+def _build_file_reservation_commit_message(entries: Sequence[tuple[str, str]]) -> str:
+    first_agent, first_pattern = entries[0]
+    if len(entries) == 1:
+        return f"file_reservation: {first_agent} {first_pattern}"
+    subject = f"file_reservation: {first_agent} {first_pattern} (+{len(entries) - 1} more)"
+    lines = [f"- {agent} {pattern}" for agent, pattern in entries]
+    return subject + "\n\n" + "\n".join(lines)
+
+
+async def write_file_reservation_records(
+    archive: ProjectArchive,
+    file_reservations: Sequence[dict[str, object]],
+) -> None:
+    if not file_reservations:
+        return
+    rel_paths: list[str] = []
+    entries: list[tuple[str, str]] = []
+    for file_reservation in file_reservations:
+        path_pattern = str(file_reservation.get("path_pattern") or file_reservation.get("path") or "").strip()
+        if not path_pattern:
+            raise ValueError("File reservation record must include 'path_pattern'.")
+        normalized_file_reservation = dict(file_reservation)
+        normalized_file_reservation["path_pattern"] = path_pattern
+        normalized_file_reservation.pop("path", None)
+        digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
+        # Legacy path: digest of path_pattern (kept to avoid stale artifacts in existing installs)
+        legacy_path = archive.root / "file_reservations" / f"{digest}.json"
+        await _write_json(legacy_path, normalized_file_reservation)
+        rel_paths.append(legacy_path.relative_to(archive.repo_root).as_posix())
+
+        # Stable per-reservation artifact to avoid collisions across shared reservations
+        reservation_id = normalized_file_reservation.get("id")
+        id_token = str(reservation_id).strip() if reservation_id is not None else ""
+        if id_token.isdigit():
+            id_path = archive.root / "file_reservations" / f"id-{id_token}.json"
+            await _write_json(id_path, normalized_file_reservation)
+            rel_paths.append(id_path.relative_to(archive.repo_root).as_posix())
+        agent_name = str(normalized_file_reservation.get("agent", "unknown"))
+        entries.append((agent_name, path_pattern))
+    commit_message = _build_file_reservation_commit_message(entries)
+    await _commit(archive.repo, archive.settings, commit_message, rel_paths)
+
+
 async def write_file_reservation_record(archive: ProjectArchive, file_reservation: dict[str, object]) -> None:
-    path_pattern = str(file_reservation.get("path_pattern") or file_reservation.get("path") or "").strip()
-    if not path_pattern:
-        raise ValueError("File reservation record must include 'path_pattern'.")
-    normalized_file_reservation = dict(file_reservation)
-    normalized_file_reservation["path_pattern"] = path_pattern
-    normalized_file_reservation.pop("path", None)
-    digest = hashlib.sha1(path_pattern.encode("utf-8")).hexdigest()
-    file_reservation_path = archive.root / "file_reservations" / f"{digest}.json"
-    await _write_json(file_reservation_path, normalized_file_reservation)
-    agent_name = str(normalized_file_reservation.get("agent", "unknown"))
-    await _commit(
-        archive.repo,
-        archive.settings,
-        f"file_reservation: {agent_name} {path_pattern}",
-        [file_reservation_path.relative_to(archive.repo_root).as_posix()],
-    )
+    await write_file_reservation_records(archive, [file_reservation])
 
 
 async def write_message_bundle(
@@ -608,8 +1215,29 @@ async def write_message_bundle(
     commit_text: str | None = None,
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
-    timestamp_str = timestamp_obj if isinstance(timestamp_obj, str) else datetime.now(timezone.utc).isoformat()
-    now = datetime.fromisoformat(timestamp_str)
+    now: datetime
+    timestamp_str: str  # Always define to avoid UnboundLocalError
+    if isinstance(timestamp_obj, datetime):
+        now = timestamp_obj
+        timestamp_str = now.isoformat()
+    elif isinstance(timestamp_obj, str) and timestamp_obj.strip():
+        timestamp_str = timestamp_obj.strip()
+        # Handle Z-suffixed timestamps (ISO 8601 UTC indicator)
+        parse_str = timestamp_str
+        if parse_str.endswith("Z"):
+            parse_str = parse_str[:-1] + "+00:00"
+        try:
+            now = datetime.fromisoformat(parse_str)
+        except ValueError:
+            now = datetime.now(timezone.utc)
+            timestamp_str = now.isoformat()
+    else:
+        now = datetime.now(timezone.utc)
+        timestamp_str = now.isoformat()
+
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        # Treat naive timestamps as UTC (matches SQLite naive-UTC convention)
+        now = now.replace(tzinfo=timezone.utc)
     y_dir = now.strftime("%Y")
     m_dir = now.strftime("%m")
 
@@ -630,7 +1258,7 @@ async def write_message_bundle(
     # Descriptive, ISO-prefixed filename: <ISO>__<subject-slug>__<id>.md
     created_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     subject_value = str(message.get("subject", "")).strip() or "message"
-    subject_slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", subject_value).strip("-_").lower()[:80] or "message"
+    subject_slug = _SUBJECT_SLUG_RE.sub("-", subject_value).strip("-_").lower()[:80] or "message"
     id_suffix = str(message.get("id", ""))
     filename = (
         f"{created_iso}__{subject_slug}__{id_suffix}.md"
@@ -702,6 +1330,11 @@ async def _update_thread_digest(
     The digest lives at messages/threads/{thread_id}.md and contains an
     append-only sequence of sections linking to canonical messages.
     """
+    if not validate_thread_id_format(thread_id):
+        raise ValueError(
+            "Invalid thread_id: must start with an alphanumeric character and contain only "
+            "letters, numbers, '.', '_', or '-' (max 128)."
+        )
     digest_dir = archive.root / "messages" / "threads"
     await _to_thread(digest_dir.mkdir, parents=True, exist_ok=True)
     digest_path = digest_dir / f"{thread_id}.md"
@@ -736,8 +1369,37 @@ async def _update_thread_digest(
                 f.write(f"# Thread {thread_id}\n\n")
             f.write(entry)
 
-    await _to_thread(_append)
+    lock_path = digest_path.with_suffix(f"{digest_path.suffix}.lock")
+    async with AsyncFileLock(lock_path):
+        await _to_thread(_append)
     return digest_path.relative_to(archive.repo_root).as_posix()
+
+
+def _resolve_archive_relative_path(archive: ProjectArchive, raw_path: str) -> Path:
+    """Resolve a relative path safely inside the project archive root.
+
+    Rejects directory traversal and ensures the resolved path stays within
+    the project's archive root (defense-in-depth against symlink escapes).
+    """
+    normalized = (raw_path or "").strip().replace("\\", "/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or normalized.startswith("..")
+        or "/../" in normalized
+        or normalized.endswith("/..")
+        or normalized == ".."
+    ):
+        raise ValueError("Invalid path: directory traversal not allowed")
+
+    safe_rel = normalized.lstrip("/")
+    root = archive.root.resolve()
+    candidate = (archive.root / safe_rel).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Invalid path: directory traversal not allowed") from exc
+    return candidate
 
 
 async def process_attachments(
@@ -751,7 +1413,9 @@ async def process_attachments(
     attachments_meta: list[dict[str, object]] = []
     commit_paths: list[str] = []
     updated_body = body_md
-    if convert_markdown and archive.settings.storage.convert_images:
+    # Respect explicit convert_markdown decision; embed_policy ("inline"/"file") forces conversion
+    should_convert = convert_markdown or embed_policy in {"inline", "file"}
+    if should_convert:
         updated_body = await _convert_markdown_images(
             archive, body_md, attachments_meta, commit_paths, embed_policy=embed_policy
         )
@@ -774,9 +1438,15 @@ async def process_attachments(
     if attachment_paths:
         for path in attachment_paths:
             p = Path(path)
-            if not p.is_absolute():
-                p = (archive.root / path).resolve()
-            meta, rel_path = await _store_image(archive, p, embed_policy=embed_policy)
+            if p.is_absolute():
+                if not archive.settings.storage.allow_absolute_attachment_paths:
+                    raise ValueError(
+                        "Absolute attachment paths are disabled. Set ALLOW_ABSOLUTE_ATTACHMENT_PATHS=true to enable."
+                    )
+                resolved = p.expanduser().resolve()
+            else:
+                resolved = _resolve_archive_relative_path(archive, path)
+            meta, rel_path = await _store_image(archive, resolved, embed_policy=embed_policy)
             attachments_meta.append(meta)
             if rel_path:
                 commit_paths.append(rel_path)
@@ -820,8 +1490,19 @@ async def _convert_markdown_images(
             last_idx = path_end
             continue
         file_path = Path(normalized_path)
-        if not file_path.is_absolute():
-            file_path = (archive.root / raw_path).resolve()
+        if file_path.is_absolute():
+            if not archive.settings.storage.allow_absolute_attachment_paths:
+                result_parts.append(raw_path)
+                last_idx = path_end
+                continue
+            file_path = file_path.expanduser().resolve()
+        else:
+            try:
+                file_path = _resolve_archive_relative_path(archive, normalized_path)
+            except ValueError:
+                result_parts.append(raw_path)
+                last_idx = path_end
+                continue
         if not file_path.is_file():
             result_parts.append(raw_path)
             last_idx = path_end
@@ -851,7 +1532,7 @@ async def _store_image(archive: ProjectArchive, path: Path, *, embed_policy: str
     # Open image and convert, properly closing the original to prevent file handle leaks
     def _open_and_convert(p: Path) -> Image.Image:
         with Image.open(p) as pil:
-            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")  # type: ignore[no-any-return]
+            return pil.convert("RGBA" if pil.mode in ("LA", "RGBA") else "RGB")
 
     img = await _to_thread(_open_and_convert, path)
     try:
@@ -977,14 +1658,113 @@ async def _append_attachment_audit(archive: ProjectArchive, sha1: str, event: di
         pass
 
 
-async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Sequence[str]) -> None:
+def _commit_lock_path(repo_root: Path, rel_paths: Sequence[str]) -> Path:
+    """Derive the commit lock path based on project-scoped rel_paths."""
+    if not rel_paths:
+        return repo_root / ".commit.lock"
+
+    project_slug: str | None = None
+    for rel_path in rel_paths:
+        parts = PurePosixPath(rel_path).parts
+        if len(parts) < 2 or parts[0] != "projects":
+            project_slug = None
+            break
+        slug = parts[1]
+        if project_slug is None:
+            project_slug = slug
+        elif project_slug != slug:
+            project_slug = None
+            break
+
+    if project_slug:
+        return repo_root / "projects" / project_slug / ".commit.lock"
+    return repo_root / ".commit.lock"
+
+
+def _is_git_index_lock_error(exc: BaseException) -> bool:
+    """Check if exception is a git index.lock contention error.
+
+    Git uses .git/index.lock for atomic index operations. When multiple
+    processes/threads try to modify the index concurrently, the second one
+    gets FileExistsError (errno 17) or an OSError wrapping it.
+    """
+    # Direct FileExistsError
+    if isinstance(exc, FileExistsError) and exc.errno == 17:
+        return True
+    # OSError wrapping FileExistsError from gitdb.util.LockedFD
+    if isinstance(exc, OSError):
+        err_str = str(exc).lower()
+        if "index.lock" in err_str or "lock at" in err_str:
+            return True
+        # Check __cause__ chain
+        cause = exc.__cause__
+        if cause is not None and _is_git_index_lock_error(cause):
+            return True
+    return False
+
+
+def _try_clean_stale_git_lock(repo_root: Path, max_age_seconds: float = 300.0) -> bool:
+    """Attempt to remove a stale .git/index.lock file.
+
+    Returns True if a stale lock was removed, False otherwise.
+    Only removes locks older than max_age_seconds to avoid removing active locks.
+    """
+    lock_path = repo_root / ".git" / "index.lock"
+    if not lock_path.exists():
+        return False
+    try:
+        mtime = lock_path.stat().st_mtime
+        age = time.time() - mtime
+        if age > max_age_seconds:
+            lock_path.unlink(missing_ok=True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+class GitIndexLockError(Exception):
+    """Raised when git index.lock contention cannot be resolved after retries."""
+
+    def __init__(self, message: str, lock_path: Path, attempts: int):
+        super().__init__(message)
+        self.lock_path = lock_path
+        self.attempts = attempts
+
+
+async def _commit_direct(
+    repo_root: Path,
+    settings: Settings,
+    message: str,
+    rel_paths: Sequence[str],
+) -> None:
+    """Perform a git commit directly without queue batching.
+
+    This is the core commit implementation used by both the commit queue
+    and direct commits. It handles:
+    - Git index.lock contention with exponential backoff
+    - Stale lock cleanup
+    - EMFILE recovery
+    - Trailer injection for agent/thread metadata
+
+    Args:
+        repo_root: Path to the git repository root
+        settings: Application settings
+        message: Commit message
+        rel_paths: Relative paths to add and commit
+    """
+    import errno
+
     if not rel_paths:
         return
-    actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
 
-    def _perform_commit() -> None:
-        repo.index.add(rel_paths)
-        if repo.is_dirty(index=True, working_tree=True):
+    actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
+    repo = Repo(str(repo_root))
+    attempt_repo = repo  # May diverge from `repo` during EMFILE recovery
+
+    def _perform_commit(target_repo: Repo) -> None:
+        target_repo.index.add(rel_paths)
+        if target_repo.is_dirty(index=True, working_tree=True):
             # Append commit trailers with Agent and optional Thread if present in message text
             trailers: list[str] = []
             # Extract simple Agent/Thread heuristics from the message subject line
@@ -1010,14 +1790,143 @@ async def _commit(repo: Repo, settings: Settings, message: str, rel_paths: Seque
             final_message = message
             if trailers:
                 final_message = message + "\n\n" + "\n".join(trailers) + "\n"
-            repo.index.commit(final_message, author=actor, committer=actor)
-    # Serialize commits across all projects sharing the same Git repo to avoid index races
+            target_repo.index.commit(final_message, author=actor, committer=actor)
+
+    commit_lock_path = _commit_lock_path(repo_root, rel_paths)
+    await _to_thread(commit_lock_path.parent.mkdir, parents=True, exist_ok=True)
+
+    try:
+        async with AsyncFileLock(commit_lock_path):
+            attempt_repo = repo
+            # Maximum retries for git index.lock contention (happens with concurrent agents)
+            max_index_lock_retries = 5
+            index_lock_attempts = 0
+            last_index_lock_exc: OSError | None = None
+            did_last_resort_clean = False
+
+            # +2 to allow: normal retries + 1 potential EMFILE recovery + 1 last resort after stale lock clean
+            for attempt in range(max(2, max_index_lock_retries + 2)):
+                try:
+                    await _to_thread(_perform_commit, attempt_repo)
+                    break
+                except OSError as exc:
+                    # Handle EMFILE (too many open files)
+                    if exc.errno == errno.EMFILE and attempt < 1:
+                        # Low ulimit environments (e.g., macOS CI) can hit EMFILE when spawning git subprocesses.
+                        # Best-effort recovery: free cached repos, GC stray Repo handles, and retry with a fresh Repo.
+                        with contextlib.suppress(Exception):
+                            clear_repo_cache()
+                        with contextlib.suppress(Exception):
+                            import gc
+
+                            gc.collect()
+                        await asyncio.sleep(0.05)
+                        with contextlib.suppress(Exception):
+                            attempt_repo.close()
+                        attempt_repo = Repo(str(repo_root))
+                        continue
+
+                    # Handle git index.lock contention (concurrent git operations)
+                    if _is_git_index_lock_error(exc):
+                        index_lock_attempts += 1
+                        last_index_lock_exc = exc
+
+                        if index_lock_attempts > max_index_lock_retries:
+                            # Already exhausted normal retries
+                            if not did_last_resort_clean:
+                                # Try cleaning stale lock as last resort (lower threshold: 60s instead of 5min)
+                                cleaned = _try_clean_stale_git_lock(repo_root, max_age_seconds=60.0)
+                                if cleaned:
+                                    did_last_resort_clean = True
+                                    continue  # Try one more time after cleaning
+                            # Give up with a helpful error
+                            lock_path = repo_root / ".git" / "index.lock"
+                            raise GitIndexLockError(
+                                f"Git index.lock contention after {index_lock_attempts} retries. "
+                                f"Another git operation may be in progress. "
+                                f"If this persists, manually remove: {lock_path}",
+                                lock_path=lock_path,
+                                attempts=index_lock_attempts,
+                            ) from exc
+
+                        # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
+                        # (index_lock_attempts is 1-indexed here, so 2^0=1 -> 0.1s first)
+                        delay = 0.1 * (2 ** (index_lock_attempts - 1))
+                        await asyncio.sleep(delay)
+
+                        # Try cleaning stale lock (only if older than 5 minutes)
+                        with contextlib.suppress(Exception):
+                            _try_clean_stale_git_lock(repo_root, max_age_seconds=300.0)
+                        continue
+
+                    # Other OSError - re-raise
+                    raise
+            else:
+                # Loop exhausted without break - should only happen for unexpected error patterns
+                if last_index_lock_exc is not None:
+                    lock_path = repo_root / ".git" / "index.lock"
+                    raise GitIndexLockError(
+                        f"Git index.lock contention after {index_lock_attempts} retries. "
+                        f"Another git operation may be in progress. "
+                        f"If this persists, manually remove: {lock_path}",
+                        lock_path=lock_path,
+                        attempts=index_lock_attempts,
+                    ) from last_index_lock_exc
+                raise RuntimeError("git commit failed after recovery attempts")
+
+            if attempt_repo is not repo:
+                with contextlib.suppress(Exception):
+                    attempt_repo.close()
+    finally:
+        # Always close the repo we opened, even if an exception occurred.
+        # This prevents file descriptor leaks when exceptions are thrown
+        # between Repo() creation and the previous (non-finally) close.
+        #
+        # Also close attempt_repo if EMFILE recovery created a separate handle.
+        # Without this, a non-OSError exception after EMFILE recovery would leak
+        # the replacement repo (the original is already closed by recovery).
+        if attempt_repo is not repo:
+            with contextlib.suppress(Exception):
+                attempt_repo.close()
+        with contextlib.suppress(Exception):
+            repo.close()
+
+
+async def _commit(
+    repo: Repo,
+    settings: Settings,
+    message: str,
+    rel_paths: Sequence[str],
+    *,
+    use_queue: bool = True,
+) -> None:
+    """Commit changes to a git repository.
+
+    This is the main entry point for committing changes. It wraps _commit_direct
+    and optionally uses the commit queue for batching under high load.
+
+    Args:
+        repo: Git repository object
+        settings: Application settings
+        message: Commit message
+        rel_paths: Relative paths to add and commit
+        use_queue: If True, use commit queue for potential batching (default True)
+    """
+    if not rel_paths:
+        return
+
     working_tree = repo.working_tree_dir
     if working_tree is None:
         raise ValueError("Repository has no working tree directory")
-    commit_lock_path = Path(working_tree).resolve() / ".commit.lock"
-    async with AsyncFileLock(commit_lock_path):
-        await _to_thread(_perform_commit)
+    repo_root = Path(working_tree).resolve()
+
+    if use_queue:
+        # Use commit queue for batching under high load
+        queue = await _get_commit_queue()
+        await queue.enqueue(repo_root, settings, message, rel_paths)
+    else:
+        # Direct commit without queue
+        await _commit_direct(repo_root, settings, message, rel_paths)
 
 
 async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
@@ -1033,7 +1942,9 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
     if not root.exists():
         return summary
 
-    for lock_path in sorted(root.rglob("*.lock"), key=str):
+    for lock_path_item in sorted(root.rglob("*.lock"), key=str):
+        # rglob returns Path objects at runtime; cast for type checker
+        lock_path = cast(Path, lock_path_item)
         summary["locks_scanned"] += 1
         try:
             lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=0.0)
@@ -1043,7 +1954,9 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
         except FileNotFoundError:
             continue
 
-    for metadata_path in sorted(root.rglob("*.lock.owner.json"), key=str):
+    for metadata_path_item in sorted(root.rglob("*.lock.owner.json"), key=str):
+        # rglob returns Path objects at runtime; cast for type checker
+        metadata_path = cast(Path, metadata_path_item)
         name = metadata_path.name
         if not name.endswith(".owner.json"):
             continue
@@ -1487,7 +2400,12 @@ async def get_file_content(
             # Check size before reading
             if obj.size > max_size_bytes:
                 raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
-            return str(obj.data_stream.read().decode("utf-8", errors="replace"))
+
+            stream = obj.data_stream
+            try:
+                return str(stream.read().decode("utf-8", errors="replace"))
+            finally:
+                stream.close()
         except KeyError:
             return None
 
@@ -1713,12 +2631,26 @@ async def get_historical_inbox_snapshot(
                 "error": f"Invalid timestamp format: {e}"
             }
 
+        # Get agent inbox directory at that commit
+        inbox_path = f"projects/{archive.slug}/agents/{agent_name}/inbox"
+
         # Find commit closest to (but not after) target timestamp
         closest_commit = None
-        for commit in archive.repo.iter_commits(max_count=10000):
+        try:
+            commit_iter = archive.repo.iter_commits(max_count=10000, paths=[inbox_path])
+        except Exception:
+            commit_iter = archive.repo.iter_commits(max_count=10000)
+        for commit in commit_iter:
             if commit.authored_date <= target_timestamp:
                 closest_commit = commit
                 break
+
+        if not closest_commit:
+            # Fall back to full history when the inbox path has never been touched
+            for commit in archive.repo.iter_commits(max_count=10000):
+                if commit.authored_date <= target_timestamp:
+                    closest_commit = commit
+                    break
 
         if not closest_commit:
             # No commits before this time
@@ -1729,9 +2661,6 @@ async def get_historical_inbox_snapshot(
                 "requested_time": timestamp,
                 "note": "No commits found before this timestamp"
             }
-
-        # Get agent inbox directory at that commit
-        inbox_path = f"projects/{archive.slug}/agents/{agent_name}/inbox"
 
         messages = []
         try:
@@ -1770,7 +2699,11 @@ async def get_historical_inbox_snapshot(
                             importance = "normal"
 
                             try:
-                                blob_content = item.data_stream.read().decode('utf-8', errors='ignore')
+                                stream = item.data_stream
+                                try:
+                                    blob_content = stream.read().decode('utf-8', errors='ignore')
+                                finally:
+                                    stream.close()
 
                                 # Parse JSON frontmatter (format: ---json\n{...}\n---)
                                 if blob_content.startswith('---json\n') or blob_content.startswith('---json\r\n'):
@@ -1840,3 +2773,464 @@ async def get_historical_inbox_snapshot(
 
     result: dict[str, Any] = await _to_thread(_get_snapshot)
     return result
+
+
+# =============================================================================
+# Doctor Backup Infrastructure
+# =============================================================================
+
+
+@dataclass(slots=True)
+class BackupManifest:
+    """Manifest describing a diagnostic backup."""
+
+    version: int
+    created_at: str
+    reason: str
+    database_path: str | None
+    project_bundles: list[str]
+    storage_root: str
+    restore_instructions: str
+
+
+async def create_diagnostic_backup(
+    settings: Settings,
+    project_slug: str | None = None,
+    backup_dir: Path | None = None,
+    reason: str = "doctor-repair",
+) -> Path:
+    """Create a timestamped backup before repair operations.
+
+    Format: Git bundle + SQLite copy (fast, complete, restorable)
+
+    Args:
+        settings: Application settings
+        project_slug: Specific project to backup, or None for all projects
+        backup_dir: Directory to store backup, or None for default
+        reason: Reason for backup (included in manifest)
+
+    Returns:
+        Path to backup directory containing:
+        - {project_slug}.bundle (git bundle of project archive)
+        - database.sqlite3 (copy of full database)
+        - manifest.json (what was backed up, when, why, restore instructions)
+    """
+    import shutil
+
+    from .db import get_database_path
+
+    # Create backup directory
+    if backup_dir is None:
+        backup_dir = Path(settings.storage.root) / "backups"
+    backup_dir = backup_dir.expanduser().resolve()
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+    backup_path = backup_dir / f"{timestamp}_{reason}"
+    backup_path.mkdir(parents=True, exist_ok=True)
+
+    project_bundles: list[str] = []
+    database_copied: str | None = None
+
+    # Get the archive repo
+    archive_root = Path(settings.storage.root).expanduser().resolve()
+    if not archive_root.exists():
+        raise ValueError(f"Storage root does not exist: {archive_root}")
+
+    # Copy database
+    db_path = get_database_path(settings)
+    if db_path and db_path.exists():
+        db_backup = backup_path / "database.sqlite3"
+
+        def _copy_db() -> None:
+            # Use shutil.copy2 to preserve metadata
+            shutil.copy2(db_path, db_backup)
+            # Also copy WAL and SHM files if they exist
+            wal_path = db_path.with_suffix(".sqlite3-wal")
+            shm_path = db_path.with_suffix(".sqlite3-shm")
+            if wal_path.exists():
+                shutil.copy2(wal_path, backup_path / wal_path.name)
+            if shm_path.exists():
+                shutil.copy2(shm_path, backup_path / shm_path.name)
+
+        await _to_thread(_copy_db)
+        database_copied = str(db_backup)
+
+    # Create git bundles for projects
+    repo_path = archive_root
+    if repo_path.exists() and (repo_path / ".git").exists():
+
+        def _create_bundles() -> list[str]:
+            bundles: list[str] = []
+            repo = Repo(repo_path)
+            try:
+                if project_slug:
+                    # Single project bundle
+                    bundle_path = backup_path / f"{project_slug}.bundle"
+                    try:
+                        # Create bundle of the entire repo (includes all history)
+                        repo.git.bundle("create", str(bundle_path), "--all")
+                        bundles.append(str(bundle_path))
+                    except Exception:
+                        pass  # Skip if bundle creation fails
+                else:
+                    # Bundle entire archive
+                    bundle_path = backup_path / "archive.bundle"
+                    try:
+                        repo.git.bundle("create", str(bundle_path), "--all")
+                        bundles.append(str(bundle_path))
+                    except Exception:
+                        pass
+            finally:
+                repo.close()
+
+            return bundles
+
+        project_bundles = await _to_thread(_create_bundles)
+
+    # Write manifest
+    manifest = BackupManifest(
+        version=1,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        reason=reason,
+        database_path=database_copied,
+        project_bundles=project_bundles,
+        storage_root=str(archive_root),
+        restore_instructions=(
+            "To restore:\n"
+            "1. Stop any running MCP Agent Mail processes\n"
+            "2. Copy database.sqlite3 back to original location\n"
+            "3. Use 'git clone --bare <bundle> <target>' to restore archive\n"
+            "4. Restart MCP Agent Mail"
+        ),
+    )
+
+    manifest_path = backup_path / "manifest.json"
+
+    def _write_manifest() -> None:
+        with manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "version": manifest.version,
+                    "created_at": manifest.created_at,
+                    "reason": manifest.reason,
+                    "database_path": manifest.database_path,
+                    "project_bundles": manifest.project_bundles,
+                    "storage_root": manifest.storage_root,
+                    "restore_instructions": manifest.restore_instructions,
+                },
+                f,
+                indent=2,
+            )
+
+    await _to_thread(_write_manifest)
+
+    return backup_path
+
+
+async def list_backups(settings: Settings) -> list[dict[str, Any]]:
+    """List all available diagnostic backups.
+
+    Returns:
+        List of backup info dicts with path, created_at, reason, size
+    """
+    backup_dir = Path(settings.storage.root).expanduser().resolve() / "backups"
+    if not backup_dir.exists():
+        return []
+
+    backups: list[dict[str, Any]] = []
+
+    def _scan_backups() -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for entry in sorted(backup_dir.iterdir(), reverse=True):
+            if entry.is_dir():
+                manifest_path = entry / "manifest.json"
+                if manifest_path.exists():
+                    try:
+                        with manifest_path.open(encoding="utf-8") as f:
+                            manifest_data = json.load(f)
+                        # Calculate total size
+                        total_size = sum(
+                            p.stat().st_size for p in entry.rglob("*") if p.is_file()
+                        )
+                        results.append({
+                            "path": str(entry),
+                            "created_at": manifest_data.get("created_at"),
+                            "reason": manifest_data.get("reason"),
+                            "size_bytes": total_size,
+                            "has_database": manifest_data.get("database_path") is not None,
+                            "bundle_count": len(manifest_data.get("project_bundles", [])),
+                        })
+                    except (json.JSONDecodeError, OSError):
+                        pass
+        return results
+
+    backups = await _to_thread(_scan_backups)
+    return backups
+
+
+async def restore_from_backup(
+    settings: Settings,
+    backup_path: Path,
+    target_project: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Restore from a diagnostic backup.
+
+    Args:
+        settings: Application settings
+        backup_path: Path to backup directory
+        target_project: Specific project to restore, or None for all
+        dry_run: If True, only report what would be restored
+
+    Returns:
+        Dict with restoration results
+    """
+    import shutil
+
+    from .db import get_database_path
+
+    manifest_path = backup_path / "manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(f"No manifest.json found in {backup_path}")
+
+    def _read_manifest() -> dict[str, Any]:
+        with manifest_path.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    manifest_data = await _to_thread(_read_manifest)
+
+    results: dict[str, Any] = {
+        "backup_path": str(backup_path),
+        "created_at": manifest_data.get("created_at"),
+        "reason": manifest_data.get("reason"),
+        "dry_run": dry_run,
+        "database_restored": False,
+        "bundles_restored": [],
+        "errors": [],
+    }
+
+    if dry_run:
+        results["would_restore_database"] = manifest_data.get("database_path") is not None
+        results["would_restore_bundles"] = manifest_data.get("project_bundles", [])
+        return results
+
+    # Restore database
+    db_backup = backup_path / "database.sqlite3"
+    if db_backup.exists():
+        db_path = get_database_path(settings)
+        if db_path:
+            try:
+
+                def _restore_db() -> None:
+                    # Backup current DB first (safety)
+                    if db_path.exists():
+                        shutil.copy2(db_path, db_path.with_suffix(".sqlite3.pre-restore"))
+                    shutil.copy2(db_backup, db_path)
+                    # Also restore WAL and SHM if present in backup
+                    for suffix in ["-wal", "-shm"]:
+                        backup_file = backup_path / f"database.sqlite3{suffix}"
+                        target_file = db_path.with_suffix(f".sqlite3{suffix}")
+                        if backup_file.exists():
+                            shutil.copy2(backup_file, target_file)
+
+                await _to_thread(_restore_db)
+                results["database_restored"] = True
+            except Exception as e:
+                results["errors"].append(f"Database restore failed: {e}")
+
+    # Restore git bundles
+    bundles = manifest_data.get("project_bundles", [])
+    archive_root = Path(settings.storage.root).expanduser().resolve()
+
+    def _restore_bundle(bundle_to_restore: Path, target_root: Path) -> None:
+        """Restore a git bundle to target directory."""
+        # Backup current archive
+        if target_root.exists():
+            backup_archive = target_root.with_suffix(".pre-restore")
+            if backup_archive.exists():
+                shutil.rmtree(backup_archive)
+            shutil.copytree(target_root, backup_archive)
+            shutil.rmtree(target_root)
+
+        # Clone from bundle
+        Repo.clone_from(str(bundle_to_restore), str(target_root))
+
+    for bundle_path_str in bundles:
+        bundle_path = Path(bundle_path_str)
+        if not bundle_path.exists():
+            # Try relative to backup_path
+            bundle_path = backup_path / bundle_path.name
+        if not bundle_path.exists():
+            results["errors"].append(f"Bundle not found: {bundle_path_str}")
+            continue
+
+        try:
+            await _to_thread(_restore_bundle, bundle_path, archive_root)
+            results["bundles_restored"].append(str(bundle_path))
+        except Exception as e:
+            results["errors"].append(f"Bundle restore failed for {bundle_path}: {e}")
+
+    return results
+
+
+# -------------------------------------------------------------------------------------------------
+# Push Notifications: Signal file approach for local deployments
+# -------------------------------------------------------------------------------------------------
+# When enabled, write a signal file when a message is delivered to an agent's inbox.
+# Agents can watch these files using inotify/FSEvents/kqueue for instant notifications
+# without polling. This is useful for local multi-agent workflows.
+#
+# Signal file path: {signals_dir}/projects/{project_slug}/agents/{agent_name}.signal
+# Signal file contents: JSON with message metadata (id, from, subject, importance, timestamp)
+
+# Debounce tracking: (project_slug, agent_name) -> last_signal_time
+_SIGNAL_DEBOUNCE: dict[tuple[str, str], float] = {}
+
+
+async def emit_notification_signal(
+    settings: Settings,
+    project_slug: str,
+    agent_name: str,
+    message_metadata: dict[str, Any] | None = None,
+) -> bool:
+    """Emit a notification signal for an agent in a project.
+
+    This creates/updates a signal file that agents can watch for incoming messages.
+    The signal file contains metadata about the notification for context.
+
+    Args:
+        settings: Application settings (must have notifications enabled)
+        project_slug: Project identifier
+        agent_name: Target agent name
+        message_metadata: Optional dict with message info (id, from, subject, importance)
+
+    Returns:
+        True if signal was emitted, False if notifications disabled or debounced
+    """
+    if not settings.notifications.enabled:
+        return False
+
+    # Debounce check: skip if we signaled this agent recently
+    debounce_key = (project_slug, agent_name)
+    debounce_ms = settings.notifications.debounce_ms
+    now_ms = time.time() * 1000
+
+    last_signal = _SIGNAL_DEBOUNCE.get(debounce_key, 0)
+    if now_ms - last_signal < debounce_ms:
+        return False  # Too soon, skip
+
+    _SIGNAL_DEBOUNCE[debounce_key] = now_ms
+
+    # Build signal file path
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
+
+    # Prepare signal content
+    signal_data: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "project": project_slug,
+        "agent": agent_name,
+    }
+
+    if settings.notifications.include_metadata and message_metadata:
+        signal_data["message"] = {
+            "id": message_metadata.get("id"),
+            "from": message_metadata.get("from"),
+            "subject": message_metadata.get("subject"),
+            "importance": message_metadata.get("importance", "normal"),
+        }
+
+    # Write signal file
+    def _write_signal() -> None:
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        signal_path.write_text(json.dumps(signal_data, indent=2), encoding="utf-8")
+
+    try:
+        await _to_thread(_write_signal)
+        return True
+    except Exception:
+        # Signal emission is best-effort; don't fail message delivery
+        return False
+
+
+async def clear_notification_signal(
+    settings: Settings,
+    project_slug: str,
+    agent_name: str,
+) -> bool:
+    """Clear notification signal for an agent (called when inbox is read).
+
+    This removes the signal file to indicate the agent has acknowledged notifications.
+
+    Args:
+        settings: Application settings
+        project_slug: Project identifier
+        agent_name: Target agent name
+
+    Returns:
+        True if signal was cleared, False if file didn't exist or error
+    """
+    if not settings.notifications.enabled:
+        return False
+
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
+
+    def _clear_signal() -> bool:
+        if signal_path.exists():
+            signal_path.unlink()
+            return True
+        return False
+
+    try:
+        return await _to_thread(_clear_signal)
+    except Exception:
+        return False
+
+
+def list_pending_signals(settings: Settings, project_slug: str | None = None) -> list[dict[str, Any]]:
+    """List all pending notification signals.
+
+    Args:
+        settings: Application settings
+        project_slug: Optional filter by project
+
+    Returns:
+        List of signal info dicts with project, agent, and metadata
+    """
+    if not settings.notifications.enabled:
+        return []
+
+    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    if not signals_dir.exists():
+        return []
+
+    results: list[dict[str, Any]] = []
+    projects_dir = signals_dir / "projects"
+
+    if not projects_dir.exists():
+        return []
+
+    project_dirs = [projects_dir / project_slug] if project_slug else list(projects_dir.iterdir())
+
+    for proj_dir in project_dirs:
+        if not proj_dir.is_dir():
+            continue
+        agents_dir = proj_dir / "agents"
+        if not agents_dir.exists():
+            continue
+
+        for signal_file in agents_dir.glob("*.signal"):
+            try:
+                data = json.loads(signal_file.read_text(encoding="utf-8"))
+                results.append(data)
+            except Exception:
+                # Corrupted signal file; include minimal info
+                results.append({
+                    "project": proj_dir.name,
+                    "agent": signal_file.stem,
+                    "error": "Failed to parse signal file",
+                })
+
+    return results

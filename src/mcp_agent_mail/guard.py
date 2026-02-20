@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -99,14 +100,46 @@ def _render_chain_runner_script(hook_name: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _git(cwd: Path, *args: str) -> str | None:
+    try:
+        cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
+        return cp.stdout.strip()
+    except Exception:
+        return None
+
+
+def _resolve_hooks_dir(repo: Path) -> Path:
+    # Prefer core.hooksPath if configured
+    hooks_path = _git(repo, "config", "--get", "core.hooksPath")
+    if hooks_path:
+        # Expand user (e.g. ~/.githooks)
+        p = Path(hooks_path).expanduser()
+        if p.is_absolute():
+            return p
+        # Resolve relative to repo root
+        root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
+        return Path(root) / hooks_path
+
+    # Fall back to git-dir/hooks
+    git_dir = _git(repo, "rev-parse", "--git-dir")
+    if git_dir:
+        g = Path(git_dir)
+        if not g.is_absolute():
+            g = repo / g
+        return g / "hooks"
+    # Last resort: traditional path
+    return repo / ".git" / "hooks"
+
+
+
 def render_precommit_script(archive: ProjectArchive) -> str:
     """Return the pre-commit script content for the given archive.
 
     Construct with explicit lines at column 0 to avoid indentation errors.
     """
 
-    file_reservations_dir = str((archive.root / "file_reservations").resolve())
-    storage_root = str(archive.root.resolve())
+    file_reservations_dir = str((archive.root / "file_reservations").resolve()).replace("\\", "/")
+    storage_root = str(archive.root.resolve()).replace("\\", "/")
     lines = [
         "#!/usr/bin/env python3",
         "# mcp-agent-mail guard hook (pre-commit)",
@@ -121,13 +154,11 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "# Optional Git pathspec support (preferred when available)",
         "try:",
         "    from pathspec import PathSpec as _PS  # type: ignore[import-not-found]",
-        "    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GWM  # type: ignore[import-not-found]",
         "except Exception:",
         "    _PS = None  # type: ignore[assignment]",
-        "    _GWM = None  # type: ignore[assignment]",
         "",
-        f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
-        f"STORAGE_ROOT = Path(\"{storage_root}\")",
+        f"FILE_RESERVATIONS_DIR = Path({json.dumps(file_reservations_dir)})",
+        f"STORAGE_ROOT = Path({json.dumps(storage_root)})",
         "",
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
@@ -183,24 +214,39 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "    sys.exit(0)",
         "",
         "# Local conflict detection against FILE_RESERVATIONS_DIR",
-        "def _now_iso_utc():",
-        "    return datetime.now(timezone.utc).isoformat()",
-        "def _not_expired(expires_ts):",
-        "    if not expires_ts:",
-        "        return True",
+        "def _now_utc():",
+        "    return datetime.now(timezone.utc)",
+        "def _parse_iso(value):",
+        "    if not value:",
+        "        return None",
         "    try:",
-        "        return expires_ts > _now_iso_utc()",
+        "        text = value",
+        "        if text.endswith(\"Z\"):",
+        "            text = text[:-1] + \"+00:00\"",
+        "        dt = datetime.fromisoformat(text)",
+        "        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:",
+        "            dt = dt.replace(tzinfo=timezone.utc)",
+        "        return dt.astimezone(timezone.utc)",
         "    except Exception:",
+        "        return None",
+        "def _not_expired(expires_ts):",
+        "    parsed = _parse_iso(expires_ts)",
+        "    if parsed is None:",
         "        return True",
+        "    return parsed > _now_utc()",
         "def _compile_one(patt):",
         "    q = patt.replace(\"\\\\\",\"/\")",
-        "    if _PS and _GWM:",
+        "    if _PS:",
         "        try:",
-        "            return _PS.from_lines(_GWM, [q])",
+        "            return _PS.from_lines(\"gitignore\", [q])",
         "        except Exception:",
         "            return None",
         "    return None",
-        "conflicts = []",
+        "",
+        "# Phase 1: Pre-load and compile all reservation patterns ONCE",
+        "compiled_patterns = []",
+        "all_pattern_strings = []",
+        "seen_ids = set()",
         "try:",
         "    for f in FILE_RESERVATIONS_DIR.iterdir():",
         "        if not f.name.endswith('.json'):",
@@ -213,8 +259,17 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "        for r in recs:",
         "            if not isinstance(r, dict):",
         "                continue",
+        "            rid = r.get('id')",
+        "            if rid is not None:",
+        "                rid_key = str(rid)",
+        "                if rid_key in seen_ids:",
+        "                    continue",
+        "                seen_ids.add(rid_key)",
         "            patt = (r.get('path_pattern') or '').strip()",
         "            if not patt:",
+        "                continue",
+        "            # Skip virtual namespace reservations (tool://, resource://, service://) — bd-14z",
+        "            if any(patt.startswith(pfx) for pfx in ('tool://', 'resource://', 'service://')):",
         "                continue",
         "            holder = (r.get('agent') or '').strip()",
         "            exclusive = r.get('exclusive', True)",
@@ -223,14 +278,38 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         "                continue",
         "            if holder and holder == AGENT_NAME:",
         "                continue",
+        "            if not _not_expired(expires):",
+        "                continue",
+        "            # Pre-compile pattern ONCE (not per-path)",
         "            spec = _compile_one(patt)",
-        "            for p in paths:",
-        "                norm = p.replace('\\\\','/').lstrip('/')",
-        "                matched = spec.match_file(norm) if spec is not None else _fn.fnmatch(norm, patt)",
-        "                if matched and _not_expired(expires):",
-        "                    conflicts.append((patt, p, holder))",
+        "            patt_norm = patt.replace('\\\\','/').lstrip('/')",
+        "            compiled_patterns.append((spec, patt, patt_norm, holder))",
+        "            all_pattern_strings.append(patt_norm)",
         "except Exception:",
-        "    conflicts = []",
+        "    compiled_patterns = []",
+        "    all_pattern_strings = []",
+        "",
+        "# Phase 2: Build union PathSpec for fast-path rejection",
+        "union_spec = None",
+        "if _PS and all_pattern_strings:",
+        "    try:",
+        "        union_spec = _PS.from_lines(\"gitignore\", all_pattern_strings)",
+        "    except Exception:",
+        "        union_spec = None",
+        "",
+        "# Phase 3: Check paths against compiled patterns",
+        "conflicts = []",
+        "if compiled_patterns:",
+        "    for p in paths:",
+        "        norm = p.replace('\\\\','/').lstrip('/')",
+        "        # Fast-path: if union_spec exists and path doesn't match ANY pattern, skip",
+        "        if union_spec is not None and not union_spec.match_file(norm):",
+        "            continue",
+        "        # Detailed matching for conflict attribution",
+        "        for spec, patt, patt_norm, holder in compiled_patterns:",
+        "            matched = spec.match_file(norm) if spec is not None else _fn.fnmatch(norm, patt_norm)",
+        "            if matched:",
+        "                conflicts.append((patt, p, holder))",
         "if conflicts:",
         "    sys.stderr.write(\"Exclusive file_reservation conflicts detected\\n\")",
         "    for patt, path, holder in conflicts[:10]:",
@@ -248,7 +327,7 @@ def render_prepush_script(archive: ProjectArchive) -> str:
 
     Python script to avoid external shell assumptions; NUL-safe and respects gate/advisory mode.
     """
-    file_reservations_dir = str((archive.root / "file_reservations").resolve())
+    file_reservations_dir = str((archive.root / "file_reservations").resolve()).replace("\\", "/")
     lines = [
         "#!/usr/bin/env python3",
         "# mcp-agent-mail guard hook (pre-push)",
@@ -263,12 +342,10 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "# Optional Git pathspec support (preferred when available)",
         "try:",
         "    from pathspec import PathSpec as _PS  # type: ignore[import-not-found]",
-        "    from pathspec.patterns.gitwildmatch import GitWildMatchPattern as _GWM  # type: ignore[import-not-found]",
         "except Exception:",
         "    _PS = None  # type: ignore[assignment]",
-        "    _GWM = None  # type: ignore[assignment]",
         "",
-        f"FILE_RESERVATIONS_DIR = Path(\"{file_reservations_dir}\")",
+        f"FILE_RESERVATIONS_DIR = Path({json.dumps(file_reservations_dir)})",
         "",
         "# Gate variables (presence) and mode",
         "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
@@ -313,45 +390,82 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "        # Fallback: gather changed paths directly when range enumeration fails",
         "        rng = local_sha if (not remote_sha or set(remote_sha) == {\"0\"}) else f\"{remote_sha}..{local_sha}\"",
         "        try:",
-        "            cp = subprocess.run([\"git\",\"diff\",\"--name-only\",rng],check=True,capture_output=True,text=True)",
-        "            for p in cp.stdout.splitlines():",
-        "                if p:",
-        "                    changed.append(p.strip())",
+        "            cp = subprocess.run([\"git\",\"diff\",\"--name-status\",\"-M\",\"-z\",rng],check=True,capture_output=True)",
+        "            data = cp.stdout.decode(\"utf-8\",\"ignore\")",
+        "            parts = [p for p in data.split(\"\\x00\") if p]",
+        "            i = 0",
+        "            while i < len(parts):",
+        "                status = parts[i]",
+        "                i += 1",
+        "                if status.startswith(\"R\") and i + 1 < len(parts):",
+        "                    oldp = parts[i]; newp = parts[i + 1]; i += 2",
+        "                    if oldp: changed.append(oldp)",
+        "                    if newp: changed.append(newp)",
+        "                else:",
+        "                    if i < len(parts):",
+        "                        pth = parts[i]; i += 1",
+        "                        if pth: changed.append(pth)",
         "        except Exception:",
         "            pass",
         "",
-        "# changed already initialized above; add per-commit changed paths",
+        "# changed already initialized above; add per-commit changed paths (capture renames)",
         "for c in commits:",
         "    try:",
-        "        cp = subprocess.run([\"git\",\"diff-tree\",\"-r\",\"--no-commit-id\",\"--name-only\",\"--no-ext-diff\",\"--diff-filter=ACMRDTU\",\"-z\",c],",
+        "        cp = subprocess.run([\"git\",\"diff-tree\",\"-r\",\"--no-commit-id\",\"--name-status\",\"-M\",\"--no-ext-diff\",\"--diff-filter=ACMRDTU\",\"-z\",c],",
         "                            check=True,capture_output=True)",
         "        data = cp.stdout.decode(\"utf-8\",\"ignore\")",
-        "        paths = [p for p in data.split(\"\\x00\") if p]",
-        "        changed.extend(paths)",
+        "        parts = [p for p in data.split(\"\\x00\") if p]",
+        "        i = 0",
+        "        while i < len(parts):",
+        "            status = parts[i]",
+        "            i += 1",
+        "            if status.startswith(\"R\") and i + 1 < len(parts):",
+        "                oldp = parts[i]; newp = parts[i + 1]; i += 2",
+        "                if oldp: changed.append(oldp)",
+        "                if newp: changed.append(newp)",
+        "            else:",
+        "                if i < len(parts):",
+        "                    pth = parts[i]; i += 1",
+        "                    if pth: changed.append(pth)",
         "    except Exception:",
         "        continue",
         "",
         "# Local conflict detection against FILE_RESERVATIONS_DIR using changed paths",
         "if not changed:",
         "    sys.exit(0)",
-        "def _now_iso_utc():",
-        "    return datetime.now(timezone.utc).isoformat()",
-        "def _not_expired(expires_ts):",
-        "    if not expires_ts:",
-        "        return True",
+        "def _now_utc():",
+        "    return datetime.now(timezone.utc)",
+        "def _parse_iso(value):",
+        "    if not value:",
+        "        return None",
         "    try:",
-        "        return expires_ts > _now_iso_utc()",
+        "        text = value",
+        "        if text.endswith(\"Z\"):",
+        "            text = text[:-1] + \"+00:00\"",
+        "        dt = datetime.fromisoformat(text)",
+        "        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:",
+        "            dt = dt.replace(tzinfo=timezone.utc)",
+        "        return dt.astimezone(timezone.utc)",
         "    except Exception:",
+        "        return None",
+        "def _not_expired(expires_ts):",
+        "    parsed = _parse_iso(expires_ts)",
+        "    if parsed is None:",
         "        return True",
+        "    return parsed > _now_utc()",
         "def _compile_one(patt):",
         "    q = patt.replace(\"\\\\\",\"/\")",
-        "    if _PS and _GWM:",
+        "    if _PS:",
         "        try:",
-        "            return _PS.from_lines(_GWM, [q])",
+        "            return _PS.from_lines(\"gitignore\", [q])",
         "        except Exception:",
         "            return None",
         "    return None",
-        "conflicts = []",
+        "",
+        "# Phase 1: Pre-load and compile all reservation patterns ONCE",
+        "compiled_patterns = []",
+        "all_pattern_strings = []",
+        "seen_ids = set()",
         "try:",
         "    for f in FILE_RESERVATIONS_DIR.iterdir():",
         "        if not f.name.endswith('.json'):",
@@ -364,8 +478,17 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "        for r in recs:",
         "            if not isinstance(r, dict):",
         "                continue",
+        "            rid = r.get('id')",
+        "            if rid is not None:",
+        "                rid_key = str(rid)",
+        "                if rid_key in seen_ids:",
+        "                    continue",
+        "                seen_ids.add(rid_key)",
         "            patt = (r.get('path_pattern') or '').strip()",
         "            if not patt:",
+        "                continue",
+        "            # Skip virtual namespace reservations (tool://, resource://, service://) — bd-14z",
+        "            if any(patt.startswith(pfx) for pfx in ('tool://', 'resource://', 'service://')):",
         "                continue",
         "            holder = (r.get('agent') or '').strip()",
         "            exclusive = r.get('exclusive', True)",
@@ -374,14 +497,38 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         "                continue",
         "            if holder and holder == AGENT_NAME:",
         "                continue",
+        "            if not _not_expired(expires):",
+        "                continue",
+        "            # Pre-compile pattern ONCE (not per-path)",
         "            spec = _compile_one(patt)",
-        "            for p in changed:",
-        "                norm = p.replace('\\\\','/').lstrip('/')",
-        "                matched = spec.match_file(norm) if spec is not None else _fn.fnmatch(norm, patt)",
-        "                if matched and _not_expired(expires):",
-        "                    conflicts.append((patt, p, holder))",
+        "            patt_norm = patt.replace('\\\\','/').lstrip('/')",
+        "            compiled_patterns.append((spec, patt, patt_norm, holder))",
+        "            all_pattern_strings.append(patt_norm)",
         "except Exception:",
-        "    conflicts = []",
+        "    compiled_patterns = []",
+        "    all_pattern_strings = []",
+        "",
+        "# Phase 2: Build union PathSpec for fast-path rejection",
+        "union_spec = None",
+        "if _PS and all_pattern_strings:",
+        "    try:",
+        "        union_spec = _PS.from_lines(\"gitignore\", all_pattern_strings)",
+        "    except Exception:",
+        "        union_spec = None",
+        "",
+        "# Phase 3: Check changed paths against compiled patterns",
+        "conflicts = []",
+        "if compiled_patterns:",
+        "    for p in changed:",
+        "        norm = p.replace('\\\\','/').lstrip('/')",
+        "        # Fast-path: if union_spec exists and path doesn't match ANY pattern, skip",
+        "        if union_spec is not None and not union_spec.match_file(norm):",
+        "            continue",
+        "        # Detailed matching for conflict attribution",
+        "        for spec, patt, patt_norm, holder in compiled_patterns:",
+        "            matched = spec.match_file(norm) if spec is not None else _fn.fnmatch(norm, patt_norm)",
+        "            if matched:",
+        "                conflicts.append((patt, p, holder))",
         "if conflicts:",
         "    sys.stderr.write(\"Exclusive file_reservation conflicts detected\\n\")",
         "    for patt, path, holder in conflicts[:10]:",
@@ -398,34 +545,6 @@ async def install_guard(settings: Settings, project_slug: str, repo_path: Path) 
     """Install the pre-commit chain-runner and Agent Mail guard plugin."""
 
     archive = await ensure_archive(settings, project_slug)
-
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        # Prefer core.hooksPath if configured
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                resolved = Path(hooks_path)
-            else:
-                # Resolve relative to repo root
-                root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-                resolved = Path(root) / hooks_path
-            return resolved
-        # Fall back to git-dir/hooks
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        # Last resort: traditional path
-        return repo / ".git" / "hooks"
 
     hooks_dir = _resolve_hooks_dir(repo_path)
     if not hooks_dir.exists():
@@ -484,30 +603,6 @@ async def install_prepush_guard(settings: Settings, project_slug: str, repo_path
     """Install the pre-push chain-runner and Agent Mail guard plugin."""
     archive = await ensure_archive(settings, project_slug)
 
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                resolved = Path(hooks_path)
-            else:
-                root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-                resolved = Path(root) / hooks_path
-            return resolved
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        return repo / ".git" / "hooks"
-
     hooks_dir = _resolve_hooks_dir(repo_path)
     await asyncio.to_thread(hooks_dir.mkdir, parents=True, exist_ok=True)
     # Ensure hooks.d/pre-push exists
@@ -564,48 +659,58 @@ async def uninstall_guard(repo_path: Path) -> bool:
       Agent Mail hooks (sentinel present) and not chain-runners.
     """
 
-    def _git(cwd: Path, *args: str) -> str | None:
-        try:
-            cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
-            return cp.stdout.strip()
-        except Exception:
-            return None
-
-    def _resolve_hooks_dir(repo: Path) -> Path:
-        hooks_path = _git(repo, "config", "--get", "core.hooksPath")
-        if hooks_path:
-            if hooks_path.startswith("/") or (((len(hooks_path) > 1) and ((hooks_path[1:3] == ":\\") or (hooks_path[1:3] == ":/")))):
-                return Path(hooks_path)
-            root = _git(repo, "rev-parse", "--show-toplevel") or str(repo)
-            return Path(root) / hooks_path
-        git_dir = _git(repo, "rev-parse", "--git-dir")
-        if git_dir:
-            g = Path(git_dir)
-            if not g.is_absolute():
-                g = repo / g
-            return g / "hooks"
-        return repo / ".git" / "hooks"
-
     hooks_dir = _resolve_hooks_dir(repo_path)
     removed = False
+
+    def _has_other_plugins(run_dir: Path) -> bool:
+        """Check if there are any plugins remaining after removing ours."""
+        if not run_dir.exists() or not run_dir.is_dir():
+            return False
+        # List all files, excluding our plugin
+        return any(item.is_file() and item.name != "50-agent-mail.py" for item in run_dir.iterdir())
+
     # Remove our hooks.d plugins if present
     for sub in ("pre-commit", "pre-push"):
         plugin = hooks_dir / "hooks.d" / sub / "50-agent-mail.py"
         if plugin.exists():
             await asyncio.to_thread(plugin.unlink)
             removed = True
+
     # Legacy top-level single-file uninstall (pre-chain-runner installs)
+    # Only remove chain-runner if no other plugins depend on it
     pre_commit = hooks_dir / "pre-commit"
     pre_push = hooks_dir / "pre-push"
     SENTINELS = ("mcp-agent-mail guard hook", "AGENT_NAME environment variable is required.")
-    for hook_path in (pre_commit, pre_push):
+    for hook_name, hook_path in [("pre-commit", pre_commit), ("pre-push", pre_push)]:
         if hook_path.exists():
             try:
                 content = (await asyncio.to_thread(hook_path.read_text, "utf-8")).strip()
             except Exception:
                 content = ""
-            # Remove our chain-runner files (leave other hooks intact)
-            if "mcp-agent-mail chain-runner" in content or any(s in content for s in SENTINELS):
+
+            is_our_chain_runner = "mcp-agent-mail chain-runner" in content
+            is_legacy_hook = any(s in content for s in SENTINELS)
+
+            if is_our_chain_runner:
+                # Check if other plugins exist that need the chain-runner
+                run_dir = hooks_dir / "hooks.d" / hook_name
+                orig_path = hooks_dir / f"{hook_name}.orig"
+
+                if _has_other_plugins(run_dir):
+                    # Other plugins exist - keep the chain-runner so they continue to work
+                    pass
+                elif orig_path.exists():
+                    # No other plugins, but .orig exists - restore original hook
+                    await asyncio.to_thread(hook_path.unlink)
+                    await asyncio.to_thread(orig_path.replace, hook_path)
+                    removed = True
+                else:
+                    # No other plugins and no .orig - safe to remove chain-runner
+                    await asyncio.to_thread(hook_path.unlink)
+                    removed = True
+            elif is_legacy_hook:
+                # Legacy single-file hook (not chain-runner) - safe to remove
                 await asyncio.to_thread(hook_path.unlink)
                 removed = True
+
     return removed

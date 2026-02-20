@@ -17,13 +17,13 @@ from urllib.parse import urlparse
 
 import litellm
 import structlog
-from decouple import Config as DecoupleConfig, RepositoryEnv  # type: ignore[import-untyped]
+from decouple import Config as DecoupleConfig, RepositoryEnv
 from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
 
-_router: Optional[Any] = None
 _init_lock = asyncio.Lock()
+_initialized: bool = False
 _logger = structlog.get_logger(__name__)
 
 
@@ -82,11 +82,11 @@ def _setup_callbacks() -> None:
 
 
 async def _ensure_initialized() -> None:
-    global _router
-    if _router is not None:
+    global _initialized
+    if _initialized:
         return
     async with _init_lock:
-        if _router is not None:
+        if _initialized:
             return
         settings = get_settings()
 
@@ -98,9 +98,7 @@ async def _ensure_initialized() -> None:
 
         # Enable cache globally (in-memory or Redis) using LiteLLM's API
         if settings.llm.cache_enabled:
-            from contextlib import suppress
-
-            with suppress(Exception):
+            with contextlib.suppress(Exception):
                 backend = (getattr(settings.llm, "cache_backend", "local") or "local").lower()
                 if backend == "redis" and getattr(settings.llm, "cache_redis_url", ""):
                     parsed = urlparse(settings.llm.cache_redis_url)
@@ -123,11 +121,7 @@ async def _ensure_initialized() -> None:
                     litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
 
         _setup_callbacks()
-
-        # Skip Router initialization - we use direct litellm.completion() calls.
-        # Router is designed for load balancing across multiple deployments with a model_list,
-        # but we're just using single API keys, so direct completion is simpler and works fine.
-        _router = None
+        _initialized = True
 
 
 def _choose_best_available_model(preferred: str) -> str:
@@ -144,7 +138,7 @@ def _choose_best_available_model(preferred: str) -> str:
 
     # Alias unsupported placeholder to sensible defaults by provider key presence
     if env.get("OPENAI_API_KEY"):
-        return "gpt-5-mini"
+        return "gpt-4o-mini"
     if env.get("GOOGLE_API_KEY"):
         return "gemini-1.5-flash"
     if env.get("ANTHROPIC_API_KEY"):
@@ -158,23 +152,23 @@ def _choose_best_available_model(preferred: str) -> str:
         return "xai/grok-2-mini"
     if env.get("OPENROUTER_API_KEY"):
         # OpenRouter requires qualified model ids; choose a widely available one
-        return "openrouter/openai/gpt-5-mini"
+        return "openrouter/openai/gpt-4o-mini"
     return preferred
 
 
 def _resolve_model_alias(name: str) -> str:
     """Map known placeholder or project-specific names to concrete provider models."""
     normalized = (name or "").strip().lower()
-    if normalized in {"gpt-5-mini", "gpt5-mini", "gpt-5m"}:
+    if normalized in {"gpt-5-mini", "gpt5-mini", "gpt-5m", "gpt-4o-mini"}:
         return _choose_best_available_model(normalized)
     return name
 
 async def complete_system_user(system: str, user: str, *, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> LlmOutput:
     """Chat completion helper returning content.
 
-    Falls back to litellm.completion if Router isn't available.
+    Uses direct litellm.completion() calls. Falls back to alternative models
+    if the primary model fails and an alternative provider is available.
     """
-    global _router
     await _ensure_initialized()
     settings = get_settings()
     use_model = model or settings.llm.default_model
@@ -187,33 +181,20 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
         {"role": "user", "content": user},
     ]
 
-    def _call_router(router: Any) -> Any:
-        return router.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
-
-    def _call_direct() -> Any:
-        return litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks)
+    def _call_completion(m: str) -> Any:
+        return litellm.completion(model=m, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp: Any
     try:
-        if _router is not None:
-            current_router = _router
-            resp = await asyncio.to_thread(lambda: _call_router(current_router))
-        else:
-            resp = await asyncio.to_thread(_call_direct)
+        resp = await asyncio.to_thread(_call_completion, use_model)
     except Exception as err:
-        # Fallback to direct completion if Router path fails (e.g., no deployments)
-        _router = None
-        _logger.debug("litellm.router.disabled_after_failure")
-        try:
-            resp = await asyncio.to_thread(_call_direct)
-        except Exception:
-            # As a last resort, try with a provider-backed small model if available
-            alt_model = _choose_best_available_model(use_model)
-            if alt_model != use_model:
-                use_model = alt_model
-                resp = await asyncio.to_thread(lambda: litellm.completion(model=use_model, messages=messages, temperature=temp, max_tokens=mtoks))
-            else:
-                raise err from None
+        # As a fallback, try with a provider-backed small model if available
+        alt_model = _choose_best_available_model(use_model)
+        if alt_model != use_model:
+            use_model = alt_model
+            resp = await asyncio.to_thread(_call_completion, use_model)
+        else:
+            raise err from None
 
     # Normalize content across potential shapes
     content: str
@@ -234,13 +215,13 @@ def _bridge_provider_env() -> None:
     Also map common synonyms to LiteLLM's canonical env names, e.g. GEMINI_API_KEY -> GOOGLE_API_KEY,
     GROK_API_KEY -> XAI_API_KEY.
     """
-    from decouple import RepositoryEmpty  # type: ignore[import-untyped]
+    from decouple import RepositoryEmpty
 
     # Gracefully handle missing .env file (e.g., in CI/tests)
     try:
         cfg = DecoupleConfig(RepositoryEnv(".env"))
     except FileNotFoundError:
-        cfg = DecoupleConfig(RepositoryEmpty())  # type: ignore[arg-type]
+        cfg = DecoupleConfig(RepositoryEmpty())
 
     def _get_from_any(*keys: str) -> str:
         for k in keys:
@@ -272,5 +253,4 @@ def _bridge_provider_env() -> None:
             val = _get_from_any(*aliases)
             if val:
                 os.environ[canonical] = val
-
 

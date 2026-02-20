@@ -169,7 +169,7 @@ def _refresh_viewer_assets(bundle_dir: Path) -> None:
         # Fallback to packaged resources
         package_root = _resources.files("mcp_agent_mail.viewer_assets")
 
-        def _walk(node: Any, rel: Path) -> None:  # type: ignore[no-any-explicit]
+        def _walk(node: Any, rel: Path) -> None:
             for child in node.iterdir():
                 child_rel = rel / child.name
                 if child.is_dir():

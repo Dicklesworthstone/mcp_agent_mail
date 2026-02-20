@@ -117,6 +117,99 @@ def _build_snapshot(tmp_path: Path) -> Path:
     return snapshot
 
 
+def _build_multi_project_snapshot(tmp_path: Path) -> Path:
+    snapshot = tmp_path / "multi.sqlite3"
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                name TEXT,
+                contact_policy TEXT DEFAULT 'auto'
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                sender_id INTEGER,
+                thread_id TEXT,
+                subject TEXT,
+                body_md TEXT,
+                importance TEXT,
+                ack_required INTEGER,
+                created_ts TEXT,
+                attachments TEXT
+            );
+            CREATE TABLE message_recipients (
+                message_id INTEGER,
+                agent_id INTEGER,
+                kind TEXT,
+                read_ts TEXT,
+                ack_ts TEXT
+            );
+            CREATE TABLE file_reservations (id INTEGER PRIMARY KEY, project_id INTEGER);
+            CREATE TABLE agent_links (
+                id INTEGER PRIMARY KEY,
+                a_project_id INTEGER,
+                b_project_id INTEGER
+            );
+            CREATE TABLE project_sibling_suggestions (
+                id INTEGER PRIMARY KEY,
+                project_a_id INTEGER,
+                project_b_id INTEGER
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO projects (id, slug, human_key) VALUES (1, 'alpha', '/repo/alpha')"
+        )
+        conn.execute(
+            "INSERT INTO projects (id, slug, human_key) VALUES (2, 'beta', '/repo/beta')"
+        )
+        conn.execute(
+            "INSERT INTO agents (id, project_id, name) VALUES (1, 1, 'Alpha Agent')"
+        )
+        conn.execute(
+            "INSERT INTO agents (id, project_id, name) VALUES (2, 2, 'Beta Agent')"
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (1, 1, 1, 'alpha-thread', 'Alpha', 'Alpha body', 'normal', 0, '2025-01-01T00:00:00Z', '[]')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (2, 2, 2, 'beta-thread', 'Beta', 'Beta body', 'normal', 0, '2025-01-02T00:00:00Z', '[]')
+            """
+        )
+        conn.execute(
+            "INSERT INTO message_recipients (message_id, agent_id, kind, read_ts, ack_ts) VALUES (1, 1, 'to', NULL, NULL)"
+        )
+        conn.execute(
+            "INSERT INTO message_recipients (message_id, agent_id, kind, read_ts, ack_ts) VALUES (2, 2, 'to', NULL, NULL)"
+        )
+        conn.execute(
+            "INSERT INTO file_reservations (id, project_id) VALUES (1, 1)"
+        )
+        conn.execute(
+            "INSERT INTO file_reservations (id, project_id) VALUES (2, 2)"
+        )
+        conn.execute(
+            "INSERT INTO agent_links (id, a_project_id, b_project_id) VALUES (1, 1, 2)"
+        )
+        conn.execute(
+            "INSERT INTO project_sibling_suggestions (id, project_a_id, project_b_id) VALUES (1, 1, 2)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return snapshot
+
+
 def _read_message(snapshot: Path) -> tuple[str, str, list[dict[str, object]]]:
     conn = sqlite3.connect(snapshot)
     try:
@@ -127,6 +220,44 @@ def _read_message(snapshot: Path) -> tuple[str, str, list[dict[str, object]]]:
         return row["subject"], row["body_md"], attachments
     finally:
         conn.close()
+
+
+def test_apply_project_scope_dedup_and_removes(tmp_path: Path) -> None:
+    snapshot = _build_multi_project_snapshot(tmp_path)
+
+    result = share.apply_project_scope(snapshot, ["ALPHA", " alpha ", "ALPHA"])
+
+    assert len(result.projects) == 1
+    assert result.projects[0].slug == "alpha"
+    assert result.removed_count == 1
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM message_recipients").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM file_reservations").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM agent_links").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM project_sibling_suggestions").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_detect_hosting_hints_sort_order(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(share, "_find_repo_root", lambda _start: None)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setenv("CF_PAGES", "1")
+    monkeypatch.setenv("NETLIFY", "true")
+    monkeypatch.setenv("AWS_S3_BUCKET", "bucket-name")
+
+    hints = share.detect_hosting_hints(tmp_path)
+    assert [hint.key for hint in hints] == [
+        "github_pages",
+        "cloudflare_pages",
+        "netlify",
+        "s3",
+    ]
 
 
 def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
@@ -218,6 +349,26 @@ def test_scrub_snapshot_archive_preset_preserves_runtime_state(tmp_path: Path) -
     assert "sk-" in subject
     assert "bearer" in body.lower()
     assert attachments and "download_url" in attachments[0]
+
+
+def test_scrub_snapshot_invalid_attachments_json(tmp_path: Path) -> None:
+    snapshot = _build_snapshot(tmp_path)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.execute("UPDATE messages SET attachments = ? WHERE id = 1", ("{not json}",))
+        conn.commit()
+    finally:
+        conn.close()
+
+    scrub_snapshot(snapshot, export_salt=b"invalid-json")
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        attachments_raw = conn.execute("SELECT attachments FROM messages WHERE id = 1").fetchone()[0]
+        assert attachments_raw == "[]"
+    finally:
+        conn.close()
 
 
 def test_bundle_attachments_handles_modes(tmp_path: Path) -> None:
@@ -1173,13 +1324,13 @@ def test_build_materialized_views(tmp_path: Path) -> None:
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
             VALUES (
                 1, 1, 1, 'thread-1', 'Test Message 1', 'Body 1', 'high', 1, '2025-01-01T00:00:00Z',
-                '[{"type":"file","path":"test.txt","size_bytes":100,"media_type":"text/plain"}]'
+                '[{"type":"file","path":"test.txt","bytes":100,"media_type":"text/plain"}]'
             );
 
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
             VALUES (
                 2, 1, 2, 'thread-1', 'Test Message 2', 'Body 2', 'normal', 0, '2025-01-02T00:00:00Z',
-                '[{"type":"inline","data_uri":"data:text/plain;base64,dGVzdA=="},{"type":"file","path":"doc.pdf","size_bytes":500,"media_type":"application/pdf"}]'
+                '[{"type":"inline","data_uri":"data:text/plain;base64,dGVzdA=="},{"type":"file","path":"doc.pdf","bytes":500,"media_type":"application/pdf"}]'
             );
 
             INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
