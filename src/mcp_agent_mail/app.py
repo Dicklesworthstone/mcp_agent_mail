@@ -8,6 +8,7 @@ import contextlib
 import fnmatch
 import functools
 import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -4844,15 +4845,15 @@ def build_mcp_server() -> FastMCP:
         if not agent:
             raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
 
-        # Verify registration token if the agent has one
-        if agent.registration_token and registration_token != agent.registration_token:
+        # Verify registration token if the agent has one (constant-time compare)
+        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
             raise ValueError("Invalid registration_token — only the agent's owner can deregister it")
 
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
             if db_agent:
                 db_agent.contact_policy = "block_all"
-                db_agent.task_description = f"[DEREGISTERED at {datetime.utcnow().isoformat()}] {db_agent.task_description}"
+                db_agent.task_description = f"[DEREGISTERED at {datetime.now(timezone.utc).isoformat()}] {db_agent.task_description}"
                 session.add(db_agent)
                 await session.commit()
 
@@ -5484,7 +5485,7 @@ def build_mcp_server() -> FastMCP:
         # Verify sender identity token if provided
         verified_sender = False
         if sender_token is not None:
-            if sender.registration_token and sender_token == sender.registration_token:
+            if sender.registration_token and hmac.compare_digest(sender_token, sender.registration_token):
                 verified_sender = True
             elif sender.registration_token:
                 raise ValueError(f"sender_token does not match registered token for agent '{sender_name}'")
@@ -6215,24 +6216,24 @@ def build_mcp_server() -> FastMCP:
             raise ValueError(f"Project '{project_key}' not found")
 
         age_limit = max_age_days if max_age_days is not None else settings.retention_max_age_days
-        cutoff = datetime.utcnow() - timedelta(days=age_limit)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=age_limit)
 
         async with get_session() as session:
+            stale_filter = [Message.project_id == project.id, Message.created_ts < cutoff]
             count_result = await session.execute(
-                select(func.count()).select_from(Message).where(
-                    Message.project_id == project.id,
-                    Message.created_ts < cutoff,
-                )
+                select(func.count()).select_from(Message).where(*stale_filter)
             )
             count = count_result.scalar() or 0
 
             if not dry_run and count > 0:
+                # Delete recipient links first to avoid FK violations / orphan rows
+                stale_ids = select(Message.id).where(*stale_filter).scalar_subquery()
                 await session.execute(
-                    delete(Message).where(
-                        Message.project_id == project.id,
-                        Message.created_ts < cutoff,
+                    delete(MessageRecipient).where(
+                        cast(Any, MessageRecipient.message_id).in_(stale_ids)
                     )
                 )
+                await session.execute(delete(Message).where(*stale_filter))
                 await session.commit()
 
         status = "purged" if not dry_run else "dry_run"
