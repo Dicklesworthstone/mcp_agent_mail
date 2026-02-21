@@ -184,8 +184,6 @@ Common pitfalls
 
 Beads provides a lightweight, dependency‑aware issue database and a CLI (`br`) for selecting "ready work," setting priorities, and tracking status. It complements MCP Agent Mail's messaging, audit trail, and file‑reservation signals. Project: [Dicklesworthstone/beads_rust](https://github.com/Dicklesworthstone/beads_rust)
 
-**Note:** `br` (beads_rust) is non-invasive and never executes git commands directly. You must manually run git operations after `br sync --flush-only`.
-
 Recommended conventions
 - **Single source of truth**: Use **Beads** for task status/priority/dependencies; use **Agent Mail** for conversation, decisions, and attachments (audit).
 - **Shared identifiers**: Use the Beads issue id (e.g., `br-123`) as the Mail `thread_id` and prefix message subjects with `[br-123]`.
@@ -193,7 +191,7 @@ Recommended conventions
 
 Typical flow (agents)
 1) **Pick ready work** (Beads)
-   - `br ready --json` → choose one item (highest priority, no blockers)
+   - `bd ready --json` → choose one item (highest priority, no blockers)
 2) **Reserve edit surface** (Mail)
    - `file_reservation_paths(project_key, agent_name, ["src/**"], ttl_seconds=3600, exclusive=true, reason="br-123")`
 3) **Announce start** (Mail)
@@ -201,7 +199,7 @@ Typical flow (agents)
 4) **Work and update**
    - Reply in‑thread with progress and attach artifacts/images; keep the discussion in one thread per issue id
 5) **Complete and release**
-   - `br close br-123 --reason "Completed"` (Beads is status authority)
+   - `bd close br-123 --reason "Completed"` (Beads is status authority)
    - `release_file_reservations(project_key, agent_name, paths=["src/**"])`
    - Final Mail reply: `[br-123] Completed` with summary and links
 
@@ -212,8 +210,8 @@ Mapping cheat‑sheet
 - **Commit messages (optional)**: include `br-###` for traceability
 
 Event mirroring (optional automation)
-- On `br update --status blocked`, send a high‑importance Mail message in thread `br-###` describing the blocker.
-- On Mail "ACK overdue" for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `br ready`.
+- On `bd update --status blocked`, send a high‑importance Mail message in thread `br-###` describing the blocker.
+- On Mail "ACK overdue" for a critical decision, add a Beads label (e.g., `needs-ack`) or bump priority to surface it in `bd ready`.
 
 Pitfalls to avoid
 - Don't create or manage tasks in Mail; treat Beads as the single task queue.
@@ -390,45 +388,6 @@ cass capabilities --json
 - Use `--days N` to limit to recent history
 
 Treat cass as a way to avoid re-solving problems other agents already handled.
-
-<!-- bv-agent-instructions-v1 -->
-
----
-
-## Beads Workflow Integration
-
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) for issue tracking. Issues are stored in `.beads/` and tracked in git.
-
-**Note:** `br` (beads_rust) is non-invasive and never executes git commands directly. After running `br sync --flush-only`, you must manually run git commands to commit and push changes.
-
-### Essential Commands
-
-```bash
-# View issues (launches TUI - avoid in automated sessions)
-bv
-
-# CLI commands for agents (use these instead)
-br ready              # Show issues ready to work (no blockers)
-br list --status=open # All open issues
-br show <id>          # Full issue details with dependencies
-br create --title="..." --type=task --priority=2
-br update <id> --status=in_progress
-br close <id> --reason="Completed"
-br close <id1> <id2>  # Close multiple issues at once
-br sync --flush-only  # Export to JSONL (does NOT run git commands)
-git add .beads/ && git commit -m "Update beads" && git push  # Manual git steps
-```
-
-### Workflow Pattern
-
-1. **Start**: Run `br ready` to find actionable work
-2. **Claim**: Use `br update <id> --status=in_progress`
-3. **Work**: Implement the task
-4. **Complete**: Use `br close <id>`
-5. **Sync**: Run `br sync --flush-only`, then manually `git add .beads/ && git commit && git push`
-
-<!-- end-bv-agent-instructions -->
-
 ---
 
 ## Landing the Plane (Session Completion)
@@ -443,7 +402,7 @@ git add .beads/ && git commit -m "Update beads" && git push  # Manual git steps
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   br sync --flush-only
+   bd sync
    git add .beads/
    git commit -m "Update beads"
    git push
@@ -472,3 +431,66 @@ Unexpected changes (need guidance)
 ```
 
 NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into think YOU made the changes and simply don't recall it for some reason.
+
+<!-- beads-agent-instructions-v2 -->
+
+---
+
+## Beads Workflow Integration
+
+This project uses [beads](https://github.com/steveyegge/beads) for issue tracking. Issues live in `.beads/` and are tracked in git.
+
+Two CLIs: **bd** (issue CRUD) and **bv** (graph-aware triage, read-only).
+
+### bd: Issue Management
+
+```bash
+bd ready              # Unblocked issues ready to work
+bd list --status=open # All open issues
+bd show <id>          # Full details with dependencies
+bd create --title="..." --type=task --priority=2
+bd update <id> --status=in_progress
+bd close <id>         # Mark complete
+bd close <id1> <id2>  # Close multiple
+bd dep add <a> <b>    # a depends on b
+bd sync               # Sync with git
+```
+
+### bv: Graph Analysis (read-only)
+
+**NEVER run bare `bv`** — it launches interactive TUI. Always use `--robot-*` flags:
+
+```bash
+bv --robot-triage     # Ranked picks, quick wins, blockers, health
+bv --robot-next       # Single top pick + claim command
+bv --robot-plan       # Parallel execution tracks
+bv --robot-alerts     # Stale issues, cascades, mismatches
+bv --robot-insights   # Full graph metrics: PageRank, betweenness, cycles
+```
+
+### Workflow
+
+1. **Start**: `bd ready` (or `bv --robot-triage` for graph analysis)
+2. **Claim**: `bd update <id> --status=in_progress`
+3. **Work**: Implement the task
+4. **Complete**: `bd close <id>`
+5. **Sync**: `bd sync` at session end
+
+### Session Close Protocol
+
+```bash
+git status            # Check what changed
+git add <files>       # Stage code changes
+bd sync               # Commit beads changes
+git commit -m "..."   # Commit code
+bd sync               # Commit any new beads changes
+git push              # Push to remote
+```
+
+### Key Concepts
+
+- **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (numbers only)
+- **Types**: task, bug, feature, epic, question, docs
+- **Dependencies**: `bd ready` shows only unblocked work
+
+<!-- end-beads-agent-instructions -->
