@@ -27,6 +27,7 @@ class Project(SQLModel, table=True):
     slug: str = Field(index=True, unique=True, max_length=255)
     human_key: str = Field(max_length=255, index=True)
     created_at: datetime = Field(default_factory=_utcnow_naive)
+    archived_at: Optional[datetime] = Field(default=None)
 
 class Product(SQLModel, table=True):
     """Logical grouping across multiple repositories for product-wide inbox/search and threads."""
@@ -69,6 +70,7 @@ class Agent(SQLModel, table=True):
     attachments_policy: str = Field(default="auto", max_length=16)
     contact_policy: str = Field(default="auto", max_length=16)  # open | auto | contacts_only | block_all
     registration_token: Optional[str] = Field(default=None, max_length=64, index=True)
+    retired_at: Optional[datetime] = Field(default=None)
 
 
 class MessageRecipient(SQLModel, table=True):

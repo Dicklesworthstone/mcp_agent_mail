@@ -1506,7 +1506,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                     if include_projects:
                         rows = await session.execute(
-                            text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                            text("SELECT id, slug, human_key, created_at, archived_at FROM projects ORDER BY created_at DESC")
                         )
                         for r in rows.fetchall():
                             project_id = int(r[0])
@@ -1517,6 +1517,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                     "slug": r[1],
                                     "human_key": r[2],
                                     "created_at": str(r[3]),
+                                    "archived_at": str(r[4]) if r[4] else None,
                                     "confirmed_siblings": siblings.get("confirmed", []),
                                     "suggested_siblings": siblings.get("suggested", []),
                                 }
@@ -1737,6 +1738,110 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     detail=f"Failed to delete messages: {exc!s}"
                 ) from exc
 
+        # ---- Agent Retire/Unretire API ----
+
+        @fastapi_app.post("/mail/api/retire-agent", response_class=JSONResponse)
+        async def retire_agent_api(request: Request) -> JSONResponse:
+            """Retire an agent (soft-delete). Preserves message history but stops new messages."""
+            await ensure_schema()
+            try:
+                body = await request.json()
+                agent_id: int | None = body.get("agent_id")
+                if not agent_id:
+                    raise HTTPException(status_code=400, detail="agent_id is required")
+
+                async with get_session() as session:
+                    from .models import Agent
+                    agent = await session.get(Agent, agent_id)
+                    if not agent:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+                    agent.retired_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(agent)
+                    await session.commit()
+
+                return JSONResponse({"success": True, "agent_id": agent_id, "status": "retired"})
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to retire agent: {exc!s}") from exc
+
+        @fastapi_app.post("/mail/api/unretire-agent", response_class=JSONResponse)
+        async def unretire_agent_api(request: Request) -> JSONResponse:
+            """Restore a retired agent back to active status."""
+            await ensure_schema()
+            try:
+                body = await request.json()
+                agent_id: int | None = body.get("agent_id")
+                if not agent_id:
+                    raise HTTPException(status_code=400, detail="agent_id is required")
+
+                async with get_session() as session:
+                    from .models import Agent
+                    agent = await session.get(Agent, agent_id)
+                    if not agent:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+                    agent.retired_at = None
+                    session.add(agent)
+                    await session.commit()
+
+                return JSONResponse({"success": True, "agent_id": agent_id, "status": "active"})
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to unretire agent: {exc!s}") from exc
+
+        # ---- Project Archive/Unarchive API ----
+
+        @fastapi_app.post("/mail/api/archive-project", response_class=JSONResponse)
+        async def archive_project_api(request: Request) -> JSONResponse:
+            """Archive a project (soft-delete). Preserves all messages but hides from active lists."""
+            await ensure_schema()
+            try:
+                body = await request.json()
+                project_id: int | None = body.get("project_id")
+                if not project_id:
+                    raise HTTPException(status_code=400, detail="project_id is required")
+
+                async with get_session() as session:
+                    from .models import Project
+                    project = await session.get(Project, project_id)
+                    if not project:
+                        raise HTTPException(status_code=404, detail="Project not found")
+                    project.archived_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    session.add(project)
+                    await session.commit()
+
+                return JSONResponse({"success": True, "project_id": project_id, "status": "archived"})
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to archive project: {exc!s}") from exc
+
+        @fastapi_app.post("/mail/api/unarchive-project", response_class=JSONResponse)
+        async def unarchive_project_api(request: Request) -> JSONResponse:
+            """Restore an archived project back to active status."""
+            await ensure_schema()
+            try:
+                body = await request.json()
+                project_id: int | None = body.get("project_id")
+                if not project_id:
+                    raise HTTPException(status_code=400, detail="project_id is required")
+
+                async with get_session() as session:
+                    from .models import Project
+                    project = await session.get(Project, project_id)
+                    if not project:
+                        raise HTTPException(status_code=404, detail="Project not found")
+                    project.archived_at = None
+                    session.add(project)
+                    await session.commit()
+
+                return JSONResponse({"success": True, "project_id": project_id, "status": "active"})
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to unarchive project: {exc!s}") from exc
+
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
             """Projects list view (moved from /mail)"""
@@ -1745,7 +1850,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             sibling_map = await get_project_sibling_data()
             async with get_session() as session:
                 rows = await session.execute(
-                    text("SELECT id, slug, human_key, created_at FROM projects ORDER BY created_at DESC")
+                    text("SELECT id, slug, human_key, created_at, archived_at FROM projects ORDER BY created_at DESC")
                 )
                 projects = []
                 for r in rows.fetchall():
@@ -1757,6 +1862,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             "slug": r[1],
                             "human_key": r[2],
                             "created_at": str(r[3]),
+                            "archived_at": str(r[4]) if r[4] else None,
                             "confirmed_siblings": siblings.get("confirmed", []),
                             "suggested_siblings": siblings.get("suggested", []),
                         }
@@ -1774,17 +1880,18 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             await ensure_schema()
             async with get_session() as session:
                 proj = await session.execute(
-                    text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"), {"k": project}
+                    text("SELECT id, slug, human_key, archived_at FROM projects WHERE slug = :k OR human_key = :k"), {"k": project}
                 )
                 prow = proj.fetchone()
                 if not prow:
                     return await _render("error.html", message="Project not found")
                 pid = int(prow[0])
+                project_archived_at = str(prow[3]) if prow[3] else None
                 agents_q = await session.execute(
-                    text("SELECT id, name, program, model FROM agents WHERE project_id = :pid ORDER BY name"),
+                    text("SELECT id, name, program, model, retired_at FROM agents WHERE project_id = :pid ORDER BY name"),
                     {"pid": pid},
                 )
-                agents = [{"id": r[0], "name": r[1], "program": r[2], "model": r[3]} for r in agents_q.fetchall()]
+                agents = [{"id": r[0], "name": r[1], "program": r[2], "model": r[3], "retired_at": str(r[4]) if r[4] else None} for r in agents_q.fetchall()]
                 matched_messages: list[dict] = []
                 if q and q.strip():
                     # Prefer FTS5 when available (fts_messages maintained by triggers)
@@ -1841,7 +1948,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ]
             return await _render(
                 "mail_project.html",
-                project={"id": pid, "slug": prow[1], "human_key": prow[2]},
+                project={"id": pid, "slug": prow[1], "human_key": prow[2], "archived_at": project_archived_at},
                 agents=agents,
                 q=q or "",
                 scope=scope or "",

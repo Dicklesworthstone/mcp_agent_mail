@@ -1651,16 +1651,19 @@ def _render_commit_panel(
         return None
 
 def _project_to_dict(project: Project) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "id": project.id,
         "slug": project.slug,
         "human_key": project.human_key,
         "created_at": _iso(project.created_at),
     }
+    if getattr(project, "archived_at", None) is not None:
+        d["archived_at"] = _iso(project.archived_at)
+    return d
 
 
 def _agent_to_dict(agent: Agent) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "id": agent.id,
         "name": agent.name,
         "program": agent.program,
@@ -1671,6 +1674,9 @@ def _agent_to_dict(agent: Agent) -> dict[str, Any]:
         "project_id": agent.project_id,
         "attachments_policy": getattr(agent, "attachments_policy", "auto"),
     }
+    if getattr(agent, "retired_at", None) is not None:
+        d["retired_at"] = _iso(agent.retired_at)
+    return d
 
 
 def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, Any]:
@@ -4864,6 +4870,139 @@ def build_mcp_server() -> FastMCP:
             "project_key": project_key,
         }
 
+    @mcp.tool(
+        name="retire_agent",
+        description="Soft-delete an agent: mark it as retired so it stops accepting new messages while preserving message history. "
+        "Retired agents are hidden from active agent lists but visible in 'all agents' views.",
+    )
+    @_instrument_tool("retire_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="agent_name", project_arg="project_key")
+    async def retire_agent(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        registration_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Retire an agent (soft-delete). The agent stops accepting new messages but message history is preserved."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        agent = await _get_agent(project, agent_name)
+        if not agent:
+            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
+
+        # Verify registration token if the agent has one
+        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
+            raise ValueError("Invalid registration_token — only the agent's owner can retire it")
+
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.retired_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(db_agent)
+                await session.commit()
+
+        await ctx.info(f"Retired agent '{agent_name}' from project '{project.human_key}'. Message history preserved.")
+        return {
+            "status": "retired",
+            "agent_name": agent_name,
+            "project_key": project_key,
+        }
+
+    @mcp.tool(
+        name="unretire_agent",
+        description="Restore a retired agent back to active status. The agent will resume accepting new messages.",
+    )
+    @_instrument_tool("unretire_agent", cluster=CLUSTER_IDENTITY, capabilities={"identity"}, agent_arg="agent_name", project_arg="project_key")
+    async def unretire_agent(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        registration_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Restore a retired agent back to active status."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        agent = await _get_agent(project, agent_name)
+        if not agent:
+            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
+
+        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
+            raise ValueError("Invalid registration_token — only the agent's owner can unretire it")
+
+        async with get_session() as session:
+            db_agent = await session.get(Agent, agent.id)
+            if db_agent:
+                db_agent.retired_at = None
+                session.add(db_agent)
+                await session.commit()
+
+        await ctx.info(f"Restored agent '{agent_name}' in project '{project.human_key}' to active status.")
+        return {
+            "status": "active",
+            "agent_name": agent_name,
+            "project_key": project_key,
+        }
+
+    @mcp.tool(
+        name="archive_project",
+        description="Soft-delete a project: mark it as archived so it is hidden from active project lists. "
+        "All messages are preserved and the project can be restored with unarchive_project.",
+    )
+    @_instrument_tool("archive_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, project_arg="project_key")
+    async def archive_project(
+        ctx: Context,
+        project_key: str,
+    ) -> dict[str, Any]:
+        """Archive a project (soft-delete). Hides from active lists, preserves all messages."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        async with get_session() as session:
+            db_project = await session.get(Project, project.id)
+            if db_project:
+                db_project.archived_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.add(db_project)
+                await session.commit()
+
+        await ctx.info(f"Archived project '{project.human_key}'. All messages preserved.")
+        return {
+            "status": "archived",
+            "project_key": project_key,
+            "slug": project.slug,
+        }
+
+    @mcp.tool(
+        name="unarchive_project",
+        description="Restore an archived project back to active status.",
+    )
+    @_instrument_tool("unarchive_project", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, project_arg="project_key")
+    async def unarchive_project(
+        ctx: Context,
+        project_key: str,
+    ) -> dict[str, Any]:
+        """Restore an archived project back to active status."""
+        project = await _get_project_by_identifier(project_key)
+        if not project:
+            raise ValueError(f"Project '{project_key}' not found")
+
+        async with get_session() as session:
+            db_project = await session.get(Project, project.id)
+            if db_project:
+                db_project.archived_at = None
+                session.add(db_project)
+                await session.commit()
+
+        await ctx.info(f"Restored project '{project.human_key}' to active status.")
+        return {
+            "status": "active",
+            "project_key": project_key,
+            "slug": project.slug,
+        }
+
     @mcp.tool(name="whois")
     @_instrument_tool("whois", cluster=CLUSTER_IDENTITY, capabilities={"identity", "audit"}, project_arg="project_key", agent_arg="agent_name")
     async def whois(
@@ -5357,7 +5496,7 @@ def build_mcp_server() -> FastMCP:
             async with get_session() as _bcast_session:
                 _bcast_cutoff = _naive_utc() - timedelta(days=30)
                 _bcast_result = await _bcast_session.execute(
-                    select(Agent.name, Agent.contact_policy).where(
+                    select(Agent.name, Agent.contact_policy, Agent.retired_at).where(
                         cast(Any, Agent.project_id == project.id),
                         cast(Any, Agent.last_active_ts > _bcast_cutoff),
                     )
@@ -5368,6 +5507,7 @@ def build_mcp_server() -> FastMCP:
                 row[0] for row in _bcast_rows
                 if row[0].lower() != sender_lower
                 and (row[1] or "auto").lower() != "block_all"
+                and row[2] is None  # skip retired agents
             ]
             if not to:
                 await ctx.info("[warn] Broadcast: no eligible recipients found (sender is the only active agent).")
@@ -5620,6 +5760,15 @@ def build_mcp_server() -> FastMCP:
                     rec = recipient_agents.get(nm)
                     if rec is None:
                         continue
+                    # Reject messages to retired agents
+                    if getattr(rec, "retired_at", None) is not None:
+                        raise ToolExecutionError(
+                            "AGENT_RETIRED",
+                            f"Agent '{nm}' is retired and no longer accepts new messages. "
+                            "Use unretire_agent to restore it first.",
+                            recoverable=True,
+                            data={"agent_name": nm, "retired_at": _iso(rec.retired_at)},
+                        )
                     rec_policy = getattr(rec, "contact_policy", "auto").lower()
                     # allow self always
                     if rec.name == sender.name:
@@ -10179,12 +10328,16 @@ def build_mcp_server() -> FastMCP:
             unread_counts_result = await session.execute(unread_counts_stmt)
             unread_counts_map = {row.agent_id: row.unread_count for row in unread_counts_result}
 
-            # Build agent data with unread counts
+            # Build agent data with unread counts, separating active and retired
             agent_data = []
+            retired_agent_data = []
             for agent in agents:
                 agent_dict = _agent_to_dict(agent)
                 agent_dict["unread_count"] = unread_counts_map.get(agent.id, 0)
-                agent_data.append(agent_dict)
+                if getattr(agent, "retired_at", None) is not None:
+                    retired_agent_data.append(agent_dict)
+                else:
+                    agent_data.append(agent_dict)
 
         payload = {
             "project": {
@@ -10192,6 +10345,7 @@ def build_mcp_server() -> FastMCP:
                 "human_key": project.human_key,
             },
             "agents": agent_data,
+            "retired_agents": retired_agent_data,
         }
         return _apply_resource_output_format(
             payload,

@@ -792,6 +792,17 @@ def _setup_fts(connection: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_agent_links_status "
         "ON agent_links(status)"
     )
+    # Schema migrations: add columns for soft-delete support (issue #102 and #103)
+    # SQLite ALTER TABLE ADD COLUMN is idempotent-safe via try/except
+    for migration_sql in [
+        "ALTER TABLE agents ADD COLUMN retired_at DATETIME DEFAULT NULL",
+        "ALTER TABLE projects ADD COLUMN archived_at DATETIME DEFAULT NULL",
+    ]:
+        try:
+            connection.exec_driver_sql(migration_sql)
+        except Exception:
+            # Column already exists — safe to ignore
+            pass
 
 
 def get_database_path(settings: Settings | None = None) -> Path | None:
