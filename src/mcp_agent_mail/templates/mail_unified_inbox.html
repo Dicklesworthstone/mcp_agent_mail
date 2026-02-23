@@ -596,8 +596,12 @@
     </div>
 
     {% if projects %}
+    {% set active_projects = projects | rejectattr('archived_at') | list %}
+    {% set archived_projects = projects | selectattr('archived_at') | list %}
+
+    {% if active_projects %}
     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {% for p in projects %}
+      {% for p in active_projects %}
       <a href="/mail/{{ p.slug }}"
          x-show="!searchQuery || '{{ (p.human_key ~ ' ' ~ p.slug)|replace('\\', '\\\\')|replace("'", "\\'") }}'.toLowerCase().includes(searchQuery.toLowerCase())"
          class="block bg-white dark:bg-slate-800 rounded-lg p-6 border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 hover:shadow-md transition-all duration-200">
@@ -633,6 +637,58 @@
       </a>
       {% endfor %}
     </div>
+    {% endif %}
+
+    {% if archived_projects %}
+    <div class="mt-6" x-data="{ showArchived: false }">
+      <button @click="showArchived = !showArchived"
+              class="flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors mb-4">
+        <i data-lucide="chevron-right" class="w-4 h-4 transition-transform duration-200" :class="showArchived ? 'rotate-90' : ''"></i>
+        <i data-lucide="archive" class="w-4 h-4"></i>
+        {{ archived_projects|length }} Archived Project{{ 's' if archived_projects|length != 1 else '' }}
+      </button>
+      <div x-show="showArchived" x-collapse>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {% for p in archived_projects %}
+          <a href="/mail/{{ p.slug }}"
+             x-show="!searchQuery || '{{ (p.human_key ~ ' ' ~ p.slug)|replace('\\', '\\\\')|replace("'", "\\'") }}'.toLowerCase().includes(searchQuery.toLowerCase())"
+             class="block bg-slate-50 dark:bg-slate-800/50 rounded-lg p-6 border border-dashed border-slate-300 dark:border-slate-600 hover:border-amber-400 dark:hover:border-amber-600 hover:shadow-md transition-all duration-200 opacity-75 hover:opacity-100">
+
+            <div class="flex items-start justify-between mb-4">
+              <div class="w-12 h-12 bg-gradient-to-br from-slate-400 to-slate-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                <i data-lucide="folder" class="w-6 h-6 text-white"></i>
+              </div>
+              <span class="px-2 py-1 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium rounded flex items-center gap-1">
+                <i data-lucide="archive" class="w-3 h-3"></i>
+                Archived
+              </span>
+            </div>
+
+            <h3 class="text-lg font-semibold text-slate-600 dark:text-slate-400 mb-2 line-clamp-1">
+              {{ p.human_key }}
+            </h3>
+
+            <div class="space-y-2 text-sm text-slate-500 dark:text-slate-500">
+              <div class="flex items-center gap-2">
+                <i data-lucide="hash" class="w-3.5 h-3.5"></i>
+                <span class="font-mono text-xs truncate">{{ p.slug }}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <i data-lucide="calendar" class="w-3.5 h-3.5"></i>
+                <span class="text-xs">{{ p.created_at }}</span>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <span class="text-xs text-slate-500">View details</span>
+              <i data-lucide="arrow-right" class="w-4 h-4 text-slate-400"></i>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
 
     <!-- No search results -->
     <div x-show="searchQuery && $el.previousElementSibling && Array.from($el.previousElementSibling.querySelectorAll('a[x-show]')).every(el => el.style.display === 'none')"
