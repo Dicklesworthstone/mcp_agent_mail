@@ -425,7 +425,7 @@
                       aria-label="Copy agent name">
                 <i data-lucide="copy" class="w-4 h-4"></i>
               </button>
-              <button onclick="if(confirm('Retire agent {{ a.name }}? It will stop accepting new messages but message history is preserved.')) fetch('/mail/api/retire-agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:{{ a.id }}})}).then(r=>r.json()).then(d=>{if(d.success) location.reload()})"
+              <button onclick="if(confirm('Retire agent ' + {{ a.name | tojson }} + '? It will stop accepting new messages but message history is preserved.')) fetch('/mail/api/retire-agent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:{{ a.id }}})}).then(r=>r.json()).then(d=>{if(d.success) location.reload()})"
                       class="p-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-amber-100 dark:hover:bg-amber-900/30 text-slate-700 dark:text-slate-300 hover:text-amber-700 dark:hover:text-amber-400 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md"
                       data-tippy-content="Retire agent"
                       aria-label="Retire agent">
