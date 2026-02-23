@@ -1551,6 +1551,192 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 payload["projects"] = []
             return JSONResponse(payload)
 
+        @fastapi_app.post("/mail/api/delete-messages", response_class=JSONResponse)
+        async def delete_messages_api(request: Request) -> JSONResponse:
+            """Permanently delete messages by ID (cross-project).
+
+            Removes messages from the SQLite database AND deletes the
+            corresponding markdown files from the Git archive.
+            """
+            await ensure_schema()
+
+            try:
+                request_body = await request.json()
+                message_ids: list[int] = request_body.get("message_ids", [])
+
+                if not message_ids:
+                    raise HTTPException(status_code=400, detail="No message IDs provided")
+
+                if len(message_ids) > 500:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Too many messages ({len(message_ids)}). Maximum is 500."
+                    )
+
+                async with get_session() as session:
+                    placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
+                    id_params: dict[str, Any] = {f"mid{i}": mid for i, mid in enumerate(message_ids)}
+
+                    # Fetch message metadata for Git cleanup
+                    rows = await session.execute(
+                        text(
+                            f"""
+                            SELECT m.id, m.created_ts, m.subject, s.name AS sender_name,
+                                   p.slug AS project_slug
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            JOIN projects p ON p.id = m.project_id
+                            WHERE m.id IN ({placeholders})
+                            """
+                        ),
+                        id_params,
+                    )
+                    messages_to_delete = rows.fetchall()
+
+                    if not messages_to_delete:
+                        return JSONResponse({"success": True, "deleted_count": 0})
+
+                    # Collect recipients per message
+                    recip_rows = await session.execute(
+                        text(
+                            f"""
+                            SELECT mr.message_id, a.name
+                            FROM message_recipients mr
+                            JOIN agents a ON a.id = mr.agent_id
+                            WHERE mr.message_id IN ({placeholders})
+                            """
+                        ),
+                        id_params,
+                    )
+                    recip_map: dict[int, list[str]] = {}
+                    for rr in recip_rows.fetchall():
+                        recip_map.setdefault(int(rr[0]), []).append(rr[1])
+
+                    # Delete from SQLite
+                    await session.execute(
+                        text(f"DELETE FROM message_recipients WHERE message_id IN ({placeholders})"),
+                        id_params,
+                    )
+                    del_result = await session.execute(
+                        text(f"DELETE FROM messages WHERE id IN ({placeholders})"),
+                        id_params,
+                    )
+                    deleted_count = int(getattr(del_result, "rowcount", 0) or 0)
+
+                    # Delete markdown files from Git archive
+                    settings = get_settings()
+                    git_paths_removed: list[str] = []
+                    import re as _re
+
+                    _SUBJECT_SLUG_RE = _re.compile(r"[^a-zA-Z0-9]+")
+
+                    # Group messages by project for archive access
+                    by_project: dict[str, list[Any]] = {}
+                    for mrow in messages_to_delete:
+                        slug = str(mrow[4])
+                        by_project.setdefault(slug, []).append(mrow)
+
+                    for project_slug, proj_msgs in by_project.items():
+                        try:
+                            archive = await ensure_archive(settings, project_slug)
+                            for mrow in proj_msgs:
+                                msg_id = int(mrow[0])
+                                created_ts_raw = mrow[1]
+                                subject_raw = str(mrow[2] or "")
+                                sender_name = str(mrow[3] or "")
+
+                                try:
+                                    if isinstance(created_ts_raw, str):
+                                        dt = datetime.fromisoformat(
+                                            created_ts_raw.replace("Z", "+00:00")
+                                            if created_ts_raw.endswith("Z")
+                                            else created_ts_raw
+                                        )
+                                    else:
+                                        dt = created_ts_raw
+                                    if dt.tzinfo is None:
+                                        dt = dt.replace(tzinfo=timezone.utc)
+                                except Exception:
+                                    dt = datetime.now(timezone.utc)
+
+                                y_dir = dt.strftime("%Y")
+                                m_dir = dt.strftime("%m")
+                                created_iso = dt.astimezone(timezone.utc).strftime(
+                                    "%Y-%m-%dT%H-%M-%SZ"
+                                )
+                                subject_slug = (
+                                    _SUBJECT_SLUG_RE.sub("-", subject_raw)
+                                    .strip("-_")
+                                    .lower()[:80]
+                                    or "message"
+                                )
+                                filename = f"{created_iso}__{subject_slug}__{msg_id}.md"
+
+                                candidate_dirs = [
+                                    archive.root / "messages" / y_dir / m_dir,
+                                    archive.root / "agents" / sender_name / "outbox" / y_dir / m_dir,
+                                ]
+                                for recip_name in recip_map.get(msg_id, []):
+                                    candidate_dirs.append(
+                                        archive.root / "agents" / recip_name / "inbox" / y_dir / m_dir
+                                    )
+
+                                for cdir in candidate_dirs:
+                                    fpath = cdir / filename
+                                    if fpath.exists():
+                                        rel = fpath.relative_to(archive.repo_root).as_posix()
+                                        try:
+                                            fpath.unlink()
+                                            git_paths_removed.append(rel)
+                                        except OSError:
+                                            pass
+
+                            # Commit removals for this project's archive
+                            if git_paths_removed:
+                                try:
+                                    actor_module = importlib.import_module("git")
+                                    actor_cls = getattr(actor_module, "Actor")
+                                    git_actor = actor_cls(
+                                        settings.storage.git_author_name,
+                                        settings.storage.git_author_email,
+                                    )
+                                    archive.repo.index.remove(
+                                        git_paths_removed, working_tree=False
+                                    )
+                                    archive.repo.index.commit(
+                                        f"delete: {len(proj_msgs)} message(s) via web UI\n",
+                                        author=git_actor,
+                                        committer=git_actor,
+                                    )
+                                except Exception as git_exc:
+                                    logging.getLogger(__name__).warning(
+                                        "Git commit for message deletion failed: %s", git_exc
+                                    )
+                        except Exception as archive_exc:
+                            logging.getLogger(__name__).warning(
+                                "Git archive cleanup failed for project %s: %s",
+                                project_slug,
+                                archive_exc,
+                            )
+
+                    await session.commit()
+
+                return JSONResponse({
+                    "success": True,
+                    "deleted_count": deleted_count,
+                    "git_files_removed": len(git_paths_removed),
+                })
+
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to delete messages: {exc!s}"
+                ) from exc
+
         @fastapi_app.get("/mail/projects", response_class=HTMLResponse)
         async def mail_projects_list() -> HTMLResponse:
             """Projects list view (moved from /mail)"""
@@ -2125,6 +2311,221 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 import traceback
                 traceback.print_exc()
                 raise HTTPException(status_code=500, detail=f"Failed to mark messages as read: {exc!s}") from exc
+
+        @fastapi_app.post("/mail/{project}/inbox/{agent}/delete-messages")
+        async def delete_selected_messages(project: str, agent: str, request: Request) -> JSONResponse:
+            """Permanently delete specific messages for an agent.
+
+            Removes messages from the SQLite database AND deletes the
+            corresponding markdown files from the Git archive so that
+            messages do not reappear after a refresh or server restart.
+            """
+            await ensure_schema()
+
+            try:
+                request_body = await request.json()
+                message_ids: list[int] = request_body.get("message_ids", [])
+
+                if not message_ids:
+                    raise HTTPException(status_code=400, detail="No message IDs provided")
+
+                if len(message_ids) > 500:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Too many messages selected ({len(message_ids)}). Maximum is 500."
+                    )
+
+                async with get_session() as session:
+                    # Resolve project
+                    prow = (
+                        await session.execute(
+                            text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                            {"k": project},
+                        )
+                    ).fetchone()
+                    if not prow:
+                        raise HTTPException(status_code=404, detail="Project not found")
+
+                    pid = int(prow[0])
+                    project_slug = prow[1]
+
+                    # Resolve agent
+                    arow = (
+                        await session.execute(
+                            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+                            {"pid": pid, "name": agent},
+                        )
+                    ).fetchone()
+                    if not arow:
+                        raise HTTPException(status_code=404, detail="Agent not found")
+
+                    # Fetch message metadata before deleting so we can locate Git files
+                    placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
+                    id_params: dict[str, Any] = {"pid": pid}
+                    id_params.update({f"mid{i}": mid for i, mid in enumerate(message_ids)})
+
+                    rows = await session.execute(
+                        text(
+                            f"""
+                            SELECT m.id, m.created_ts, m.subject, s.name AS sender_name
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            WHERE m.project_id = :pid
+                            AND m.id IN ({placeholders})
+                            """
+                        ),
+                        id_params,
+                    )
+                    messages_to_delete = rows.fetchall()
+
+                    if not messages_to_delete:
+                        return JSONResponse({"success": True, "deleted_count": 0})
+
+                    # Collect recipient names per message for inbox path removal
+                    recip_rows = await session.execute(
+                        text(
+                            f"""
+                            SELECT mr.message_id, a.name
+                            FROM message_recipients mr
+                            JOIN agents a ON a.id = mr.agent_id
+                            WHERE mr.message_id IN ({placeholders})
+                            """
+                        ),
+                        {f"mid{i}": mid for i, mid in enumerate(message_ids)},
+                    )
+                    recip_map: dict[int, list[str]] = {}
+                    for rr in recip_rows.fetchall():
+                        recip_map.setdefault(int(rr[0]), []).append(rr[1])
+
+                    # Delete from SQLite: recipients first, then messages
+                    await session.execute(
+                        text(
+                            f"DELETE FROM message_recipients WHERE message_id IN ({placeholders})"
+                        ),
+                        {f"mid{i}": mid for i, mid in enumerate(message_ids)},
+                    )
+                    del_result = await session.execute(
+                        text(
+                            f"DELETE FROM messages WHERE project_id = :pid AND id IN ({placeholders})"
+                        ),
+                        id_params,
+                    )
+                    deleted_count = int(getattr(del_result, "rowcount", 0) or 0)
+
+                    # Delete markdown files from Git archive
+                    settings = get_settings()
+                    git_paths_removed: list[str] = []
+                    try:
+                        archive = await ensure_archive(settings, project_slug)
+                        import re as _re
+
+                        _SUBJECT_SLUG_RE = _re.compile(r"[^a-zA-Z0-9]+")
+
+                        for mrow in messages_to_delete:
+                            msg_id = int(mrow[0])
+                            created_ts_raw = mrow[1]
+                            subject_raw = str(mrow[2] or "")
+                            sender_name = str(mrow[3] or "")
+
+                            # Reconstruct the filename used by write_message_bundle
+                            try:
+                                if isinstance(created_ts_raw, str):
+                                    dt = datetime.fromisoformat(
+                                        created_ts_raw.replace("Z", "+00:00")
+                                        if created_ts_raw.endswith("Z")
+                                        else created_ts_raw
+                                    )
+                                else:
+                                    dt = created_ts_raw
+                                if dt.tzinfo is None:
+                                    dt = dt.replace(tzinfo=timezone.utc)
+                            except Exception:
+                                dt = datetime.now(timezone.utc)
+
+                            y_dir = dt.strftime("%Y")
+                            m_dir = dt.strftime("%m")
+                            created_iso = dt.astimezone(timezone.utc).strftime(
+                                "%Y-%m-%dT%H-%M-%SZ"
+                            )
+                            subject_slug = (
+                                _SUBJECT_SLUG_RE.sub("-", subject_raw)
+                                .strip("-_")
+                                .lower()[:80]
+                                or "message"
+                            )
+                            filename = f"{created_iso}__{subject_slug}__{msg_id}.md"
+
+                            # Paths: canonical, outbox, and each recipient inbox
+                            candidate_dirs = [
+                                archive.root / "messages" / y_dir / m_dir,
+                                archive.root / "agents" / sender_name / "outbox" / y_dir / m_dir,
+                            ]
+                            for recip_name in recip_map.get(msg_id, []):
+                                candidate_dirs.append(
+                                    archive.root / "agents" / recip_name / "inbox" / y_dir / m_dir
+                                )
+
+                            for cdir in candidate_dirs:
+                                fpath = cdir / filename
+                                if fpath.exists():
+                                    rel = fpath.relative_to(archive.repo_root).as_posix()
+                                    try:
+                                        fpath.unlink()
+                                        git_paths_removed.append(rel)
+                                    except OSError:
+                                        pass
+
+                        # Commit removals to Git
+                        if git_paths_removed:
+                            try:
+                                actor_module = importlib.import_module("git")
+                                actor_cls = getattr(actor_module, "Actor")
+                                git_actor = actor_cls(
+                                    settings.storage.git_author_name,
+                                    settings.storage.git_author_email,
+                                )
+                                archive.repo.index.remove(
+                                    git_paths_removed, working_tree=False
+                                )
+                                archive.repo.index.commit(
+                                    f"delete: {deleted_count} message(s) via web UI\n",
+                                    author=git_actor,
+                                    committer=git_actor,
+                                )
+                            except Exception as git_exc:
+                                # Log but don't fail the request if Git commit fails;
+                                # the files are already unlinked and DB rows deleted.
+                                import traceback
+
+                                traceback.print_exc()
+                                logging.getLogger(__name__).warning(
+                                    "Git commit for message deletion failed: %s", git_exc
+                                )
+                    except Exception as archive_exc:
+                        # Archive operations are best-effort; DB deletion already happened.
+                        logging.getLogger(__name__).warning(
+                            "Git archive cleanup failed: %s", archive_exc
+                        )
+
+                    await session.commit()
+
+                return JSONResponse({
+                    "success": True,
+                    "deleted_count": deleted_count,
+                    "git_files_removed": len(git_paths_removed),
+                    "agent": agent,
+                    "project": project_slug,
+                })
+
+            except HTTPException:
+                raise
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to delete messages: {exc!s}"
+                ) from exc
 
         @fastapi_app.get("/mail/{project}/thread/{thread_id}", response_class=HTMLResponse)
         async def mail_thread(project: str, thread_id: str) -> HTMLResponse:

@@ -250,18 +250,20 @@ if command -v jq >/dev/null 2>&1; then
     # Remove any existing "type" key that may have been added by older versions
     .mcpServers["mcp-agent-mail"] |= del(.type) |
     # Add hooks configuration
+    # NOTE: Use \u0027 for literal single quotes inside jq strings to avoid
+    # breaking the outer bash single-quoted block (fixes #101).
     .hooks = (.hooks // {}) |
     .hooks.SessionStart = [{"matcher": "", "hooks": [
-      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations active '" + $proj + "'")},
-      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli acks pending '" + $proj + "' '" + $agent + "' --limit 20")}
+      {"type": "command", "command": "cd \u0027\($mcp_dir)\u0027 && uv run python -m mcp_agent_mail.cli file_reservations active \u0027\($proj)\u0027"},
+      {"type": "command", "command": "cd \u0027\($mcp_dir)\u0027 && uv run python -m mcp_agent_mail.cli acks pending \u0027\($proj)\u0027 \u0027\($agent)\u0027 --limit 20"}
     ]}] |
     .hooks.BeforeTool = [{"matcher": "write_file|replace|edit_file", "hooks": [
-      {"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations soon '" + $proj + "' --minutes 10")}
+      {"type": "command", "command": "cd \u0027\($mcp_dir)\u0027 && uv run python -m mcp_agent_mail.cli file_reservations soon \u0027\($proj)\u0027 --minutes 10"}
     ]}] |
     .hooks.AfterTool = [
       {"matcher": "shell|run_command", "hooks": [{"type": "command", "command": $inbox_cmd}]},
-      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli list-acks --project '" + $proj + "' --agent '" + $agent + "' --limit 10")}]},
-      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": ("cd '" + $mcp_dir + "' && uv run python -m mcp_agent_mail.cli file_reservations list '" + $proj + "'")}]}
+      {"matcher": "mcp__mcp-agent-mail__send_message", "hooks": [{"type": "command", "command": "cd \u0027\($mcp_dir)\u0027 && uv run python -m mcp_agent_mail.cli list-acks --project \u0027\($proj)\u0027 --agent \u0027\($agent)\u0027 --limit 10"}]},
+      {"matcher": "mcp__mcp-agent-mail__file_reservation_paths", "hooks": [{"type": "command", "command": "cd \u0027\($mcp_dir)\u0027 && uv run python -m mcp_agent_mail.cli file_reservations list \u0027\($proj)\u0027"}]}
     ]
   ' "$HOME_SETTINGS" > "$TMP_MERGE"; then
     if mv "$TMP_MERGE" "$HOME_SETTINGS"; then
