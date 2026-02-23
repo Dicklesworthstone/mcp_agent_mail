@@ -1626,7 +1626,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                     # Delete markdown files from Git archive
                     settings = get_settings()
-                    git_paths_removed: list[str] = []
+                    total_git_files_removed = 0
                     import re as _re
 
                     _SUBJECT_SLUG_RE = _re.compile(r"[^a-zA-Z0-9]+")
@@ -1638,6 +1638,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         by_project.setdefault(slug, []).append(mrow)
 
                     for project_slug, proj_msgs in by_project.items():
+                        git_paths_removed: list[str] = []
                         try:
                             archive = await ensure_archive(settings, project_slug)
                             for mrow in proj_msgs:
@@ -1709,6 +1710,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                         author=git_actor,
                                         committer=git_actor,
                                     )
+                                    total_git_files_removed += len(git_paths_removed)
                                 except Exception as git_exc:
                                     logging.getLogger(__name__).warning(
                                         "Git commit for message deletion failed: %s", git_exc
@@ -1725,7 +1727,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return JSONResponse({
                     "success": True,
                     "deleted_count": deleted_count,
-                    "git_files_removed": len(git_paths_removed),
+                    "git_files_removed": total_git_files_removed,
                 })
 
             except HTTPException:
@@ -1747,7 +1749,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 body = await request.json()
                 agent_id: int | None = body.get("agent_id")
-                if not agent_id:
+                if agent_id is None:
                     raise HTTPException(status_code=400, detail="agent_id is required")
 
                 async with get_session() as session:
@@ -1772,7 +1774,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 body = await request.json()
                 agent_id: int | None = body.get("agent_id")
-                if not agent_id:
+                if agent_id is None:
                     raise HTTPException(status_code=400, detail="agent_id is required")
 
                 async with get_session() as session:
@@ -1799,7 +1801,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 body = await request.json()
                 project_id: int | None = body.get("project_id")
-                if not project_id:
+                if project_id is None:
                     raise HTTPException(status_code=400, detail="project_id is required")
 
                 async with get_session() as session:
@@ -1824,7 +1826,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 body = await request.json()
                 project_id: int | None = body.get("project_id")
-                if not project_id:
+                if project_id is None:
                     raise HTTPException(status_code=400, detail="project_id is required")
 
                 async with get_session() as session:
