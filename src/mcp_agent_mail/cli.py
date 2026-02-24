@@ -48,7 +48,7 @@ from .config import get_settings
 from .db import ensure_schema, get_session, reset_database_state
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
-from .models import Agent, FileReservation, Message, MessageRecipient, Product, ProductProjectLink, Project
+from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, MessageSummary, Product, ProductProjectLink, Project, ProjectSiblingSuggestion, WindowIdentity
 from .share import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_THRESHOLD,
@@ -2517,6 +2517,402 @@ def clear_and_reset_everything(
         console.print(f"[dim]Removed database files:[/] {', '.join(str(p) for p in deleted_db_files)}")
     if deleted_storage:
         console.print(f"[dim]Cleared storage root entries:[/] {', '.join(str(p.name) for p in deleted_storage)}")
+
+
+@app.command("hard-delete-agent")
+def hard_delete_agent(
+    project: Annotated[str, typer.Argument(help="Project slug or human key.")],
+    agent_name: Annotated[str, typer.Argument(help="Name of the agent to permanently delete.")],
+    confirmation: Annotated[
+        str,
+        typer.Option(
+            "--confirm",
+            help="Must be exactly 'I UNDERSTAND' to proceed. This operation is IRREVERSIBLE.",
+        ),
+    ] = "",
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option("--token", "-t", help="Registration token for token-protected agents."),
+    ] = None,
+) -> None:
+    """Permanently delete an agent and ALL associated data (messages, files, database records).
+
+    This is NOT soft-delete. Data is physically destroyed and cannot be recovered.
+    Requires --confirm='I UNDERSTAND' to proceed.
+    """
+    if confirmation != "I UNDERSTAND":
+        console.print(
+            "[red]Hard delete requires --confirm='I UNDERSTAND' (case-sensitive).[/]\n"
+            "[yellow]This operation is IRREVERSIBLE — all messages, files, and database records "
+            "for this agent will be permanently destroyed.[/]"
+        )
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+
+    async def _execute() -> dict[str, Any]:
+        import hmac as _hmac
+
+        await ensure_schema(settings)
+        proj = await _get_project_record(project)
+        agent = await _get_agent_record(proj, agent_name)
+
+        # Verify registration token if the agent has one
+        if agent.registration_token and not _hmac.compare_digest(registration_token or "", agent.registration_token):
+            raise ValueError("Invalid registration_token — only the agent's owner can hard-delete it")
+
+        agent_id = agent.id
+        project_id = proj.id
+        deleted_counts: dict[str, int] = {}
+
+        # Phase 1: Database cleanup in a single transaction
+        async with get_session() as session:
+            # Delete message_recipients where this agent is a recipient
+            recipient_rows = await session.execute(
+                select(MessageRecipient).where(cast(Any, MessageRecipient.agent_id) == agent_id)
+            )
+            recipient_records = recipient_rows.scalars().all()
+            deleted_counts["message_recipients"] = len(recipient_records)
+            for rec in recipient_records:
+                await session.delete(rec)
+
+            # Find and delete messages sent by this agent
+            sent_msg_rows = await session.execute(
+                select(Message).where(
+                    cast(Any, Message.project_id) == project_id,
+                    cast(Any, Message.sender_id) == agent_id,
+                )
+            )
+            sent_messages = sent_msg_rows.scalars().all()
+            sent_message_ids = [m.id for m in sent_messages]
+
+            # Delete recipient records for sent messages
+            if sent_message_ids:
+                sent_recipient_rows = await session.execute(
+                    select(MessageRecipient).where(
+                        cast(Any, MessageRecipient.message_id).in_(sent_message_ids)
+                    )
+                )
+                sent_recipient_records = sent_recipient_rows.scalars().all()
+                deleted_counts["sent_message_recipients"] = len(sent_recipient_records)
+                for rec in sent_recipient_records:
+                    await session.delete(rec)
+
+            # Delete messages (FTS cleanup by DB trigger)
+            deleted_counts["messages_sent"] = len(sent_messages)
+            for msg in sent_messages:
+                await session.delete(msg)
+
+            # Delete file reservations
+            fr_rows = await session.execute(
+                select(FileReservation).where(
+                    cast(Any, FileReservation.project_id) == project_id,
+                    cast(Any, FileReservation.agent_id) == agent_id,
+                )
+            )
+            file_reservations = fr_rows.scalars().all()
+            deleted_counts["file_reservations"] = len(file_reservations)
+            for fr in file_reservations:
+                await session.delete(fr)
+
+            # Delete agent links (both directions)
+            link_rows = await session.execute(
+                select(AgentLink).where(
+                    or_(
+                        cast(Any, AgentLink.a_agent_id) == agent_id,
+                        cast(Any, AgentLink.b_agent_id) == agent_id,
+                    )
+                )
+            )
+            agent_links = link_rows.scalars().all()
+            deleted_counts["agent_links"] = len(agent_links)
+            for link in agent_links:
+                await session.delete(link)
+
+            # Delete window identities
+            wi_rows = await session.execute(
+                select(WindowIdentity).where(
+                    cast(Any, WindowIdentity.project_id) == project_id,
+                    cast(Any, WindowIdentity.display_name) == agent_name,
+                )
+            )
+            window_identities = wi_rows.scalars().all()
+            deleted_counts["window_identities"] = len(window_identities)
+            for wi in window_identities:
+                await session.delete(wi)
+
+            # Delete the agent record itself
+            db_agent = await session.get(Agent, agent_id)
+            if db_agent:
+                await session.delete(db_agent)
+                deleted_counts["agent"] = 1
+
+            await session.commit()
+
+        # Phase 2: Filesystem cleanup (best-effort)
+        files_removed = 0
+        dirs_removed = 0
+        fs_errors: list[str] = []
+        try:
+            from .storage import ensure_archive
+
+            archive = await ensure_archive(settings, proj.slug)
+            agent_dir = archive.root / "agents" / agent_name
+            if agent_dir.exists():
+                for item in agent_dir.rglob("*"):
+                    if item.is_file():
+                        files_removed += 1
+                    elif item.is_dir():
+                        dirs_removed += 1
+                shutil.rmtree(agent_dir)
+        except Exception as exc:
+            fs_errors.append(str(exc))
+
+        deleted_counts["archive_files_removed"] = files_removed
+        deleted_counts["archive_dirs_removed"] = dirs_removed
+        return {"deleted_counts": deleted_counts, "fs_errors": fs_errors}
+
+    try:
+        result = _run_async(_execute())
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    counts = result["deleted_counts"]
+    fs_errors = result["fs_errors"]
+    console.print(f"[green]Hard-deleted agent '{agent_name}' from project '{project}'.[/]")
+    console.print(
+        f"[dim]Database:[/] {counts.get('messages_sent', 0)} messages, "
+        f"{counts.get('message_recipients', 0) + counts.get('sent_message_recipients', 0)} recipient records, "
+        f"{counts.get('file_reservations', 0)} file reservations, "
+        f"{counts.get('agent_links', 0)} agent links, "
+        f"{counts.get('window_identities', 0)} window identities"
+    )
+    console.print(
+        f"[dim]Filesystem:[/] {counts.get('archive_files_removed', 0)} files and "
+        f"{counts.get('archive_dirs_removed', 0)} directories removed"
+    )
+    if fs_errors:
+        for err in fs_errors:
+            console.print(f"[yellow]Filesystem warning:[/] {err}")
+
+
+@app.command("hard-delete-project")
+def hard_delete_project(
+    project: Annotated[str, typer.Argument(help="Project slug or human key.")],
+    confirmation: Annotated[
+        str,
+        typer.Option(
+            "--confirm",
+            help="Must be exactly 'I UNDERSTAND' to proceed. This operation is IRREVERSIBLE.",
+        ),
+    ] = "",
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option("--token", "-t", help="Registration token (must match a registered agent in the project)."),
+    ] = None,
+) -> None:
+    """Permanently delete a project and ALL associated data (agents, messages, files, database records).
+
+    This is NOT soft-delete. The entire project is physically destroyed and cannot be recovered.
+    Requires --confirm='I UNDERSTAND' to proceed.
+    """
+    if confirmation != "I UNDERSTAND":
+        console.print(
+            "[red]Hard delete requires --confirm='I UNDERSTAND' (case-sensitive).[/]\n"
+            "[yellow]This operation is IRREVERSIBLE — ALL agents, messages, files, and database records "
+            "for this project will be permanently destroyed.[/]"
+        )
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+
+    async def _execute() -> dict[str, Any]:
+        import hmac as _hmac
+
+        await ensure_schema(settings)
+        proj = await _get_project_record(project)
+        project_id = proj.id
+        project_slug = proj.slug
+
+        # Verify caller owns at least one agent in this project
+        async with get_session() as session:
+            agents_result = await session.execute(
+                select(Agent).where(
+                    cast(Any, Agent.project_id) == project_id,
+                    Agent.registration_token.isnot(None),
+                )
+            )
+            token_agents = agents_result.scalars().all()
+            if token_agents:
+                if not registration_token or not any(
+                    _hmac.compare_digest(registration_token, a.registration_token)
+                    for a in token_agents
+                    if a.registration_token
+                ):
+                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+
+        deleted_counts: dict[str, int] = {}
+
+        # Phase 1: Database cleanup in a single transaction
+        async with get_session() as session:
+            # Collect all agent IDs
+            agent_rows = await session.execute(
+                select(Agent).where(cast(Any, Agent.project_id) == project_id)
+            )
+            agents = agent_rows.scalars().all()
+            agent_ids = [a.id for a in agents]
+            deleted_counts["agents"] = len(agents)
+
+            # Collect all message IDs
+            msg_rows = await session.execute(
+                select(Message).where(cast(Any, Message.project_id) == project_id)
+            )
+            messages = msg_rows.scalars().all()
+            message_ids = [m.id for m in messages]
+            deleted_counts["messages"] = len(messages)
+
+            # Delete message recipients
+            if message_ids:
+                mr_rows = await session.execute(
+                    select(MessageRecipient).where(
+                        cast(Any, MessageRecipient.message_id).in_(message_ids)
+                    )
+                )
+                mrs = mr_rows.scalars().all()
+                deleted_counts["message_recipients"] = len(mrs)
+                for mr in mrs:
+                    await session.delete(mr)
+
+            # Delete messages (FTS cleanup by DB trigger)
+            for msg in messages:
+                await session.delete(msg)
+
+            # Delete file reservations
+            fr_rows = await session.execute(
+                select(FileReservation).where(cast(Any, FileReservation.project_id) == project_id)
+            )
+            frs = fr_rows.scalars().all()
+            deleted_counts["file_reservations"] = len(frs)
+            for fr in frs:
+                await session.delete(fr)
+
+            # Delete agent links
+            if agent_ids:
+                link_rows = await session.execute(
+                    select(AgentLink).where(
+                        or_(
+                            cast(Any, AgentLink.a_agent_id).in_(agent_ids),
+                            cast(Any, AgentLink.b_agent_id).in_(agent_ids),
+                        )
+                    )
+                )
+                links = link_rows.scalars().all()
+                deleted_counts["agent_links"] = len(links)
+                for link in links:
+                    await session.delete(link)
+
+            # Delete window identities
+            wi_rows = await session.execute(
+                select(WindowIdentity).where(cast(Any, WindowIdentity.project_id) == project_id)
+            )
+            wis = wi_rows.scalars().all()
+            deleted_counts["window_identities"] = len(wis)
+            for wi in wis:
+                await session.delete(wi)
+
+            # Delete message summaries
+            ms_rows = await session.execute(
+                select(MessageSummary).where(cast(Any, MessageSummary.project_id) == project_id)
+            )
+            summaries = ms_rows.scalars().all()
+            deleted_counts["message_summaries"] = len(summaries)
+            for ms in summaries:
+                await session.delete(ms)
+
+            # Delete sibling suggestions
+            ss_rows = await session.execute(
+                select(ProjectSiblingSuggestion).where(
+                    or_(
+                        cast(Any, ProjectSiblingSuggestion.project_a_id) == project_id,
+                        cast(Any, ProjectSiblingSuggestion.project_b_id) == project_id,
+                    )
+                )
+            )
+            suggestions = ss_rows.scalars().all()
+            deleted_counts["sibling_suggestions"] = len(suggestions)
+            for ss in suggestions:
+                await session.delete(ss)
+
+            # Delete product-project links
+            ppl_rows = await session.execute(
+                select(ProductProjectLink).where(cast(Any, ProductProjectLink.project_id) == project_id)
+            )
+            ppls = ppl_rows.scalars().all()
+            deleted_counts["product_links"] = len(ppls)
+            for ppl in ppls:
+                await session.delete(ppl)
+
+            # Delete all agents
+            for agent in agents:
+                await session.delete(agent)
+
+            # Delete the project itself
+            db_project = await session.get(Project, project_id)
+            if db_project:
+                await session.delete(db_project)
+                deleted_counts["project"] = 1
+
+            await session.commit()
+
+        # Phase 2: Filesystem cleanup (best-effort)
+        files_removed = 0
+        dirs_removed = 0
+        fs_errors: list[str] = []
+        try:
+            archive_root = Path(settings.storage.root).expanduser().resolve()
+            project_dir = archive_root / "projects" / project_slug
+            if project_dir.exists():
+                for item in project_dir.rglob("*"):
+                    if item.is_file():
+                        files_removed += 1
+                    elif item.is_dir():
+                        dirs_removed += 1
+                shutil.rmtree(project_dir)
+        except Exception as exc:
+            fs_errors.append(str(exc))
+
+        deleted_counts["archive_files_removed"] = files_removed
+        deleted_counts["archive_dirs_removed"] = dirs_removed
+        return {"deleted_counts": deleted_counts, "fs_errors": fs_errors, "slug": project_slug}
+
+    try:
+        result = _run_async(_execute())
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+
+    counts = result["deleted_counts"]
+    fs_errors = result["fs_errors"]
+    console.print(f"[green]Hard-deleted project '{project}' (slug: {result['slug']}).[/]")
+    console.print(
+        f"[dim]Database:[/] {counts.get('agents', 0)} agents, "
+        f"{counts.get('messages', 0)} messages, "
+        f"{counts.get('message_recipients', 0)} recipient records, "
+        f"{counts.get('file_reservations', 0)} file reservations, "
+        f"{counts.get('agent_links', 0)} agent links, "
+        f"{counts.get('window_identities', 0)} window identities, "
+        f"{counts.get('message_summaries', 0)} message summaries, "
+        f"{counts.get('sibling_suggestions', 0)} sibling suggestions, "
+        f"{counts.get('product_links', 0)} product links"
+    )
+    console.print(
+        f"[dim]Filesystem:[/] {counts.get('archive_files_removed', 0)} files and "
+        f"{counts.get('archive_dirs_removed', 0)} directories removed"
+    )
+    if fs_errors:
+        for err in fs_errors:
+            console.print(f"[yellow]Filesystem warning:[/] {err}")
 
 
 @app.command("migrate")
