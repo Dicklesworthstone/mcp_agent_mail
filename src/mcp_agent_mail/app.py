@@ -1516,9 +1516,12 @@ def _quote_hyphenated_tokens(query: str) -> str:
     return _FTS5_HYPHENATED_TOKEN_RE.sub(r'"\1"', query)
 
 
+_LIKE_ESCAPE_CHAR = "!"
+
+
 def _like_escape(term: str) -> str:
     """Escape LIKE wildcards for literal substring matching."""
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
 
 
 def _extract_like_terms(query: str, *, max_terms: int = 5) -> list[str]:
@@ -8241,7 +8244,7 @@ def build_mcp_server() -> FastMCP:
                     key = f"t{idx}"
                     params[key] = f"%{_like_escape(term)}%"
                     clauses.append(
-                        f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                        f"(m.subject LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}')"
                     )
                 where_clause = " AND ".join(clauses)
                 async with get_session() as session:
@@ -9843,7 +9846,7 @@ def build_mcp_server() -> FastMCP:
                             key = f"t{idx}"
                             params[key] = f"%{_like_escape(term)}%"
                             clauses.append(
-                                f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                                f"(m.subject LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}')"
                             )
                         where_clause = " AND ".join(clauses)
                         result = await session.execute(
