@@ -97,6 +97,8 @@ _SLUG_VALIDATOR_RE = re.compile(r"^[a-z0-9_-]+$", re.IGNORECASE)
 _AGENT_NAME_VALIDATOR_RE = re.compile(r"^[A-Za-z0-9]+$")
 _TIMESTAMP_VALIDATOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
+_LIKE_ESCAPE_CHAR = "!"
+
 
 def _configure_logging(settings: Settings) -> None:
     """Initialize structlog and stdlib logging formatting."""
@@ -1349,7 +1351,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return '"' + s.replace('"', '""') + '"'
 
             def _like_escape(term: str) -> str:
-                return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                return term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
 
             for p in parts:
                 key = None
@@ -1929,11 +1931,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     except Exception:
                         # Fallback to LIKE if FTS not available
                         if like_scope == "subject":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT 10000"
                         elif like_scope == "body":
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT 10000"
                         else:
-                            like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT 10000"
                         search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
                         matched_messages = [
                             {
@@ -2782,11 +2784,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ]
                 except Exception:
                     if like_scope == "subject":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT :lim"
                     elif like_scope == "body":
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '\\' ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT :lim"
                     else:
-                        like_sql = "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '\\' OR m.body_md LIKE :pat ESCAPE '\\') ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT :lim"
                     rows = await session.execute(
                         text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%", "lim": limit}
                     )
