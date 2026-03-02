@@ -20,7 +20,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from mcp_agent_mail import config as _config
-from mcp_agent_mail.app import _quote_hyphenated_tokens, _sanitize_fts_query, build_mcp_server
+from mcp_agent_mail.app import _like_escape, _quote_hyphenated_tokens, _sanitize_fts_query, build_mcp_server
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.http import build_http_app
 from mcp_agent_mail.models import Agent, Project
@@ -174,6 +174,18 @@ class TestQuoteHyphenatedTokens:
         # These don't match the pattern: alphanumeric-alphanumeric
         result = _quote_hyphenated_tokens("foo-")
         assert result == "foo-"  # No quote because pattern needs alphanumeric after hyphen
+
+
+class TestLikeEscape:
+    """Test LIKE fallback escaping helper."""
+
+    def test_like_escape_escapes_wildcards_and_escape_char(self):
+        """Escapes %, _, and the escape marker itself for SQL LIKE safety."""
+        assert _like_escape("100%_ready!ok") == "100!%!_ready!!ok"
+
+    def test_like_escape_keeps_backslash_literal(self):
+        """Backslashes should remain literal; escape marker is !, not backslash."""
+        assert _like_escape("a\\b") == "a\\b"
 
 
 # =============================================================================

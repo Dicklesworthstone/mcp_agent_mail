@@ -1472,6 +1472,7 @@ def _validate_thread_id(raw_value: Optional[str]) -> Optional[str]:
 _FTS5_UNSEARCHABLE_PATTERNS = frozenset({"*", "**", "***", ".", "..", "...", "?", "??", "???", ""})
 _LIKE_FALLBACK_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,63}")
 _LIKE_FALLBACK_STOPWORDS = frozenset({"AND", "OR", "NOT", "NEAR"})
+_LIKE_ESCAPE_CHAR = "!"
 
 # Regex to detect hyphenated tokens that need quoting for FTS5
 # Matches: POL-358, FEAT-123, foo-bar-baz, A-1
@@ -1517,8 +1518,16 @@ def _quote_hyphenated_tokens(query: str) -> str:
 
 
 def _like_escape(term: str) -> str:
-    """Escape LIKE wildcards for literal substring matching."""
-    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    """Escape LIKE wildcards for literal substring matching.
+
+    Uses `_LIKE_ESCAPE_CHAR` instead of backslash to avoid cross-dialect
+    ambiguity where `ESCAPE '\\'` can be interpreted as two characters.
+    """
+    return (
+        term.replace(_LIKE_ESCAPE_CHAR, _LIKE_ESCAPE_CHAR * 2)
+        .replace("%", f"{_LIKE_ESCAPE_CHAR}%")
+        .replace("_", f"{_LIKE_ESCAPE_CHAR}_")
+    )
 
 
 def _extract_like_terms(query: str, *, max_terms: int = 5) -> list[str]:
@@ -4969,13 +4978,12 @@ def build_mcp_server() -> FastMCP:
                 select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+            if token_agents and (not registration_token or not any(
+                hmac.compare_digest(registration_token, a.registration_token)
+                for a in token_agents
+                if a.registration_token
+            )):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5012,13 +5020,12 @@ def build_mcp_server() -> FastMCP:
                 select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+            if token_agents and (not registration_token or not any(
+                hmac.compare_digest(registration_token, a.registration_token)
+                for a in token_agents
+                if a.registration_token
+            )):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5249,13 +5256,12 @@ def build_mcp_server() -> FastMCP:
                 )
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+            if token_agents and (not registration_token or not any(
+                hmac.compare_digest(registration_token, a.registration_token)
+                for a in token_agents
+                if a.registration_token
+            )):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         deleted_counts: dict[str, int] = {}
 
@@ -8241,7 +8247,7 @@ def build_mcp_server() -> FastMCP:
                     key = f"t{idx}"
                     params[key] = f"%{_like_escape(term)}%"
                     clauses.append(
-                        f"(m.subject LIKE :{key} ESCAPE '\\' OR m.body_md LIKE :{key} ESCAPE '\\')"
+                        f"(m.subject LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}')"
                     )
                 where_clause = " AND ".join(clauses)
                 async with get_session() as session:
@@ -9843,7 +9849,7 @@ def build_mcp_server() -> FastMCP:
                             key = f"t{idx}"
                             params[key] = f"%{_like_escape(term)}%"
                             clauses.append(
-                                f"(m.subject LIKE :{key} ESCAPE '\\' OR m.body_md LIKE :{key} ESCAPE '\\')"
+                                f"(m.subject LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}')"
                             )
                         where_clause = " AND ".join(clauses)
                         result = await session.execute(
