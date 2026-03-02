@@ -100,6 +100,11 @@ _TIMESTAMP_VALIDATOR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 _LIKE_ESCAPE_CHAR = "!"
 
 
+def _like_escape(term: str) -> str:
+    """Escape LIKE wildcards for literal substring matching."""
+    return term.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
 def _configure_logging(settings: Settings) -> None:
     """Initialize structlog and stdlib logging formatting."""
     # Idempotent setup
@@ -1936,7 +1941,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT 10000"
                         else:
                             like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT 10000"
-                        search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%"})
+                        search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{_like_escape(q)}%"})
                         matched_messages = [
                             {
                                 "id": r[0],
@@ -2790,7 +2795,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     else:
                         like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT :lim"
                     rows = await session.execute(
-                        text(like_sql), {"pid": pid, "pat": like_pat or f"%{q}%", "lim": limit}
+                        text(like_sql), {"pid": pid, "pat": like_pat or f"%{_like_escape(q)}%", "lim": limit}
                     )
                     results = [
                         {
