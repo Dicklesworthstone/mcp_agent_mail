@@ -8241,7 +8241,7 @@ def build_mcp_server() -> FastMCP:
                     key = f"t{idx}"
                     params[key] = f"%{_like_escape(term)}%"
                     clauses.append(
-                        f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                        f"(m.subject LIKE :{key} ESCAPE '\\' OR m.body_md LIKE :{key} ESCAPE '\\')"
                     )
                 where_clause = " AND ".join(clauses)
                 async with get_session() as session:
@@ -9843,7 +9843,7 @@ def build_mcp_server() -> FastMCP:
                             key = f"t{idx}"
                             params[key] = f"%{_like_escape(term)}%"
                             clauses.append(
-                                f"(m.subject LIKE :{key} ESCAPE '\\\\' OR m.body_md LIKE :{key} ESCAPE '\\\\')"
+                                f"(m.subject LIKE :{key} ESCAPE '\\' OR m.body_md LIKE :{key} ESCAPE '\\')"
                             )
                         where_clause = " AND ".join(clauses)
                         result = await session.execute(
