@@ -7,6 +7,7 @@ This directory contains Architecture Decision Records (ADRs) documenting signifi
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [ADR-002](002-rust-optimization-analysis.md) | Rust/PyO3 Optimization Analysis | Decided | January 2026 |
+| [Identity Contract](../IDENTITY_CONTRACT.md) | Per-Pane Agent Identity File Convention | Canonical | March 2026 |
 
 ## What is an ADR?
 
