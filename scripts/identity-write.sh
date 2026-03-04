@@ -58,6 +58,12 @@ PANE_ID="${3:-${TMUX_PANE:-}}"
 [ -z "$AGENT_NAME" ] && die "usage: identity-write.sh <agent_name> [project_path] [pane_id]"
 [ -z "$PANE_ID" ]    && die "pane_id not provided and TMUX_PANE is not set"
 
+# Require absolute path to avoid hash mismatches between write and resolve.
+case "$PROJECT_PATH" in
+    /*) ;;
+    *)  die "project_path must be an absolute path (got: ${PROJECT_PATH})" ;;
+esac
+
 # ── compute paths ────────────────────────────────────────────────────────────
 
 HASH=$(project_hash "$PROJECT_PATH")
@@ -68,7 +74,10 @@ TIMESTAMP=$(epoch_now)
 # ── atomic write ─────────────────────────────────────────────────────────────
 
 mkdir -p "$IDENTITY_DIR" || die "failed to create directory: ${IDENTITY_DIR}"
-chmod 700 "$IDENTITY_DIR" 2>/dev/null || true
+# Secure the entire directory chain (mkdir -p inherits umask, typically 755).
+chmod 700 "${HOME}/.local/state/agent-mail" \
+          "${HOME}/.local/state/agent-mail/identity" \
+          "$IDENTITY_DIR" 2>/dev/null || true
 
 TMPFILE="${IDENTITY_FILE}.tmp.$$"
 

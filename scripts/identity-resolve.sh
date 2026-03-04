@@ -46,6 +46,9 @@ epoch_now() {
 }
 
 STALE_SECONDS="${IDENTITY_STALE_SECONDS:-86400}"
+case "$STALE_SECONDS" in
+    ''|*[!0-9]*) die "IDENTITY_STALE_SECONDS must be a positive integer (got: ${STALE_SECONDS})" ;;
+esac
 BASE_DIR="${HOME}/.local/state/agent-mail/identity"
 
 # ── mode dispatch ────────────────────────────────────────────────────────────
@@ -128,12 +131,18 @@ PANE_ID="${2:-${TMUX_PANE:-}}"
 
 [ -z "$PANE_ID" ] && die "pane_id not provided and TMUX_PANE is not set"
 
+# Require absolute path to match identity-write.sh hash.
+case "$PROJECT_PATH" in
+    /*) ;;
+    *)  die "project_path must be an absolute path (got: ${PROJECT_PATH})" ;;
+esac
+
 HASH=$(project_hash "$PROJECT_PATH")
 IDENTITY_FILE="${BASE_DIR}/${HASH}/${PANE_ID}"
 
-[ -f "$IDENTITY_FILE" ] || exit 1
-
-# Read the file: line 1 = agent name, line 2 = timestamp.
+# Read the file atomically — no separate existence check (avoids TOCTOU race
+# with concurrent --cleanup). If the file vanished, the redirect fails and
+# we exit 1 via the || fallback.
 AGENT_NAME=""
 FILE_TS=""
 _linenum=0
@@ -144,7 +153,7 @@ while IFS= read -r _line || [ -n "$_line" ]; do
         2) FILE_TS="$_line" ;;
     esac
     [ "$_linenum" -ge 2 ] && break
-done < "$IDENTITY_FILE"
+done < "$IDENTITY_FILE" 2>/dev/null || exit 1
 
 [ -z "$AGENT_NAME" ] && exit 1
 
