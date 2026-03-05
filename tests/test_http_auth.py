@@ -406,6 +406,34 @@ class TestOAuthMetadataEndpoints:
             data = response.json()
             assert data.get("mcp_oauth") is False
 
+    @pytest.mark.asyncio
+    async def test_oauth_metadata_prefixed_mount_returns_404(self, isolated_env):
+        """Mounted transport paths should not expose accidental OAuth metadata."""
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/.well-known/oauth-authorization-server")
+            assert response.status_code == 404
+            data = response.json()
+            assert data.get("mcp_oauth") is False
+
+    @pytest.mark.asyncio
+    async def test_oauth_metadata_suffix_probe_returns_404(self, isolated_env):
+        """Codex-style suffix probes should also terminate OAuth discovery cleanly."""
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/.well-known/oauth-authorization-server/api")
+            assert response.status_code == 404
+            data = response.json()
+            assert data.get("mcp_oauth") is False
+
 
 # =============================================================================
 # Test: JWT Helper Functions

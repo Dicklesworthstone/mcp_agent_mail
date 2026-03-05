@@ -1104,17 +1104,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
         return JSONResponse({"status": "ready"})
 
-    # Well-known OAuth metadata endpoints: return 404 so clients skip OAuth discovery.
-    # Claude Code 2.1.37+ probes these and interprets 200 as "OAuth available",
-    # then Zod-validates expecting issuer/authorization_endpoint/etc. Per RFC 8414,
-    # 404 signals "no OAuth metadata" which is correct when OAuth is disabled.
-    @fastapi_app.get("/.well-known/oauth-authorization-server")
-    async def oauth_meta_root() -> JSONResponse:
+    def _oauth_metadata_disabled_response() -> JSONResponse:
         return JSONResponse({"mcp_oauth": False}, status_code=404)
 
-    @fastapi_app.get("/.well-known/oauth-authorization-server/mcp")
-    async def oauth_meta_root_mcp() -> JSONResponse:
-        return JSONResponse({"mcp_oauth": False}, status_code=404)
+    def _register_oauth_metadata_disabled(path: str) -> None:
+        async def _oauth_metadata_disabled() -> JSONResponse:
+            return _oauth_metadata_disabled_response()
+
+        fastapi_app.add_api_route(path, _oauth_metadata_disabled, methods=["GET"], include_in_schema=False)
 
     # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
     # and runs a fresh StreamableHTTP transport per request.
@@ -1191,6 +1188,21 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             mount_paths.append(compat_no_slash)
         if compat_with_slash not in mount_paths:
             mount_paths.append(compat_with_slash)
+
+    oauth_metadata_paths = {
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
+    }
+    for mount_path in mount_paths:
+        normalized = mount_path.rstrip("/") or "/"
+        if normalized == "/":
+            continue
+        oauth_metadata_paths.add(f"{normalized}/.well-known/oauth-authorization-server")
+        oauth_metadata_paths.add(f"{normalized}/.well-known/oauth-authorization-server/mcp")
+        oauth_metadata_paths.add(f"/.well-known/oauth-authorization-server{normalized}")
+        oauth_metadata_paths.add(f"/.well-known/oauth-authorization-server{normalized}/")
+    for path in sorted(oauth_metadata_paths):
+        _register_oauth_metadata_disabled(path)
 
     for mount_path in mount_paths:
         with contextlib.suppress(Exception):
