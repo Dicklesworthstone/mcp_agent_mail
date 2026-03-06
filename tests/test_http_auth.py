@@ -13,6 +13,7 @@ Reference: mcp_agent_mail-w51
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -430,6 +431,31 @@ class TestOAuthMetadataEndpoints:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/.well-known/oauth-authorization-server/api")
+            assert response.status_code == 404
+            data = response.json()
+            assert data.get("mcp_oauth") is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/api/.well-known/oauth-authorization-server/",
+            "/api/.well-known/oauth-authorization-server/mcp/",
+            "/mcp/.well-known/oauth-authorization-server/",
+            "/mcp/.well-known/oauth-authorization-server/mcp/",
+        ],
+    )
+    async def test_oauth_metadata_prefixed_trailing_slash_paths_return_404(
+        self, isolated_env, path: str
+    ):
+        """Mounted trailing-slash probe paths should not fall through into the MCP transport."""
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await asyncio.wait_for(client.get(path), timeout=1.0)
             assert response.status_code == 404
             data = response.json()
             assert data.get("mcp_oauth") is False

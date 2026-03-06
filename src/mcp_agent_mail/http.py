@@ -1189,18 +1189,23 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         if compat_with_slash not in mount_paths:
             mount_paths.append(compat_with_slash)
 
-    oauth_metadata_paths = {
-        "/.well-known/oauth-authorization-server",
-        "/.well-known/oauth-authorization-server/mcp",
-    }
+    oauth_metadata_paths: set[str] = set()
+
+    def _add_oauth_metadata_path(path: str) -> None:
+        normalized = path.rstrip("/") or "/"
+        oauth_metadata_paths.add(normalized)
+        if normalized != "/":
+            oauth_metadata_paths.add(f"{normalized}/")
+
+    _add_oauth_metadata_path("/.well-known/oauth-authorization-server")
+    _add_oauth_metadata_path("/.well-known/oauth-authorization-server/mcp")
     for mount_path in mount_paths:
         normalized = mount_path.rstrip("/") or "/"
         if normalized == "/":
             continue
-        oauth_metadata_paths.add(f"{normalized}/.well-known/oauth-authorization-server")
-        oauth_metadata_paths.add(f"{normalized}/.well-known/oauth-authorization-server/mcp")
-        oauth_metadata_paths.add(f"/.well-known/oauth-authorization-server{normalized}")
-        oauth_metadata_paths.add(f"/.well-known/oauth-authorization-server{normalized}/")
+        _add_oauth_metadata_path(f"{normalized}/.well-known/oauth-authorization-server")
+        _add_oauth_metadata_path(f"{normalized}/.well-known/oauth-authorization-server/mcp")
+        _add_oauth_metadata_path(f"/.well-known/oauth-authorization-server{normalized}")
     for path in sorted(oauth_metadata_paths):
         _register_oauth_metadata_disabled(path)
 
