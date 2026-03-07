@@ -197,4 +197,4 @@ stop_background_server
 # Also kill any other processes on port 8765 (cross-platform: uses lsof on macOS, fuser on Linux)
 kill_port_processes 8765
 
-exec ./scripts/run_server_with_token.sh
+./scripts/run_server_with_token.sh
