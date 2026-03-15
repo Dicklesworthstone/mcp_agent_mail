@@ -355,6 +355,63 @@ class ProjectArchive:
 _PROCESS_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
 _PROCESS_LOCK_OWNERS: dict[tuple[int, str], int] = {}
 
+# ---------------------------------------------------------------------------
+# Lock-FD telemetry: track active AsyncFileLock instances for leak detection
+# ---------------------------------------------------------------------------
+import threading as _threading
+
+_ACTIVE_LOCK_INSTANCES: dict[int, "AsyncFileLock"] = {}  # id(lock) -> lock
+_LOCK_INSTANCES_GUARD = _threading.Lock()
+_LOCK_FD_LEAKED_TOTAL: int = 0  # monotonic counter of detected leaks
+
+
+def get_lock_telemetry() -> dict[str, int]:
+    """Return current lock-FD telemetry for monitoring."""
+    with _LOCK_INSTANCES_GUARD:
+        return {
+            "active_locks": len(_ACTIVE_LOCK_INSTANCES),
+            "leaked_total": _LOCK_FD_LEAKED_TOTAL,
+        }
+
+
+def cleanup_leaked_lockfile_fds() -> int:
+    """Scan /proc/self/fd for open FDs pointing to deleted .lock files and close them.
+
+    Returns the number of leaked FDs that were closed.
+    """
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.exists():
+        return 0
+    closed = 0
+    try:
+        for entry in fd_dir.iterdir():
+            try:
+                fd_num = int(entry.name)
+            except ValueError:
+                continue
+            try:
+                target = os.readlink(str(entry))
+            except OSError:
+                continue
+            # Deleted lock files show up as "/path/to/.lock (deleted)"
+            if target.endswith("(deleted)") and ".lock" in target:
+                try:
+                    os.close(fd_num)
+                    closed += 1
+                    _logger.warning(
+                        "lockfile_fd.leaked_closed",
+                        extra={"fd": fd_num, "target": target},
+                    )
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    if closed:
+        global _LOCK_FD_LEAKED_TOTAL
+        with _LOCK_INSTANCES_GUARD:
+            _LOCK_FD_LEAKED_TOTAL += closed
+    return closed
+
 
 class _LRURepoCache:
     """LRU cache for Git Repo objects with size limit.
@@ -579,11 +636,15 @@ def get_fd_headroom() -> int:
 def proactive_fd_cleanup(*, threshold: int = 100) -> int:
     """Proactively cleanup resources if file descriptor headroom is low.
 
+    Handles two classes of leaked FDs:
+    1. Repo-cache FDs (git Repo objects held too long)
+    2. Lockfile FDs (leaked by AsyncFileLock on release failure / cancellation)
+
     Args:
         threshold: Minimum headroom required; cleanup runs if below this.
 
     Returns:
-        Number of repos freed (0 if no cleanup needed or unable to check).
+        Number of resources freed (0 if no cleanup needed or unable to check).
     """
     headroom = get_fd_headroom()
     if headroom < 0:
@@ -594,6 +655,11 @@ def proactive_fd_cleanup(*, threshold: int = 100) -> int:
         return 0
     # Low headroom - force cleanup of ALL evicted repos (bypass grace period)
     freed = _REPO_CACHE._cleanup_evicted(force=True)
+
+    # Clean up leaked lockfile FDs (deleted .lock files still held open)
+    lock_fds_closed = cleanup_leaked_lockfile_fds()
+    freed += lock_fds_closed
+
     # If still low, clear some cached repos too
     new_headroom = get_fd_headroom()
     if new_headroom >= 0 and new_headroom < threshold // 2:
@@ -659,6 +725,65 @@ class AsyncFileLock:
         self._loop_key: tuple[int, str] | None = None
         self._process_lock: asyncio.Lock | None = None
         self._process_lock_held = False
+        # Register for telemetry
+        with _LOCK_INSTANCES_GUARD:
+            _ACTIVE_LOCK_INSTANCES[id(self)] = self
+
+    def __del__(self) -> None:
+        with _LOCK_INSTANCES_GUARD:
+            _ACTIVE_LOCK_INSTANCES.pop(id(self), None)
+
+    def _force_close_fd(self) -> bool:
+        """Force-close the underlying SoftFileLock file descriptor if still open.
+
+        This is the last-resort safety net: if ``release()`` raised or was
+        interrupted, the FD may still be open and pointing at a (possibly
+        deleted) lock file.  We reach into the SoftFileLock internals to
+        close it, preventing FD exhaustion.
+
+        Returns True if an FD was actually closed, False otherwise.
+        """
+        fd = getattr(self._lock, "_context", None)
+        if fd is None:
+            return False
+        lock_fd = getattr(fd, "lock_file_fd", None)
+        if lock_fd is None:
+            return False
+        try:
+            os.close(lock_fd)
+            fd.lock_file_fd = None
+            fd.lock_counter = 0
+            _logger.warning(
+                "lockfile_fd.force_closed",
+                extra={"path": str(self._path), "fd": lock_fd},
+            )
+            global _LOCK_FD_LEAKED_TOTAL
+            with _LOCK_INSTANCES_GUARD:
+                _LOCK_FD_LEAKED_TOTAL += 1
+            return True
+        except OSError:
+            # FD was already closed (e.g., by a concurrent cleanup)
+            fd.lock_file_fd = None
+            fd.lock_counter = 0
+            return False
+
+    def _release_strict(self) -> bool:
+        """Release the lock, ensuring the FD is closed even on failure.
+
+        Returns True if the lock was successfully released (FD closed).
+        If ``release()`` raises, falls back to ``_force_close_fd()``.
+        """
+        try:
+            self._lock.release()
+            return True
+        except Exception as exc:
+            _logger.error(
+                "lockfile_fd.release_failed",
+                extra={"path": str(self._path), "error": str(exc)},
+            )
+            # Fallback: force-close the FD to prevent leak
+            self._force_close_fd()
+            return False
 
     async def __aenter__(self) -> None:
         """Acquire the file lock with adaptive retry and stale lock detection.
@@ -776,13 +901,22 @@ class AsyncFileLock:
             # Best-effort cleanup on any failure (including cancellation) to avoid leaking
             # lock file handles and process-level locks.
             if self._held:
-                task = asyncio.create_task(_to_thread(self._lock.release))
+                release_ok = False
+                task = asyncio.create_task(_to_thread(self._release_strict))
                 try:
-                    await asyncio.shield(task)
+                    release_ok = await asyncio.shield(task)
                 except BaseException:
                     with contextlib.suppress(Exception):
-                        await task
+                        release_ok = await task
+                if not release_ok:
+                    # release_strict already force-closed the FD; force-close
+                    # again as a safety net (idempotent)
+                    await _to_thread(self._force_close_fd)
                 self._held = False
+                # Only unlink files if we confirmed the FD is closed (release
+                # succeeded or was force-closed).  This prevents unlinking a
+                # lock path while another process may have legitimately
+                # acquired it in between.
                 for cleanup_coro in (
                     _to_thread(self._metadata_path.unlink, missing_ok=True),
                     _to_thread(self._path.unlink, missing_ok=True),
@@ -871,17 +1005,31 @@ class AsyncFileLock:
 
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: object) -> None:
         if self._held:
-            # Release/unlink must be cancellation-safe; otherwise cancelled tasks can leak
-            # lock file handles and wedge subsequent operations.
-            for cleanup_coro in (
-                _to_thread(self._lock.release),
-                asyncio.sleep(0.01) if sys.platform == "win32" else None,
-                _to_thread(self._metadata_path.unlink, missing_ok=True),
-                _to_thread(self._path.unlink, missing_ok=True),
-            ):
-                if cleanup_coro is None:
-                    continue
-                task = asyncio.create_task(cleanup_coro)
+            # Step 1: Release the lock (closes FD + unlinks lock file internally).
+            # Use _release_strict so that if release() raises, the FD is still
+            # force-closed, preventing the leaked-FD exhaustion bug (#116).
+            release_ok = False
+            release_task = asyncio.create_task(_to_thread(self._release_strict))
+            try:
+                release_ok = await asyncio.shield(release_task)
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    release_ok = await release_task
+            if not release_ok:
+                # Last resort: ensure FD is closed even if everything above failed
+                await _to_thread(self._force_close_fd)
+
+            # Step 2: Windows needs a short delay after close before unlink
+            if sys.platform == "win32":
+                await asyncio.sleep(0.01)
+
+            # Step 3: Clean up metadata file.  The lock file itself is already
+            # unlinked by SoftFileLock._release(); we only need to remove the
+            # metadata sidecar.  Redundant unlink of self._path is safe (missing_ok).
+            for cleanup_path in (self._metadata_path, self._path):
+                task = asyncio.create_task(
+                    _to_thread(cleanup_path.unlink, missing_ok=True)
+                )
                 try:
                     await asyncio.shield(task)
                 except BaseException:
