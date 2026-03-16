@@ -235,6 +235,147 @@ async def test_human_inbox_mark_read(isolated_env):
         assert data["messages"][0]["read"] is True
 
 
+async def _create_ai_agent(slug: str, name: str) -> None:
+    """Create an AI agent in the given project."""
+    async with get_session() as session:
+        pid_row = (await session.execute(
+            text("SELECT id FROM projects WHERE slug = :s"), {"s": slug}
+        )).fetchone()
+        await session.execute(
+            text("""INSERT OR IGNORE INTO agents
+                    (project_id, name, program, model, task_description,
+                     contact_policy, attachments_policy, inception_ts, last_active_ts)
+                    VALUES (:pid, :name, 'claude-code', 'opus-4', 'test',
+                            'open', 'auto', :ts, :ts)"""),
+            {"pid": pid_row[0], "name": name, "ts": datetime.now(timezone.utc)},
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_human_compose_page(isolated_env):
+    """GET /mail/human/compose renders compose page with identity selector."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        resp = await client.get(f"/mail/human/compose?project={slug}")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_human_send_as_identity(isolated_env):
+    """POST /mail/human/send sends message from chosen human identity."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+
+    await _create_ai_agent(slug, "SteelGuard")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/mail/human/send", json={
+            "project_slug": slug,
+            "sender_name": "lee",
+            "recipients": ["SteelGuard"],
+            "subject": "Review the security audit",
+            "body_md": "Please check the latest findings.",
+            "importance": "normal",
+            "include_preamble": False,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["sender"] == "lee"
+
+    # Verify message in DB has no preamble
+    async with get_session() as session:
+        msg = (await session.execute(
+            text("SELECT body_md, importance FROM messages WHERE id = :mid"),
+            {"mid": data["message_id"]},
+        )).fetchone()
+        assert "HUMAN OVERSEER" not in msg[0]
+        assert msg[1] == "normal"
+
+
+@pytest.mark.asyncio
+async def test_human_send_with_preamble(isolated_env):
+    """POST /mail/human/send with include_preamble=True adds operator preamble."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+
+    await _create_ai_agent(slug, "DeepWatch")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/mail/human/send", json={
+            "project_slug": slug,
+            "sender_name": "lee",
+            "recipients": ["DeepWatch"],
+            "subject": "Urgent directive",
+            "body_md": "Drop everything.",
+            "importance": "urgent",
+            "include_preamble": True,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+
+    async with get_session() as session:
+        msg = (await session.execute(
+            text("SELECT body_md, importance FROM messages WHERE id = :mid"),
+            {"mid": data["message_id"]},
+        )).fetchone()
+        assert "MESSAGE FROM HUMAN" in msg[0]
+        assert msg[1] == "urgent"
+
+
+@pytest.mark.asyncio
+async def test_human_send_validates_sender_is_human(isolated_env):
+    """Cannot send as an AI agent identity."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    await _create_ai_agent(slug, "FakeBot")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/mail/human/send", json={
+            "project_slug": slug,
+            "sender_name": "FakeBot",
+            "recipients": ["FakeBot"],
+            "subject": "Spoofed",
+            "body_md": "This should fail.",
+        })
+        assert resp.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_create_note(isolated_env):
     """POST /mail/human/notes creates a private note."""

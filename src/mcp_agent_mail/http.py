@@ -1576,6 +1576,207 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
 
             return JSONResponse({"success": True, "marked": len(message_ids)})
 
+        # ========== Human Compose Routes ==========
+
+        @fastapi_app.get("/mail/human/compose", response_class=HTMLResponse)
+        async def human_compose(project: str | None = None) -> HTMLResponse:
+            """Render compose page with identity selector."""
+            await ensure_schema()
+            async with get_session() as session:
+                # Get all human identities with their projects
+                id_rows = (
+                    await session.execute(
+                        text("""
+                            SELECT a.id, a.name, a.task_description, p.slug, p.human_key
+                            FROM agents a JOIN projects p ON a.project_id = p.id
+                            WHERE a.model = 'Human'
+                            ORDER BY a.name, p.slug
+                        """)
+                    )
+                ).fetchall()
+
+                identities = [
+                    {"name": r[1], "display_label": r[2], "project_slug": r[3], "project_path": r[4]}
+                    for r in id_rows
+                ]
+
+                # Get all agents grouped by project (for recipient selection)
+                projects_agents: dict[str, list[dict[str, Any]]] = {}
+                all_projects = (
+                    await session.execute(text("SELECT slug, human_key FROM projects ORDER BY slug"))
+                ).fetchall()
+                for prow in all_projects:
+                    agents = (
+                        await session.execute(
+                            text("""
+                                SELECT name, model FROM agents
+                                WHERE project_id = (SELECT id FROM projects WHERE slug = :s)
+                                ORDER BY name
+                            """),
+                            {"s": prow[0]},
+                        )
+                    ).fetchall()
+                    projects_agents[prow[0]] = [
+                        {"name": a[0], "is_human": a[1] == "Human"}
+                        for a in agents
+                    ]
+
+            return await _render(
+                "human_compose.html",
+                identities=identities,
+                projects_agents=projects_agents,
+                all_projects=[{"slug": p[0], "path": p[1]} for p in all_projects],
+                selected_project=project,
+            )
+
+        @fastapi_app.post("/mail/human/send")
+        async def human_send(request: Request) -> JSONResponse:
+            """Send message from a human identity. Validates sender is model=Human."""
+            await ensure_schema()
+
+            body = await request.json()
+            project_slug: str = body.get("project_slug", "").strip()
+            sender_name: str = body.get("sender_name", "").strip()
+            recipients: list[str] = body.get("recipients", [])
+            subject: str = body.get("subject", "").strip()
+            body_md: str = body.get("body_md", "").strip()
+            importance: str = body.get("importance", "normal")
+            include_preamble: bool = body.get("include_preamble", False)
+            thread_id: str | None = body.get("thread_id")
+
+            # Validate inputs
+            if not project_slug:
+                raise HTTPException(status_code=400, detail="project_slug is required")
+            if not sender_name:
+                raise HTTPException(status_code=400, detail="sender_name is required")
+            if not recipients:
+                raise HTTPException(status_code=400, detail="At least one recipient required")
+            if len(recipients) > 100:
+                raise HTTPException(status_code=400, detail="Max 100 recipients")
+            if not subject or len(subject) > 200:
+                raise HTTPException(status_code=400, detail="Subject required (max 200 chars)")
+            if not body_md or len(body_md) > 50000:
+                raise HTTPException(status_code=400, detail="Body required (max 50,000 chars)")
+            if importance not in ("low", "normal", "high", "urgent"):
+                raise HTTPException(status_code=400, detail="Invalid importance level")
+
+            recipients = list(dict.fromkeys(recipients))
+
+            # Build body with optional preamble
+            if include_preamble:
+                preamble = """---
+
+MESSAGE FROM HUMAN OPERATOR
+
+This message is from a human operator. Please prioritize the instructions below.
+
+---
+
+"""
+                full_body = preamble + body_md
+            else:
+                full_body = body_md
+
+            now = datetime.now(timezone.utc)
+
+            async with get_session() as session:
+                # Resolve project
+                prow = (
+                    await session.execute(
+                        text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                        {"k": project_slug},
+                    )
+                ).fetchone()
+                if not prow:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+                pid = int(prow[0])
+                actual_slug = prow[1]
+
+                # Validate sender is a human agent in this project
+                sender_row = (
+                    await session.execute(
+                        text("SELECT id, model FROM agents WHERE project_id = :pid AND name = :name"),
+                        {"pid": pid, "name": sender_name},
+                    )
+                ).fetchone()
+                if not sender_row:
+                    raise HTTPException(status_code=404, detail=f"Sender '{sender_name}' not found in project")
+                if sender_row[1] != "Human":
+                    raise HTTPException(status_code=403, detail="Cannot send as a non-human agent")
+
+                sender_id = sender_row[0]
+
+                # Insert message
+                result = await session.execute(
+                    text("""
+                        INSERT INTO messages (project_id, sender_id, subject, body_md, importance, thread_id, created_ts, ack_required)
+                        VALUES (:pid, :sid, :subj, :body, :imp, :tid, :ts, 0)
+                        RETURNING id
+                    """),
+                    {"pid": pid, "sid": sender_id, "subj": subject, "body": full_body,
+                     "imp": importance, "tid": thread_id, "ts": now},
+                )
+                message_id = result.fetchone()[0]
+
+                # Resolve recipients
+                placeholders = ", ".join(f":name_{i}" for i in range(len(recipients)))
+                params: dict[str, Any] = {"pid": pid}
+                params.update({f"name_{i}": n for i, n in enumerate(recipients)})
+                recipient_rows = (
+                    await session.execute(
+                        text(f"SELECT id, name FROM agents WHERE project_id = :pid AND name IN ({placeholders})"),
+                        params,
+                    )
+                ).fetchall()
+                recipient_map = {r[1]: r[0] for r in recipient_rows}
+                valid_recipients = [n for n in recipients if n in recipient_map]
+
+                if not valid_recipients:
+                    await session.rollback()
+                    raise HTTPException(status_code=400, detail="No valid recipients found")
+
+                # Insert recipients
+                await session.execute(
+                    text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+                    [{"mid": message_id, "aid": recipient_map[n]} for n in valid_recipients],
+                )
+
+                # Write to Git archive (best-effort in case storage isn't configured)
+                try:
+                    from .storage import ensure_archive, write_message_bundle
+                    settings = get_settings()
+                    archive = await ensure_archive(settings, actual_slug)
+                    await write_message_bundle(
+                        archive,
+                        {
+                            "id": message_id, "thread_id": thread_id,
+                            "project": prow[2], "project_slug": actual_slug,
+                            "from": sender_name, "to": valid_recipients,
+                            "cc": [], "bcc": [], "subject": subject,
+                            "importance": importance, "ack_required": False,
+                            "created": now.isoformat(), "attachments": [],
+                        },
+                        full_body, sender_name, valid_recipients,
+                        commit_text=f"{sender_name}: {subject}",
+                    )
+                except Exception:
+                    # Archive write is best-effort; DB is the source of truth
+                    logging.warning("Failed to write message to Git archive", exc_info=True)
+
+                # Update sender activity
+                await session.execute(
+                    text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
+                    {"ts": now, "id": sender_id},
+                )
+                await session.commit()
+
+            return JSONResponse({
+                "success": True, "message_id": message_id,
+                "sender": sender_name, "recipients": valid_recipients,
+                "sent_at": now.isoformat(),
+            })
+
         # ========== Project Routes (wildcard — must come after /mail/human/*) ==========
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)

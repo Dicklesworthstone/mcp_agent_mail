@@ -1,0 +1,482 @@
+{% extends "base.html" %}
+
+{% block title %}Compose — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 transition-colors font-medium flex items-center gap-1">
+    <i data-lucide="inbox" class="w-3.5 h-3.5"></i>
+    Agent Mail
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/human/inbox" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    My Inbox
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium">Compose</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto space-y-6 page-transition pb-12" x-data="humanComposer()" x-init="init()" @keydown.ctrl.enter="sendMessage()" @keydown.meta.enter="sendMessage()">
+
+  <!-- Header -->
+  <div class="mb-6">
+    <h1 class="text-3xl font-semibold text-slate-900 dark:text-white mb-2">Compose Message</h1>
+    <p class="text-slate-600 dark:text-slate-400">Send a message from your human identity to agents in a project.</p>
+  </div>
+
+  <form @submit.prevent="sendMessage()" class="space-y-6">
+
+    <!-- Identity & Project Selection -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+        <h2 class="text-lg font-semibold text-slate-900 dark:text-white">Sender Identity</h2>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Choose which identity to send as</p>
+      </div>
+      <div class="p-6 space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+            Send as <span class="text-red-500">*</span>
+          </label>
+          <select x-model="selectedIdentity" @change="onIdentityChange()"
+                  class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+            <option value="">-- Select identity --</option>
+            <template x-for="ident in identities" :key="ident.name + ':' + ident.project_slug">
+              <option :value="ident.name + ':' + ident.project_slug"
+                      :selected="selectedIdentity === ident.name + ':' + ident.project_slug"
+                      x-text="ident.name + ' (' + ident.project_slug + ')'"></option>
+            </template>
+          </select>
+        </div>
+
+        <!-- Importance -->
+        <div>
+          <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Importance</label>
+          <div class="flex items-center gap-2">
+            <template x-for="level in ['low', 'normal', 'high', 'urgent']" :key="level">
+              <button type="button" @click="importance = level"
+                      :class="importance === level
+                        ? (level === 'urgent' ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-300 dark:border-red-700'
+                          : level === 'high' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-700'
+                          : 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400 border-primary-300 dark:border-primary-700')
+                        : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'"
+                      class="px-3 py-1.5 border rounded-lg text-sm font-medium transition-all capitalize"
+                      x-text="level"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Preamble Toggle -->
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" x-model="includePreamble"
+                 class="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-primary-600 focus:ring-primary-500">
+          <span class="text-sm text-slate-700 dark:text-slate-300">Include priority preamble (tells agents to prioritize this message)</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Recipients Section -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-white">
+              Recipients
+              <span class="ml-2 text-sm font-normal text-slate-500 dark:text-slate-400">
+                (<span x-text="selectedRecipients.length"></span> selected)
+              </span>
+            </h2>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Select agents to receive this message</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" @click="selectAllRecipients()"
+                    class="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors">
+              Select All
+            </button>
+            <button type="button" @click="selectedRecipients = []"
+                    class="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-md transition-colors">
+              Clear
+            </button>
+          </div>
+        </div>
+        <div x-show="filteredAgents.length > 6" class="mt-4">
+          <div class="relative">
+            <i data-lucide="search" class="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400"></i>
+            <input type="text" x-model="recipientSearch"
+                   placeholder="Search agents..."
+                   class="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+          </div>
+        </div>
+      </div>
+      <div class="p-6">
+        <template x-if="!selectedIdentity">
+          <div class="text-center py-8 text-slate-500 dark:text-slate-400 text-sm">
+            Select an identity above to see available recipients.
+          </div>
+        </template>
+        <template x-if="selectedIdentity && filteredAgents.length === 0">
+          <div class="text-center py-8 text-slate-500 dark:text-slate-400 text-sm">
+            No other agents in this project.
+          </div>
+        </template>
+        <div x-show="selectedIdentity && filteredAgents.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <template x-for="agent in searchedAgents" :key="agent.name">
+            <label class="flex items-center gap-3 p-3 bg-slate-50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg border border-slate-200 dark:border-slate-700 cursor-pointer transition-colors"
+                   :class="selectedRecipients.includes(agent.name) ? 'ring-2 ring-primary-500 bg-primary-50 dark:bg-primary-900/20' : ''">
+              <input type="checkbox" :value="agent.name" x-model="selectedRecipients"
+                     class="w-4 h-4 text-primary-600 bg-white dark:bg-slate-700 border-slate-300 dark:border-slate-600 rounded focus:ring-2 focus:ring-primary-500">
+              <i :data-lucide="agent.is_human ? 'user' : 'bot'" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+              <span class="text-sm font-medium text-slate-900 dark:text-white truncate flex-1" x-text="agent.name"></span>
+            </label>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- Message Content -->
+    <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+      <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-semibold text-slate-900 dark:text-white">Message Content</h2>
+            <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Compose your message in Markdown</p>
+          </div>
+          <div class="flex items-center gap-1 p-0.5 bg-slate-100 dark:bg-slate-900 rounded-lg">
+            <button type="button" @click="viewMode = 'write'"
+                    class="px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5"
+                    :class="viewMode === 'write' ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+              <i data-lucide="edit-3" class="w-3.5 h-3.5"></i> Write
+            </button>
+            <button type="button" @click="viewMode = 'preview'"
+                    class="px-3 py-1.5 text-xs font-medium rounded-md transition-all flex items-center gap-1.5"
+                    :class="viewMode === 'preview' ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'">
+              <i data-lucide="eye" class="w-3.5 h-3.5"></i> Preview
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="p-6 space-y-4">
+        <!-- Subject -->
+        <div>
+          <label for="subject" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+            Subject <span class="text-red-500">*</span>
+          </label>
+          <input type="text" id="subject" x-model="subject" required maxlength="200"
+                 placeholder="e.g., Review the security audit"
+                 class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+          <p class="mt-1.5 text-xs text-slate-500"><span x-text="subject.length"></span> / 200</p>
+        </div>
+
+        <!-- Body -->
+        <div x-show="viewMode === 'write'" x-transition>
+          <label for="body" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+            Message Body <span class="text-red-500">*</span>
+          </label>
+          <!-- Markdown Toolbar -->
+          <div class="flex flex-wrap items-center gap-0.5 p-1.5 bg-slate-100 dark:bg-slate-900 rounded-t-lg border border-b-0 border-slate-200 dark:border-slate-700">
+            <button type="button" @click="insertMarkdown('**', '**', 'bold text')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Bold">
+              <i data-lucide="bold" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('*', '*', 'italic text')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Italic">
+              <i data-lucide="italic" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('`', '`', 'code')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Code">
+              <i data-lucide="code" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <div class="w-px h-5 bg-slate-300 dark:bg-slate-600 mx-1"></div>
+            <button type="button" @click="insertMarkdown('## ', '', 'Heading')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Heading">
+              <i data-lucide="heading" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('- ', '', 'List item')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="List">
+              <i data-lucide="list" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <button type="button" @click="insertMarkdown('[', '](url)', 'link text')"
+                    class="p-1.5 hover:bg-slate-200 dark:hover:bg-slate-700 rounded transition-colors" title="Link">
+              <i data-lucide="link" class="w-4 h-4 text-slate-600 dark:text-slate-400"></i>
+            </button>
+            <div class="flex-1"></div>
+            <span class="text-xs text-slate-500 dark:text-slate-400">
+              <kbd class="px-1.5 py-0.5 bg-slate-200 dark:bg-slate-700 rounded text-xs font-mono">Ctrl+Enter</kbd> to send
+            </span>
+          </div>
+          <textarea id="body" x-ref="bodyTextarea" x-model="body" @input="updatePreview()"
+                    required maxlength="50000" rows="12"
+                    placeholder="Write your message here using Markdown..."
+                    class="w-full px-4 py-3 bg-slate-50 dark:bg-slate-900 border border-t-0 border-slate-200 dark:border-slate-700 rounded-b-lg text-slate-900 dark:text-white placeholder-slate-400 font-mono text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all resize-none"></textarea>
+          <p class="mt-1.5 text-xs text-slate-500"><span x-text="body.length.toLocaleString()"></span> / 50,000</p>
+        </div>
+
+        <!-- Preview -->
+        <div x-show="viewMode === 'preview'" x-transition>
+          <label class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Preview</label>
+          <div class="p-4 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg min-h-[300px] max-h-[500px] overflow-y-auto">
+            <div x-html="renderedPreview" class="prose prose-sm dark:prose-invert max-w-none"></div>
+            <div x-show="!body" class="flex items-center justify-center h-48 text-slate-400">
+              <p class="text-sm">Your message preview will appear here</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Thread ID -->
+        <div>
+          <label for="threadId" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+            Thread ID <span class="text-xs font-normal text-slate-500">(Optional)</span>
+          </label>
+          <input type="text" id="threadId" x-model="threadId"
+                 placeholder="e.g., 42 or custom-thread-id"
+                 class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 font-mono text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all">
+        </div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="flex items-center justify-between gap-4 pt-2">
+      <a href="/mail/human/inbox"
+         class="inline-flex items-center gap-2 px-4 py-2.5 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-sm font-medium transition-colors">
+        <i data-lucide="arrow-left" class="w-4 h-4"></i>
+        Cancel
+      </a>
+      <button type="submit" :disabled="!canSend()"
+              class="inline-flex items-center gap-2 px-6 py-2.5 bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-100 rounded-lg shadow-sm font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              :class="sending ? 'cursor-wait' : ''">
+        <svg x-show="sending" class="animate-spin w-4 h-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        <i x-show="!sending" data-lucide="send" class="w-4 h-4"></i>
+        <span x-text="sending ? 'Sending...' : 'Send to ' + selectedRecipients.length + ' agent' + (selectedRecipients.length !== 1 ? 's' : '')">Send</span>
+      </button>
+    </div>
+  </form>
+
+  <!-- Toast -->
+  <template x-if="showToast">
+    <div x-transition:enter="transition ease-out duration-300"
+         x-transition:enter-start="opacity-0 transform translate-y-4"
+         x-transition:enter-end="opacity-100 transform translate-y-0"
+         class="fixed bottom-6 right-6 z-[100] max-w-md">
+      <div :class="toastType === 'success' ? 'bg-green-600' : 'bg-red-600'"
+           class="rounded-lg p-4 shadow-xl text-white flex items-start gap-3">
+        <i :data-lucide="toastType === 'success' ? 'check-circle' : 'alert-circle'" class="w-5 h-5 flex-shrink-0"></i>
+        <div class="flex-1 min-w-0">
+          <h4 class="font-semibold mb-0.5" x-text="toastTitle"></h4>
+          <p class="text-sm opacity-90" x-text="toastMessage"></p>
+        </div>
+        <button @click="showToast = false" class="text-white/80 hover:text-white transition-colors">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <!-- Confirmation Modal -->
+  <template x-if="showConfirmModal">
+    <div class="fixed inset-0 z-[150] flex items-center justify-center p-4"
+         @click.self="showConfirmModal = false"
+         @keydown.escape.window="showConfirmModal = false">
+      <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"></div>
+      <div class="relative w-full max-w-md bg-white dark:bg-slate-800 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 dark:border-slate-700">
+          <h3 class="text-lg font-semibold text-slate-900 dark:text-white">Confirm Send</h3>
+        </div>
+        <div class="p-6 space-y-3">
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-slate-600 dark:text-slate-400">From:</span>
+            <span class="font-medium text-slate-900 dark:text-white" x-text="senderName"></span>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-slate-600 dark:text-slate-400">Recipients:</span>
+            <span class="font-medium text-slate-900 dark:text-white" x-text="selectedRecipients.length + ' agent' + (selectedRecipients.length !== 1 ? 's' : '')"></span>
+          </div>
+          <div class="flex items-start justify-between text-sm gap-3">
+            <span class="text-slate-600 dark:text-slate-400 flex-shrink-0">Subject:</span>
+            <span class="font-medium text-slate-900 dark:text-white text-right" x-text="subject"></span>
+          </div>
+          <div class="flex items-center justify-between text-sm">
+            <span class="text-slate-600 dark:text-slate-400">Importance:</span>
+            <span class="px-2 py-0.5 rounded text-xs font-medium capitalize"
+                  :class="importance === 'urgent' ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400'
+                    : importance === 'high' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400'
+                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300'"
+                  x-text="importance"></span>
+          </div>
+        </div>
+        <div class="px-6 py-4 bg-slate-50 dark:bg-slate-900 flex items-center justify-end gap-3 border-t border-slate-200 dark:border-slate-700">
+          <button @click="showConfirmModal = false" type="button"
+                  class="px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors">
+            Cancel
+          </button>
+          <button @click="confirmSend()" type="button" :disabled="sending"
+                  class="px-4 py-2 text-sm font-medium bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50">
+            Confirm & Send
+          </button>
+        </div>
+      </div>
+    </div>
+  </template>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function humanComposer() {
+  return {
+    identities: {{ identities | tojson }},
+    projectsAgents: {{ projects_agents | tojson }},
+    allProjects: {{ all_projects | tojson }},
+    selectedIdentity: '',
+    selectedRecipients: [],
+    recipientSearch: '',
+    subject: '',
+    body: '',
+    threadId: '',
+    importance: 'normal',
+    includePreamble: false,
+    viewMode: 'write',
+    renderedPreview: '',
+    sending: false,
+    showToast: false,
+    showConfirmModal: false,
+    toastType: 'success',
+    toastTitle: '',
+    toastMessage: '',
+
+    get senderName() {
+      if (!this.selectedIdentity) return '';
+      return this.selectedIdentity.split(':')[0];
+    },
+
+    get projectSlug() {
+      if (!this.selectedIdentity) return '';
+      return this.selectedIdentity.split(':').slice(1).join(':');
+    },
+
+    get filteredAgents() {
+      if (!this.projectSlug) return [];
+      const agents = this.projectsAgents[this.projectSlug] || [];
+      return agents.filter(a => a.name !== this.senderName);
+    },
+
+    get searchedAgents() {
+      if (!this.recipientSearch) return this.filteredAgents;
+      const q = this.recipientSearch.toLowerCase();
+      return this.filteredAgents.filter(a => a.name.toLowerCase().includes(q));
+    },
+
+    init() {
+      // Auto-select identity if project was provided via query param
+      const selectedProject = {{ selected_project | tojson }};
+      if (selectedProject) {
+        const match = this.identities.find(i => i.project_slug === selectedProject);
+        if (match) {
+          this.selectedIdentity = match.name + ':' + match.project_slug;
+        }
+      }
+      this.$nextTick(() => { if (typeof lucide !== 'undefined') lucide.createIcons(); });
+    },
+
+    onIdentityChange() {
+      this.selectedRecipients = [];
+      this.recipientSearch = '';
+      this.$nextTick(() => { if (typeof lucide !== 'undefined') lucide.createIcons(); });
+    },
+
+    selectAllRecipients() {
+      this.selectedRecipients = this.filteredAgents.map(a => a.name);
+    },
+
+    canSend() {
+      return this.selectedIdentity &&
+             this.selectedRecipients.length > 0 &&
+             this.selectedRecipients.length <= 100 &&
+             this.subject.trim() &&
+             this.subject.length <= 200 &&
+             this.body.trim() &&
+             this.body.length <= 50000 &&
+             !this.sending;
+    },
+
+    insertMarkdown(before, after, placeholder) {
+      const textarea = this.$refs.bodyTextarea;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const sel = this.body.substring(start, end) || placeholder;
+      this.body = this.body.substring(0, start) + before + sel + after + this.body.substring(end);
+      this.$nextTick(() => {
+        textarea.focus();
+        const pos = start + before.length + sel.length;
+        textarea.setSelectionRange(pos, pos);
+        this.updatePreview();
+      });
+    },
+
+    updatePreview() {
+      if (typeof marked !== 'undefined') {
+        try {
+          const raw = marked.parse(this.body || '_No content yet..._');
+          this.renderedPreview = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(raw) : raw;
+        } catch (e) {
+          this.renderedPreview = '<p class="text-red-500">Error rendering preview</p>';
+        }
+      }
+    },
+
+    async sendMessage() {
+      if (!this.canSend()) return;
+      this.showConfirmModal = true;
+    },
+
+    async confirmSend() {
+      if (this.sending) return;
+      this.showConfirmModal = false;
+      this.sending = true;
+
+      try {
+        const resp = await fetch('/mail/human/send', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            project_slug: this.projectSlug,
+            sender_name: this.senderName,
+            recipients: this.selectedRecipients,
+            subject: this.subject.trim(),
+            body_md: this.body.trim(),
+            importance: this.importance,
+            include_preamble: this.includePreamble,
+            thread_id: this.threadId.trim() || null,
+          }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.detail || `Server error: ${resp.status}`);
+        }
+
+        this.toastType = 'success';
+        this.toastTitle = 'Message Sent';
+        this.toastMessage = `Delivered to ${this.selectedRecipients.length} agent${this.selectedRecipients.length !== 1 ? 's' : ''}`;
+        this.showToast = true;
+
+        setTimeout(() => { window.location.href = '/mail/human/inbox'; }, 2000);
+
+      } catch (error) {
+        this.toastType = 'error';
+        this.toastTitle = 'Failed to Send';
+        this.toastMessage = error.message || 'An unexpected error occurred.';
+        this.showToast = true;
+        this.sending = false;
+        setTimeout(() => { this.showToast = false; }, 6000);
+      } finally {
+        if (typeof lucide !== 'undefined') { try { lucide.createIcons(); } catch(e) {} }
+      }
+    },
+  };
+}
+</script>
+{% endblock %}
