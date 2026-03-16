@@ -503,10 +503,10 @@ ensure_repo() {
 }
 
 ensure_python_and_venv() {
-  info "Ensuring Python 3.14 and project venv (.venv)"
-  uv python install 3.14
+  info "Ensuring Python 3.13 and project venv (.venv)"
+  uv python install 3.13
   if [[ ! -d "${REPO_DIR}/.venv" ]]; then
-    (cd "${REPO_DIR}" && uv venv -p 3.14)
+    (cd "${REPO_DIR}" && uv venv -p 3.13)
     ok "Created venv at ${REPO_DIR}/.venv"
     record_summary "Venv: created at ${REPO_DIR}/.venv"
   else

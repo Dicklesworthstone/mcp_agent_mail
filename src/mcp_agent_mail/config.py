@@ -278,7 +278,7 @@ def get_settings() -> Settings:
 
     def _agent_name_mode(value: str) -> str:
         v = (value or "").strip().lower()
-        if v in {"strict", "coerce", "always_auto"}:
+        if v in {"strict", "coerce", "always_auto", "none"}:
             return v
         return "coerce"
 

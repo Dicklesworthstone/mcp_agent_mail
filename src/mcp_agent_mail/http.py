@@ -1906,11 +1906,14 @@ This message is from a human operator. Please prioritize the instructions below.
                 recipient_map = {r[1]: r[0] for r in recipient_rows}
                 valid_recipients = [n for n in recipients if n in recipient_map]
 
-                if valid_recipients:
-                    await session.execute(
-                        text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
-                        [{"mid": message_id, "aid": recipient_map[n]} for n in valid_recipients],
-                    )
+                if not valid_recipients:
+                    await session.rollback()
+                    raise HTTPException(status_code=400, detail="No valid recipients found")
+
+                await session.execute(
+                    text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+                    [{"mid": message_id, "aid": recipient_map[n]} for n in valid_recipients],
+                )
 
                 # Write to Git archive (best-effort)
                 try:
@@ -3522,9 +3525,9 @@ This message is from a human operator. Please prioritize the instructions below.
                 result = await session.execute(
                     text("DELETE FROM human_notes WHERE id = :id"), {"id": note_id}
                 )
-                await session.commit()
                 if result.rowcount == 0:
                     raise HTTPException(status_code=404, detail="Note not found")
+                await session.commit()
             return JSONResponse({"success": True, "deleted": note_id})
 
     try:

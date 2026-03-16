@@ -1951,9 +1951,14 @@ async def _generate_unique_agent_name(
         if mode == "always_auto":
             sanitized = None
         if sanitized:
+            # "none" mode: accept any sanitized name without format validation
+            if mode == "none":
+                if await available(sanitized):
+                    return sanitized
+                # Name taken — fall through to auto-generation
             # When coercing, if the provided hint is not in the valid adjective+noun set,
             # silently fall back to auto-generation instead of erroring.
-            if validate_agent_name_format(sanitized):
+            elif validate_agent_name_format(sanitized):
                 if not await available(sanitized):
                     # In strict mode, indicate conflict; in coerce, fall back to generation
                     if mode == "strict":
@@ -2017,6 +2022,13 @@ async def _get_or_create_agent(
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
+    elif mode == "none":
+        # Accept any sanitized name without adjective+noun format validation
+        sanitized = sanitize_agent_name(name)
+        if not sanitized:
+            desired_name = await _generate_unique_agent_name(project, settings, None)
+        else:
+            desired_name = sanitized
     else:
         sanitized = sanitize_agent_name(name)
         if not sanitized:

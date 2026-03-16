@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mcp-agent-mail": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8765/mcp/",
+      "headers": {
+        "Authorization": "Bearer 71834075505ca6b0d5688156400ab7782d5d16e6189502c27e664f60dcadc983"
+      },
+      "enabled": true
+    }
+  }
+}
