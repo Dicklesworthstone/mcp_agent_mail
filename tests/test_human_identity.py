@@ -497,3 +497,116 @@ async def test_delete_note(isolated_env):
 
         resp = await client.get("/mail/human/notes/api")
         assert len(resp.json()["notes"]) == 0
+
+
+async def _create_agent_message_to_lee(client, slug: str) -> int:
+    """Helper: register lee, create ReplyBot, send message to lee with thread_id, return message_id."""
+    await client.post("/mail/human/register", json={
+        "project_slug": slug, "name": "lee",
+    })
+    async with get_session() as session:
+        pid = (await session.execute(
+            text("SELECT id FROM projects WHERE slug = :s"), {"s": slug}
+        )).fetchone()[0]
+        await session.execute(
+            text("""INSERT OR IGNORE INTO agents
+                    (project_id, name, program, model, task_description,
+                     contact_policy, attachments_policy, inception_ts, last_active_ts)
+                    VALUES (:pid, 'ReplyBot', 'claude-code', 'opus-4', 'test',
+                            'open', 'auto', :ts, :ts)"""),
+            {"pid": pid, "ts": datetime.now(timezone.utc)},
+        )
+        await session.commit()
+
+        bot_id = (await session.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = 'ReplyBot'"),
+            {"pid": pid},
+        )).fetchone()[0]
+        lee_id = (await session.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = 'lee'"),
+            {"pid": pid},
+        )).fetchone()[0]
+
+        result = await session.execute(
+            text("""INSERT INTO messages
+                    (project_id, sender_id, subject, body_md, importance,
+                     thread_id, created_ts, ack_required)
+                    VALUES (:pid, :sid, 'Need approval', 'PR #42 ready for review.',
+                            'high', 'thread-42', :ts, 0) RETURNING id"""),
+            {"pid": pid, "sid": bot_id, "ts": datetime.now(timezone.utc)},
+        )
+        mid = result.fetchone()[0]
+        await session.execute(
+            text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+            {"mid": mid, "aid": lee_id},
+        )
+        await session.commit()
+    return mid
+
+
+@pytest.mark.asyncio
+async def test_human_reply_page(isolated_env):
+    """GET /mail/human/reply/{mid} renders reply composer pre-filled with thread context."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mid = await _create_agent_message_to_lee(client, slug)
+        resp = await client.get(f"/mail/human/reply/{mid}")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_human_reply_sends_in_thread(isolated_env):
+    """POST /mail/human/reply sends reply in same thread, addressed to original sender."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mid = await _create_agent_message_to_lee(client, slug)
+        resp = await client.post("/mail/human/reply", json={
+            "original_message_id": mid,
+            "sender_name": "lee",
+            "body_md": "Approved. Merge it.",
+            "importance": "normal",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert "Re: Need approval" in data.get("subject", "")
+
+    # Verify thread_id inherited
+    async with get_session() as session:
+        msg = (await session.execute(
+            text("SELECT thread_id, subject FROM messages WHERE id = :mid"),
+            {"mid": data["message_id"]},
+        )).fetchone()
+        assert msg[0] == "thread-42"
+        assert msg[1].startswith("Re:")
+
+
+@pytest.mark.asyncio
+async def test_human_reply_defaults_recipient_to_sender(isolated_env):
+    """Reply auto-addresses to the original message sender."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        mid = await _create_agent_message_to_lee(client, slug)
+        resp = await client.post("/mail/human/reply", json={
+            "original_message_id": mid,
+            "sender_name": "lee",
+            "body_md": "Thanks.",
+        })
+        data = resp.json()
+        assert "ReplyBot" in data["recipients"]

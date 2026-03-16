@@ -1777,6 +1777,174 @@ This message is from a human operator. Please prioritize the instructions below.
                 "sent_at": now.isoformat(),
             })
 
+        # ========== Human Reply Routes ==========
+
+        @fastapi_app.get("/mail/human/reply/{message_id}", response_class=HTMLResponse)
+        async def human_reply_page(message_id: int) -> HTMLResponse:
+            """Render reply composer pre-filled with thread context."""
+            await ensure_schema()
+            async with get_session() as session:
+                row = (
+                    await session.execute(
+                        text("""
+                            SELECT m.id, m.subject, m.body_md, m.thread_id, m.importance,
+                                   m.created_ts, sender.name AS sender_name,
+                                   p.slug, p.human_key
+                            FROM messages m
+                            JOIN agents sender ON m.sender_id = sender.id
+                            JOIN projects p ON m.project_id = p.id
+                            WHERE m.id = :mid
+                        """),
+                        {"mid": message_id},
+                    )
+                ).fetchone()
+                if not row:
+                    return await _render("error.html", message="Message not found")
+
+                identities = (
+                    await session.execute(
+                        text("""
+                            SELECT a.name, a.task_description
+                            FROM agents a
+                            JOIN projects p ON a.project_id = p.id
+                            WHERE a.model = 'Human' AND p.slug = :slug
+                        """),
+                        {"slug": row[7]},
+                    )
+                ).fetchall()
+
+            original = {
+                "id": row[0], "subject": row[1], "body_md": row[2],
+                "thread_id": row[3] or str(row[0]), "importance": row[4],
+                "created_ts": str(row[5]), "sender": row[6],
+                "project_slug": row[7], "project_path": row[8],
+            }
+            reply_subject = row[1] if row[1].startswith("Re:") else f"Re: {row[1]}"
+
+            return await _render(
+                "human_reply.html",
+                original=original,
+                reply_subject=reply_subject,
+                identities=[{"name": i[0], "display_label": i[1]} for i in identities],
+            )
+
+        @fastapi_app.post("/mail/human/reply")
+        async def human_reply_send(request: Request) -> JSONResponse:
+            """Send a reply from a human identity, inheriting thread context."""
+            await ensure_schema()
+
+            body = await request.json()
+            original_mid: int = body.get("original_message_id", 0)
+            sender_name: str = body.get("sender_name", "").strip()
+            body_md: str = body.get("body_md", "").strip()
+            importance: str = body.get("importance", "")
+            extra_recipients: list[str] = body.get("extra_recipients", [])
+
+            if not original_mid:
+                raise HTTPException(status_code=400, detail="original_message_id required")
+            if not sender_name:
+                raise HTTPException(status_code=400, detail="sender_name required")
+            if not body_md:
+                raise HTTPException(status_code=400, detail="body_md required")
+
+            now = datetime.now(timezone.utc)
+
+            async with get_session() as session:
+                orig = (
+                    await session.execute(
+                        text("""
+                            SELECT m.id, m.subject, m.thread_id, m.importance, m.project_id,
+                                   sender.name AS sender_name, p.slug, p.human_key
+                            FROM messages m
+                            JOIN agents sender ON m.sender_id = sender.id
+                            JOIN projects p ON m.project_id = p.id
+                            WHERE m.id = :mid
+                        """),
+                        {"mid": original_mid},
+                    )
+                ).fetchone()
+                if not orig:
+                    raise HTTPException(status_code=404, detail="Original message not found")
+
+                pid = orig[4]
+                thread_id = orig[2] or str(orig[0])
+                reply_subject = orig[1] if orig[1].startswith("Re:") else f"Re: {orig[1]}"
+                reply_importance = importance if importance in ("low", "normal", "high", "urgent") else orig[3]
+
+                sender_row = (
+                    await session.execute(
+                        text("SELECT id, model FROM agents WHERE project_id = :pid AND name = :name"),
+                        {"pid": pid, "name": sender_name},
+                    )
+                ).fetchone()
+                if not sender_row or sender_row[1] != "Human":
+                    raise HTTPException(status_code=403, detail="Sender must be a registered human identity")
+
+                recipients = [orig[5]] + extra_recipients
+                recipients = list(dict.fromkeys(recipients))
+
+                result = await session.execute(
+                    text("""
+                        INSERT INTO messages (project_id, sender_id, subject, body_md, importance, thread_id, created_ts, ack_required)
+                        VALUES (:pid, :sid, :subj, :body, :imp, :tid, :ts, 0)
+                        RETURNING id
+                    """),
+                    {"pid": pid, "sid": sender_row[0], "subj": reply_subject, "body": body_md,
+                     "imp": reply_importance, "tid": thread_id, "ts": now},
+                )
+                message_id = result.fetchone()[0]
+
+                placeholders = ", ".join(f":name_{i}" for i in range(len(recipients)))
+                params: dict[str, Any] = {"pid": pid}
+                params.update({f"name_{i}": n for i, n in enumerate(recipients)})
+                recipient_rows = (
+                    await session.execute(
+                        text(f"SELECT id, name FROM agents WHERE project_id = :pid AND name IN ({placeholders})"),
+                        params,
+                    )
+                ).fetchall()
+                recipient_map = {r[1]: r[0] for r in recipient_rows}
+                valid_recipients = [n for n in recipients if n in recipient_map]
+
+                if valid_recipients:
+                    await session.execute(
+                        text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+                        [{"mid": message_id, "aid": recipient_map[n]} for n in valid_recipients],
+                    )
+
+                # Write to Git archive (best-effort)
+                try:
+                    from .storage import ensure_archive, write_message_bundle
+                    settings = get_settings()
+                    archive = await ensure_archive(settings, orig[6])
+                    await write_message_bundle(
+                        archive,
+                        {
+                            "id": message_id, "thread_id": thread_id,
+                            "project": orig[7], "project_slug": orig[6],
+                            "from": sender_name, "to": valid_recipients,
+                            "cc": [], "bcc": [], "subject": reply_subject,
+                            "importance": reply_importance, "ack_required": False,
+                            "created": now.isoformat(), "attachments": [],
+                        },
+                        body_md, sender_name, valid_recipients,
+                        commit_text=f"{sender_name} reply: {reply_subject}",
+                    )
+                except Exception:
+                    logging.warning("Failed to write reply to Git archive", exc_info=True)
+
+                await session.execute(
+                    text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
+                    {"ts": now, "id": sender_row[0]},
+                )
+                await session.commit()
+
+            return JSONResponse({
+                "success": True, "message_id": message_id,
+                "subject": reply_subject, "sender": sender_name,
+                "recipients": valid_recipients, "thread_id": thread_id,
+            })
+
         # ========== Project Routes (wildcard — must come after /mail/human/*) ==========
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)

@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+
+{% block title %}Reply — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail/" class="text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Mail</a>
+  <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+  <a href="/mail/human/inbox" class="text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Inbox</a>
+  <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+  <span class="text-gray-900 dark:text-white font-medium">Reply</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto space-y-6 pb-12" x-data="replyComposer()" x-init="init()">
+
+  <!-- Thread context -->
+  <div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"/></svg>
+    <span>Replying in thread: <span class="font-mono text-primary-600 dark:text-primary-400">{{ original.thread_id }}</span></span>
+    <span class="mx-1">|</span>
+    <span class="font-mono text-xs bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded">{{ original.project_slug }}</span>
+  </div>
+
+  <!-- Original message (collapsible) -->
+  <details class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden" open>
+    <summary class="px-6 py-4 cursor-pointer select-none flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-750 transition-colors">
+      <div class="flex items-center gap-3 min-w-0">
+        <span class="shrink-0 w-8 h-8 rounded-full bg-primary-100 dark:bg-primary-900/30 flex items-center justify-center text-primary-700 dark:text-primary-400 text-sm font-semibold">{{ original.sender[0] | upper }}</span>
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-gray-900 dark:text-white truncate">{{ original.sender }}</div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ original.subject }}</div>
+        </div>
+      </div>
+      <span class="text-xs text-gray-400 shrink-0 ml-4">{{ original.created_ts }}</span>
+    </summary>
+    <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+      <div class="prose prose-sm dark:prose-invert max-w-none text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{{ original.body_md }}</div>
+    </div>
+  </details>
+
+  <!-- Reply form -->
+  <form @submit.prevent="sendReply()" class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden">
+    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+      <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Reply</h2>
+    </div>
+    <div class="p-6 space-y-4">
+
+      <!-- Identity selector -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Reply as</label>
+        <select x-model="senderName"
+          class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors">
+          {% for ident in identities %}
+          <option value="{{ ident.name }}">{{ ident.name }}{% if ident.display_label %} ({{ ident.display_label }}){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <!-- Subject (pre-filled) -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Subject</label>
+        <input type="text" x-model="subject" readonly
+          class="w-full rounded-lg border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-white px-4 py-2.5 text-sm">
+      </div>
+
+      <!-- Importance -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Importance</label>
+        <div class="flex items-center gap-2">
+          <template x-for="level in ['low', 'normal', 'high', 'urgent']" :key="level">
+            <button type="button" @click="importance = level"
+              :class="importance === level
+                ? (level === 'urgent' ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-300 dark:border-red-700'
+                  : level === 'high' ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-700'
+                  : 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400 border-primary-300 dark:border-primary-700')
+                : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'"
+              class="px-3 py-1.5 border rounded-lg text-sm font-medium transition-all capitalize"
+              x-text="level"></button>
+          </template>
+        </div>
+      </div>
+
+      <!-- Extra recipients -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Additional recipients (optional)</label>
+        <input type="text" x-model="extraRecipients"
+          class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+          placeholder="comma-separated agent names">
+      </div>
+
+      <!-- Reply body -->
+      <div>
+        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Message</label>
+        <textarea x-model="bodyMd" rows="8"
+          class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors font-mono"
+          placeholder="Write your reply in Markdown..."></textarea>
+      </div>
+
+      <!-- Actions -->
+      <div class="flex items-center gap-3 pt-2">
+        <button type="submit" :disabled="!bodyMd.trim() || sending"
+          class="px-5 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2">
+          <template x-if="sending">
+            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          </template>
+          <span x-text="sending ? 'Sending...' : 'Send Reply'"></span>
+        </button>
+        <a href="/mail/human/inbox" class="px-4 py-2.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">Cancel</a>
+        <span x-show="toast" x-text="toast" x-transition
+          class="text-sm font-medium"
+          :class="toastError ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'"></span>
+      </div>
+    </div>
+  </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function replyComposer() {
+  return {
+    originalId: {{ original.id }},
+    senderName: '{{ identities[0].name if identities else "" }}',
+    subject: {{ reply_subject | tojson }},
+    importance: {{ original.importance | tojson }},
+    bodyMd: '',
+    extraRecipients: '',
+    sending: false,
+    toast: '',
+    toastError: false,
+
+    init() {},
+
+    async sendReply() {
+      if (!this.bodyMd.trim() || this.sending) return;
+      this.sending = true;
+
+      const extras = this.extraRecipients
+        .split(',')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      const payload = {
+        original_message_id: this.originalId,
+        sender_name: this.senderName,
+        body_md: this.bodyMd,
+        importance: this.importance,
+      };
+      if (extras.length > 0) {
+        payload.extra_recipients = extras;
+      }
+
+      try {
+        const resp = await fetch('/mail/human/reply', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.showToast(data.detail || 'Failed to send reply', true);
+          this.sending = false;
+          return;
+        }
+        this.showToast('Reply sent');
+        setTimeout(() => {
+          const tid = data.thread_id;
+          const proj = {{ original.project_slug | tojson }};
+          window.location.href = `/mail/${proj}/thread/${tid}`;
+        }, 800);
+      } catch (e) {
+        this.showToast('Network error', true);
+        this.sending = false;
+      }
+    },
+
+    showToast(msg, isError = false) {
+      this.toast = msg;
+      this.toastError = isError;
+      setTimeout(() => { this.toast = ''; }, 3000);
+    },
+  };
+}
+</script>
+{% endblock %}
