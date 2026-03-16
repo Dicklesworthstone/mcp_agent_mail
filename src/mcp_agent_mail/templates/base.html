@@ -2148,6 +2148,15 @@
           <div class="flex items-center gap-3">
             {% block header_actions %}{% endblock %}
 
+            <!-- Operator Dashboard Link -->
+            <a href="/mail/human"
+               class="p-2 rounded-lg hover:bg-primary-100 dark:hover:bg-primary-900/30 text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-all duration-200 flex items-center gap-1.5"
+               data-tippy-content="Operator Dashboard"
+               aria-label="Operator Dashboard">
+              <i data-lucide="user" class="w-5 h-5"></i>
+              <span class="hidden sm:inline text-sm font-medium">Operator</span>
+            </a>
+
             <!-- Help Button -->
             <button onclick="window.restartTutorial()"
                     class="p-2 rounded-lg hover:bg-primary-100 dark:hover:bg-primary-900/30 text-primary-600 dark:text-primary-400 transition-all duration-200 relative group"

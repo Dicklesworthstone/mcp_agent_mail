@@ -377,6 +377,40 @@ async def test_human_send_validates_sender_is_human(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_human_dashboard(isolated_env):
+    """GET /mail/human renders a dashboard landing page."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        resp = await client.get("/mail/human")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_base_template_has_human_link(isolated_env):
+    """The unified inbox page should include a link to /mail/human."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    await ensure_schema()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/mail")
+        assert resp.status_code == 200
+        assert "/mail/human" in resp.text
+
+
+@pytest.mark.asyncio
 async def test_create_note(isolated_env):
     """POST /mail/human/notes creates a private note."""
     settings = _config.get_settings()

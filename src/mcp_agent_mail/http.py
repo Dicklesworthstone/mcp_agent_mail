@@ -1945,6 +1945,32 @@ This message is from a human operator. Please prioritize the instructions below.
                 "recipients": valid_recipients, "thread_id": thread_id,
             })
 
+        # ========== Human Dashboard Route ==========
+
+        @fastapi_app.get("/mail/human", response_class=HTMLResponse)
+        async def human_dashboard() -> HTMLResponse:
+            """Human operator dashboard — landing page for inbox, compose, notes."""
+            await ensure_schema()
+            inbox = await _build_human_inbox_payload(limit=10)
+            notes = await _build_notes_payload()
+            async with get_session() as session:
+                id_rows = (await session.execute(
+                    text("""
+                        SELECT a.name, a.task_description, p.slug, p.human_key
+                        FROM agents a JOIN projects p ON a.project_id = p.id
+                        WHERE a.model = 'Human'
+                        ORDER BY a.name
+                    """)
+                )).fetchall()
+            identities = [
+                {"name": r[0], "display_label": r[1], "project_slug": r[2], "project_path": r[3]}
+                for r in id_rows
+            ]
+            return await _render(
+                "human_dashboard.html",
+                inbox=inbox, notes=notes, identities=identities,
+            )
+
         # ========== Project Routes (wildcard — must come after /mail/human/*) ==========
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
