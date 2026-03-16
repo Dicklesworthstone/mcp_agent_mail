@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
@@ -106,3 +108,251 @@ async def test_list_human_identities(isolated_env):
         data = resp.json()
         assert len(data["identities"]) >= 1
         assert any(i["name"] == "lee" for i in data["identities"])
+
+
+async def _create_message_to_human(slug: str, sender_name: str, subject: str, body: str) -> int:
+    """Create an AI agent and send a message to the human 'lee' in the given project."""
+    async with get_session() as session:
+        pid_row = (await session.execute(
+            text("SELECT id FROM projects WHERE slug = :s"), {"s": slug}
+        )).fetchone()
+        pid = pid_row[0]
+
+        # Create AI agent sender
+        await session.execute(
+            text("""INSERT OR IGNORE INTO agents
+                    (project_id, name, program, model, task_description,
+                     contact_policy, attachments_policy, inception_ts, last_active_ts)
+                    VALUES (:pid, :name, 'claude-code', 'opus-4', 'test agent',
+                            'open', 'auto', :ts, :ts)"""),
+            {"pid": pid, "name": sender_name, "ts": datetime.now(timezone.utc)},
+        )
+        await session.commit()
+
+        # Get agent IDs
+        lee_row = (await session.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = 'lee'"),
+            {"pid": pid},
+        )).fetchone()
+        sender_row = (await session.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = :n"),
+            {"pid": pid, "n": sender_name},
+        )).fetchone()
+
+        # Send message
+        result = await session.execute(
+            text("""INSERT INTO messages
+                    (project_id, sender_id, subject, body_md, importance, created_ts, ack_required)
+                    VALUES (:pid, :sid, :subj, :body, 'normal', :ts, 0)
+                    RETURNING id"""),
+            {"pid": pid, "sid": sender_row[0], "subj": subject,
+             "body": body, "ts": datetime.now(timezone.utc)},
+        )
+        mid = result.fetchone()[0]
+        await session.execute(
+            text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+            {"mid": mid, "aid": lee_row[0]},
+        )
+        await session.commit()
+    return mid
+
+
+@pytest.mark.asyncio
+async def test_human_inbox_html(isolated_env):
+    """GET /mail/human/inbox renders HTML inbox for human identities."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        resp = await client.get("/mail/human/inbox")
+        assert resp.status_code == 200
+        assert "text/html" in resp.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_human_inbox_json(isolated_env):
+    """GET /mail/human/inbox/api returns JSON inbox data."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+
+    mid = await _create_message_to_human(slug, "BrassAdama", "Fleet status report", "All systems nominal.")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/mail/human/inbox/api")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["messages"]) == 1
+        assert data["messages"][0]["subject"] == "Fleet status report"
+        assert data["messages"][0]["sender"] == "BrassAdama"
+        assert data["messages"][0]["read"] is False
+
+
+@pytest.mark.asyncio
+async def test_human_inbox_mark_read(isolated_env):
+    """POST /mail/human/inbox/mark-read marks messages as read."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+
+    mid = await _create_message_to_human(slug, "TestBot", "Test", "Body")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Mark as read
+        resp = await client.post("/mail/human/inbox/mark-read", json={
+            "message_ids": [mid],
+        })
+        assert resp.status_code == 200
+
+        # Verify it's now read
+        resp = await client.get("/mail/human/inbox/api")
+        data = resp.json()
+        assert data["messages"][0]["read"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_note(isolated_env):
+    """POST /mail/human/notes creates a private note."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        resp = await client.post("/mail/human/notes", json={
+            "project_slug": slug,
+            "author": "lee",
+            "body_md": "BrassAdama seems to be handling fleet ops well. Monitor for 48h.",
+            "thread_id": "thread-42",
+            "tags": ["observation", "fleet"],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] is not None
+        assert data["author"] == "lee"
+
+
+@pytest.mark.asyncio
+async def test_list_notes(isolated_env):
+    """GET /mail/human/notes/api lists all notes, optionally filtered."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        await client.post("/mail/human/notes", json={
+            "project_slug": slug,
+            "author": "lee",
+            "body_md": "Note 1",
+            "tags": ["fleet"],
+        })
+        await client.post("/mail/human/notes", json={
+            "project_slug": slug,
+            "author": "lee",
+            "body_md": "Note 2",
+            "tags": ["security"],
+        })
+
+        # All notes
+        resp = await client.get("/mail/human/notes/api")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["notes"]) == 2
+
+        # Filter by tag
+        resp = await client.get("/mail/human/notes/api?tag=fleet")
+        data = resp.json()
+        assert len(data["notes"]) == 1
+        assert "Note 1" in data["notes"][0]["body_md"]
+
+
+@pytest.mark.asyncio
+async def test_notes_not_visible_to_agents(isolated_env):
+    """Notes should NOT appear in agent inboxes or unified inbox."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        await client.post("/mail/human/notes", json={
+            "project_slug": slug,
+            "author": "lee",
+            "body_md": "Secret observation",
+        })
+
+        # Check unified inbox -- note should not appear
+        resp = await client.get("/mail/api/unified-inbox")
+        data = resp.json()
+        for msg in data.get("messages", []):
+            assert "Secret observation" not in msg.get("subject", "")
+            assert "Secret observation" not in msg.get("excerpt", "")
+
+
+@pytest.mark.asyncio
+async def test_delete_note(isolated_env):
+    """DELETE /mail/human/notes/{id} removes a note."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    slug = await _seed_project()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await client.post("/mail/human/register", json={
+            "project_slug": slug,
+            "name": "lee",
+        })
+        resp = await client.post("/mail/human/notes", json={
+            "project_slug": slug,
+            "author": "lee",
+            "body_md": "Temporary note",
+        })
+        note_id = resp.json()["id"]
+
+        resp = await client.delete(f"/mail/human/notes/{note_id}")
+        assert resp.status_code == 200
+
+        resp = await client.get("/mail/human/notes/api")
+        assert len(resp.json()["notes"]) == 0

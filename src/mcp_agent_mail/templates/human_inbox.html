@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}My Inbox — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail" class="text-primary-600 dark:text-primary-400 hover:text-primary-700 dark:hover:text-primary-300 transition-colors font-medium flex items-center gap-1">
+    <i data-lucide="inbox" class="w-3.5 h-3.5"></i>
+    Agent Mail
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-600 dark:text-slate-400 flex items-center gap-1">
+    <i data-lucide="user" class="w-3.5 h-3.5"></i>
+    My Inbox
+  </span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div class="flex flex-col page-transition" x-data="humanInbox()" x-init="init()">
+
+  <!-- Header Bar -->
+  <div class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-4 flex items-center gap-4 sticky top-16 shadow-sm z-10">
+    <!-- Title + Unread Badge -->
+    <div class="flex items-center gap-3">
+      <h1 class="text-xl font-semibold text-slate-900 dark:text-white">My Inbox</h1>
+      <template x-if="unreadCount > 0">
+        <span class="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-red-500 text-white animate-pulse"
+              x-text="unreadCount"></span>
+      </template>
+    </div>
+
+    <div class="flex-1"></div>
+
+    <!-- Batch Actions -->
+    <template x-if="selectedIds.length > 0">
+      <button @click="markSelectedRead()"
+              class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
+        <i data-lucide="check-check" class="w-4 h-4"></i>
+        Mark Read (<span x-text="selectedIds.length"></span>)
+      </button>
+    </template>
+
+    <!-- Compose Link -->
+    <a href="/mail/human/compose"
+       class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm">
+      <i data-lucide="pen-square" class="w-4 h-4"></i>
+      Compose
+    </a>
+  </div>
+
+  <!-- Filter Tabs -->
+  <div class="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-6 py-2 flex items-center gap-1">
+    <button @click="filter = 'all'; applyFilter()"
+            :class="filter === 'all' ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
+            class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors">
+      All
+    </button>
+    <button @click="filter = 'unread'; applyFilter()"
+            :class="filter === 'unread' ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
+            class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center gap-1">
+      Unread
+      <template x-if="unreadCount > 0">
+        <span class="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-1.5 rounded-full" x-text="unreadCount"></span>
+      </template>
+    </button>
+    <div class="w-px h-5 bg-slate-200 dark:bg-slate-700 mx-1"></div>
+    <template x-for="proj in projects" :key="proj">
+      <button @click="filter = 'project:' + proj; applyFilter()"
+              :class="filter === 'project:' + proj ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-400' : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-700'"
+              class="px-3 py-1.5 rounded-md text-sm font-medium transition-colors"
+              x-text="proj">
+      </button>
+    </template>
+  </div>
+
+  <!-- Message List -->
+  <div class="flex-1 bg-slate-50 dark:bg-slate-900">
+    <!-- Empty State -->
+    <template x-if="filteredMessages.length === 0">
+      <div class="flex flex-col items-center justify-center py-24 text-center">
+        <div class="w-16 h-16 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center mb-4">
+          <i data-lucide="inbox" class="w-8 h-8 text-slate-400 dark:text-slate-500"></i>
+        </div>
+        <h3 class="text-lg font-medium text-slate-700 dark:text-slate-300 mb-1">No messages</h3>
+        <p class="text-sm text-slate-500 dark:text-slate-400">Messages sent to your human identities will appear here.</p>
+      </div>
+    </template>
+
+    <!-- Messages -->
+    <div class="divide-y divide-slate-200 dark:divide-slate-700">
+      <template x-for="msg in filteredMessages" :key="msg.id">
+        <div class="flex items-center gap-3 px-6 py-3 hover:bg-white dark:hover:bg-slate-800 transition-colors cursor-pointer group"
+             :class="!msg.read ? 'bg-white dark:bg-slate-800 border-l-4 border-l-primary-500' : 'bg-slate-50 dark:bg-slate-900 border-l-4 border-l-transparent'"
+             @click="openMessage(msg)">
+          <!-- Checkbox -->
+          <input type="checkbox" :value="msg.id"
+                 x-model.number="selectedIds"
+                 @click.stop
+                 class="w-4 h-4 rounded border-slate-300 dark:border-slate-600 text-primary-600 focus:ring-primary-500">
+
+          <!-- Sender -->
+          <div class="w-32 flex-shrink-0">
+            <span class="text-sm truncate block"
+                  :class="!msg.read ? 'font-semibold text-slate-900 dark:text-white' : 'text-slate-600 dark:text-slate-400'"
+                  x-text="msg.sender"></span>
+          </div>
+
+          <!-- Subject + Excerpt -->
+          <div class="flex-1 min-w-0 flex items-center gap-2">
+            <span class="text-sm truncate"
+                  :class="!msg.read ? 'font-semibold text-slate-900 dark:text-white' : 'text-slate-700 dark:text-slate-300'"
+                  x-text="msg.subject"></span>
+            <span class="text-sm text-slate-400 dark:text-slate-500 truncate hidden sm:inline"
+                  x-text="'— ' + msg.excerpt"></span>
+          </div>
+
+          <!-- Project Badge -->
+          <span class="flex-shrink-0 px-2 py-0.5 rounded text-xs font-medium bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-400"
+                x-text="msg.project_slug"></span>
+
+          <!-- Time -->
+          <span class="flex-shrink-0 text-xs text-slate-500 dark:text-slate-400 w-16 text-right"
+                x-text="msg.created_relative"></span>
+
+          <!-- Reply -->
+          <a :href="'/mail/human/reply/' + msg.id"
+             @click.stop
+             class="flex-shrink-0 opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 transition-all"
+             title="Reply">
+            <i data-lucide="reply" class="w-4 h-4 text-slate-500 dark:text-slate-400"></i>
+          </a>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- Identities Footer -->
+  <div class="bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 px-6 py-3">
+    <div class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+      <i data-lucide="users" class="w-3.5 h-3.5"></i>
+      <span>Identities:</span>
+      <template x-for="ident in identities" :key="ident.id">
+        <span class="px-2 py-0.5 bg-slate-100 dark:bg-slate-700 rounded text-slate-600 dark:text-slate-300"
+              x-text="ident.name + ' (' + ident.project_slug + ')'"></span>
+      </template>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function humanInbox() {
+  return {
+    allMessages: {{ messages | tojson }},
+    identities: {{ identities | tojson }},
+    unreadCount: {{ unread_count }},
+    filter: 'all',
+    filteredMessages: [],
+    selectedIds: [],
+    projects: [],
+    pollTimer: null,
+
+    init() {
+      // Extract unique project slugs
+      const slugs = new Set();
+      this.allMessages.forEach(m => slugs.add(m.project_slug));
+      this.projects = [...slugs].sort();
+
+      this.applyFilter();
+
+      // Auto-refresh every 30s
+      this.pollTimer = setInterval(() => this.refresh(), 30000);
+    },
+
+    applyFilter() {
+      if (this.filter === 'all') {
+        this.filteredMessages = this.allMessages;
+      } else if (this.filter === 'unread') {
+        this.filteredMessages = this.allMessages.filter(m => !m.read);
+      } else if (this.filter.startsWith('project:')) {
+        const proj = this.filter.slice(8);
+        this.filteredMessages = this.allMessages.filter(m => m.project_slug === proj);
+      }
+    },
+
+    openMessage(msg) {
+      window.location.href = '/mail/' + msg.project_slug + '/message/' + msg.id;
+    },
+
+    async markSelectedRead() {
+      if (this.selectedIds.length === 0) return;
+      try {
+        const resp = await fetch('/mail/human/inbox/mark-read', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({message_ids: this.selectedIds}),
+        });
+        if (resp.ok) {
+          this.selectedIds.forEach(id => {
+            const msg = this.allMessages.find(m => m.id === id);
+            if (msg && !msg.read) {
+              msg.read = true;
+              this.unreadCount = Math.max(0, this.unreadCount - 1);
+            }
+          });
+          this.selectedIds = [];
+          this.applyFilter();
+        }
+      } catch (e) {
+        console.error('Failed to mark read:', e);
+      }
+    },
+
+    async refresh() {
+      try {
+        const resp = await fetch('/mail/human/inbox/api');
+        if (resp.ok) {
+          const data = await resp.json();
+          this.allMessages = data.messages;
+          this.identities = data.identities;
+          this.unreadCount = data.unread_count;
+          this.applyFilter();
+          // Re-init lucide icons for any new elements
+          if (window.lucide) lucide.createIcons();
+        }
+      } catch (e) {
+        console.error('Refresh failed:', e);
+      }
+    },
+
+    destroy() {
+      if (this.pollTimer) clearInterval(this.pollTimer);
+    }
+  };
+}
+</script>
+{% endblock %}

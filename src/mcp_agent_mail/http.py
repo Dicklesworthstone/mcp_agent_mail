@@ -1278,6 +1278,103 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
 
             return {"messages": messages, "projects": projects}
 
+        async def _build_human_inbox_payload(*, limit: int = 200) -> dict[str, Any]:
+            """Fetch messages addressed to any human agent."""
+            messages: list[dict[str, Any]] = []
+            identities: list[dict[str, Any]] = []
+
+            async with get_session() as session:
+                # Get human identities
+                id_rows = (
+                    await session.execute(
+                        text("""
+                            SELECT a.id, a.name, a.task_description, p.slug, p.human_key
+                            FROM agents a JOIN projects p ON a.project_id = p.id
+                            WHERE a.model = 'Human'
+                            ORDER BY a.name
+                        """)
+                    )
+                ).fetchall()
+
+                identities = [
+                    {"id": r[0], "name": r[1], "display_label": r[2],
+                     "project_slug": r[3], "project_path": r[4]}
+                    for r in id_rows
+                ]
+
+                if not id_rows:
+                    return {"messages": [], "identities": [], "unread_count": 0}
+
+                human_agent_ids = [r[0] for r in id_rows]
+                placeholders = ", ".join(f":aid_{i}" for i in range(len(human_agent_ids)))
+                params: dict[str, Any] = {"lim": limit}
+                params.update({f"aid_{i}": aid for i, aid in enumerate(human_agent_ids)})
+
+                rows = (
+                    await session.execute(
+                        text(f"""
+                            SELECT m.id, m.subject, m.body_md, m.created_ts, m.importance,
+                                   m.thread_id, sender.name AS sender_name,
+                                   p.slug AS project_slug, p.human_key AS project_path,
+                                   mr.read_ts,
+                                   recip.name AS recipient_name
+                            FROM messages m
+                            JOIN message_recipients mr ON m.id = mr.message_id
+                            JOIN agents recip ON mr.agent_id = recip.id
+                            JOIN agents sender ON m.sender_id = sender.id
+                            JOIN projects p ON m.project_id = p.id
+                            WHERE mr.agent_id IN ({placeholders})
+                            ORDER BY m.created_ts DESC
+                            LIMIT :lim
+                        """),
+                        params,
+                    )
+                ).fetchall()
+
+            now = datetime.now(timezone.utc)
+            unread = 0
+            for r in rows:
+                created = r[3]
+                is_read = r[9] is not None
+                if not is_read:
+                    unread += 1
+
+                # Compute relative time
+                if isinstance(created, str):
+                    created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                else:
+                    created_dt = created
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+
+                delta = (now - created_dt).total_seconds()
+                if delta < 60:
+                    relative = "just now"
+                elif delta < 3600:
+                    relative = f"{int(delta // 60)}m ago"
+                elif delta < 86400:
+                    relative = f"{int(delta // 3600)}h ago"
+                else:
+                    relative = f"{int(delta // 86400)}d ago"
+
+                body_text = r[2] or ""
+                messages.append({
+                    "id": r[0],
+                    "subject": r[1],
+                    "excerpt": body_text[:200].replace("\n", " "),
+                    "created_ts": str(r[3]),
+                    "created_relative": relative,
+                    "importance": r[4],
+                    "thread_id": r[5],
+                    "sender": r[6],
+                    "project_slug": r[7],
+                    "project_path": r[8],
+                    "read": is_read,
+                    "recipient": r[10],
+                })
+
+            return {"messages": messages, "identities": identities, "unread_count": unread}
+
         @fastapi_app.get("/mail", response_class=HTMLResponse)
         async def mail_unified_inbox() -> HTMLResponse:
             """Unified inbox showing ALL messages across ALL projects (Gmail-style) + Projects below"""
@@ -1327,6 +1424,159 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                         }
                     )
             return await _render("mail_index.html", projects=projects)
+
+        # ========== Human Identity Routes ==========
+        # NOTE: These must be registered BEFORE /mail/{project} to avoid
+        # the path parameter capturing "human" as a project slug.
+
+        @fastapi_app.post("/mail/human/register")
+        async def human_register(request: Request) -> JSONResponse:
+            """Register a human identity as an agent in a project."""
+            await ensure_schema()
+
+            body = await request.json()
+            project_slug: str = body.get("project_slug", "").strip()
+            name: str = body.get("name", "").strip()
+            display_label: str = body.get("display_label", "").strip()
+
+            if not project_slug:
+                raise HTTPException(status_code=400, detail="project_slug is required")
+            if not name:
+                raise HTTPException(status_code=400, detail="name is required")
+            if len(name) > 128:
+                raise HTTPException(status_code=400, detail="name too long (max 128)")
+
+            async with get_session() as session:
+                prow = (
+                    await session.execute(
+                        text("SELECT id, slug FROM projects WHERE slug = :k OR human_key = :k"),
+                        {"k": project_slug},
+                    )
+                ).fetchone()
+                if not prow:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+                pid = int(prow[0])
+                now = datetime.now(timezone.utc)
+
+                # Upsert: create if missing, return existing if present
+                await session.execute(
+                    text("""
+                        INSERT OR IGNORE INTO agents
+                            (project_id, name, program, model, task_description,
+                             contact_policy, attachments_policy, inception_ts, last_active_ts)
+                        VALUES (:pid, :name, :prog, :model, :task, :policy, :att, :ts, :ts)
+                    """),
+                    {
+                        "pid": pid, "name": name, "prog": "WebUI", "model": "Human",
+                        "task": display_label or f"Human operator: {name}",
+                        "policy": "open", "att": "auto", "ts": now,
+                    },
+                )
+                await session.commit()
+
+                row = (
+                    await session.execute(
+                        text(
+                            "SELECT id, name, program, model, task_description, inception_ts "
+                            "FROM agents WHERE project_id = :pid AND name = :name"
+                        ),
+                        {"pid": pid, "name": name},
+                    )
+                ).fetchone()
+
+            return JSONResponse({
+                "id": row[0], "name": row[1], "program": row[2],
+                "model": row[3], "display_label": row[4],
+                "created_at": str(row[5]),
+            })
+
+        @fastapi_app.get("/mail/human/identities")
+        async def human_identities() -> JSONResponse:
+            """List all human agents across all projects."""
+            await ensure_schema()
+            async with get_session() as session:
+                rows = (
+                    await session.execute(
+                        text("""
+                            SELECT a.id, a.name, a.task_description, a.inception_ts,
+                                   p.slug, p.human_key
+                            FROM agents a
+                            JOIN projects p ON a.project_id = p.id
+                            WHERE a.model = 'Human'
+                            ORDER BY a.name, p.slug
+                        """)
+                    )
+                ).fetchall()
+
+            identities = [
+                {
+                    "id": r[0], "name": r[1], "display_label": r[2],
+                    "created_at": str(r[3]), "project_slug": r[4],
+                    "project_path": r[5],
+                }
+                for r in rows
+            ]
+            return JSONResponse({"identities": identities})
+
+        # ========== Human Inbox Routes ==========
+
+        @fastapi_app.get("/mail/human/inbox", response_class=HTMLResponse)
+        async def human_inbox() -> HTMLResponse:
+            """Render HTML inbox for all human identities."""
+            await ensure_schema()
+            payload = await _build_human_inbox_payload()
+            return await _render("human_inbox.html", **payload)
+
+        @fastapi_app.get("/mail/human/inbox/api")
+        async def human_inbox_api() -> JSONResponse:
+            """JSON API for human inbox (for AJAX refresh)."""
+            await ensure_schema()
+            payload = await _build_human_inbox_payload()
+            return JSONResponse(payload)
+
+        @fastapi_app.post("/mail/human/inbox/mark-read")
+        async def human_inbox_mark_read(request: Request) -> JSONResponse:
+            """Mark messages as read for human recipients."""
+            await ensure_schema()
+            body = await request.json()
+            message_ids: list[int] = body.get("message_ids", [])
+            if not message_ids or len(message_ids) > 500:
+                raise HTTPException(status_code=400, detail="Provide 1-500 message_ids")
+
+            now = datetime.now(timezone.utc)
+            async with get_session() as session:
+                # Get all human agent IDs
+                human_ids = [
+                    r[0] for r in (
+                        await session.execute(
+                            text("SELECT id FROM agents WHERE model = 'Human'")
+                        )
+                    ).fetchall()
+                ]
+                if not human_ids:
+                    raise HTTPException(status_code=404, detail="No human identities registered")
+
+                placeholders_mid = ", ".join(f":mid_{i}" for i in range(len(message_ids)))
+                placeholders_aid = ", ".join(f":aid_{i}" for i in range(len(human_ids)))
+                params: dict[str, Any] = {"ts": now}
+                params.update({f"mid_{i}": mid for i, mid in enumerate(message_ids)})
+                params.update({f"aid_{i}": aid for i, aid in enumerate(human_ids)})
+
+                await session.execute(
+                    text(f"""
+                        UPDATE message_recipients SET read_ts = :ts
+                        WHERE message_id IN ({placeholders_mid})
+                        AND agent_id IN ({placeholders_aid})
+                        AND read_ts IS NULL
+                    """),
+                    params,
+                )
+                await session.commit()
+
+            return JSONResponse({"success": True, "marked": len(message_ids)})
+
+        # ========== Project Routes (wildcard — must come after /mail/human/*) ==========
 
         @fastapi_app.get("/mail/{project}", response_class=HTMLResponse)
         async def mail_project(
@@ -2117,98 +2367,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     items.append({"id": r[0], "subject": r[1], "created": str(r[2]), "attachments": attachments})
             return await _render("mail_attachments.html", project={"slug": prow[1], "human_key": prow[2]}, items=items)
 
-        # ========== Human Identity Routes ==========
-
-        @fastapi_app.post("/mail/human/register")
-        async def human_register(request: Request) -> JSONResponse:
-            """Register a human identity as an agent in a project."""
-            await ensure_schema()
-
-            body = await request.json()
-            project_slug: str = body.get("project_slug", "").strip()
-            name: str = body.get("name", "").strip()
-            display_label: str = body.get("display_label", "").strip()
-
-            if not project_slug:
-                raise HTTPException(status_code=400, detail="project_slug is required")
-            if not name:
-                raise HTTPException(status_code=400, detail="name is required")
-            if len(name) > 128:
-                raise HTTPException(status_code=400, detail="name too long (max 128)")
-
-            async with get_session() as session:
-                prow = (
-                    await session.execute(
-                        text("SELECT id, slug FROM projects WHERE slug = :k OR human_key = :k"),
-                        {"k": project_slug},
-                    )
-                ).fetchone()
-                if not prow:
-                    raise HTTPException(status_code=404, detail="Project not found")
-
-                pid = int(prow[0])
-                now = datetime.now(timezone.utc)
-
-                # Upsert: create if missing, return existing if present
-                await session.execute(
-                    text("""
-                        INSERT OR IGNORE INTO agents
-                            (project_id, name, program, model, task_description,
-                             contact_policy, attachments_policy, inception_ts, last_active_ts)
-                        VALUES (:pid, :name, :prog, :model, :task, :policy, :att, :ts, :ts)
-                    """),
-                    {
-                        "pid": pid, "name": name, "prog": "WebUI", "model": "Human",
-                        "task": display_label or f"Human operator: {name}",
-                        "policy": "open", "att": "auto", "ts": now,
-                    },
-                )
-                await session.commit()
-
-                row = (
-                    await session.execute(
-                        text(
-                            "SELECT id, name, program, model, task_description, inception_ts "
-                            "FROM agents WHERE project_id = :pid AND name = :name"
-                        ),
-                        {"pid": pid, "name": name},
-                    )
-                ).fetchone()
-
-            return JSONResponse({
-                "id": row[0], "name": row[1], "program": row[2],
-                "model": row[3], "display_label": row[4],
-                "created_at": str(row[5]),
-            })
-
-        @fastapi_app.get("/mail/human/identities")
-        async def human_identities() -> JSONResponse:
-            """List all human agents across all projects."""
-            await ensure_schema()
-            async with get_session() as session:
-                rows = (
-                    await session.execute(
-                        text("""
-                            SELECT a.id, a.name, a.task_description, a.inception_ts,
-                                   p.slug, p.human_key
-                            FROM agents a
-                            JOIN projects p ON a.project_id = p.id
-                            WHERE a.model = 'Human'
-                            ORDER BY a.name, p.slug
-                        """)
-                    )
-                ).fetchall()
-
-            identities = [
-                {
-                    "id": r[0], "name": r[1], "display_label": r[2],
-                    "created_at": str(r[3]), "project_slug": r[4],
-                    "project_path": r[5],
-                }
-                for r in rows
-            ]
-            return JSONResponse({"identities": identities})
-
         # ========== Human Overseer Routes ==========
 
         @fastapi_app.get("/mail/{project}/overseer/compose", response_class=HTMLResponse)
@@ -2854,6 +3012,125 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     "error": f"Unable to retrieve historical snapshot: {e!s}"
                 })
 
+        # ========== Human Notes Routes ==========
+
+        async def _build_notes_payload(
+            *, tag: str | None = None, project: str | None = None, thread_id: str | None = None
+        ) -> dict[str, Any]:
+            """Fetch human notes with optional filters."""
+            async with get_session() as session:
+                query = """
+                    SELECT n.id, n.body_md, n.tags, n.thread_id, n.created_ts, n.updated_ts,
+                           a.name AS author, p.slug AS project_slug, p.human_key
+                    FROM human_notes n
+                    JOIN agents a ON n.author_id = a.id
+                    JOIN projects p ON n.project_id = p.id
+                    WHERE 1=1
+                """
+                params: dict[str, Any] = {}
+                if project:
+                    query += " AND p.slug = :proj"
+                    params["proj"] = project
+                if thread_id:
+                    query += " AND n.thread_id = :tid"
+                    params["tid"] = thread_id
+                query += " ORDER BY n.created_ts DESC LIMIT 500"
+
+                rows = (await session.execute(text(query), params)).fetchall()
+
+            import json as json_mod
+            notes = []
+            for r in rows:
+                note_tags = json_mod.loads(r[2]) if isinstance(r[2], str) else (r[2] or [])
+                if tag and tag not in note_tags:
+                    continue
+                notes.append({
+                    "id": r[0], "body_md": r[1], "tags": note_tags,
+                    "thread_id": r[3], "created_ts": str(r[4]),
+                    "updated_ts": str(r[5]), "author": r[6],
+                    "project_slug": r[7], "project_path": r[8],
+                })
+
+            return {"notes": notes}
+
+        @fastapi_app.get("/mail/human/notes", response_class=HTMLResponse)
+        async def human_notes_page() -> HTMLResponse:
+            """Render notes dashboard."""
+            await ensure_schema()
+            payload = await _build_notes_payload()
+            return await _render("human_notes.html", **payload)
+
+        @fastapi_app.get("/mail/human/notes/api")
+        async def human_notes_api(
+            tag: str | None = None,
+            project: str | None = None,
+            thread_id: str | None = None,
+        ) -> JSONResponse:
+            """JSON API for notes with optional filters."""
+            await ensure_schema()
+            payload = await _build_notes_payload(tag=tag, project=project, thread_id=thread_id)
+            return JSONResponse(payload)
+
+        @fastapi_app.post("/mail/human/notes")
+        async def human_notes_create(request: Request) -> JSONResponse:
+            """Create a private human note."""
+            await ensure_schema()
+            body = await request.json()
+            project_slug: str = body.get("project_slug", "").strip()
+            author: str = body.get("author", "").strip()
+            body_md: str = body.get("body_md", "").strip()
+            thread_id: str | None = body.get("thread_id")
+            tags: list[str] = body.get("tags", [])
+
+            if not project_slug or not author or not body_md:
+                raise HTTPException(status_code=400, detail="project_slug, author, body_md required")
+
+            now = datetime.now(timezone.utc)
+            async with get_session() as session:
+                prow = (await session.execute(
+                    text("SELECT id FROM projects WHERE slug = :k OR human_key = :k"),
+                    {"k": project_slug},
+                )).fetchone()
+                if not prow:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+                author_row = (await session.execute(
+                    text("SELECT id, model FROM agents WHERE project_id = :pid AND name = :name"),
+                    {"pid": prow[0], "name": author},
+                )).fetchone()
+                if not author_row or author_row[1] != "Human":
+                    raise HTTPException(status_code=403, detail="Author must be a registered human identity")
+
+                import json as json_mod
+                result = await session.execute(
+                    text("""
+                        INSERT INTO human_notes (project_id, author_id, thread_id, body_md, tags, created_ts, updated_ts)
+                        VALUES (:pid, :aid, :tid, :body, :tags, :ts, :ts)
+                        RETURNING id
+                    """),
+                    {"pid": prow[0], "aid": author_row[0], "tid": thread_id,
+                     "body": body_md, "tags": json_mod.dumps(tags), "ts": now},
+                )
+                note_id = result.fetchone()[0]
+                await session.commit()
+
+            return JSONResponse({
+                "id": note_id, "author": author, "project_slug": project_slug,
+                "thread_id": thread_id, "tags": tags, "created_ts": now.isoformat(),
+            })
+
+        @fastapi_app.delete("/mail/human/notes/{note_id}")
+        async def human_notes_delete(note_id: int) -> JSONResponse:
+            """Delete a human note."""
+            await ensure_schema()
+            async with get_session() as session:
+                result = await session.execute(
+                    text("DELETE FROM human_notes WHERE id = :id"), {"id": note_id}
+                )
+                await session.commit()
+                if result.rowcount == 0:
+                    raise HTTPException(status_code=404, detail="Note not found")
+            return JSONResponse({"success": True, "deleted": note_id})
 
     try:
         _register_mail_ui()
