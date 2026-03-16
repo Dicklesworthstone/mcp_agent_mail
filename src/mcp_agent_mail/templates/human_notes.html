@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+
+{% block title %}Notes — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm">
+  <a href="/mail/" class="text-gray-500 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Mail</a>
+  <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+  <span class="text-gray-900 dark:text-white font-medium">Notes</span>
+</nav>
+{% endblock %}
+
+{% block content %}
+<div x-data="notesApp()" x-init="init()" class="space-y-6">
+
+  <!-- Composer -->
+  <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6">
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">New Note</h2>
+    <form @submit.prevent="createNote()">
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Note</label>
+          <textarea x-model="form.body_md" rows="4"
+            class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors"
+            placeholder="Write your observation, decision, or note in Markdown..."></textarea>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Tags</label>
+            <input type="text" x-model="form.tags_input"
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              placeholder="comma-separated tags">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Thread ID</label>
+            <input type="text" x-model="form.thread_id"
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              placeholder="optional thread link">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Project</label>
+            <input type="text" x-model="form.project_slug"
+              class="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              placeholder="project slug">
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button type="submit" :disabled="!form.body_md.trim()"
+            class="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            Save Note
+          </button>
+          <span x-show="toast" x-text="toast" x-transition
+            class="text-sm font-medium"
+            :class="toastError ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'"></span>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Filters -->
+  <div class="flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-600 dark:text-gray-400">Filter by tag:</label>
+      <input type="text" x-model="filterTag" @input.debounce.300ms="applyFilters()"
+        class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-3 py-1.5 text-sm focus:ring-2 focus:ring-primary-500"
+        placeholder="tag name">
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-600 dark:text-gray-400">Project:</label>
+      <input type="text" x-model="filterProject" @input.debounce.300ms="applyFilters()"
+        class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-3 py-1.5 text-sm focus:ring-2 focus:ring-primary-500"
+        placeholder="project slug">
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="text-sm text-gray-600 dark:text-gray-400">Thread:</label>
+      <input type="text" x-model="filterThread" @input.debounce.300ms="applyFilters()"
+        class="rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white px-3 py-1.5 text-sm focus:ring-2 focus:ring-primary-500"
+        placeholder="thread ID">
+    </div>
+    <button @click="filterTag=''; filterProject=''; filterThread=''; applyFilters()"
+      class="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors">Clear</button>
+  </div>
+
+  <!-- Notes Feed -->
+  <div class="space-y-4">
+    <template x-if="notes.length === 0">
+      <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-12 text-center">
+        <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+        </svg>
+        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-1">No notes yet</h3>
+        <p class="text-sm text-gray-500 dark:text-gray-400">Start capturing observations, decisions, and context above.</p>
+      </div>
+    </template>
+
+    <template x-for="note in notes" :key="note.id">
+      <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-5 hover:border-primary-300 dark:hover:border-primary-600 transition-colors">
+        <div class="flex items-start justify-between gap-4">
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-2">
+              <span class="text-sm font-medium text-gray-900 dark:text-white" x-text="note.author"></span>
+              <span class="text-xs text-gray-400">in</span>
+              <span class="text-xs font-mono text-primary-600 dark:text-primary-400 bg-primary-50 dark:bg-primary-900/30 px-1.5 py-0.5 rounded" x-text="note.project_slug"></span>
+              <template x-if="note.thread_id">
+                <span class="text-xs text-gray-400 font-mono bg-gray-100 dark:bg-gray-700 px-1.5 py-0.5 rounded" x-text="'#' + note.thread_id"></span>
+              </template>
+              <span class="ml-auto text-xs text-gray-400" x-text="note.created_ts"></span>
+            </div>
+            <div class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap" x-text="note.body_md"></div>
+            <template x-if="note.tags && note.tags.length > 0">
+              <div class="flex flex-wrap gap-1.5 mt-3">
+                <template x-for="t in note.tags" :key="t">
+                  <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300"
+                    x-text="t"></span>
+                </template>
+              </div>
+            </template>
+          </div>
+          <button @click="deleteNote(note.id)"
+            class="shrink-0 p-1.5 text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20"
+            title="Delete note">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </template>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+function notesApp() {
+  return {
+    notes: {{ notes | tojson }},
+    form: {
+      body_md: '',
+      tags_input: '',
+      thread_id: '',
+      project_slug: '',
+    },
+    filterTag: '',
+    filterProject: '',
+    filterThread: '',
+    toast: '',
+    toastError: false,
+
+    init() {},
+
+    async createNote() {
+      const tags = this.form.tags_input
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+
+      const payload = {
+        project_slug: this.form.project_slug,
+        author: 'lee',
+        body_md: this.form.body_md,
+        tags: tags,
+      };
+      if (this.form.thread_id.trim()) {
+        payload.thread_id = this.form.thread_id.trim();
+      }
+
+      try {
+        const resp = await fetch('/mail/human/notes', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          this.showToast(data.detail || 'Failed to create note', true);
+          return;
+        }
+        this.showToast('Note saved');
+        this.form.body_md = '';
+        this.form.tags_input = '';
+        this.form.thread_id = '';
+        await this.applyFilters();
+      } catch (e) {
+        this.showToast('Network error', true);
+      }
+    },
+
+    async deleteNote(id) {
+      if (!confirm('Delete this note?')) return;
+      try {
+        const resp = await fetch(`/mail/human/notes/${id}`, {method: 'DELETE'});
+        if (resp.ok) {
+          this.notes = this.notes.filter(n => n.id !== id);
+          this.showToast('Note deleted');
+        }
+      } catch (e) {
+        this.showToast('Failed to delete', true);
+      }
+    },
+
+    async applyFilters() {
+      const params = new URLSearchParams();
+      if (this.filterTag) params.set('tag', this.filterTag);
+      if (this.filterProject) params.set('project', this.filterProject);
+      if (this.filterThread) params.set('thread_id', this.filterThread);
+      try {
+        const resp = await fetch(`/mail/human/notes/api?${params}`);
+        const data = await resp.json();
+        this.notes = data.notes;
+      } catch (e) {
+        console.error('Filter failed:', e);
+      }
+    },
+
+    showToast(msg, isError = false) {
+      this.toast = msg;
+      this.toastError = isError;
+      setTimeout(() => { this.toast = ''; }, 3000);
+    },
+  };
+}
+</script>
+{% endblock %}

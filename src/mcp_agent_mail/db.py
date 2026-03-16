@@ -290,4 +290,11 @@ def _setup_fts(connection: Any) -> None:
     connection.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS idx_message_recipients_agent ON message_recipients(agent_id)"
     )
+    # Human notes indexes
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_human_notes_project ON human_notes(project_id)"
+    )
+    connection.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS idx_human_notes_thread ON human_notes(thread_id)"
+    )
 

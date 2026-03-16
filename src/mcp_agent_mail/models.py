@@ -120,6 +120,24 @@ class AgentLink(SQLModel, table=True):
     expires_ts: Optional[datetime] = None
 
 
+class HumanNote(SQLModel, table=True):
+    """Private notes written by human operators. NOT delivered to agents."""
+
+    __tablename__ = "human_notes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="projects.id", index=True)
+    author_id: int = Field(foreign_key="agents.id", index=True)
+    thread_id: Optional[str] = Field(default=None, index=True, max_length=128)
+    body_md: str
+    tags: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON, nullable=False, server_default="[]"),
+    )
+    created_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ProjectSiblingSuggestion(SQLModel, table=True):
     """LLM-ranked sibling project suggestion (undirected pair)."""
 
