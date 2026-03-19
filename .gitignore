@@ -236,3 +236,9 @@ AGENTS.md.backup
 # SQLite WAL/SHM temp files (test databases)
 test.sqlite3-shm
 test.sqlite3-wal
+
+# Tool-specific MCP configs (contain auth tokens)
+cline.mcp.json
+opencode.json
+windsurf.mcp.json
+.vscode/
