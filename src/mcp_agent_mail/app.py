@@ -1950,6 +1950,12 @@ async def _generate_unique_agent_name(
         sanitized = sanitize_agent_name(name_hint)
         if mode == "always_auto":
             sanitized = None
+        elif mode == "off":
+            if sanitized:
+                if await available(sanitized):
+                    return sanitized
+                raise ValueError(f"Agent name '{sanitized}' is already in use.")
+            # No alphanumerics remain; fall through to auto-generation
         if sanitized:
             # When coercing, if the provided hint is not in the valid adjective+noun set,
             # silently fall back to auto-generation instead of erroring.
@@ -2017,6 +2023,12 @@ async def _get_or_create_agent(
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if mode == "always_auto" or name is None:
         desired_name = await _generate_unique_agent_name(project, settings, None)
+    elif mode == "off":
+        sanitized = sanitize_agent_name(name)
+        if not sanitized:
+            desired_name = await _generate_unique_agent_name(project, settings, None)
+        else:
+            desired_name = sanitized
     else:
         sanitized = sanitize_agent_name(name)
         if not sanitized:
