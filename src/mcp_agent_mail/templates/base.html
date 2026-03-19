@@ -9,7 +9,7 @@
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
     <script>
       (function () {
@@ -35,21 +35,35 @@
         theme: {
           extend: {
             fontFamily: {
-              sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+              sans: ['IBM Plex Sans', 'system-ui', '-apple-system', 'sans-serif'],
+              mono: ['IBM Plex Mono', 'ui-monospace', 'SFMono-Regular', 'monospace'],
             },
             colors: {
               primary: {
-                50: '#eef2ff',
-                100: '#e0e7ff',
-                200: '#c7d2fe',
-                300: '#a5b4fc',
-                400: '#818cf8',
-                500: '#6366f1',
-                600: '#4f46e5',
-                700: '#4338ca',
-                800: '#3730a3',
-                900: '#312e81',
-                950: '#1e1b4b',
+                50: '#fffbeb',
+                100: '#fef3c7',
+                200: '#fde68a',
+                300: '#fcd34d',
+                400: '#fbbf24',
+                500: '#f59e0b',
+                600: '#d97706',
+                700: '#b45309',
+                800: '#92400e',
+                900: '#78350f',
+                950: '#451a03',
+              },
+              accent: {
+                50: '#f0f9ff',
+                100: '#e0f2fe',
+                200: '#bae6fd',
+                300: '#7dd3fc',
+                400: '#38bdf8',
+                500: '#0ea5e9',
+                600: '#0284c7',
+                700: '#0369a1',
+                800: '#075985',
+                900: '#0c4a6e',
+                950: '#082f49',
               },
               success: {
                 50: '#f0fdf4',
@@ -71,7 +85,7 @@
               'soft': '0 2px 8px 0 rgba(0, 0, 0, 0.05)',
               'medium': '0 4px 16px 0 rgba(0, 0, 0, 0.08)',
               'large': '0 8px 32px 0 rgba(0, 0, 0, 0.12)',
-              'glow': '0 0 20px rgba(99, 102, 241, 0.3)',
+              'glow': '0 0 20px rgba(245, 158, 11, 0.25)',
             },
             animation: {
               'fade-in': 'fadeIn 0.2s ease-in-out',
@@ -178,16 +192,16 @@
         startOnLoad: false,
         theme: 'base',
         themeVariables: {
-          primaryColor: '#6366f1',
+          primaryColor: '#f59e0b',
           primaryTextColor: '#fff',
-          primaryBorderColor: '#4f46e5',
-          lineColor: '#6366f1',
-          secondaryColor: '#818cf8',
-          tertiaryColor: '#a5b4fc',
+          primaryBorderColor: '#d97706',
+          lineColor: '#f59e0b',
+          secondaryColor: '#fbbf24',
+          tertiaryColor: '#fcd34d',
           background: '#ffffff',
-          mainBkg: '#6366f1',
-          secondBkg: '#818cf8',
-          tertiaryBkg: '#a5b4fc'
+          mainBkg: '#f59e0b',
+          secondBkg: '#fbbf24',
+          tertiaryBkg: '#fcd34d'
         },
         gitGraph: {
           rotateCommitLabel: false,
@@ -317,7 +331,7 @@
 
       /* Gradient backgrounds */
       .gradient-primary {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        background: linear-gradient(135deg, #fbbf24 0%, #b45309 100%);
       }
 
       .gradient-success {
@@ -326,10 +340,10 @@
 
       .gradient-mesh {
         background:
-          radial-gradient(at 40% 20%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
-          radial-gradient(at 80% 0%, rgba(139, 92, 246, 0.15) 0px, transparent 50%),
-          radial-gradient(at 0% 50%, rgba(236, 72, 153, 0.15) 0px, transparent 50%),
-          radial-gradient(at 80% 50%, rgba(59, 130, 246, 0.15) 0px, transparent 50%);
+          radial-gradient(at 40% 20%, rgba(245, 158, 11, 0.12) 0px, transparent 50%),
+          radial-gradient(at 80% 0%, rgba(251, 191, 36, 0.10) 0px, transparent 50%),
+          radial-gradient(at 0% 50%, rgba(56, 189, 248, 0.08) 0px, transparent 50%),
+          radial-gradient(at 80% 50%, rgba(14, 165, 233, 0.08) 0px, transparent 50%);
       }
 
       /* Prose styling for markdown */
@@ -341,16 +355,16 @@
       .prose h2 { font-size: 1.5em; font-weight: 600; margin: 1em 0 0.5em; line-height: 1.3; }
       .prose h3 { font-size: 1.25em; font-weight: 600; margin: 1em 0 0.5em; line-height: 1.4; }
       .prose p { margin: 1em 0; line-height: 1.7; }
-      .prose a { color: #6366f1; text-decoration: underline; }
-      .prose a:hover { color: #4f46e5; }
+      .prose a { color: #f59e0b; text-decoration: underline; }
+      .prose a:hover { color: #d97706; }
       .prose ul, .prose ol { margin: 1em 0; padding-left: 2em; }
       .prose li { margin: 0.5em 0; }
       .prose code {
-        background: rgba(99, 102, 241, 0.1);
+        background: rgba(245, 158, 11, 0.1);
         padding: 0.2em 0.4em;
         border-radius: 4px;
         font-size: 0.9em;
-        font-family: 'Monaco', 'Courier New', monospace;
+        font-family: 'IBM Plex Mono', 'Monaco', monospace;
       }
       .prose pre {
         background: #1e293b;
@@ -365,7 +379,7 @@
         color: #e2e8f0;
       }
       .prose blockquote {
-        border-left: 4px solid #6366f1;
+        border-left: 4px solid #f59e0b;
         padding-left: 1em;
         margin: 1em 0;
         font-style: italic;
@@ -378,9 +392,9 @@
       }
 
       .dark .prose { color: #e2e8f0; }
-      .dark .prose a { color: #818cf8; }
-      .dark .prose a:hover { color: #a5b4fc; }
-      .dark .prose code { background: rgba(99, 102, 241, 0.2); }
+      .dark .prose a { color: #fbbf24; }
+      .dark .prose a:hover { color: #fcd34d; }
+      .dark .prose code { background: rgba(245, 158, 11, 0.2); }
       .dark .prose blockquote { color: #94a3b8; }
 
       /* Loading skeleton */
@@ -397,7 +411,7 @@
 
       /* Focus styles for accessibility */
       *:focus-visible {
-        outline: 2px solid #6366f1;
+        outline: 2px solid #f59e0b;
         outline-offset: 2px;
         border-radius: 4px;
       }
@@ -468,17 +482,17 @@
 
       /* Custom NProgress styling */
       #nprogress .bar {
-        background: linear-gradient(to right, #6366f1, #8b5cf6, #ec4899) !important;
+        background: linear-gradient(to right, #f59e0b, #fbbf24, #38bdf8) !important;
         height: 3px !important;
       }
 
       #nprogress .peg {
-        box-shadow: 0 0 10px #6366f1, 0 0 5px #6366f1 !important;
+        box-shadow: 0 0 10px #f59e0b, 0 0 5px #f59e0b !important;
       }
 
       #nprogress .spinner-icon {
-        border-top-color: #6366f1 !important;
-        border-left-color: #6366f1 !important;
+        border-top-color: #f59e0b !important;
+        border-left-color: #f59e0b !important;
       }
 
       /* Tippy.js custom theme */
@@ -585,12 +599,12 @@
       input:not([class*="focus:"]):focus,
       textarea:not([class*="focus:"]):focus,
       select:not([class*="focus:"]):focus {
-        box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
       }
 
       /* Glow on hover for interactive elements */
       .glow-on-hover:hover {
-        box-shadow: 0 0 20px rgba(99, 102, 241, 0.4);
+        box-shadow: 0 0 20px rgba(245, 158, 11, 0.4);
       }
 
       /* Stat counter animation */
@@ -612,13 +626,13 @@
         position: relative;
         padding: 1rem;
         border-radius: 1rem;
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%);
-        border: 1px solid rgba(99, 102, 241, 0.1);
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(251, 191, 36, 0.05) 100%);
+        border: 1px solid rgba(245, 158, 11, 0.1);
       }
 
       .dark .message-bubble {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-        border: 1px solid rgba(99, 102, 241, 0.2);
+        background: linear-gradient(135deg, rgba(245, 158, 11, 0.1) 0%, rgba(251, 191, 36, 0.1) 100%);
+        border: 1px solid rgba(245, 158, 11, 0.2);
       }
 
       /* Skeleton loader */
@@ -786,13 +800,13 @@
 
       /* Enhanced focus states for accessibility */
       *:focus-visible {
-        outline: 3px solid #6366f1;
+        outline: 3px solid #f59e0b;
         outline-offset: 3px;
         border-radius: 6px;
       }
 
       .dark *:focus-visible {
-        outline-color: #818cf8;
+        outline-color: #fbbf24;
       }
 
       /* Skip to content link for accessibility */
@@ -800,7 +814,7 @@
         position: absolute;
         top: -40px;
         left: 0;
-        background: #6366f1;
+        background: #f59e0b;
         color: white;
         padding: 8px;
         text-decoration: none;
@@ -907,7 +921,7 @@
         content: '';
         position: absolute;
         inset: -2px;
-        background: linear-gradient(45deg, #6366f1, #8b5cf6, #ec4899, #6366f1);
+        background: linear-gradient(45deg, #f59e0b, #fbbf24, #38bdf8, #f59e0b);
         background-size: 300% 300%;
         border-radius: inherit;
         opacity: 0;
@@ -934,7 +948,7 @@
     {% block head %}{% endblock %}
   </head>
 
-  <body class="bg-gradient-to-br from-slate-50 via-white to-slate-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 text-slate-900 dark:text-slate-100 min-h-screen">
+  <body class="bg-gradient-to-br from-zinc-50 via-white to-zinc-50 dark:from-[#0a0a0f] dark:via-[#0f1118] dark:to-[#0a0a0f] text-zinc-900 dark:text-zinc-100 min-h-screen font-sans">
     <!-- Accessibility: Skip to main content -->
     <a href="#main-content" class="skip-to-content">Skip to main content</a>
 
@@ -2126,17 +2140,17 @@
     </div>
 
     <!-- Navigation Header -->
-    <nav class="glass sticky top-0 z-40 border-b border-slate-200/80 dark:border-slate-700/80">
+    <nav class="sticky top-0 z-40 border-b border-zinc-200/60 dark:border-zinc-800/80 bg-white/90 dark:bg-[#0f1118]/90 backdrop-blur-xl">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div class="flex items-center justify-between h-16">
+        <div class="flex items-center justify-between h-14">
           <!-- Logo and Brand -->
           <div class="flex items-center gap-8">
-            <a href="/mail" class="flex items-center gap-3 group">
-              <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center shadow-medium group-hover:shadow-glow transition-all duration-300">
-                <i data-lucide="mail" class="w-5 h-5 text-white"></i>
+            <a href="/mail" class="flex items-center gap-2.5 group">
+              <div class="w-8 h-8 rounded-lg bg-primary-500 flex items-center justify-center group-hover:bg-primary-400 transition-colors duration-200">
+                <i data-lucide="radio-tower" class="w-4 h-4 text-white"></i>
               </div>
-              <span class="text-xl font-bold bg-gradient-to-r from-primary-600 to-primary-800 dark:from-primary-400 dark:to-primary-600 bg-clip-text text-transparent">
-                Agent Mail
+              <span class="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                Agent<span class="text-primary-500">Mail</span>
               </span>
             </a>
 
@@ -2193,10 +2207,10 @@
     </main>
 
     <!-- Footer -->
-    <footer class="border-t border-slate-200 dark:border-slate-800 mt-16">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div class="flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">
-          <p>MCP Agent Mail &copy; 2025</p>
+    <footer class="border-t border-zinc-200/60 dark:border-zinc-800/50 mt-16">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <div class="flex items-center justify-between text-xs font-mono text-zinc-400 dark:text-zinc-600">
+          <p>AgentMail &copy; 2025</p>
           <div class="flex items-center gap-4">
             <!-- Footer links commented out until destinations are available -->
             <!-- <a href="#" class="hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Documentation</a> -->
@@ -2476,7 +2490,7 @@
 
             const confetti = [];
             const confettiCount = 150;
-            const colors = ['#6366f1', '#8b5cf6', '#ec4899', '#10b981', '#f59e0b'];
+            const colors = ['#f59e0b', '#fbbf24', '#38bdf8', '#10b981', '#0ea5e9'];
 
             for (let i = 0; i < confettiCount; i++) {
               confetti.push({
@@ -2563,7 +2577,7 @@
               title: 'Go to Projects',
               description: 'View all projects',
               icon: 'folder',
-              iconBg: 'rgba(99, 102, 241, 0.1)',
+              iconBg: 'rgba(245, 158, 11, 0.1)',
               iconColor: 'text-primary-600',
               shortcut: 'G+P',
               action: () => window.location.href = '/mail',
@@ -2574,7 +2588,7 @@
               title: 'Search Messages',
               description: 'Find messages across projects',
               icon: 'search',
-              iconBg: 'rgba(139, 92, 246, 0.1)',
+              iconBg: 'rgba(251, 191, 36, 0.1)',
               iconColor: 'text-purple-600',
               shortcut: '/',
               action: () => {
@@ -2619,7 +2633,7 @@
               title: 'Keyboard Shortcuts',
               description: 'View all keyboard shortcuts',
               icon: 'keyboard',
-              iconBg: 'rgba(236, 72, 153, 0.1)',
+              iconBg: 'rgba(56, 189, 248, 0.1)',
               iconColor: 'text-pink-600',
               shortcut: '?',
               action: () => {
