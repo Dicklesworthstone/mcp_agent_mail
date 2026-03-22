@@ -3070,6 +3070,7 @@ async def _get_or_create_agent(
         # Priority 4: no name, no window ID -> auto-generate
         desired_name = await _generate_unique_agent_name(project, settings, None)
     await ensure_schema()
+    newly_created = False
     async with get_session() as session:
         for _attempt in range(5):
             # Use case-insensitive matching to be consistent with _agent_name_exists() and _get_agent()
@@ -3102,6 +3103,7 @@ async def _get_or_create_agent(
                 await session.commit()
                 await session.refresh(candidate)
                 agent = candidate
+                newly_created = True
                 break
             except IntegrityError:
                 await session.rollback()
@@ -3152,8 +3154,22 @@ async def _get_or_create_agent(
     if window_identity is not None:
         agent_dict["window_id"] = window_identity.window_uuid
         agent_dict["window_display_name"] = window_identity.display_name
-    async with _archive_write_lock(archive):
-        await write_agent_profile(archive, agent_dict)
+    try:
+        async with _archive_write_lock(archive):
+            await write_agent_profile(archive, agent_dict)
+    except Exception:
+        # Roll back the DB record if the archive write fails and we just
+        # created the agent.  This keeps the two stores consistent so the
+        # caller doesn't receive an error while the agent already exists in
+        # the DB (issue #121).
+        if newly_created:
+            with suppress(Exception):
+                async with get_session() as rollback_session:
+                    db_agent = await rollback_session.get(Agent, agent.id)
+                    if db_agent:
+                        await rollback_session.delete(db_agent)
+                        await rollback_session.commit()
+        raise
     return agent
 
 
@@ -5553,8 +5569,19 @@ def build_mcp_server() -> FastMCP:
                 await session.refresh(db_agent)
                 agent = db_agent
         archive = await ensure_archive(settings, project.slug)
-        async with _archive_write_lock(archive):
-            await write_agent_profile(archive, _agent_to_dict(agent))
+        try:
+            async with _archive_write_lock(archive):
+                await write_agent_profile(archive, _agent_to_dict(agent))
+        except Exception:
+            # Roll back the DB record so the caller doesn't get an error
+            # while the agent already exists in the database (issue #121).
+            with suppress(Exception):
+                async with get_session() as rollback_session:
+                    db_agent = await rollback_session.get(Agent, agent.id)
+                    if db_agent:
+                        await rollback_session.delete(db_agent)
+                        await rollback_session.commit()
+            raise
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         result = _agent_to_dict(agent)
         result["registration_token"] = token
