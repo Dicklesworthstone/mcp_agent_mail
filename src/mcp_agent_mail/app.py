@@ -5790,6 +5790,7 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="sender_name",
     )
+    @retry_on_db_lock(max_retries=3, base_delay=0.05, max_delay=0.5)
     async def send_message(
         ctx: Context,
         project_key: str,
@@ -7102,6 +7103,7 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="from_agent",
     )
+    @retry_on_db_lock(max_retries=3, base_delay=0.05, max_delay=0.5)
     async def request_contact(
         ctx: Context,
         project_key: str,
@@ -7273,6 +7275,7 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="to_agent",
     )
+    @retry_on_db_lock(max_retries=3, base_delay=0.05, max_delay=0.5)
     async def respond_contact(
         ctx: Context,
         project_key: str,
