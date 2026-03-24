@@ -495,8 +495,8 @@ class TestSQLiteConfiguration:
             )
             timeout = result[0]
 
-        # Should be 30000ms (30 seconds)
-        assert timeout == 30000
+        # Should be 60000ms (60 seconds) to handle sustained write contention
+        assert timeout == 60000
 
     @pytest.mark.asyncio
     async def test_synchronous_mode_normal(self, isolated_env):
