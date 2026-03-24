@@ -263,9 +263,9 @@ def retry_on_db_lock(
             for attempt in range(max_retries + 1):
                 try:
                     result = await func(*args, **kwargs)
-                    # Success - reset circuit breaker
-                    if use_circuit_breaker and attempt > 0:
-                        # Only record success if we had retries (indicates recovery)
+                    # Success - reset circuit breaker if it had any accumulated failures,
+                    # even on the first attempt (allows recovery from HALF_OPEN state).
+                    if use_circuit_breaker and _circuit_breaker_failures > 0:
                         await _record_circuit_success()
                     return result
 
