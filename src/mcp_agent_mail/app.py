@@ -45,6 +45,7 @@ from .db import (
     get_query_tracker,
     get_session,
     init_engine,
+    retry_on_db_lock,
     start_query_tracking,
     stop_query_tracking,
 )
@@ -7916,6 +7917,7 @@ def build_mcp_server() -> FastMCP:
         project_arg="project_key",
         agent_arg="requester",
     )
+    @retry_on_db_lock(max_retries=3, base_delay=0.05, max_delay=0.5)
     async def macro_contact_handshake(
         ctx: Context,
         project_key: str,
