@@ -1098,7 +1098,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         app_any2 = _cast(_Any, fastapi_app)
         app_any2.add_middleware(
             CORSMiddleware,
-            allow_origins=settings.cors.origins or ["*"],
+            allow_origins=settings.cors.origins or [],
             allow_credentials=settings.cors.allow_credentials,
             allow_methods=settings.cors.allow_methods or ["*"],
             allow_headers=settings.cors.allow_headers or ["*"],
@@ -1936,6 +1936,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             order: str | None = None,
             boost: int | None = None,
         ) -> HTMLResponse:
+            if order not in ("relevance", "time", None):
+                order = "relevance"
             await ensure_schema()
             async with get_session() as session:
                 proj = await session.execute(
@@ -2056,6 +2058,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         @fastapi_app.get("/mail/unified-inbox", response_class=HTMLResponse)
         async def unified_inbox(limit: int = 10000, filter_importance: str | None = None) -> HTMLResponse:
             """Unified inbox showing messages from all active agents across all projects."""
+            limit = min(max(1, limit), 10000)
             await ensure_schema()
             async with get_session() as session:
                 # Get all projects with their agents
@@ -2192,6 +2195,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         @fastapi_app.get("/mail/{project}/inbox/{agent}", response_class=HTMLResponse)
         async def mail_inbox(project: str, agent: str, limit: int = 10000, page: int = 1) -> HTMLResponse:
+            limit = min(max(1, limit), 10000)
+            page = min(max(1, page), 10000)
             await ensure_schema()
             async with get_session() as session:
                 prow = (
@@ -2797,6 +2802,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             order: str | None = None,
             boost: int | None = None,
         ) -> HTMLResponse:
+            limit = min(max(1, limit), 10000)
+            if order not in ("relevance", "time", None):
+                order = "relevance"
             await ensure_schema()
             async with get_session() as session:
                 prow = (
