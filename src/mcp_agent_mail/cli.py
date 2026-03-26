@@ -43,6 +43,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
+from filelock import SoftFileLock, Timeout as LockTimeout
+
 from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session, reset_database_state
@@ -671,6 +673,52 @@ async def _get_product_record(key: str) -> Product:
         return prod
 
 
+_SERVER_LOCK_FILENAME = "server.lock"
+
+
+def _acquire_server_lock(settings: Any = None) -> SoftFileLock:
+    """Acquire an exclusive lock on server.lock inside the resolved STORAGE_ROOT.
+
+    Ensures only one Agent Mail server process can own a given storage root at a
+    time.  The lock is held for the lifetime of the process (the underlying file
+    descriptor is released automatically on exit).  The PID is written into the
+    lockfile for diagnostic purposes.
+
+    Returns the held ``SoftFileLock`` so the caller can keep a reference alive.
+    Raises ``SystemExit(1)`` if another server already holds the lock.
+    """
+    if settings is None:
+        settings = get_settings()
+    storage_root = Path(settings.storage.root).expanduser().resolve()
+    storage_root.mkdir(parents=True, exist_ok=True)
+    lock_path = storage_root / _SERVER_LOCK_FILENAME
+    lock = SoftFileLock(str(lock_path))
+    try:
+        lock.acquire(timeout=0)
+    except LockTimeout:
+        # Try to read the PID from the lockfile for a helpful message
+        owner_pid = "(unknown)"
+        try:
+            owner_pid = lock_path.read_text(encoding="utf-8").strip() or "(unknown)"
+        except OSError:
+            pass
+        print(
+            f"ERROR: Another Agent Mail server is already running for this "
+            f"storage root (PID: {owner_pid}). Only one server can own a "
+            f"storage root at a time.\n"
+            f"  Storage root: {storage_root}\n"
+            f"  Lock file:    {lock_path}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    # Write our PID into the lockfile for diagnostics
+    try:
+        lock_path.write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass  # Non-fatal; the lock itself is what matters
+    return lock
+
+
 @app.command("serve-http")
 def serve_http(
     host: Optional[str] = typer.Option(None, help="Host interface for HTTP transport. Defaults to HTTP_HOST setting."),
@@ -679,6 +727,10 @@ def serve_http(
 ) -> None:
     """Run the MCP server over the Streamable HTTP transport."""
     settings = get_settings()
+
+    # Enforce single-server ownership of the storage root (issue #123)
+    _server_lock = _acquire_server_lock(settings)  # noqa: F841 — prevent GC
+
     resolved_host = host or settings.http.host
     resolved_port = port or settings.http.port
     resolved_path = path or settings.http.path
@@ -727,6 +779,9 @@ def serve_stdio() -> None:
     os.environ["TOOLS_LOG_ENABLED"] = "false"
     os.environ["LOG_RICH_ENABLED"] = "false"
     clear_settings_cache()
+
+    # Enforce single-server ownership of the storage root (issue #123)
+    _server_lock = _acquire_server_lock()  # noqa: F841 — prevent GC
 
     # Redirect all logging to stderr to avoid corrupting stdio transport
     for handler in logging.root.handlers[:]:

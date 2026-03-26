@@ -217,6 +217,7 @@ screenshots/renamed
 screenshots/gif_frames
 temp.lock
 temp.lock.owner.json
+server.lock
 archived_mailbox_states/
 # Share export test output
 out/
