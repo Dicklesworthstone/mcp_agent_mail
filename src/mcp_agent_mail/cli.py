@@ -43,7 +43,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from filelock import SoftFileLock, Timeout as LockTimeout
+from filelock import FileLock, Timeout as LockTimeout
 
 from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
@@ -676,15 +676,18 @@ async def _get_product_record(key: str) -> Product:
 _SERVER_LOCK_FILENAME = "server.lock"
 
 
-def _acquire_server_lock(settings: Any = None) -> SoftFileLock:
+def _acquire_server_lock(settings: Any = None) -> FileLock:
     """Acquire an exclusive lock on server.lock inside the resolved STORAGE_ROOT.
 
     Ensures only one Agent Mail server process can own a given storage root at a
-    time.  The lock is held for the lifetime of the process (the underlying file
-    descriptor is released automatically on exit).  The PID is written into the
-    lockfile for diagnostic purposes.
+    time.  Uses OS-level file locking (flock/fcntl on Unix, LockFileEx on
+    Windows) so the lock is automatically released if the process crashes —
+    unlike SoftFileLock which leaves a stale marker file on disk.
 
-    Returns the held ``SoftFileLock`` so the caller can keep a reference alive.
+    The PID is written into a companion .pid file for diagnostic purposes.
+
+    Returns the held ``FileLock`` so the caller can keep a reference alive
+    (preventing GC from closing the file descriptor and releasing the lock).
     Raises ``SystemExit(1)`` if another server already holds the lock.
     """
     if settings is None:
@@ -692,14 +695,15 @@ def _acquire_server_lock(settings: Any = None) -> SoftFileLock:
     storage_root = Path(settings.storage.root).expanduser().resolve()
     storage_root.mkdir(parents=True, exist_ok=True)
     lock_path = storage_root / _SERVER_LOCK_FILENAME
-    lock = SoftFileLock(str(lock_path))
+    lock = FileLock(str(lock_path))
     try:
         lock.acquire(timeout=0)
     except LockTimeout:
-        # Try to read the PID from the lockfile for a helpful message
+        # Try to read the PID from the companion .pid file for a helpful message
         owner_pid = "(unknown)"
+        pid_path = storage_root / "server.pid"
         try:
-            owner_pid = lock_path.read_text(encoding="utf-8").strip() or "(unknown)"
+            owner_pid = pid_path.read_text(encoding="utf-8").strip() or "(unknown)"
         except OSError:
             pass
         print(
@@ -711,9 +715,11 @@ def _acquire_server_lock(settings: Any = None) -> SoftFileLock:
             file=sys.stderr,
         )
         raise SystemExit(1)
-    # Write our PID into the lockfile for diagnostics
+    # Write our PID to a companion file for diagnostics (not the lock file
+    # itself, which is managed by the OS-level locking mechanism)
     try:
-        lock_path.write_text(str(os.getpid()), encoding="utf-8")
+        pid_path = storage_root / "server.pid"
+        pid_path.write_text(str(os.getpid()), encoding="utf-8")
     except OSError:
         pass  # Non-fatal; the lock itself is what matters
     return lock

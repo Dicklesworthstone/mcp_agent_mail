@@ -218,6 +218,7 @@ screenshots/gif_frames
 temp.lock
 temp.lock.owner.json
 server.lock
+server.pid
 archived_mailbox_states/
 # Share export test output
 out/
