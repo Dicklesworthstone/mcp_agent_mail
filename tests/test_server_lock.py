@@ -6,14 +6,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from filelock import SoftFileLock
+from filelock import FileLock
 from typer.testing import CliRunner
 
 from mcp_agent_mail.cli import _SERVER_LOCK_FILENAME, _acquire_server_lock, app
 
 
 def test_acquire_server_lock_creates_lockfile(isolated_env, tmp_path, monkeypatch):
-    """_acquire_server_lock creates server.lock and writes PID."""
+    """_acquire_server_lock creates server.lock and writes PID to server.pid."""
     storage_root = tmp_path / "lock_test_storage"
     monkeypatch.setenv("STORAGE_ROOT", str(storage_root))
     from mcp_agent_mail.config import clear_settings_cache
@@ -23,7 +23,9 @@ def test_acquire_server_lock_creates_lockfile(isolated_env, tmp_path, monkeypatc
     try:
         lock_path = storage_root / _SERVER_LOCK_FILENAME
         assert lock_path.exists()
-        pid_text = lock_path.read_text(encoding="utf-8").strip()
+        pid_path = storage_root / "server.pid"
+        assert pid_path.exists()
+        pid_text = pid_path.read_text(encoding="utf-8").strip()
         assert pid_text == str(os.getpid())
     finally:
         lock.release()
@@ -37,12 +39,14 @@ def test_acquire_server_lock_blocks_second_acquisition(isolated_env, tmp_path, m
 
     clear_settings_cache()
 
-    # Hold the lock manually
+    # Hold the lock manually using FileLock (OS-level, same as production)
     storage_root.mkdir(parents=True, exist_ok=True)
     lock_path = storage_root / _SERVER_LOCK_FILENAME
-    holder = SoftFileLock(str(lock_path))
+    holder = FileLock(str(lock_path))
     holder.acquire(timeout=0)
-    lock_path.write_text("99999", encoding="utf-8")
+    # Write PID to companion file (same as production code)
+    pid_path = storage_root / "server.pid"
+    pid_path.write_text("99999", encoding="utf-8")
     try:
         # Second acquisition should fail with SystemExit(1)
         import pytest
@@ -84,9 +88,10 @@ def test_serve_http_fails_when_locked(isolated_env, tmp_path, monkeypatch):
     clear_settings_cache()
     storage_root.mkdir(parents=True, exist_ok=True)
     lock_path = storage_root / _SERVER_LOCK_FILENAME
-    holder = SoftFileLock(str(lock_path))
+    holder = FileLock(str(lock_path))
     holder.acquire(timeout=0)
-    lock_path.write_text("12345", encoding="utf-8")
+    pid_path = storage_root / "server.pid"
+    pid_path.write_text("12345", encoding="utf-8")
     try:
         runner = CliRunner()
         result = runner.invoke(app, ["serve-http"])
@@ -126,9 +131,10 @@ def test_serve_stdio_fails_when_locked(isolated_env, tmp_path, monkeypatch):
     clear_settings_cache()
     storage_root.mkdir(parents=True, exist_ok=True)
     lock_path = storage_root / _SERVER_LOCK_FILENAME
-    holder = SoftFileLock(str(lock_path))
+    holder = FileLock(str(lock_path))
     holder.acquire(timeout=0)
-    lock_path.write_text("67890", encoding="utf-8")
+    pid_path = storage_root / "server.pid"
+    pid_path.write_text("67890", encoding="utf-8")
     try:
         runner = CliRunner()
         result = runner.invoke(app, ["serve-stdio"])
@@ -165,9 +171,11 @@ def test_error_message_includes_pid(isolated_env, tmp_path, monkeypatch, capsys)
     clear_settings_cache()
     storage_root.mkdir(parents=True, exist_ok=True)
     lock_path = storage_root / _SERVER_LOCK_FILENAME
-    holder = SoftFileLock(str(lock_path))
+    holder = FileLock(str(lock_path))
     holder.acquire(timeout=0)
-    lock_path.write_text("42", encoding="utf-8")
+    # Write PID to companion file
+    pid_path = storage_root / "server.pid"
+    pid_path.write_text("42", encoding="utf-8")
     try:
         import pytest
 
