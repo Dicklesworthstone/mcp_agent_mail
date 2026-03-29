@@ -2837,12 +2837,14 @@ async def _get_message(project: Project, message_id: int) -> Message:
         raise ValueError("Project must have an id before reading messages.")
     await ensure_schema()
     async with get_session() as session:
+        # Cross-project: look up by message ID only. Message IDs are globally unique.
+        # Agents need to ack/read/reply to messages from any project, not just their own.
         result = await session.execute(
-            select(Message).where(Message.project_id == project.id, Message.id == message_id)  # type: ignore[arg-type]
+            select(Message).where(Message.id == message_id)  # type: ignore[arg-type]
         )
         message = result.scalars().first()
         if not message:
-            raise NoResultFound(f"Message '{message_id}' not found for project '{project.human_key}'.")
+            raise NoResultFound(f"Message '{message_id}' not found.")
         return message
 
 
@@ -2851,12 +2853,13 @@ async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
         raise ValueError("Project must have an id before querying agents.")
     await ensure_schema()
     async with get_session() as session:
+        # Cross-project: look up by agent_id only. Agent IDs are globally unique.
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, Agent.id == agent_id)  # type: ignore[arg-type]
+            select(Agent).where(Agent.id == agent_id)  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if not agent:
-            raise NoResultFound(f"Agent id '{agent_id}' not found for project '{project.human_key}'.")
+            raise NoResultFound(f"Agent id '{agent_id}' not found.")
         return agent
 
 
