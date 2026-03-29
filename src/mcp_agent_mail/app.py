@@ -2110,11 +2110,17 @@ async def _get_agent_global(project: Project, name: str) -> Agent:
         )
 
     async with get_session() as session:
-        # Search all projects for this agent name, prefer most recently active
+        # Search all projects for this agent name.
+        # Prefer registrations on OTHER projects (the agent's real home)
+        # over the sender's project (likely a ghost auto-registration).
         result = await session.execute(
             select(Agent)
             .where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
-            .order_by(desc(Agent.last_active_ts))  # type: ignore[arg-type]
+            .order_by(
+                # Deprioritize sender's project — ghosts live there
+                (Agent.project_id == project.id).asc(),  # type: ignore[union-attr]
+                desc(Agent.last_active_ts),  # type: ignore[arg-type]
+            )
         )
         agent = result.scalars().first()
         if agent:
