@@ -32,7 +32,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency fallback
     PathSpec = None  # type: ignore[misc,assignment]
     GitWildMatchPattern = None  # type: ignore[misc,assignment]
-from sqlalchemy import asc, bindparam, desc, func, or_, select, text, update
+from sqlalchemy import asc, bindparam, case, desc, func, or_, select, text, update
 from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import aliased
 
@@ -2117,8 +2117,8 @@ async def _get_agent_global(project: Project, name: str) -> Agent:
             select(Agent)
             .where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
             .order_by(
-                # Deprioritize sender's project — ghosts live there
-                (Agent.project_id == project.id).asc(),  # type: ignore[union-attr]
+                # 0 = different project (preferred), 1 = sender's project (ghost)
+                case((Agent.project_id == project.id, 1), else_=0),  # type: ignore[arg-type]
                 desc(Agent.last_active_ts),  # type: ignore[arg-type]
             )
         )
