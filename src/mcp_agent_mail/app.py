@@ -2092,6 +2092,44 @@ async def _get_or_create_agent(
     return agent
 
 
+async def _get_agent_global(project: Project, name: str) -> Agent:
+    """Get agent by name, searching globally across all projects.
+
+    Each agent has one home registration. When resolving recipients,
+    we first check the sender's project, then fall back to any project
+    where the agent is registered. This enables cross-project messaging
+    without creating ghost registrations.
+    """
+    await ensure_schema()
+    if not name or not name.strip():
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            f"Agent name cannot be empty.",
+            recoverable=True,
+            data={"parameter": "agent_name", "provided": repr(name)},
+        )
+
+    async with get_session() as session:
+        # First: check sender's project (fast path)
+        result = await session.execute(
+            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+        )
+        agent = result.scalars().first()
+        if agent:
+            return agent
+
+        # Second: search all projects for this agent name
+        result = await session.execute(
+            select(Agent).where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+        )
+        agent = result.scalars().first()
+        if agent:
+            return agent
+
+    # Not found anywhere — fall through to regular _get_agent for error messaging
+    return await _get_agent(project, name)
+
+
 async def _get_agent(project: Project, name: str) -> Agent:
     """Get agent by name with helpful error messages and suggestions."""
     await ensure_schema()
@@ -2905,9 +2943,11 @@ def build_mcp_server() -> FastMCP:
         to_names = _unique(to_names)
         cc_names = _unique(cc_names)
         bcc_names = _unique(bcc_names)
-        to_agents = [await _get_agent(project, name) for name in to_names]
-        cc_agents = [await _get_agent(project, name) for name in cc_names]
-        bcc_agents = [await _get_agent(project, name) for name in bcc_names]
+        # Resolve recipients globally — each agent has one home registration,
+        # and messages should reach them regardless of which project the sender is on.
+        to_agents = [await _get_agent_global(project, name) for name in to_names]
+        cc_agents = [await _get_agent_global(project, name) for name in cc_names]
+        bcc_agents = [await _get_agent_global(project, name) for name in bcc_names]
         recipient_records: list[tuple[Agent, str]] = [(agent, "to") for agent in to_agents]
         recipient_records.extend((agent, "cc") for agent in cc_agents)
         recipient_records.extend((agent, "bcc") for agent in bcc_agents)
