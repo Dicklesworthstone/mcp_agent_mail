@@ -1159,7 +1159,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                     sibling_map = await get_project_sibling_data()
 
                 async with get_session() as session:
-                    # Fetch recent messages with sender/project and computed recipient list
+                    # Fetch recent messages with sender/project, computed recipient list,
+                    # and actual read status (true when ALL recipients have read_ts set).
                     query = text(
                         """
                         SELECT
@@ -1185,7 +1186,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                     )
                                 ),
                                 ''
-                            ) AS recipients
+                            ) AS recipients,
+                            CASE
+                                WHEN (
+                                    SELECT COUNT(*) FROM message_recipients mr3
+                                    WHERE mr3.message_id = m.id AND mr3.read_ts IS NULL
+                                ) = 0 THEN 1
+                                ELSE 0
+                            END AS all_read
                         FROM messages m
                         JOIN agents sender ON m.sender_id = sender.id
                         JOIN projects p ON m.project_id = p.id
@@ -1251,7 +1259,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:  # type: ignore[
                                 "recipients": ", ".join(
                                     part.strip() for part in (r[10] or "").split(",") if part.strip()
                                 ),
-                                "read": False,
+                                "read": bool(r[11]),
                             }
                         )
 
