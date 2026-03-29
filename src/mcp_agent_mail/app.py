@@ -2464,12 +2464,14 @@ async def _list_inbox(
     sender_alias = aliased(Agent)
     await ensure_schema()
     async with get_session() as session:
+        # Cross-project inbox: match by agent_id only, not project_id.
+        # Each agent has one home registration; messages addressed to them
+        # from any project should be visible in their inbox.
         stmt = (
             select(Message, MessageRecipient.kind, sender_alias.name)  # type: ignore[call-overload]
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
             .where(
-                cast(Any, Message.project_id) == project.id,
                 MessageRecipient.agent_id == agent.id,
             )
             .order_by(desc(Message.created_ts))  # type: ignore[arg-type]
