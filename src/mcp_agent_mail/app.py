@@ -2096,9 +2096,9 @@ async def _get_agent_global(project: Project, name: str) -> Agent:
     """Get agent by name, searching globally across all projects.
 
     Each agent has one home registration. When resolving recipients,
-    we first check the sender's project, then fall back to any project
-    where the agent is registered. This enables cross-project messaging
-    without creating ghost registrations.
+    we find the most recently active registration with this name across
+    all projects. This ensures messages reach the real agent, not a
+    ghost auto-registration on the sender's project.
     """
     await ensure_schema()
     if not name or not name.strip():
@@ -2110,17 +2110,11 @@ async def _get_agent_global(project: Project, name: str) -> Agent:
         )
 
     async with get_session() as session:
-        # First: check sender's project (fast path)
+        # Search all projects for this agent name, prefer most recently active
         result = await session.execute(
-            select(Agent).where(Agent.project_id == project.id, func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
-        )
-        agent = result.scalars().first()
-        if agent:
-            return agent
-
-        # Second: search all projects for this agent name
-        result = await session.execute(
-            select(Agent).where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+            select(Agent)
+            .where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+            .order_by(desc(Agent.last_active_ts))  # type: ignore[arg-type]
         )
         agent = result.scalars().first()
         if agent:
