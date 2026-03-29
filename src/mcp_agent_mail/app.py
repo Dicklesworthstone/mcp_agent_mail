@@ -2092,6 +2092,20 @@ async def _get_or_create_agent(
     return agent
 
 
+async def _find_agent_globally(name: str) -> Optional[Agent]:
+    """Check if an agent with this name exists on ANY project.
+    Returns the agent if found, None if truly unknown.
+    Used to prevent ghost registrations during cross-project sends."""
+    if not name or not name.strip():
+        return None
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+        )
+        return result.scalars().first()
+
+
 async def _get_agent_global(project: Project, name: str) -> Agent:
     """Get agent by name, searching globally across all projects.
 
@@ -4118,9 +4132,23 @@ def build_mcp_server() -> FastMCP:
                 # Auto-register missing local recipients if enabled
                 if getattr(settings_local, "messaging_auto_register_recipients", True):
                     # Best effort: try to register any unknown local recipients with sane defaults
+                    # BUT: check globally first to prevent ghost registrations.
+                    # If an agent exists on another project, skip local registration —
+                    # _get_agent_global will resolve correctly at delivery time.
                     newly_registered: set[str] = set()
+                    found_globally: set[str] = set()
                     for missing in list(unknown_local):
                         try:
+                            existing = await _find_agent_globally(missing)
+                            if existing:
+                                # Agent exists on another project — no ghost needed
+                                found_globally.add(missing)
+                                await ctx.info(
+                                    f"[note] '{missing}' not in local project but found globally "
+                                    f"(project_id={existing.project_id}). Skipping local registration."
+                                )
+                                continue
+                            # Truly unknown agent — auto-register in sender's project
                             _ = await _get_or_create_agent(
                                 project,
                                 missing,
@@ -4133,11 +4161,16 @@ def build_mcp_server() -> FastMCP:
                         except Exception:
                             pass
                     unknown_local.difference_update(newly_registered)
-                    # Re-run routing for any that were registered
+                    unknown_local.difference_update(found_globally)
+                    # Re-run routing for newly registered agents
                     if newly_registered:
                         from contextlib import suppress
                         with suppress(_ContactBlocked):
                             await _route(list(newly_registered), "to")
+                    # For globally-found agents, add directly to local_to —
+                    # _persist_message resolves via _get_agent_global
+                    if found_globally:
+                        local_to.extend(found_globally)
                 # Attempt cross-project handshakes for unknown external recipients if allowed
                 attempted_external: list[str] = []
                 try:
