@@ -2101,7 +2101,9 @@ async def _find_agent_globally(name: str) -> Optional[Agent]:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+            select(Agent)
+            .where(func.lower(Agent.name) == name.lower())  # type: ignore[arg-type]
+            .order_by(desc(Agent.last_active_ts))  # type: ignore[arg-type]
         )
         return result.scalars().first()
 
