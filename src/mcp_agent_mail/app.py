@@ -2847,11 +2847,13 @@ async def _compute_thread_summary(
 
 
 async def _get_message(project: Project, message_id: int) -> Message:
+    # NOTE: 'project' parameter kept for API compatibility with callers but is not
+    # used in the query. Message IDs are globally unique (auto-increment).
     if project.id is None:
         raise ValueError("Project must have an id before reading messages.")
     await ensure_schema()
     async with get_session() as session:
-        # Cross-project: look up by message ID only. Message IDs are globally unique.
+        # Cross-project: look up by message ID only.
         # Agents need to ack/read/reply to messages from any project, not just their own.
         result = await session.execute(
             select(Message).where(Message.id == message_id)  # type: ignore[arg-type]
@@ -4168,9 +4170,17 @@ def build_mcp_server() -> FastMCP:
                         with suppress(_ContactBlocked):
                             await _route(list(newly_registered), "to")
                     # For globally-found agents, add directly to local_to —
-                    # _persist_message resolves via _get_agent_global
+                    # _persist_message resolves via _get_agent_global.
+                    # Dedup against external to prevent double delivery (review C1).
                     if found_globally:
-                        local_to.extend(found_globally)
+                        external_names = {
+                            nm.lower()
+                            for group in external.values()
+                            for nm in group.get("to", []) + group.get("cc", []) + group.get("bcc", [])
+                        } if external else set()
+                        for name in found_globally:
+                            if name.lower() not in external_names:
+                                local_to.append(name)
                 # Attempt cross-project handshakes for unknown external recipients if allowed
                 attempted_external: list[str] = []
                 try:
