@@ -28,6 +28,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import httpx
 import typer
 import uvicorn
+from filelock import FileLock, Timeout as LockTimeout
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import (
@@ -43,14 +44,24 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from filelock import FileLock, Timeout as LockTimeout
-
 from .app import _sanitize_fts_query, build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session, reset_database_state
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
-from .models import Agent, AgentLink, FileReservation, Message, MessageRecipient, MessageSummary, Product, ProductProjectLink, Project, ProjectSiblingSuggestion, WindowIdentity
+from .models import (
+    Agent,
+    AgentLink,
+    FileReservation,
+    Message,
+    MessageRecipient,
+    MessageSummary,
+    Product,
+    ProductProjectLink,
+    Project,
+    ProjectSiblingSuggestion,
+    WindowIdentity,
+)
 from .share import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_CHUNK_THRESHOLD,
@@ -698,14 +709,12 @@ def _acquire_server_lock(settings: Any = None) -> FileLock:
     lock = FileLock(str(lock_path))
     try:
         lock.acquire(timeout=0)
-    except LockTimeout:
+    except LockTimeout as exc:
         # Try to read the PID from the companion .pid file for a helpful message
         owner_pid = "(unknown)"
         pid_path = storage_root / "server.pid"
-        try:
+        with suppress(OSError):
             owner_pid = pid_path.read_text(encoding="utf-8").strip() or "(unknown)"
-        except OSError:
-            pass
         print(
             f"ERROR: Another Agent Mail server is already running for this "
             f"storage root (PID: {owner_pid}). Only one server can own a "
@@ -714,7 +723,7 @@ def _acquire_server_lock(settings: Any = None) -> FileLock:
             f"  Lock file:    {lock_path}",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        raise SystemExit(1) from exc
     # Write our PID to a companion file for diagnostics (not the lock file
     # itself, which is managed by the OS-level locking mechanism)
     try:
@@ -735,7 +744,7 @@ def serve_http(
     settings = get_settings()
 
     # Enforce single-server ownership of the storage root (issue #123)
-    _server_lock = _acquire_server_lock(settings)  # noqa: F841 — prevent GC
+    _server_lock = _acquire_server_lock(settings)
 
     resolved_host = host or settings.http.host
     resolved_port = port or settings.http.port
@@ -787,7 +796,7 @@ def serve_stdio() -> None:
     clear_settings_cache()
 
     # Enforce single-server ownership of the storage root (issue #123)
-    _server_lock = _acquire_server_lock()  # noqa: F841 — prevent GC
+    _server_lock = _acquire_server_lock()
 
     # Redirect all logging to stderr to avoid corrupting stdio transport
     for handler in logging.root.handlers[:]:
@@ -2805,13 +2814,14 @@ def hard_delete_project(
                 )
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
+            if token_agents and (
+                not registration_token or not any(
                     _hmac.compare_digest(registration_token, a.registration_token)
                     for a in token_agents
                     if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+                )
+            ):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         deleted_counts: dict[str, int] = {}
 

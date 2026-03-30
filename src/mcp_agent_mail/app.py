@@ -4993,13 +4993,14 @@ def build_mcp_server() -> FastMCP:
                 select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
+            if token_agents and (
+                not registration_token or not any(
                     hmac.compare_digest(registration_token, a.registration_token)
                     for a in token_agents
                     if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+                )
+            ):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5036,13 +5037,14 @@ def build_mcp_server() -> FastMCP:
                 select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
+            if token_agents and (
+                not registration_token or not any(
                     hmac.compare_digest(registration_token, a.registration_token)
                     for a in token_agents
                     if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+                )
+            ):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5273,13 +5275,14 @@ def build_mcp_server() -> FastMCP:
                 )
             )
             token_agents = agents_result.scalars().all()
-            if token_agents:
-                if not registration_token or not any(
+            if token_agents and (
+                not registration_token or not any(
                     hmac.compare_digest(registration_token, a.registration_token)
                     for a in token_agents
                     if a.registration_token
-                ):
-                    raise ValueError("Invalid registration_token — must match a registered agent in the project")
+                )
+            ):
+                raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
         deleted_counts: dict[str, int] = {}
 
