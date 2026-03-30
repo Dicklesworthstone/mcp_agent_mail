@@ -2859,7 +2859,7 @@ async def _get_window_identity(
             select(WindowIdentity).where(
                 cast(Any, WindowIdentity.project_id == project.id),
                 cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
-                cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                or_(cast(Any, WindowIdentity.expires_ts).is_(None), cast(Any, WindowIdentity.expires_ts) > now),
             )
         )
         return result.scalars().first()
@@ -3406,7 +3406,9 @@ async def _create_message(
         )
         session.add(message)
         await session.flush()
+        assert message.id is not None
         for recipient, kind in recipients:
+            assert recipient.id is not None
             entry = MessageRecipient(message_id=message.id, agent_id=recipient.id, kind=kind)
             session.add(entry)
         sender.last_active_ts = _naive_utc()
@@ -4075,7 +4077,8 @@ async def _commit_info_for_message(settings: Settings, project: Project, message
                 diffs = parent.diff(commit, paths=[relpath], create_patch=True)
                 for d in diffs:
                     try:
-                        patch = d.diff.decode("utf-8", "ignore")
+                        raw_diff = d.diff
+                        patch = raw_diff.decode("utf-8", "ignore") if isinstance(raw_diff, bytes) else str(raw_diff or "")
                     except Exception:
                         patch = ""
                     for line in patch.splitlines():
@@ -4990,7 +4993,7 @@ def build_mcp_server() -> FastMCP:
         # Verify caller owns at least one agent in this project
         async with get_session() as session:
             agents_result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
+                select(Agent).where(Agent.project_id == project.id, cast(Any, Agent.registration_token).isnot(None))
             )
             token_agents = agents_result.scalars().all()
             if token_agents and (
@@ -5034,7 +5037,7 @@ def build_mcp_server() -> FastMCP:
         # Verify caller owns at least one agent in this project
         async with get_session() as session:
             agents_result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id, Agent.registration_token.isnot(None))
+                select(Agent).where(Agent.project_id == project.id, cast(Any, Agent.registration_token).isnot(None))
             )
             token_agents = agents_result.scalars().all()
             if token_agents and (
@@ -5271,7 +5274,7 @@ def build_mcp_server() -> FastMCP:
             agents_result = await session.execute(
                 select(Agent).where(
                     cast(Any, Agent.project_id) == project_id,
-                    Agent.registration_token.isnot(None),
+                    cast(Any, Agent.registration_token).isnot(None),
                 )
             )
             token_agents = agents_result.scalars().all()
@@ -5631,7 +5634,7 @@ def build_mcp_server() -> FastMCP:
             result = await session.execute(
                 select(WindowIdentity).where(
                     cast(Any, WindowIdentity.project_id == project.id),
-                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                    or_(cast(Any, WindowIdentity.expires_ts).is_(None), cast(Any, WindowIdentity.expires_ts) > now),
                 )
             )
             identities = result.scalars().all()
@@ -5700,7 +5703,7 @@ def build_mcp_server() -> FastMCP:
                 select(WindowIdentity).where(
                     cast(Any, WindowIdentity.project_id == project.id),
                     cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
-                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                    or_(cast(Any, WindowIdentity.expires_ts).is_(None), cast(Any, WindowIdentity.expires_ts) > now),
                 )
             )
             wi = result.scalars().first()
@@ -5767,7 +5770,7 @@ def build_mcp_server() -> FastMCP:
                 select(WindowIdentity).where(
                     cast(Any, WindowIdentity.project_id == project.id),
                     cast(Any, func.lower(WindowIdentity.window_uuid) == window_uuid.lower()),
-                    cast(Any, or_(WindowIdentity.expires_ts.is_(None), WindowIdentity.expires_ts > now)),
+                    or_(cast(Any, WindowIdentity.expires_ts).is_(None), cast(Any, WindowIdentity.expires_ts) > now),
                 )
             )
             wi = result.scalars().first()
@@ -11780,10 +11783,11 @@ def _apply_tool_filter(mcp: FastMCP, settings: Settings) -> None:
         logger.warning("Tool filtering enabled but FastMCP tool manager not found")
         return
 
-    tools_registry = getattr(cast(_ToolRegistryLike, tool_manager), "_tools", None)
-    if tools_registry is None or not isinstance(tools_registry, dict):
+    tools_registry_raw = getattr(cast(_ToolRegistryLike, tool_manager), "_tools", None)
+    if tools_registry_raw is None or not isinstance(tools_registry_raw, dict):
         logger.warning("Tool filtering enabled but tool registry not accessible")
         return
+    tools_registry = cast(dict[str, Any], tools_registry_raw)
 
     # Identify tools to remove
     to_remove: list[str] = []

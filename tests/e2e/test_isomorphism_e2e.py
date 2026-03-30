@@ -809,7 +809,7 @@ async def test_isomorphism_e2e_suite(isolated_env, tmp_path: Path, monkeypatch) 
     reservation_times: dict[int, dict[str, Any]] = {
         entry["id"]: entry for entry in reservations_snapshot if isinstance(entry, dict) and entry.get("id") is not None
     }
-    reservation_lookup = {
+    reservation_lookup: dict[tuple[Any, Any], dict[str, Any]] = {
         (entry.get("agent"), entry.get("path_pattern")): entry
         for entry in reservations_snapshot
         if isinstance(entry, dict)

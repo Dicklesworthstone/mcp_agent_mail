@@ -89,6 +89,8 @@ async def test_external_cross_project_routing(isolated_env):
         await s.commit()
         await s.refresh(p1)
         await s.refresh(p2)
+        assert p1.id is not None
+        assert p2.id is not None
         a_sender = Agent(project_id=p1.id, name="Alpha", program="codex", model="gpt-5", task_description="")
         b_recv = Agent(project_id=p2.id, name="Receiver", program="codex", model="gpt-5", task_description="")
         s.add(a_sender)
@@ -96,6 +98,8 @@ async def test_external_cross_project_routing(isolated_env):
         await s.commit()
         await s.refresh(a_sender)
         await s.refresh(b_recv)
+        assert a_sender.id is not None
+        assert b_recv.id is not None
         link = AgentLink(
             a_project_id=p1.id,
             a_agent_id=a_sender.id,

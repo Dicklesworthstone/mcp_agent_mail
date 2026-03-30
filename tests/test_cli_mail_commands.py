@@ -37,6 +37,7 @@ async def seed_project_with_agents() -> tuple[Project, Agent, Agent]:
         session.add(project)
         await session.commit()
         await session.refresh(project)
+        assert project.id is not None
 
         sender = Agent(
             project_id=project.id,
@@ -57,6 +58,8 @@ async def seed_project_with_agents() -> tuple[Project, Agent, Agent]:
         await session.commit()
         await session.refresh(sender)
         await session.refresh(receiver)
+        assert sender.id is not None
+        assert receiver.id is not None
 
         return project, sender, receiver
 
@@ -71,6 +74,9 @@ async def seed_message_with_ack(
     acknowledged: bool = False,
 ) -> Message:
     """Create a message with optional acknowledgement state."""
+    assert project.id is not None
+    assert sender.id is not None
+    assert receiver.id is not None
     async with get_session() as session:
         created_ts = datetime.now(timezone.utc) - timedelta(minutes=created_offset_minutes)
         # Convert to naive for SQLite
@@ -88,6 +94,7 @@ async def seed_message_with_ack(
         session.add(message)
         await session.commit()
         await session.refresh(message)
+        assert message.id is not None
 
         recipient = MessageRecipient(
             message_id=message.id,
@@ -534,6 +541,9 @@ def test_acks_pending_shows_message_details(isolated_env):
     project, sender, receiver = asyncio.run(seed_project_with_agents())
 
     async def create_with_thread():
+        assert project.id is not None
+        assert sender.id is not None
+        assert receiver.id is not None
         async with get_session() as session:
             message = Message(
                 project_id=project.id,
@@ -547,6 +557,7 @@ def test_acks_pending_shows_message_details(isolated_env):
             session.add(message)
             await session.commit()
             await session.refresh(message)
+            assert message.id is not None
             session.add(
                 MessageRecipient(message_id=message.id, agent_id=receiver.id, kind="cc")
             )
@@ -568,6 +579,9 @@ def test_acks_remind_read_status_indicator(isolated_env):
     project, sender, receiver = asyncio.run(seed_project_with_agents())
 
     async def create_read_message():
+        assert project.id is not None
+        assert sender.id is not None
+        assert receiver.id is not None
         async with get_session() as session:
             message = Message(
                 project_id=project.id,
@@ -582,6 +596,7 @@ def test_acks_remind_read_status_indicator(isolated_env):
             session.add(message)
             await session.commit()
             await session.refresh(message)
+            assert message.id is not None
             session.add(
                 MessageRecipient(
                     message_id=message.id,
@@ -608,6 +623,9 @@ def test_multiple_recipients_handled(isolated_env):
     project, sender, receiver = asyncio.run(seed_project_with_agents())
 
     async def create_multi_recipient():
+        assert project.id is not None
+        assert sender.id is not None
+        assert receiver.id is not None
         async with get_session() as session:
             # Create another agent
             other = Agent(
@@ -620,6 +638,7 @@ def test_multiple_recipients_handled(isolated_env):
             session.add(other)
             await session.commit()
             await session.refresh(other)
+            assert other.id is not None
 
             message = Message(
                 project_id=project.id,
@@ -632,6 +651,7 @@ def test_multiple_recipients_handled(isolated_env):
             session.add(message)
             await session.commit()
             await session.refresh(message)
+            assert message.id is not None
 
             # Add multiple recipients
             session.add(

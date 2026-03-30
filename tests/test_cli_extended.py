@@ -18,6 +18,7 @@ def _seed_backend() -> None:
             session.add(p)
             await session.commit()
             await session.refresh(p)
+            assert p.id is not None
             session.add(Agent(project_id=p.id, name="Blue", program="x", model="y", task_description=""))
             await session.commit()
     asyncio.run(_seed())

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -605,13 +605,13 @@ def get_db_health_status() -> dict[str, Any]:
     }
 
     if _engine is not None:
-        pool = _engine.pool
+        pool = cast(Any, _engine.pool)
         # Pool attributes are available at runtime but not in type stubs
         status["pool"] = {
-            "size": pool.size(),  # type: ignore[attr-defined]
-            "checked_in": pool.checkedin(),  # type: ignore[attr-defined]
-            "checked_out": pool.checkedout(),  # type: ignore[attr-defined]
-            "overflow": pool.overflow(),  # type: ignore[attr-defined]
+            "size": pool.size(),
+            "checked_in": pool.checkedin(),
+            "checked_out": pool.checkedout(),
+            "overflow": pool.overflow(),
         }
 
     if state == CircuitState.OPEN:

@@ -17,10 +17,12 @@ def _seed_with_ack() -> None:
             session.add(p)
             await session.commit()
             await session.refresh(p)
+            assert p.id is not None
             a = Agent(project_id=p.id, name="Blue", program="x", model="y", task_description="")
             session.add(a)
             await session.commit()
             await session.refresh(a)
+            assert a.id is not None
             m = Message(
                 project_id=p.id,
                 sender_id=a.id,
@@ -32,6 +34,7 @@ def _seed_with_ack() -> None:
             session.add(m)
             await session.commit()
             await session.refresh(m)
+            assert m.id is not None
             session.add(
                 MessageRecipient(message_id=m.id, agent_id=a.id, kind="to")
             )

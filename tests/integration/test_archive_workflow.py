@@ -29,11 +29,13 @@ def test_archive_save_list_restore_cycle(isolated_env):
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(project_id=project.id, name="BlueLake", program="codex", model="gpt5")
             session.add(agent)
             await session.commit()
             await session.refresh(agent)
+            assert agent.id is not None
 
             message = Message(
                 project_id=project.id,
@@ -46,6 +48,7 @@ def test_archive_save_list_restore_cycle(isolated_env):
             session.add(message)
             await session.commit()
             await session.refresh(message)
+            assert message.id is not None
 
             recipient = MessageRecipient(
                 message_id=message.id,

@@ -1030,7 +1030,7 @@ def test_verify_bundle_with_tampered_signature(tmp_path: Path) -> None:
 
     # Create a valid signed bundle
     manifest_path = tmp_path / "manifest.json"
-    manifest_data = {"version": "1.0", "test": "data"}
+    manifest_data: dict[str, str | bool] = {"version": "1.0", "test": "data"}
     manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
 
     signing_key_path = tmp_path / "signing.key"

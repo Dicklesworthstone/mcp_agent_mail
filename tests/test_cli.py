@@ -92,6 +92,7 @@ def test_cli_list_projects(isolated_env):
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
             session.add(
                 Agent(
                     project_id=project.id,
