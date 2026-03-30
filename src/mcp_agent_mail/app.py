@@ -12,6 +12,7 @@ import hmac
 import inspect
 import json
 import logging
+import os
 import re
 import secrets
 import shlex
@@ -2115,9 +2116,12 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
 
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
-    # Resolve symlinks to canonical path so /dp/ntm and /data/projects/ntm
-    # resolve to the same project identity
-    human_key = str(Path(human_key).resolve())
+    # Normalize the path (collapse //, .., trailing slashes) WITHOUT following
+    # symlinks so that distinct user-visible paths keep distinct project identities.
+    # Using os.path.normpath instead of Path.resolve() — the latter calls
+    # realpath() which follows symlinks and can collapse unrelated projects
+    # onto the same DB row (see GitHub issue #126).
+    human_key = os.path.normpath(human_key)
     slug = _compute_project_slug(human_key)
     for attempt in range(6):
         try:
