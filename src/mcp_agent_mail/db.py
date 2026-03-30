@@ -800,11 +800,8 @@ def _setup_fts(connection: Any) -> None:
         "ALTER TABLE agents ADD COLUMN registration_token VARCHAR(64) DEFAULT NULL",
         "ALTER TABLE messages ADD COLUMN topic VARCHAR(64) DEFAULT NULL",
     ]:
-        try:
+        with suppress(Exception):  # Column already exists — safe to ignore
             connection.exec_driver_sql(migration_sql)
-        except Exception:
-            # Column already exists — safe to ignore
-            pass
 
     # Index migrations for newly added columns.
     # CREATE INDEX IF NOT EXISTS is natively idempotent in SQLite.

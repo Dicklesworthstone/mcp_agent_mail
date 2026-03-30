@@ -40,7 +40,6 @@ from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
     archive_write_lock,
-    cleanup_leaked_lockfile_fds,
     collect_lock_status,
     ensure_archive,
     get_agent_communication_graph,
@@ -1754,7 +1753,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             if git_paths_removed:
                                 try:
                                     actor_module = importlib.import_module("git")
-                                    actor_cls = getattr(actor_module, "Actor")
+                                    actor_cls = actor_module.Actor
                                     git_actor = actor_cls(
                                         settings.storage.git_author_name,
                                         settings.storage.git_author_email,
@@ -2650,7 +2649,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         if git_paths_removed:
                             try:
                                 actor_module = importlib.import_module("git")
-                                actor_cls = getattr(actor_module, "Actor")
+                                actor_cls = actor_module.Actor
                                 git_actor = actor_cls(
                                     settings.storage.git_author_name,
                                     settings.storage.git_author_email,
