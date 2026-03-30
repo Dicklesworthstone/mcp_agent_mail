@@ -314,6 +314,7 @@ class TestPathTraversalPrevention:
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(
                 project_id=project.id,
@@ -402,6 +403,7 @@ class TestLargeInputHandling:
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(
                 project_id=project.id,
@@ -461,6 +463,7 @@ class TestLargeInputHandling:
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(
                 project_id=project.id,
@@ -647,6 +650,7 @@ class TestSpecialCharactersInIdentifiers:
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(
                 project_id=project.id,
@@ -725,6 +729,7 @@ class TestXSSPrevention:
             session.add(project)
             await session.commit()
             await session.refresh(project)
+            assert project.id is not None
 
             agent = Agent(
                 project_id=project.id,
@@ -774,8 +779,8 @@ class TestMalformedJSONHandling:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             # Deeply nested structure (100 levels)
-            nested = {"level": None}
-            current = nested
+            nested: dict[str, Any] = {"level": None}
+            current: dict[str, Any] = nested
             for _ in range(100):
                 current["level"] = {"level": None}
                 current = current["level"]

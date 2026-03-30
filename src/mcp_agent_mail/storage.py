@@ -27,6 +27,7 @@ import re
 import sys
 import threading as _threading
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1298,9 +1299,9 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
         return repo
 
 
-async def write_agent_profile(archive: ProjectArchive, agent: dict[str, object]) -> None:
-    profile_path = archive.root / "agents" / agent["name"].__str__() / "profile.json"
-    await _write_json(profile_path, agent)
+async def write_agent_profile(archive: ProjectArchive, agent: Mapping[str, object]) -> None:
+    profile_path = archive.root / "agents" / str(agent["name"]) / "profile.json"
+    await _write_json(profile_path, dict(agent))
     rel = profile_path.relative_to(archive.repo_root).as_posix()
     await _commit(archive.repo, archive.settings, f"agent: profile {agent['name']}", [rel])
 
@@ -2812,7 +2813,7 @@ async def get_historical_inbox_snapshot(
         messages = []
         try:
             # Navigate to the inbox folder in the commit tree
-            tree = closest_commit.tree
+            tree = cast(Any, closest_commit.tree)
             for part in inbox_path.split("/"):
                 tree = tree / part
 

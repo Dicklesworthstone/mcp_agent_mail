@@ -378,7 +378,7 @@ async def test_file_reservation_integration_logging(isolated_env, monkeypatch):
     console = Console(record=True, force_terminal=True)
 
     def _log(title: str, description: str, data: object | None = None) -> None:
-        renderables = [Text(description)]
+        renderables: list[Text | Syntax] = [Text(description)]
         if data is not None:
             rendered = json.dumps(data, indent=2, default=str)
             renderables.append(Syntax(rendered, "json", theme="monokai", word_wrap=True))

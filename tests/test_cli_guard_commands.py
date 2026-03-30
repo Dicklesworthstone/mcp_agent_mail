@@ -97,6 +97,7 @@ async def _seed_project_with_agent(
         session.add(project)
         await session.commit()
         await session.refresh(project)
+        assert project.id is not None
 
         agent = Agent(
             project_id=project.id,

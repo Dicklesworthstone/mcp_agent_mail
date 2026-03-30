@@ -266,4 +266,4 @@ class TestCommitRetryIntegration:
 
         # Check the commit message
         latest_commit = next(iter(repo.iter_commits()))
-        assert "TestAgent" in latest_commit.message
+        assert "TestAgent" in str(latest_commit.message)

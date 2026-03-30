@@ -13,7 +13,7 @@ from collections.abc import Generator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from rich import box
 from rich.align import Align
@@ -673,7 +673,7 @@ def create_data_tree(data: dict[str, Any], root_label: str = "Data") -> Tree:
                     for i, item in enumerate(value):
                         if isinstance(item, (dict, list)):
                             subbranch = branch.add(f"[dim]{i}[/dim]")
-                            add_items(subbranch, item)
+                            add_items(subbranch, cast(dict[str, Any] | list[Any], item))
                         else:
                             branch.add(f"[dim]{i}:[/dim] [white]{escape(str(item))}[/white]")
                 else:

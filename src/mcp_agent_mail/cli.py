@@ -2810,7 +2810,7 @@ def hard_delete_project(
             agents_result = await session.execute(
                 select(Agent).where(
                     cast(Any, Agent.project_id) == project_id,
-                    Agent.registration_token.isnot(None),
+                    cast(Any, Agent.registration_token).isnot(None),
                 )
             )
             token_agents = agents_result.scalars().all()

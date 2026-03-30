@@ -20,6 +20,7 @@ def _seed_with_ack() -> dict[str, Any]:
             session.add(p)
             await session.commit()
             await session.refresh(p)
+            assert p.id is not None
             a = Agent(project_id=p.id, name="A", program="x", model="y")
             b = Agent(project_id=p.id, name="B", program="x", model="y")
             session.add(a)
@@ -27,12 +28,15 @@ def _seed_with_ack() -> dict[str, Any]:
             await session.commit()
             await session.refresh(a)
             await session.refresh(b)
+            assert a.id is not None
+            assert b.id is not None
             # Ack-required message from A to B
             m = Message(
                 project_id=p.id, sender_id=a.id, subject="NeedsAck", body_md="body", ack_required=True
             )
             session.add(m)
             await session.flush()
+            assert m.id is not None
             session.add(MessageRecipient(message_id=m.id, agent_id=b.id, kind="to"))
             await session.commit()
             data["project_id"] = p.id
