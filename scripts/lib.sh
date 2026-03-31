@@ -183,6 +183,63 @@ json_merge_mcp_server() {
     '.mcpServers = (.mcpServers // {}) | .mcpServers[$name] = $config'
 }
 
+# Return the Morph grep-only tool allowlist unless explicitly overridden.
+default_morph_enabled_tools() {
+  printf '%s\n' "${MORPH_ENABLED_TOOLS:-warpgrep_codebase_search,warpgrep_github_search}"
+}
+
+# Best-effort Morph API key discovery for CLI installers.
+# Priority:
+#   1) MORPH_API_KEY env var
+#   2) ~/.codex/config.toml
+#   3) ~/.gemini/settings.json
+#   4) ~/.claude/settings.json
+#   5) legacy ~/.claude.json
+resolve_morph_api_key() {
+  local key=""
+
+  if [[ -n "${MORPH_API_KEY:-}" ]]; then
+    printf '%s\n' "${MORPH_API_KEY}"
+    return 0
+  fi
+
+  if [[ -f "${HOME}/.codex/config.toml" ]]; then
+    key=$(sed -n 's/^MORPH_API_KEY = "\(.*\)"$/\1/p' "${HOME}/.codex/config.toml" | head -n 1)
+    if [[ -n "${key}" ]]; then
+      printf '%s\n' "${key}"
+      return 0
+    fi
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    if [[ -f "${HOME}/.gemini/settings.json" ]]; then
+      key=$(jq -r '.mcpServers["morph-mcp"].env.MORPH_API_KEY // empty' "${HOME}/.gemini/settings.json" 2>/dev/null || true)
+      if [[ -n "${key}" ]]; then
+        printf '%s\n' "${key}"
+        return 0
+      fi
+    fi
+
+    if [[ -f "${HOME}/.claude/settings.json" ]]; then
+      key=$(jq -r '.mcpServers["morph-mcp"].env.MORPH_API_KEY // empty' "${HOME}/.claude/settings.json" 2>/dev/null || true)
+      if [[ -n "${key}" ]]; then
+        printf '%s\n' "${key}"
+        return 0
+      fi
+    fi
+
+    if [[ -f "${HOME}/.claude.json" ]]; then
+      key=$(jq -r '.mcpServers["morph-mcp"].env.MORPH_API_KEY // empty' "${HOME}/.claude.json" 2>/dev/null || true)
+      if [[ -n "${key}" ]]; then
+        printf '%s\n' "${key}"
+        return 0
+      fi
+    fi
+  fi
+
+  printf '\n'
+}
+
 # Append hook to existing hooks array without duplicating
 # Usage: json_append_hook <existing_json> <hook_type> <hook_json> <identifier>
 # hook_type: SessionStart, PreToolUse, PostToolUse
@@ -649,5 +706,4 @@ kill_port_processes() {
     fi
   fi
 }
-
 

@@ -71,6 +71,14 @@ PY
   log_ok "Generated bearer token."
 fi
 
+_MORPH_ENABLED_TOOLS=$(default_morph_enabled_tools)
+_MORPH_API_KEY=$(resolve_morph_api_key)
+if [[ -n "${_MORPH_API_KEY}" ]]; then
+  log_ok "Morph MCP will be configured in grep-only mode."
+else
+  log_warn "Morph API key not found; skipping morph-mcp setup."
+fi
+
 log_step "Preparing project-local .claude/settings.json"
 CLAUDE_DIR="${TARGET_DIR}/.claude"
 SETTINGS_PATH="${CLAUDE_DIR}/settings.json"
@@ -257,6 +265,20 @@ MCPJSON
 
 # Merge MCP server into existing config (preserves other servers)
 MERGED_LOCAL=$(json_merge_mcp_server "$EXISTING_LOCAL" "mcp-agent-mail" "$MCP_SERVER_CONFIG")
+if [[ -n "${_MORPH_API_KEY}" ]]; then
+  MORPH_SERVER_CONFIG=$(cat <<MCPJSON
+{
+  "command": "npx",
+  "args": ["-y", "@morphllm/morphmcp"],
+  "env": {
+    "ENABLED_TOOLS": "${_MORPH_ENABLED_TOOLS}",
+    "MORPH_API_KEY": "${_MORPH_API_KEY}"
+  }
+}
+MCPJSON
+)
+  MERGED_LOCAL=$(json_merge_mcp_server "$MERGED_LOCAL" "morph-mcp" "$MORPH_SERVER_CONFIG")
+fi
 
 write_atomic "$LOCAL_SETTINGS_PATH" <<< "$MERGED_LOCAL"
 json_validate "$LOCAL_SETTINGS_PATH" || log_warn "Invalid JSON in ${LOCAL_SETTINGS_PATH}"
@@ -286,8 +308,22 @@ if command -v jq >/dev/null 2>&1; then
   trap 'rm -f "$TMP_MERGE" 2>/dev/null' EXIT INT TERM
 
   umask 077  # Bug 1 fix: secure permissions for temp file
-  if jq --arg url "${_URL}" --arg token "${_TOKEN}" \
-      '.mcpServers = (.mcpServers // {}) | .mcpServers["mcp-agent-mail"] = {"type":"http","url":$url,"headers":{"Authorization": ("Bearer " + $token)}}' \
+  if jq --arg url "${_URL}" \
+      --arg token "${_TOKEN}" \
+      --arg morph_key "${_MORPH_API_KEY}" \
+      --arg morph_enabled "${_MORPH_ENABLED_TOOLS}" \
+      '.mcpServers = (.mcpServers // {}) |
+       .mcpServers["mcp-agent-mail"] = {"type":"http","url":$url,"headers":{"Authorization": ("Bearer " + $token)}} |
+       (if $morph_key != "" then
+          .mcpServers["morph-mcp"] = {
+            "command": "npx",
+            "args": ["-y", "@morphllm/morphmcp"],
+            "env": {
+              "MORPH_API_KEY": $morph_key,
+              "ENABLED_TOOLS": $morph_enabled
+            }
+          }
+        else . end)' \
       "$HOME_SETTINGS_PATH" > "$TMP_MERGE"; then
     # Bug 3 fix: Check mv separately
     if mv "$TMP_MERGE" "$HOME_SETTINGS_PATH"; then
@@ -319,7 +355,18 @@ else
       "type": "http",
       "url": "${_URL}",
       "headers": {${AUTH_HEADER_LINE}}
+    }$(if [[ -n "${_MORPH_API_KEY}" ]]; then cat <<JSONFRAG
+,
+    "morph-mcp": {
+      "command": "npx",
+      "args": ["-y", "@morphllm/morphmcp"],
+      "env": {
+        "MORPH_API_KEY": "${_MORPH_API_KEY}",
+        "ENABLED_TOOLS": "${_MORPH_ENABLED_TOOLS}"
+      }
     }
+JSONFRAG
+fi)
   }
 }
 JSON
@@ -378,4 +425,3 @@ _print "Open your project in Claude Code; it should auto-detect the project-leve
 if [[ ${_SERVER_AVAILABLE} -eq 0 ]]; then
   _print "Remember to start the server: uv run python -m mcp_agent_mail.cli serve-http"
 fi
-

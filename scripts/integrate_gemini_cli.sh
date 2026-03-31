@@ -62,12 +62,35 @@ PY
   log_ok "Generated bearer token."
 fi
 
+_MORPH_ENABLED_TOOLS=$(default_morph_enabled_tools)
+_MORPH_API_KEY=$(resolve_morph_api_key)
+if [[ -n "${_MORPH_API_KEY}" ]]; then
+  log_ok "Morph MCP will be configured in grep-only mode."
+else
+  log_warn "Morph API key not found; skipping morph-mcp setup."
+fi
+
 OUT_JSON="${TARGET_DIR}/gemini.mcp.json"
 backup_file "$OUT_JSON"
 if [[ -n "${_TOKEN}" ]]; then
   AUTH_HEADER_LINE="        \"Authorization\": \"Bearer ${_TOKEN}\""
 else
   AUTH_HEADER_LINE=''
+fi
+MORPH_MCP_JSON=""
+if [[ -n "${_MORPH_API_KEY}" ]]; then
+  MORPH_MCP_JSON=$(cat <<JSONFRAG
+,
+    "morph-mcp": {
+      "command": "npx",
+      "args": ["-y", "@morphllm/morphmcp"],
+      "env": {
+        "ENABLED_TOOLS": "${_MORPH_ENABLED_TOOLS}",
+        "MORPH_API_KEY": "${_MORPH_API_KEY}"
+      }
+    }
+JSONFRAG
+)
 fi
 # Gemini CLI uses "httpUrl" for Streamable HTTP transport (not "url" which is for SSE)
 write_atomic "$OUT_JSON" <<JSON
@@ -76,7 +99,7 @@ write_atomic "$OUT_JSON" <<JSON
     "mcp-agent-mail": {
       "httpUrl": "${_URL}",
       "headers": {${AUTH_HEADER_LINE}}
-    }
+    }${MORPH_MCP_JSON}
   }
 }
 JSON
@@ -129,7 +152,18 @@ write_atomic "$HOME_GEMINI_JSON" <<JSON
   "mcpServers": {
     "mcp-agent-mail": {
       "httpUrl": "${_URL}"
+    }$(if [[ -n "${_MORPH_API_KEY}" ]]; then cat <<JSONFRAG
+,
+    "morph-mcp": {
+      "command": "npx",
+      "args": ["-y", "@morphllm/morphmcp"],
+      "env": {
+        "MORPH_API_KEY": "${_MORPH_API_KEY}",
+        "ENABLED_TOOLS": "${_MORPH_ENABLED_TOOLS}"
+      }
     }
+JSONFRAG
+fi)
   }
 }
 JSON
@@ -237,7 +271,14 @@ if command -v jq >/dev/null 2>&1; then
   umask 077
   # Add hooks configuration AND MCP server using jq
   # Note: Use httpUrl for Streamable HTTP transport; do NOT include "type" key
-  if jq --arg proj "$_PROJ" --arg agent "$_AGENT" --arg inbox_cmd "$INBOX_CHECK_CMD" --arg mcp_dir "$_MCP_DIR" --arg url "$_URL" --arg token "$_TOKEN" '
+  if jq --arg proj "$_PROJ" \
+      --arg agent "$_AGENT" \
+      --arg inbox_cmd "$INBOX_CHECK_CMD" \
+      --arg mcp_dir "$_MCP_DIR" \
+      --arg url "$_URL" \
+      --arg token "$_TOKEN" \
+      --arg morph_key "$_MORPH_API_KEY" \
+      --arg morph_enabled "$_MORPH_ENABLED_TOOLS" '
     # Add MCP server config with httpUrl (Streamable HTTP transport)
     .mcpServers = (.mcpServers // {}) |
     .mcpServers["mcp-agent-mail"] = (
@@ -247,6 +288,16 @@ if command -v jq >/dev/null 2>&1; then
         {"httpUrl": $url}
       end
     ) |
+    (if $morph_key != "" then
+      .mcpServers["morph-mcp"] = {
+        "command": "npx",
+        "args": ["-y", "@morphllm/morphmcp"],
+        "env": {
+          "MORPH_API_KEY": $morph_key,
+          "ENABLED_TOOLS": $morph_enabled
+        }
+      }
+    else . end) |
     # Remove any existing "type" key that may have been added by older versions
     .mcpServers["mcp-agent-mail"] |= del(.type) |
     # Add hooks configuration
@@ -290,10 +341,15 @@ else
     else
       _MCP_SERVER_JSON='"mcp-agent-mail": {"httpUrl": "'"${_URL}"'"}'
     fi
+    if [[ -n "${_MORPH_API_KEY}" ]]; then
+      _MORPH_SERVER_JSON=', "morph-mcp": {"command": "npx", "args": ["-y", "@morphllm/morphmcp"], "env": {"MORPH_API_KEY": "'"${_MORPH_API_KEY}"'", "ENABLED_TOOLS": "'"${_MORPH_ENABLED_TOOLS}"'"}}'
+    else
+      _MORPH_SERVER_JSON=''
+    fi
     write_atomic "$HOME_SETTINGS" <<JSON
 {
   "mcpServers": {
-    ${_MCP_SERVER_JSON}
+    ${_MCP_SERVER_JSON}${_MORPH_SERVER_JSON}
   },
   "hooks": {
     "SessionStart": [{"matcher": "", "hooks": [
