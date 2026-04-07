@@ -1002,9 +1002,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         tasks = getattr(fastapi_app.state, "_background_tasks", [])
         for task in tasks:
             task.cancel()
-        for task in tasks:
+        # Await cancelled tasks with a timeout to prevent shutdown hangs
+        # (aiosqlite cancellation can block indefinitely)
+        if tasks:
             with contextlib.suppress(Exception):
-                await task
+                await asyncio.wait(tasks, timeout=5.0)
 
     from contextlib import asynccontextmanager
 
@@ -1145,28 +1147,69 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         fastapi_app.add_api_route(path, _oauth_metadata_disabled, methods=["GET"], include_in_schema=False)
 
-    # A minimal stateless ASGI adapter that does not rely on ASGI lifespan management
-    # and runs a fresh StreamableHTTP transport per request.
-    from mcp.server.streamable_http import StreamableHTTPServerTransport
+    # Thin ASGI wrapper that normalizes Accept / Content-Type headers for
+    # MCP clients (some omit Accept entirely) and then delegates to the
+    # SDK's native mcp_http_app which properly coordinates server lifecycle,
+    # request handling, and session management via StreamableHTTPSessionManager.
+    #
+    # In production the parent FastAPI lifespan initializes the session manager
+    # task group before any requests arrive.  In test environments (httpx
+    # ASGITransport) no lifespan events are sent, so the wrapper lazily enters
+    # the MCP app's lifespan on first request to avoid "Task group not
+    # initialized" errors.
+    class _HeaderFixupMCPApp:
+        """Normalize headers then delegate to the native MCP HTTP app."""
 
-    class StatelessMCPASGIApp:
-        def __init__(self, mcp_server) -> None:
-            self._server = mcp_server
+        def __init__(self, native_app: FastAPI) -> None:
+            self._app = native_app
+            self._lifespan_entered = False
+            self._lifespan_cm: Any = None
+
+        async def _ensure_lifespan(self) -> None:
+            """Lazily enter the MCP app's lifespan if not already running.
+
+            This handles test environments where ASGI lifespan events are never
+            sent (e.g. httpx ASGITransport).  In production the parent app's
+            lifespan context already calls mcp_http_app.lifespan, so the
+            session manager's task group will already be initialized and this
+            method is a fast no-op.
+            """
+            if self._lifespan_entered:
+                return
+            # Check if the session manager is already running (production path)
+            session_mgr = getattr(self._app.state, "session_manager", None)
+            if session_mgr is None:
+                # Try to find it via route endpoint
+                for route in getattr(self._app, "routes", []):
+                    endpoint = getattr(route, "endpoint", None)
+                    sm = getattr(endpoint, "session_manager", None)
+                    if sm is not None:
+                        session_mgr = sm
+                        break
+            if session_mgr is not None and getattr(session_mgr, "_task_group", None) is not None:
+                self._lifespan_entered = True
+                return
+            # Enter the MCP app's lifespan (test path)
+            mcp_lifespan_app = cast(_FastAPILifespan, self._app)
+            self._lifespan_cm = mcp_lifespan_app.lifespan(self._app)
+            await self._lifespan_cm.__aenter__()
+            self._lifespan_entered = True
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope.get("type") != "http":
-                res = JSONResponse({"detail": "Not Found"}, status_code=404)
-                await res(scope, receive, send)
+                # Delegate non-HTTP scopes (e.g. lifespan) directly
+                await self._app(scope, receive, send)
                 return
 
-            # Ensure Accept and Content-Type headers are present per StreamableHTTP expectations
+            await self._ensure_lifespan()
+
             headers = list(scope.get("headers") or [])
 
             def _has_header(key: bytes) -> bool:
                 lk = key.lower()
                 return any(h[0].lower() == lk for h in headers)
 
-            # Ensure both JSON and SSE are present; httpx defaults no Accept header
+            # Ensure both JSON and SSE are accepted; httpx defaults no Accept header
             headers = [(k, v) for (k, v) in headers if k.lower() != b"accept"]
             headers.append((b"accept", b"application/json, text/event-stream"))
             if scope.get("method") == "POST" and not _has_header(b"content-type"):
@@ -1174,34 +1217,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             new_scope = dict(scope)
             new_scope["headers"] = headers
 
-            http_transport = StreamableHTTPServerTransport(
-                mcp_session_id=None,
-                is_json_response_enabled=True,
-                event_store=None,
-                security_settings=None,
-            )
-
-            async with http_transport.connect() as streams:
-                read_stream, write_stream = streams
-                server_task = asyncio.create_task(
-                    self._server._mcp_server.run(
-                        read_stream,
-                        write_stream,
-                        self._server._mcp_server.create_initialization_options(),
-                        stateless=True,
-                    )
-                )
-                # No response wrapping/unwrapping - just pass through MCP responses as-is
-                # MCP clients can handle JSON-RPC format properly
-                try:
-                    await http_transport.handle_request(new_scope, receive, send)
-                finally:
-                    with contextlib.suppress(Exception):
-                        await http_transport.terminate()
-                    if not server_task.done():
-                        server_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await server_task
+            await self._app(new_scope, receive, send)
 
     # Mount at both '/base' and '/base/' to tolerate either form from clients/tests.
     # Also mount compatibility aliases for both '/api' and '/mcp' regardless of configured base.
@@ -1210,7 +1226,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         mount_base = "/" + mount_base
     base_no_slash = mount_base.rstrip("/") or "/"
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
-    stateless_app = StatelessMCPASGIApp(server)
+    stateless_app = _HeaderFixupMCPApp(mcp_http_app)
 
     mount_paths = [base_no_slash, base_with_slash]
     for compat_base in ("/api", "/mcp"):
@@ -1284,7 +1300,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
                 scope["headers"] = scope_headers
             await stateless_app(
-                {**scope, "path": base_path_with_slash},  # ensure mounted path
+                {**scope, "path": "/"},  # MCP app expects requests at its root
                 request.receive,
                 _send,
             )
