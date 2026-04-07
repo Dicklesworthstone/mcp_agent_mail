@@ -43,6 +43,7 @@ from .config import Settings, get_settings
 from .db import (
     ensure_schema,
     get_engine,
+    get_immediate_session,
     get_query_tracker,
     get_session,
     init_engine,
@@ -3675,8 +3676,10 @@ async def _expire_stale_file_reservations(
         return []
 
     expired_pairs: list[tuple[FileReservation, Agent]] = []
-    # Release any entries whose TTL has already elapsed
-    async with get_session() as session:
+    # Release any entries whose TTL has already elapsed.
+    # Use BEGIN IMMEDIATE so the release is immediately visible to
+    # subsequent reserve calls on other connections (#130).
+    async with get_immediate_session() as session:
         expired_rows = await session.execute(
             select(FileReservation, Agent)
             .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
@@ -3702,7 +3705,7 @@ async def _expire_stale_file_reservations(
     stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
     if stale_ids:
-        async with get_session() as session:
+        async with get_immediate_session() as session:
             await session.execute(
                 update(FileReservation)
                 .where(
@@ -8973,7 +8976,12 @@ def build_mcp_server() -> FastMCP:
         conflicts: list[dict[str, Any]] = []
         archive = await ensure_archive(settings, project.slug)
         async with _archive_write_lock(archive):
-            async with get_session() as session:
+            # Use BEGIN IMMEDIATE to acquire a fresh WAL snapshot, preventing
+            # stale reads that cause duplicate exclusive holders (#129) and
+            # phantom conflicts after release (#130).  The entire read-check-
+            # write cycle runs inside a single IMMEDIATE transaction so that
+            # concurrent callers are serialised at the SQLite lock level.
+            async with get_immediate_session() as session:
                 existing_rows = await session.execute(
                     select(FileReservation, Agent.name)
                     .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
@@ -8984,81 +8992,96 @@ def build_mcp_server() -> FastMCP:
                     )
                 )
                 existing_reservations = [(row[0], row[1]) for row in existing_rows.all()]
-            payloads: list[dict[str, Any]] = []
-            ctx_branch: Optional[str] = None
-            ctx_worktree: Optional[str] = None
-            try:
-                with _git_repo(project.human_key) as repo:
-                    try:
-                        ctx_branch = repo.active_branch.name
-                    except Exception:
+
+                payloads: list[dict[str, Any]] = []
+                ctx_branch: Optional[str] = None
+                ctx_worktree: Optional[str] = None
+                try:
+                    with _git_repo(project.human_key) as repo:
                         try:
-                            ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            ctx_branch = repo.active_branch.name
                         except Exception:
-                            ctx_branch = None
-                    try:
-                        ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                    except Exception:
-                        ctx_worktree = None
-            except Exception:
-                pass
-            # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n*m))
-            union_spec = _build_reservation_union_spec(existing_reservations, agent.id, exclusive)
+                            try:
+                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                            except Exception:
+                                ctx_branch = None
+                        try:
+                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                        except Exception:
+                            ctx_worktree = None
+                except Exception:
+                    pass
+                # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n*m))
+                union_spec = _build_reservation_union_spec(existing_reservations, agent.id, exclusive)
 
-            # Pre-compute which paths might conflict using the union spec
-            potentially_conflicting_paths: set[str] = set()
-            if union_spec is not None:
-                # Normalize paths for matching (same normalization as pattern matching)
-                normalized_paths = [_normalize_pathspec_pattern(p) for p in paths]
-                # Match all normalized paths against union in a single pass
-                matching_normalized = set(union_spec.match_files(normalized_paths))
-                # Build set of original paths that might conflict
-                for orig_path, norm_path in zip(paths, normalized_paths, strict=True):
-                    if norm_path in matching_normalized:
-                        potentially_conflicting_paths.add(orig_path)
-            else:
-                # Fallback: all paths potentially conflict (PathSpec unavailable)
-                potentially_conflicting_paths = set(paths)
+                # Pre-compute which paths might conflict using the union spec
+                potentially_conflicting_paths: set[str] = set()
+                if union_spec is not None:
+                    # Normalize paths for matching (same normalization as pattern matching)
+                    normalized_paths = [_normalize_pathspec_pattern(p) for p in paths]
+                    # Match all normalized paths against union in a single pass
+                    matching_normalized = set(union_spec.match_files(normalized_paths))
+                    # Build set of original paths that might conflict
+                    for orig_path, norm_path in zip(paths, normalized_paths, strict=True):
+                        if norm_path in matching_normalized:
+                            potentially_conflicting_paths.add(orig_path)
+                else:
+                    # Fallback: all paths potentially conflict (PathSpec unavailable)
+                    potentially_conflicting_paths = set(paths)
 
-            for path in paths:
-                conflicting_holders: list[dict[str, Any]] = []
+                for path in paths:
+                    conflicting_holders: list[dict[str, Any]] = []
 
-                # Fast path: skip detailed check if path cannot conflict with any reservation
-                if path in potentially_conflicting_paths:
-                    # Slow path: detailed attribution for potentially conflicting paths only
-                    for file_reservation_record, holder_name in existing_reservations:
-                        if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
-                            conflicting_holders.append(
-                                {
-                                    "agent": holder_name,
-                                    "path_pattern": file_reservation_record.path_pattern,
-                                    "exclusive": file_reservation_record.exclusive,
-                                    "expires_ts": _iso(file_reservation_record.expires_ts),
-                                }
-                            )
+                    # Fast path: skip detailed check if path cannot conflict with any reservation
+                    if path in potentially_conflicting_paths:
+                        # Slow path: detailed attribution for potentially conflicting paths only
+                        for file_reservation_record, holder_name in existing_reservations:
+                            if _file_reservations_conflict(file_reservation_record, path, exclusive, agent):
+                                conflicting_holders.append(
+                                    {
+                                        "agent": holder_name,
+                                        "path_pattern": file_reservation_record.path_pattern,
+                                        "exclusive": file_reservation_record.exclusive,
+                                        "expires_ts": _iso(file_reservation_record.expires_ts),
+                                    }
+                                )
 
-                if conflicting_holders:
-                    # Advisory model: still grant the file_reservation but surface conflicts
-                    conflicts.append({"path": path, "holders": conflicting_holders})
-                file_reservation = await _create_file_reservation(project, agent, path, exclusive, reason, ttl_seconds)
-                file_reservation_payload = _file_reservation_payload(
-                    project,
-                    file_reservation,
-                    agent,
-                    branch=ctx_branch,
-                    worktree=ctx_worktree,
-                )
-                payloads.append(file_reservation_payload)
-                granted.append(
-                    {
-                        "id": file_reservation.id,
-                        "path_pattern": file_reservation.path_pattern,
-                        "exclusive": file_reservation.exclusive,
-                        "reason": file_reservation.reason,
-                        "expires_ts": _iso(file_reservation.expires_ts),
-                    }
-                )
-                existing_reservations.append((file_reservation, agent.name))
+                    if conflicting_holders:
+                        # Advisory model: still grant the file_reservation but surface conflicts
+                        conflicts.append({"path": path, "holders": conflicting_holders})
+                    # Create reservation inline within the IMMEDIATE transaction
+                    # (instead of _create_file_reservation which opens its own session)
+                    expires = _naive_utc() + timedelta(seconds=ttl_seconds)
+                    file_reservation = FileReservation(
+                        project_id=project.id,
+                        agent_id=agent.id,
+                        path_pattern=path,
+                        exclusive=exclusive,
+                        reason=reason,
+                        expires_ts=expires,
+                    )
+                    session.add(file_reservation)
+                    await session.flush()  # Assigns id without committing
+                    file_reservation_payload = _file_reservation_payload(
+                        project,
+                        file_reservation,
+                        agent,
+                        branch=ctx_branch,
+                        worktree=ctx_worktree,
+                    )
+                    payloads.append(file_reservation_payload)
+                    granted.append(
+                        {
+                            "id": file_reservation.id,
+                            "path_pattern": file_reservation.path_pattern,
+                            "exclusive": file_reservation.exclusive,
+                            "reason": file_reservation.reason,
+                            "expires_ts": _iso(file_reservation.expires_ts),
+                        }
+                    )
+                    existing_reservations.append((file_reservation, agent.name))
+                # Commit all reservations atomically within the IMMEDIATE tx
+                await session.commit()
             if payloads:
                 await write_file_reservation_records(archive, payloads)
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
@@ -9131,7 +9154,9 @@ def build_mcp_server() -> FastMCP:
             now = datetime.now(timezone.utc)
             naive_now = _naive_utc(now)  # Compute once for consistency
             reservations: list[FileReservation] = []
-            async with get_session() as session:
+            # Use BEGIN IMMEDIATE so the release is immediately visible to
+            # subsequent reserve calls on other connections (#130).
+            async with get_immediate_session() as session:
                 select_stmt = (
                     select(FileReservation)
                     .where(
@@ -9262,7 +9287,8 @@ def build_mcp_server() -> FastMCP:
 
         now = datetime.now(timezone.utc)
         naive_now = _naive_utc(now)
-        async with get_session() as session:
+        # Use BEGIN IMMEDIATE so the forced release is immediately visible (#130).
+        async with get_immediate_session() as session:
             await session.execute(
                 update(FileReservation)
                 .where(
@@ -9414,7 +9440,9 @@ def build_mcp_server() -> FastMCP:
         now = datetime.now(timezone.utc)
         bump = max(60, int(extend_seconds))
 
-        async with get_session() as session:
+        # Use a single IMMEDIATE session for the read + write so the
+        # renewal is atomic and immediately visible to other connections.
+        async with get_immediate_session() as session:
             stmt = (
                 select(FileReservation)
                 .where(
@@ -9431,12 +9459,11 @@ def build_mcp_server() -> FastMCP:
             result = await session.execute(stmt)
             file_reservations: list[FileReservation] = list(result.scalars().all())
 
-        if not file_reservations:
-            await ctx.info(f"No active file_reservations to renew for '{agent.name}'.")
-            return {"renewed": 0, "file_reservations": []}
+            if not file_reservations:
+                await ctx.info(f"No active file_reservations to renew for '{agent.name}'.")
+                return {"renewed": 0, "file_reservations": []}
 
-        updated: list[dict[str, Any]] = []
-        async with get_session() as session:
+            updated: list[dict[str, Any]] = []
             for file_reservation in file_reservations:
                 old_exp = file_reservation.expires_ts
                 if getattr(old_exp, "tzinfo", None) is None:
