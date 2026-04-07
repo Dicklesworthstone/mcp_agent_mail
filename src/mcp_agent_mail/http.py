@@ -1164,6 +1164,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             self._app = native_app
             self._lifespan_entered = False
             self._lifespan_cm: Any = None
+            self._lifespan_lock: asyncio.Lock | None = None
 
         async def _ensure_lifespan(self) -> None:
             """Lazily enter the MCP app's lifespan if not already running.
@@ -1173,27 +1174,37 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             lifespan context already calls mcp_http_app.lifespan, so the
             session manager's task group will already be initialized and this
             method is a fast no-op.
+
+            Uses double-check locking to prevent concurrent requests from
+            entering the lifespan context manager twice.
             """
             if self._lifespan_entered:
                 return
-            # Check if the session manager is already running (production path)
-            session_mgr = getattr(self._app.state, "session_manager", None)
-            if session_mgr is None:
-                # Try to find it via route endpoint
-                for route in getattr(self._app, "routes", []):
-                    endpoint = getattr(route, "endpoint", None)
-                    sm = getattr(endpoint, "session_manager", None)
-                    if sm is not None:
-                        session_mgr = sm
-                        break
-            if session_mgr is not None and getattr(session_mgr, "_task_group", None) is not None:
+            # Lazily create the lock (must be in async context for the
+            # correct event loop).
+            if self._lifespan_lock is None:
+                self._lifespan_lock = asyncio.Lock()
+            async with self._lifespan_lock:
+                if self._lifespan_entered:
+                    return
+                # Check if the session manager is already running (production path)
+                session_mgr = getattr(self._app.state, "session_manager", None)
+                if session_mgr is None:
+                    # Try to find it via route endpoint
+                    for route in getattr(self._app, "routes", []):
+                        endpoint = getattr(route, "endpoint", None)
+                        sm = getattr(endpoint, "session_manager", None)
+                        if sm is not None:
+                            session_mgr = sm
+                            break
+                if session_mgr is not None and getattr(session_mgr, "_task_group", None) is not None:
+                    self._lifespan_entered = True
+                    return
+                # Enter the MCP app's lifespan (test path)
+                mcp_lifespan_app = cast(_FastAPILifespan, self._app)
+                self._lifespan_cm = mcp_lifespan_app.lifespan(self._app)
+                await self._lifespan_cm.__aenter__()
                 self._lifespan_entered = True
-                return
-            # Enter the MCP app's lifespan (test path)
-            mcp_lifespan_app = cast(_FastAPILifespan, self._app)
-            self._lifespan_cm = mcp_lifespan_app.lifespan(self._app)
-            await self._lifespan_cm.__aenter__()
-            self._lifespan_entered = True
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope.get("type") != "http":
