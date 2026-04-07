@@ -28,7 +28,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import httpx
 import typer
 import uvicorn
-from filelock import FileLock, Timeout as LockTimeout
+from filelock import BaseFileLock, FileLock, Timeout as LockTimeout
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import (
@@ -687,7 +687,7 @@ async def _get_product_record(key: str) -> Product:
 _SERVER_LOCK_FILENAME = "server.lock"
 
 
-def _acquire_server_lock(settings: Any = None) -> FileLock:
+def _acquire_server_lock(settings: Any = None) -> BaseFileLock:
     """Acquire an exclusive lock on server.lock inside the resolved STORAGE_ROOT.
 
     Ensures only one Agent Mail server process can own a given storage root at a
