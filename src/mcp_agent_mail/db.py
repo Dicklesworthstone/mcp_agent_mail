@@ -31,6 +31,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
@@ -583,6 +584,58 @@ async def get_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[A
     finally:
         # Ensure session close completes even under cancellation (anyio cancel scopes
         # will raise asyncio.CancelledError which is BaseException in Python 3.14).
+        close_task = asyncio.create_task(session.close())
+        try:
+            await asyncio.shield(close_task)
+        except BaseException:
+            with suppress(BaseException):
+                await close_task
+            raise
+
+
+@asynccontextmanager
+async def get_immediate_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[AsyncSession]:
+    """Provide an async database session that begins with ``BEGIN IMMEDIATE``.
+
+    This forces SQLite to acquire a *reserved lock* at the start of the
+    transaction, which in WAL mode guarantees that all subsequent reads see
+    the latest committed state (a fresh WAL snapshot).  Without this, a
+    pooled connection may re-use a stale read snapshot, causing:
+
+    - Phantom conflicts after a release (#130 / Rust Bug #85)
+    - Missed conflicts before an insert (#129 / Rust Bug #86)
+
+    The session is otherwise identical to :func:`get_session` — callers
+    should ``await session.commit()`` on the success path; the finally
+    block rolls back any uncommitted changes and closes the session.
+
+    **Only use this for reservation operations** (or other paths that
+    require serialised read-then-write consistency).  Regular reads should
+    continue using :func:`get_session` to avoid unnecessary write-lock
+    contention.
+    """
+    if check_circuit_breaker:
+        state = get_circuit_state()
+        if state == CircuitState.OPEN:
+            raise CircuitBreakerOpenError(
+                "Circuit breaker is open for database operations. "
+                "This typically indicates sustained database lock contention."
+            )
+
+    factory = get_session_factory()
+    session = factory()
+    try:
+        # Obtain the underlying connection and issue BEGIN IMMEDIATE *before*
+        # SQLAlchemy's autobegin can issue a plain BEGIN.
+        conn = await session.connection()
+        await conn.exec_driver_sql("BEGIN IMMEDIATE")
+        yield session
+    except BaseException:
+        # Roll back on any error so the IMMEDIATE lock is released.
+        with suppress(BaseException):
+            await session.rollback()
+        raise
+    finally:
         close_task = asyncio.create_task(session.close())
         try:
             await asyncio.shield(close_task)
