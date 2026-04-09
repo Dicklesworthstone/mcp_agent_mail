@@ -7,7 +7,7 @@ from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import get_settings
-from mcp_agent_mail.db import ensure_schema, get_session
+from mcp_agent_mail.db import ensure_schema, get_db_health_status, get_session
 from mcp_agent_mail.models import Agent, AgentLink, Project
 
 
@@ -75,6 +75,7 @@ async def test_contact_auto_allow_same_thread(isolated_env):
             },
         )
         assert (third.data.get("deliveries") or [{}])[0].get("payload", {}).get("subject") == "Followup"
+        assert get_db_health_status()["pool"]["checked_out"] == 0
 
 
 @pytest.mark.asyncio
@@ -131,4 +132,3 @@ async def test_external_cross_project_routing(isolated_env):
         storage_root = Path(get_settings().storage.root).expanduser().resolve()
         ops_dir = storage_root / "projects" / "ops" / "messages"
         assert any(ops_dir.rglob("*.md"))
-
