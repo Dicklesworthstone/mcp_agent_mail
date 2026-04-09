@@ -112,6 +112,9 @@ def isolated_env(tmp_path, monkeypatch):
     finally:
         # Close all cached Repo objects first (prevents file handle leaks)
         clear_repo_cache()
+        # Dispose database engine/pool state before forcing GC so SQLAlchemy
+        # returns pooled connections cleanly instead of warning during finalizers.
+        reset_database_state()
 
         # Suppress ResourceWarnings during cleanup since Python 3.14 warns about resources
         # being cleaned up by GC, which is exactly what we want
@@ -144,7 +147,6 @@ def isolated_env(tmp_path, monkeypatch):
             gc.collect()
 
         clear_settings_cache()
-        reset_database_state()
 
         if db_path.exists():
             db_path.unlink()

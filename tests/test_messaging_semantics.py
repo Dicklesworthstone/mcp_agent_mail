@@ -5,6 +5,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_db_health_status
 
 
 @pytest.mark.asyncio
@@ -478,6 +479,7 @@ async def test_reply_message_supports_agent_at_project_external_address(isolated
             },
         )
         assert any(delivery["project"] == "/security/reply-xproj-ops" for delivery in reply.data["deliveries"])
+        assert get_db_health_status()["pool"]["checked_out"] == 0
 
 
 @pytest.mark.asyncio

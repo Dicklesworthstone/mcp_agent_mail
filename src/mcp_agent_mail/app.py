@@ -42,6 +42,7 @@ from sqlalchemy.orm import aliased
 from . import rich_logger
 from .config import Settings, get_settings
 from .db import (
+    dispose_engine_blocking,
     ensure_schema,
     get_engine,
     get_immediate_session,
@@ -773,20 +774,17 @@ def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncContextMan
             yield
         finally:
             cancelled: BaseException | None = None
-            dispose_task: asyncio.Task[None] | None = None
             with suppress(Exception):
                 engine = get_engine()
-                dispose_task = asyncio.create_task(engine.dispose())
-            if dispose_task is not None:
                 try:
-                    await asyncio.shield(dispose_task)
+                    await asyncio.shield(asyncio.to_thread(dispose_engine_blocking, engine))
                 except asyncio.CancelledError as exc:
                     cancelled = exc
                     with suppress(BaseException):
-                        await dispose_task
+                        dispose_engine_blocking(engine)
                 except Exception:
                     with suppress(BaseException):
-                        await dispose_task
+                        dispose_engine_blocking(engine)
             with suppress(BaseException):
                 clear_repo_cache()
             if cancelled is not None:
@@ -6436,16 +6434,16 @@ def build_mcp_server() -> FastMCP:
                             .limit(500)
                         )
                         thread_rows = [(row[0], row[1]) for row in (await s.execute(stmt)).all()]
-                    # collect participants (sender names and recipients)
-                    participants: set[str] = {n for _m, n in thread_rows}
-                    message_ids = [m.id for m, _ in thread_rows if m.id is not None]
-                    if message_ids:
-                        recipient_rows = await s.execute(
-                            select(Agent.name)
-                            .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
-                            .where(cast(Any, MessageRecipient.message_id).in_(message_ids))
-                        )
-                        participants.update({row[0] for row in recipient_rows.all() if row[0]})
+                        # Keep every thread-participant query inside the managed session.
+                        participants: set[str] = {n for _m, n in thread_rows}
+                        message_ids = [m.id for m, _ in thread_rows if m.id is not None]
+                        if message_ids:
+                            recipient_rows = await s.execute(
+                                select(Agent.name)
+                                .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
+                                .where(cast(Any, MessageRecipient.message_id).in_(message_ids))
+                            )
+                            participants.update({row[0] for row in recipient_rows.all() if row[0]})
                     auto_ok_names.update(participants)
                 except Exception:
                     logger.exception("Failed to fetch thread participants for contact auto-allow (thread_id=%s)", thread_id)
@@ -7495,12 +7493,12 @@ def build_mcp_server() -> FastMCP:
                         else:
                             unknown_local.add(display_value or candidate.strip() or candidate)
 
-        try:
-            await _route(to_names, "to")
-            await _route(cc_list, "cc")
-            await _route(bcc_list, "bcc")
-        except _ContactBlocked:
-            return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+            try:
+                await _route(to_names, "to")
+                await _route(cc_list, "cc")
+                await _route(bcc_list, "bcc")
+            except _ContactBlocked:
+                return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
 
         if unknown_local or unknown_external:
             parts: list[str] = []

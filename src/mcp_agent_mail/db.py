@@ -720,41 +720,7 @@ def reset_database_state() -> None:
     if _engine is not None:
         engine = _engine
         try:
-            # Prefer a full async dispose when possible (aiosqlite uses background threads).
-            try:
-                running = asyncio.get_running_loop()
-            except RuntimeError:
-                running = None
-
-            if running is not None and running.is_running():
-                # Pytest fixture teardown can happen while an event loop is still active.
-                # In that case, disposing asynchronously in a helper thread avoids leaving
-                # aiosqlite connections for GC to clean up later.
-                dispose_error: Exception | None = None
-
-                def _dispose_in_thread() -> None:
-                    nonlocal dispose_error
-                    try:
-                        asyncio.run(engine.dispose())
-                    except Exception as exc:  # pragma: no cover - best-effort fallback path
-                        dispose_error = exc
-
-                dispose_thread = threading.Thread(target=_dispose_in_thread, name="db-dispose", daemon=True)
-                dispose_thread.start()
-                dispose_thread.join(timeout=5.0)
-                if dispose_thread.is_alive():
-                    raise TimeoutError("Timed out waiting for async engine disposal in helper thread.")
-                if dispose_error is not None:
-                    raise dispose_error
-            else:
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = None
-                if loop is not None and not loop.is_running() and not loop.is_closed():
-                    loop.run_until_complete(engine.dispose())
-                else:
-                    asyncio.run(engine.dispose())
+            dispose_engine_blocking(engine)
         except Exception:
             # Last resort: sync pool disposal.
             with suppress(Exception):
@@ -765,6 +731,26 @@ def reset_database_state() -> None:
     _schema_lock = None
     # Tests frequently mutate env vars; keep settings cache in sync with DB resets.
     clear_settings_cache()
+
+
+def dispose_engine_blocking(engine: AsyncEngine, timeout_seconds: float = 5.0) -> None:
+    """Dispose an async engine in a helper thread so shutdown survives active event loops/cancellation."""
+    dispose_error: BaseException | None = None
+
+    def _dispose_in_thread() -> None:
+        nonlocal dispose_error
+        try:
+            asyncio.run(engine.dispose())
+        except BaseException as exc:  # pragma: no cover - best-effort fallback path
+            dispose_error = exc
+
+    dispose_thread = threading.Thread(target=_dispose_in_thread, name="db-dispose", daemon=True)
+    dispose_thread.start()
+    dispose_thread.join(timeout=timeout_seconds)
+    if dispose_thread.is_alive():
+        raise TimeoutError("Timed out waiting for async engine disposal in helper thread.")
+    if dispose_error is not None:
+        raise dispose_error
 
 
 def _setup_fts(connection: Any) -> None:
