@@ -1705,6 +1705,7 @@ sequenceDiagram
 - Attachments
   - Image references (file path or data URI) are converted to WebP; small images embed inline when policy allows
   - Non-absolute `attachment_paths` (and markdown image paths) resolve relative to the project archive root under `STORAGE_ROOT/projects/<slug>/`, not the code repo root
+  - Absolute attachment paths are disabled by default. Enabling `ALLOW_ABSOLUTE_ATTACHMENT_PATHS=true` on a networked deployment turns message sending into a filesystem read primitive for whatever paths the server process can access.
   - Stored under `attachments/<xx>/<sha1>.webp` and referenced by relative path in frontmatter
 - File Reservations
   - TTL-based; exclusive means "please don't modify overlapping surfaces" for others until expiry or release
@@ -2051,6 +2052,7 @@ Common variables you may set:
 | `INLINE_IMAGE_MAX_BYTES` | `65536` | Threshold (bytes) for inlining WebP images during send_message |
 | `CONVERT_IMAGES` | `true` | Convert images to WebP (and optionally inline small ones) |
 | `KEEP_ORIGINAL_IMAGES` | `false` | Also store original image bytes alongside WebP (attachments/originals/) |
+| `ALLOW_ABSOLUTE_ATTACHMENT_PATHS` | `false` | Allow absolute filesystem paths in attachments and markdown image references. Keep this disabled on networked deployments unless you explicitly want server-side file reads. |
 | `LOG_LEVEL` | `INFO` | Server log level |
 | `HTTP_CORS_ENABLED` | `false` | Enable CORS middleware when true |
 | `HTTP_CORS_ORIGINS` |  | CSV of allowed origins (e.g., `https://app.example.com,https://ops.example.com`) |

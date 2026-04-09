@@ -334,7 +334,7 @@ def get_settings() -> Settings:
         pool_timeout=_int_optional(_decouple_config("DATABASE_POOL_TIMEOUT", default="")),
     )
 
-    allow_abs_default = "true" if environment.lower() == "development" else "false"
+    allow_abs_default = "false"
     storage_settings = StorageSettings(
         # Default to a global, user-scoped archive directory outside the source tree
         root=_decouple_config("STORAGE_ROOT", default="~/.mcp_agent_mail_git_mailbox_repo"),

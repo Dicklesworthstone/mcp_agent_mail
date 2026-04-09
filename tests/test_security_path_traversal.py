@@ -377,6 +377,48 @@ class TestAttachmentPathTraversal:
             # Message should be sent (body text is just text)
             assert result.data.get("deliveries") is not None
 
+    @pytest.mark.asyncio
+    async def test_absolute_attachment_paths_disabled_by_default(self, isolated_env, monkeypatch, tmp_path):
+        """Absolute attachment paths should be rejected unless explicitly enabled."""
+        from fastmcp.exceptions import ToolError
+
+        monkeypatch.setenv("CONVERT_IMAGES", "false")
+        from mcp_agent_mail import config as _config
+
+        _config.clear_settings_cache()
+        assert get_settings().storage.allow_absolute_attachment_paths is False
+
+        secret_file = tmp_path / "secret.txt"
+        secret_file.write_text("secret", encoding="utf-8")
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": "/backend"})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "/backend",
+                    "program": "test",
+                    "model": "test",
+                    "name": "BlueLake",
+                },
+            )
+
+            with pytest.raises(ToolError) as exc_info:
+                await client.call_tool(
+                    "send_message",
+                    {
+                        "project_key": "/backend",
+                        "sender_name": "BlueLake",
+                        "to": ["BlueLake"],
+                        "subject": "Absolute attachment",
+                        "body_md": "Should be rejected",
+                        "attachment_paths": [str(secret_file.resolve())],
+                        "convert_images": False,
+                    },
+                )
+        assert "absolute attachment paths are disabled" in str(exc_info.value).lower()
+
 
 # ============================================================================
 # Archive Extraction Security Tests

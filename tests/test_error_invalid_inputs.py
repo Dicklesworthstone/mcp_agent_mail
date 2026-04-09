@@ -28,8 +28,11 @@ import contextlib
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from sqlmodel import select
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_session
+from mcp_agent_mail.models import Agent, Project
 
 # ============================================================================
 # Test: Invalid project_key
@@ -237,6 +240,38 @@ async def test_send_message_empty_recipients(isolated_env):
         # Should succeed but with no deliveries
         assert result.data["count"] == 0
         assert result.data["deliveries"] == []
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_project_rejects_legacy_tokenless_project(isolated_env):
+    """Legacy projects with tokenless agents should not bypass hard-delete auth."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/legacy/no-token"})
+
+    async with get_session() as session:
+        project = (
+            await session.execute(select(Project).where(Project.human_key == "/legacy/no-token"))
+        ).scalars().one()
+        session.add(
+            Agent(
+                project_id=project.id,
+                name="BlueLake",
+                program="legacy",
+                model="legacy",
+                task_description="legacy bootstrap",
+            )
+        )
+        await session.commit()
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "hard_delete_project",
+                {"project_key": "/legacy/no-token", "confirmation": "I UNDERSTAND"},
+            )
+        err = str(exc_info.value).lower()
+        assert "registration token" in err or "authenticated" in err
 
 
 @pytest.mark.asyncio

@@ -8300,6 +8300,7 @@ def build_mcp_server() -> FastMCP:
         exclusive: bool = True,
         reason: str = "macro-file_reservation",
         auto_release: bool = False,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Reserve a set of file paths and optionally release them at the end of the workflow."""
@@ -8317,6 +8318,7 @@ def build_mcp_server() -> FastMCP:
                 "ttl_seconds": ttl_seconds,
                 "exclusive": exclusive,
                 "reason": reason,
+                "registration_token": registration_token,
                 "format": "json",
             }
         )
@@ -8331,6 +8333,7 @@ def build_mcp_server() -> FastMCP:
                     "project_key": project_key,
                     "agent_name": agent_name,
                     "paths": paths,
+                    "registration_token": registration_token,
                     "format": "json",
                 }
             )
@@ -9354,6 +9357,7 @@ def build_mcp_server() -> FastMCP:
         ttl_seconds: int = 3600,
         exclusive: bool = True,
         reason: str = "",
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -9439,7 +9443,14 @@ def build_mcp_server() -> FastMCP:
                 c.print(Panel("\n".join(paths), title=f"tool: file_reservation_paths — agent={agent_name} ttl={ttl_seconds}s", border_style="green"))
             except Exception:
                 pass
-        agent = await _get_agent(project, agent_name)
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="file_reservation_paths",
+        )
         if project.id is None:
             raise ValueError("Project must have an id before reserving file paths.")
         stale_auto_releases = await _expire_stale_file_reservations(project.id)
@@ -9580,6 +9591,7 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         paths: Optional[list[str]] = None,
         file_reservation_ids: Optional[list[int]] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -9632,7 +9644,14 @@ def build_mcp_server() -> FastMCP:
                 pass
         try:
             project = await _get_project_by_identifier(project_key)
-            agent = await _get_agent(project, agent_name)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="release_file_reservations",
+            )
             if project.id is None or agent.id is None:
                 raise ValueError("Project and agent must have ids before releasing file_reservations.")
             await ensure_schema()
@@ -9708,6 +9727,7 @@ def build_mcp_server() -> FastMCP:
         file_reservation_id: int,
         notify_previous: bool = True,
         note: str = "",
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -9718,7 +9738,14 @@ def build_mcp_server() -> FastMCP:
         previous holder summarizing the heuristics.
         """
         project = await _get_project_by_identifier(project_key)
-        actor = await _get_agent(project, agent_name)
+        actor = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="force_release_file_reservation",
+        )
         if project.id is None:
             raise ValueError("Project must have an id before releasing file_reservations.")
 
@@ -9858,6 +9885,7 @@ def build_mcp_server() -> FastMCP:
                         "ctx": ctx,
                         "project_key": project_key,
                         "sender_name": agent_name,
+                        "sender_token": registration_token,
                         "to": [holder.name],
                         "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
                         "body_md": "\n".join(body_lines),
@@ -9879,6 +9907,7 @@ def build_mcp_server() -> FastMCP:
         extend_seconds: int = 1800,
         paths: Optional[list[str]] = None,
         file_reservation_ids: Optional[list[int]] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -9918,7 +9947,14 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
         project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="renew_file_reservations",
+        )
         if project.id is None or agent.id is None:
             raise ValueError("Project and agent must have ids before renewing file_reservations.")
         await ensure_schema()
@@ -10029,12 +10065,21 @@ def build_mcp_server() -> FastMCP:
             slot: str,
             ttl_seconds: int = 3600,
             exclusive: bool = True,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Acquire a build slot (advisory), optionally exclusive. Returns conflicts when another holder is active.
             """
             project = await _get_project_by_identifier(project_key)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="acquire_build_slot",
+            )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
@@ -10042,19 +10087,19 @@ def build_mcp_server() -> FastMCP:
             active = _read_active_slots(slot_path, now)
 
             branch = _compute_branch(project.human_key)
-            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
 
             conflicts: list[dict[str, Any]] = []
             if exclusive:
                 for entry in active:
-                    if entry.get("agent") == agent_name and entry.get("branch") == branch:
+                    if entry.get("agent") == agent.name and entry.get("branch") == branch:
                         continue
                     if entry.get("exclusive", True):
                         conflicts.append(entry)
             payload = {
                 "slot": slot,
-                "agent": agent_name,
+                "agent": agent.name,
                 "branch": branch,
                 "exclusive": exclusive,
                 "acquired_ts": _iso(now),
@@ -10074,24 +10119,33 @@ def build_mcp_server() -> FastMCP:
             agent_name: str,
             slot: str,
             extend_seconds: int = 1800,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Extend expiry for an existing build slot lease. No-op if missing.
             """
             project = await _get_project_by_identifier(project_key)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="renew_build_slot",
+            )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
             branch = _compute_branch(project.human_key)
-            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
             try:
                 current = json.loads(lease_path.read_text(encoding="utf-8"))
             except Exception:
                 current = {}
             new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
-            current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp})
+            current.update({"slot": slot, "agent": agent.name, "branch": branch, "expires_ts": new_exp})
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
             return {"renewed": True, "expires_ts": new_exp}
@@ -10103,17 +10157,26 @@ def build_mcp_server() -> FastMCP:
             project_key: str,
             agent_name: str,
             slot: str,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
             Mark an active slot lease as released (non-destructive; keeps JSON with released_ts).
             """
             project = await _get_project_by_identifier(project_key)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="release_build_slot",
+            )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
             branch = _compute_branch(project.human_key)
-            holder_id = _safe_component(f"{agent_name}__{branch or 'unknown'}")
+            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
             released = False
             try:
@@ -11673,7 +11736,7 @@ def build_mcp_server() -> FastMCP:
         )
 
     @mcp.resource(
-        "resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit,format}",
+        "resource://inbox/{agent}{?project,since_ts,urgent_only,include_bodies,limit,agent_token,format}",
         mime_type="application/json",
     )
     async def inbox_resource(
@@ -11798,11 +11861,13 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit,format}", mime_type="application/json")
+    @mcp.resource("resource://views/urgent-unread/{agent}{?project,limit,agent_token,format}", mime_type="application/json")
     async def urgent_unread_view(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -11827,6 +11892,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
@@ -11849,7 +11916,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for urgent view")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://views/urgent-unread/{agent}",
+        )
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=True, include_bodies=False, since_ts=None)
         # Filter unread (no read_ts recorded)
         unread: list[dict[str, Any]] = []
@@ -11873,11 +11947,13 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://views/ack-required/{agent}{?project,limit,format}", mime_type="application/json")
+    @mcp.resource("resource://views/ack-required/{agent}{?project,limit,agent_token,format}", mime_type="application/json")
     async def ack_required_view(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -11902,6 +11978,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
@@ -11924,7 +12002,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for ack view")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://views/ack-required/{agent}",
+        )
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
         await ensure_schema()
@@ -11954,12 +12039,14 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://views/acks-stale/{agent}{?project,ttl_seconds,limit,format}", mime_type="application/json")
+    @mcp.resource("resource://views/acks-stale/{agent}{?project,ttl_seconds,limit,agent_token,format}", mime_type="application/json")
     async def acks_stale_view(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         ttl_seconds: Optional[int] = None,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -11986,6 +12073,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("ttl_seconds"):
                     with suppress(Exception):
                         ttl_seconds = int(parsed["ttl_seconds"][0])
@@ -12011,7 +12100,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for stale acks view")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://views/acks-stale/{agent}",
+        )
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
         await ensure_schema()
@@ -12059,12 +12155,14 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit,format}", mime_type="application/json")
+    @mcp.resource("resource://views/ack-overdue/{agent}{?project,ttl_minutes,limit,agent_token,format}", mime_type="application/json")
     async def ack_overdue_view(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         ttl_minutes: int = 60,
         limit: int = 50,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """List messages requiring acknowledgement older than ttl_minutes without ack."""
@@ -12078,6 +12176,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("ttl_minutes"):
                     with suppress(Exception):
                         ttl_minutes = int(parsed["ttl_minutes"][0])
@@ -12103,7 +12203,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for ack-overdue view")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://views/ack-overdue/{agent}",
+        )
         if project_obj.id is None or agent_obj.id is None:
             raise ValueError("Project/agent IDs must exist")
         await ensure_schema()
@@ -12140,11 +12247,13 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://mailbox/{agent}{?project,limit,format}", mime_type="application/json")
+    @mcp.resource("resource://mailbox/{agent}{?project,limit,agent_token,format}", mime_type="application/json")
     async def mailbox_resource(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -12165,6 +12274,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
@@ -12187,7 +12298,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for mailbox resource")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://mailbox/{agent}",
+        )
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
         # Attach recent commit summaries touching the archive (best-effort)
@@ -12225,13 +12343,15 @@ def build_mcp_server() -> FastMCP:
         )
 
     @mcp.resource(
-        "resource://mailbox-with-commits/{agent}{?project,limit,format}",
+        "resource://mailbox-with-commits/{agent}{?project,limit,agent_token,format}",
         mime_type="application/json",
     )
     async def mailbox_with_commits_resource(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """List recent messages in an agent's mailbox with commit metadata including diff summaries."""
@@ -12245,6 +12365,8 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("limit"):
                     with suppress(Exception):
                         limit = int(parsed["limit"][0])
@@ -12266,7 +12388,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for mailbox-with-commits resource")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://mailbox-with-commits/{agent}",
+        )
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
         enriched: list[dict[str, Any]] = []
@@ -12287,13 +12416,15 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts,format}", mime_type="application/json")
+    @mcp.resource("resource://outbox/{agent}{?project,limit,include_bodies,since_ts,agent_token,format}", mime_type="application/json")
     async def outbox_resource(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         limit: int = 20,
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """List messages sent by the agent, enriched with commit metadata for canonical files."""
@@ -12315,6 +12446,8 @@ def build_mcp_server() -> FastMCP:
                     include_bodies = parsed["include_bodies"][0].lower() in {"1","true","t","yes","y"}
                 if parsed.get("since_ts"):
                     since_ts = parsed["since_ts"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
@@ -12335,7 +12468,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for outbox resource")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://outbox/{agent}",
+        )
         items = await _list_outbox(project_obj, agent_obj, limit, include_bodies, since_ts)
         enriched: list[dict[str, Any]] = []
         for item in items:

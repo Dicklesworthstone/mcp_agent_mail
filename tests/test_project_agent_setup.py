@@ -23,6 +23,7 @@ import asyncio
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 from sqlalchemy import text
 from sqlmodel import select
 
@@ -298,6 +299,58 @@ async def test_register_agent_updates_existing_agent(isolated_env):
         agent = await get_agent_from_db(project["id"], agent_name)
         assert agent is not None, "Agent should exist"
         assert agent["task_description"] == "Updated task"
+
+
+@pytest.mark.asyncio
+async def test_register_agent_existing_identity_requires_token_across_sessions(isolated_env):
+    """A new session cannot take over an existing named agent without its token."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/test/setup/takeover"})
+        created = await bootstrap_client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/setup/takeover",
+                "program": "bootstrap-program",
+                "model": "bootstrap-model",
+                "name": "BlueLake",
+                "task_description": "Original owner",
+            },
+        )
+        registration_token = created.data["registration_token"]
+
+    async with Client(server) as attacker_client:
+        with pytest.raises(ToolError) as exc_info:
+            await attacker_client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "/test/setup/takeover",
+                    "program": "attacker-program",
+                    "model": "attacker-model",
+                    "name": "BlueLake",
+                    "task_description": "Hijacked",
+                },
+            )
+        assert "registration_token" in str(exc_info.value)
+
+    project = await get_project_from_db("/test/setup/takeover")
+    assert project is not None
+    assert await count_agents_in_project(project["id"]) == 1
+
+    async with Client(server) as owner_client:
+        updated = await owner_client.call_tool(
+            "register_agent",
+            {
+                "project_key": "/test/setup/takeover",
+                "program": "bootstrap-program",
+                "model": "bootstrap-model",
+                "name": "BlueLake",
+                "task_description": "Updated by owner",
+                "registration_token": registration_token,
+            },
+        )
+    assert updated.data["name"] == "BlueLake"
+    assert updated.data["task_description"] == "Updated by owner"
 
 
 @pytest.mark.asyncio
