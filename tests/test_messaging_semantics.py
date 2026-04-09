@@ -171,6 +171,206 @@ async def test_send_message_requires_sender_token_across_sessions(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_send_message_auto_contact_requests_pending_approval_without_target_auth(isolated_env):
+    """auto_contact_if_blocked should create a pending request, not pretend to auto-approve."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-pending"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-pending", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-pending", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        with pytest.raises(ToolError) as exc_info:
+            await sender_client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/security/auto-contact-pending",
+                    "sender_name": "GreenCastle",
+                    "sender_token": green_token,
+                    "to": ["BlueLake"],
+                    "subject": "Need approval",
+                    "body_md": "please let me in",
+                    "auto_contact_if_blocked": True,
+                },
+            )
+        assert "Pending contact requests were created for: BlueLake" in str(exc_info.value)
+
+        contacts = await sender_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "/security/auto-contact-pending",
+                "agent_name": "GreenCastle",
+                "registration_token": green_token,
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert any(item["to"] == "BlueLake" and item["status"] == "pending" for item in contact_items)
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/security/auto-contact-pending",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert any(item["subject"] == "Contact request from GreenCastle" for item in messages)
+
+
+@pytest.mark.asyncio
+async def test_send_message_auto_contact_auto_approves_when_target_is_authenticated_in_session(isolated_env):
+    """Same-session authenticated agents can still use the one-step auto-approval path."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/security/auto-contact-approved"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-approved", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-approved", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "/security/auto-contact-approved",
+                "sender_name": "GreenCastle",
+                "to": ["BlueLake"],
+                "subject": "Auto approved",
+                "body_md": "same session works",
+                "auto_contact_if_blocked": True,
+            },
+        )
+        assert result.data["count"] == 1
+
+        contacts = await client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "/security/auto-contact-approved",
+                "agent_name": "GreenCastle",
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert any(item["to"] == "BlueLake" and item["status"] == "approved" for item in contact_items)
+
+
+@pytest.mark.asyncio
+async def test_send_message_auto_contact_requests_cross_project_approval_without_target_auth(isolated_env):
+    """Cross-project auto-contact should create a pending request when only the sender is authenticated."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-xproj-backend"})
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-xproj-frontend"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-xproj-backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-xproj-frontend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        with pytest.raises(ToolError) as exc_info:
+            await sender_client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/security/auto-contact-xproj-backend",
+                    "sender_name": "GreenCastle",
+                    "sender_token": green_token,
+                    "to": ["BlueLake@/security/auto-contact-xproj-frontend"],
+                    "subject": "Need cross-project approval",
+                    "body_md": "please link us",
+                    "auto_contact_if_blocked": True,
+                },
+            )
+        assert "pending external contact requests were created for BlueLake@/security/auto-contact-xproj-frontend" in str(exc_info.value)
+
+        contacts = await sender_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "/security/auto-contact-xproj-backend",
+                "agent_name": "GreenCastle",
+                "registration_token": green_token,
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert any(item["to"] == "BlueLake" and item["status"] == "pending" for item in contact_items)
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/security/auto-contact-xproj-frontend",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert any(item["subject"] == "Contact request from GreenCastle" for item in messages)
+
+
+@pytest.mark.asyncio
+async def test_send_message_cross_project_auto_contact_preserves_recipient_kind(isolated_env):
+    """In-session cross-project auto-approval must preserve whether the target was TO/CC/BCC."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/security/auto-contact-kind-backend"})
+        await client.call_tool("ensure_project", {"human_key": "/security/auto-contact-kind-frontend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-kind-backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-kind-frontend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "/security/auto-contact-kind-backend",
+                "sender_name": "GreenCastle",
+                "to": ["GreenCastle"],
+                "bcc": ["BlueLake@/security/auto-contact-kind-frontend"],
+                "subject": "Cross-project BCC",
+                "body_md": "recipient kind must survive auto-approval",
+                "auto_contact_if_blocked": True,
+            },
+        )
+        assert result.data["count"] == 2
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/security/auto-contact-kind-frontend",
+                "agent_name": "BlueLake",
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        delivered = next(item for item in messages if item["subject"] == "Cross-project BCC")
+        assert delivered["kind"] == "bcc"
+        assert delivered["body_md"] == "recipient kind must survive auto-approval"
+
+
+@pytest.mark.asyncio
 async def test_search_and_summarize_thread_respect_recipient_visibility(isolated_env):
     """Only senders/recipients, including BCC, can discover a private thread."""
     server = build_mcp_server()
