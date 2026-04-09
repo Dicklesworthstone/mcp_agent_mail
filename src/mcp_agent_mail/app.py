@@ -34,7 +34,7 @@ import uuid
 from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
-from sqlalchemy import asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
+from sqlalchemy import asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, exists as _sa_exists, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import aliased
 
@@ -126,6 +126,10 @@ def delete(*args: Any, **kwargs: Any) -> Any:
 
 def or_(*clauses: Any) -> Any:
     return _sa_or(*clauses)
+
+
+def exists(*args: Any, **kwargs: Any) -> Any:
+    return _sa_exists(*args, **kwargs)
 
 
 def asc(value: Any) -> Any:
@@ -3282,6 +3286,58 @@ async def _get_agent(project: Project, name: str) -> Agent:
         )
 
 
+async def _find_agent_optional(project: Project, name: str | None) -> Agent | None:
+    """Return an agent by name without raising when it does not exist."""
+    if project.id is None or not name or not name.strip():
+        return None
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent).where(
+                cast(Any, Agent.project_id == project.id),
+                cast(Any, func.lower(Agent.name) == name.lower()),
+            )
+        )
+        return result.scalars().first()
+
+
+async def _ensure_agent_registration_token(
+    agent: Agent,
+    *,
+    rotate: bool = False,
+) -> tuple[Agent, str]:
+    """Ensure an agent has a stable registration token and return it."""
+    if agent.id is None:
+        raise ValueError("Agent must have an id before ensuring a registration token.")
+
+    async with get_session() as session:
+        db_agent = await session.get(Agent, agent.id)
+        if db_agent is None:
+            raise NoResultFound(f"Agent id '{agent.id}' no longer exists.")
+
+        token = db_agent.registration_token
+        if rotate or not token:
+            token = secrets.token_urlsafe(32)
+            db_agent.registration_token = token
+            session.add(db_agent)
+            await session.commit()
+            await session.refresh(db_agent)
+        return db_agent, str(token)
+
+
+def _message_visible_to_agent_clause(agent_id: int) -> Any:
+    """Return a SQL clause limiting messages to sender-visible or recipient-visible rows."""
+    return or_(
+        cast(Any, Message.sender_id) == agent_id,
+        exists(
+            select(MessageRecipient.message_id).where(
+                cast(Any, MessageRecipient.message_id == Message.id),
+                cast(Any, MessageRecipient.agent_id == agent_id),
+            )
+        ),
+    )
+
+
 async def _get_agents_batch(project: Project, names: Sequence[str]) -> dict[str, Agent]:
     """Batch lookup agents by name with `_get_agent`-equivalent error reporting."""
     await ensure_schema()
@@ -4190,6 +4246,7 @@ async def _compute_thread_summary(
     llm_model: Optional[str],
     *,
     per_thread_limit: Optional[int] = None,
+    viewer_agent: Agent | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
     if project.id is None:
         raise ValueError("Project must have an id before summarizing threads.")
@@ -4209,6 +4266,10 @@ async def _compute_thread_summary(
             .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
             .order_by(asc(cast(Any, Message.created_ts)))
         )
+        if viewer_agent is not None:
+            if viewer_agent.id is None:
+                raise ValueError("Viewer agent must have an id before summarizing visible threads.")
+            stmt = stmt.where(_message_visible_to_agent_clause(viewer_agent.id))
         if per_thread_limit:
             stmt = stmt.limit(per_thread_limit)
         result = await session.execute(stmt)
@@ -4288,6 +4349,28 @@ async def _get_message(project: Project, message_id: int) -> Message:
         return message
 
 
+async def _get_visible_message(project: Project, agent: Agent, message_id: int) -> Message:
+    """Return a message only when it is visible to the authenticated agent."""
+    if project.id is None or agent.id is None:
+        raise ValueError("Project and agent must have ids before reading visible messages.")
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Message).where(
+                cast(Any, Message.project_id == project.id),
+                cast(Any, Message.id == message_id),
+                _message_visible_to_agent_clause(agent.id),
+            )
+        )
+        message = result.scalars().first()
+        if not message:
+            raise NoResultFound(
+                f"Message '{message_id}' not found or not visible to agent '{agent.name}' "
+                f"in project '{project.human_key}'."
+            )
+        return message
+
+
 async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
     if project.id is None:
         raise ValueError("Project must have an id before querying agents.")
@@ -4347,6 +4430,8 @@ def build_mcp_server() -> FastMCP:
     )
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
+    session_agent_bindings: defaultdict[str, set[tuple[int, int]]] = defaultdict(set)
+    session_current_agents: defaultdict[str, dict[int, int]] = defaultdict(dict)
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -4354,6 +4439,229 @@ def build_mcp_server() -> FastMCP:
         except Exception:
             # Context may not be available outside of a request; ignore logging
             return
+
+    def _project_agent_key(project: Project, agent: Agent) -> tuple[int, int]:
+        if project.id is None or agent.id is None:
+            raise ValueError("Project and agent must have ids before binding MCP sessions.")
+        return project.id, agent.id
+
+    def _bind_session_agent(ctx: Context, project: Project, agent: Agent) -> None:
+        project_id, agent_id = _project_agent_key(project, agent)
+        session_id = ctx.session_id
+        session_agent_bindings[session_id].add((project_id, agent_id))
+        session_current_agents[session_id][project_id] = agent_id
+
+    def _session_is_bound_to_agent(ctx: Context, project: Project, agent: Agent) -> bool:
+        if project.id is None or agent.id is None:
+            return False
+        return (project.id, agent.id) in session_agent_bindings.get(ctx.session_id, set())
+
+    async def _resolve_session_agent_for_project(
+        ctx: Context,
+        project: Project,
+    ) -> Agent | None:
+        if project.id is None:
+            return None
+        session_id = ctx.session_id
+        current_agent_id = session_current_agents.get(session_id, {}).get(project.id)
+        if current_agent_id is not None:
+            with suppress(NoResultFound):
+                return await _get_agent_by_id(project, current_agent_id)
+
+        bound_agent_ids = [
+            agent_id
+            for bound_project_id, agent_id in session_agent_bindings.get(session_id, set())
+            if bound_project_id == project.id
+        ]
+        if len(bound_agent_ids) == 1:
+            return await _get_agent_by_id(project, bound_agent_ids[0])
+        return None
+
+    async def _authenticate_agent(
+        ctx: Context,
+        project: Project,
+        agent_name: str,
+        provided_token: Optional[str],
+        *,
+        token_param: str,
+        action: str,
+    ) -> Agent:
+        agent = await _get_agent(project, agent_name)
+        if _session_is_bound_to_agent(ctx, project, agent):
+            _bind_session_agent(ctx, project, agent)
+            return agent
+
+        stored_token = (agent.registration_token or "").strip()
+        if not stored_token:
+            raise ToolExecutionError(
+                "AUTHENTICATION_REQUIRED",
+                (
+                    f"Agent '{agent.name}' does not have a registration token, so {action} cannot be authenticated. "
+                    "Re-register or mint a token locally before retrying."
+                ),
+                recoverable=True,
+                data={"agent_name": agent.name, "project_key": project.human_key, "action": action},
+            )
+        if not provided_token:
+            raise ToolExecutionError(
+                "AUTHENTICATION_REQUIRED",
+                (
+                    f"{action} requires {token_param} for agent '{agent.name}', unless this MCP session has already "
+                    "authenticated as that agent."
+                ),
+                recoverable=True,
+                data={"agent_name": agent.name, "project_key": project.human_key, "token_param": token_param},
+            )
+        if not hmac.compare_digest(provided_token, stored_token):
+            raise ToolExecutionError(
+                "AUTHENTICATION_REQUIRED",
+                f"Invalid {token_param} for agent '{agent.name}'.",
+                recoverable=True,
+                data={"agent_name": agent.name, "project_key": project.human_key, "token_param": token_param},
+            )
+
+        _bind_session_agent(ctx, project, agent)
+        return agent
+
+    async def _resolve_authenticated_agent(
+        ctx: Context,
+        project: Project,
+        *,
+        agent_name: Optional[str],
+        provided_token: Optional[str],
+        token_param: str,
+        action: str,
+    ) -> Agent:
+        if agent_name:
+            return await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                provided_token,
+                token_param=token_param,
+                action=action,
+            )
+
+        agent = await _resolve_session_agent_for_project(ctx, project)
+        if agent is not None:
+            return agent
+
+        raise ToolExecutionError(
+            "AUTHENTICATION_REQUIRED",
+            (
+                f"{action} requires an authenticated agent for project '{project.human_key}'. "
+                "Provide agent_name plus registration_token (or agent_token for resources), or authenticate in this session first."
+            ),
+            recoverable=True,
+            data={"project_key": project.human_key, "token_param": token_param},
+        )
+
+    async def _authenticate_project_admin(
+        ctx: Context,
+        project: Project,
+        provided_token: Optional[str],
+        *,
+        action: str,
+    ) -> Agent:
+        agent = await _resolve_session_agent_for_project(ctx, project)
+        if agent is not None:
+            return agent
+
+        if project.id is None:
+            raise ValueError("Project must have an id before authenticating project-scoped actions.")
+
+        async with get_session() as session:
+            agents_result = await session.execute(
+                select(Agent).where(
+                    cast(Any, Agent.project_id) == project.id,
+                    cast(Any, Agent.registration_token).isnot(None),
+                )
+            )
+            token_agents = agents_result.scalars().all()
+
+        if not token_agents:
+            raise ToolExecutionError(
+                "AUTHENTICATION_REQUIRED",
+                (
+                    f"{action} requires a project registration token, but project '{project.human_key}' has no "
+                    "token-bearing agents. Register or create an agent identity first."
+                ),
+                recoverable=True,
+                data={"project_key": project.human_key, "action": action},
+            )
+        if not provided_token:
+            raise ToolExecutionError(
+                "AUTHENTICATION_REQUIRED",
+                f"{action} requires registration_token matching a registered agent in project '{project.human_key}'.",
+                recoverable=True,
+                data={"project_key": project.human_key, "token_param": "registration_token"},
+            )
+
+        for token_agent in token_agents:
+            if token_agent.registration_token and hmac.compare_digest(provided_token, token_agent.registration_token):
+                _bind_session_agent(ctx, project, token_agent)
+                return token_agent
+
+        raise ToolExecutionError(
+            "AUTHENTICATION_REQUIRED",
+            f"Invalid registration_token for project '{project.human_key}'.",
+            recoverable=True,
+            data={"project_key": project.human_key, "token_param": "registration_token"},
+        )
+
+    async def _authenticate_product_agents(
+        ctx: Context,
+        product_key: str,
+        *,
+        agent_name: Optional[str],
+        provided_token: Optional[str],
+        token_param: str,
+        action: str,
+    ) -> tuple[Product, list[Project], list[tuple[Project, Agent]]]:
+        await ensure_schema()
+        async with get_session() as session:
+            product = await _get_product_by_key(session, product_key.strip())
+            if product is None:
+                raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
+            project_rows = await session.execute(
+                select(Project)
+                .join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id)
+                .where(cast(Any, ProductProjectLink.product_id) == cast(Any, product.id))
+            )
+            projects = list(project_rows.scalars().all())
+
+        authorized: list[tuple[Project, Agent]] = []
+        for project in projects:
+            if agent_name:
+                agent = await _find_agent_optional(project, agent_name)
+                if agent is None:
+                    continue
+                if _session_is_bound_to_agent(ctx, project, agent):
+                    _bind_session_agent(ctx, project, agent)
+                    authorized.append((project, agent))
+                    continue
+                stored_token = (agent.registration_token or "").strip()
+                if stored_token and provided_token and hmac.compare_digest(provided_token, stored_token):
+                    _bind_session_agent(ctx, project, agent)
+                    authorized.append((project, agent))
+                    continue
+            else:
+                session_agent = await _resolve_session_agent_for_project(ctx, project)
+                if session_agent is not None:
+                    authorized.append((project, session_agent))
+
+        if authorized:
+            return product, projects, authorized
+
+        raise ToolExecutionError(
+            "AUTHENTICATION_REQUIRED",
+            (
+                f"{action} requires an authenticated agent on at least one project linked to product '{product_key}'. "
+                "Provide agent_name plus registration_token, or authenticate an agent in this MCP session first."
+            ),
+            recoverable=True,
+            data={"product_key": product_key, "agent_name": agent_name, "token_param": token_param},
+        )
 
     async def _deliver_message(
         ctx: Context,
@@ -4741,6 +5049,7 @@ def build_mcp_server() -> FastMCP:
         name: Optional[str] = None,
         task_description: str = "",
         attachments_policy: str = "auto",
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -4826,6 +5135,17 @@ def build_mcp_server() -> FastMCP:
         ap = (attachments_policy or "auto").lower()
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
+        if name:
+            existing_agent = await _find_agent_optional(project, name)
+            if existing_agent is not None:
+                await _authenticate_agent(
+                    ctx,
+                    project,
+                    existing_agent.name,
+                    registration_token,
+                    token_param="registration_token",
+                    action="register_agent for an existing identity",
+                )
         agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
         # Persist attachment policy if changed
         if getattr(agent, "attachments_policy", None) != ap:
@@ -4837,16 +5157,8 @@ def build_mcp_server() -> FastMCP:
                     await session.commit()
                     await session.refresh(db_agent)
                     agent = db_agent
-        # Generate and persist a registration token for sender verification
-        token = secrets.token_urlsafe(32)
-        async with get_session() as session:
-            db_agent = await session.get(Agent, agent.id)
-            if db_agent:
-                db_agent.registration_token = token
-                session.add(db_agent)
-                await session.commit()
-                await session.refresh(db_agent)
-                agent = db_agent
+        agent, token = await _ensure_agent_registration_token(agent)
+        _bind_session_agent(ctx, project, agent)
         await ctx.info(f"Registered agent '{agent.name}' for project '{project.human_key}'.")
         result = _agent_to_dict(agent)
         result["registration_token"] = token
@@ -4878,13 +5190,14 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        agent = await _get_agent(project, agent_name)
-        if not agent:
-            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
-
-        # Verify registration token if the agent has one (constant-time compare)
-        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
-            raise ValueError("Invalid registration_token — only the agent's owner can deregister it")
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="deregister_agent",
+        )
 
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
@@ -4918,13 +5231,14 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        agent = await _get_agent(project, agent_name)
-        if not agent:
-            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
-
-        # Verify registration token if the agent has one
-        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
-            raise ValueError("Invalid registration_token — only the agent's owner can retire it")
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="retire_agent",
+        )
 
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
@@ -4956,12 +5270,14 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        agent = await _get_agent(project, agent_name)
-        if not agent:
-            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
-
-        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
-            raise ValueError("Invalid registration_token — only the agent's owner can unretire it")
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="unretire_agent",
+        )
 
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
@@ -4993,20 +5309,12 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        # Verify caller owns at least one agent in this project
-        async with get_session() as session:
-            agents_result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id, cast(Any, Agent.registration_token).isnot(None))
-            )
-            token_agents = agents_result.scalars().all()
-            if token_agents and (
-                not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                )
-            ):
-                raise ValueError("Invalid registration_token — must match a registered agent in the project")
+        await _authenticate_project_admin(
+            ctx,
+            project,
+            registration_token,
+            action="archive_project",
+        )
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5037,20 +5345,12 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        # Verify caller owns at least one agent in this project
-        async with get_session() as session:
-            agents_result = await session.execute(
-                select(Agent).where(Agent.project_id == project.id, cast(Any, Agent.registration_token).isnot(None))
-            )
-            token_agents = agents_result.scalars().all()
-            if token_agents and (
-                not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                )
-            ):
-                raise ValueError("Invalid registration_token — must match a registered agent in the project")
+        await _authenticate_project_admin(
+            ctx,
+            project,
+            registration_token,
+            action="unarchive_project",
+        )
 
         async with get_session() as session:
             db_project = await session.get(Project, project.id)
@@ -5100,13 +5400,14 @@ def build_mcp_server() -> FastMCP:
         if not project:
             raise ValueError(f"Project '{project_key}' not found")
 
-        agent = await _get_agent(project, agent_name)
-        if not agent:
-            raise ValueError(f"Agent '{agent_name}' not found in project '{project_key}'")
-
-        # Verify registration token if the agent has one
-        if agent.registration_token and not hmac.compare_digest(registration_token or "", agent.registration_token):
-            raise ValueError("Invalid registration_token — only the agent's owner can hard-delete it")
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="hard_delete_agent",
+        )
 
         agent_id = agent.id
         project_id = project.id
@@ -5272,23 +5573,12 @@ def build_mcp_server() -> FastMCP:
         project_slug = project.slug
         project_human_key = project.human_key
 
-        # Verify caller owns at least one agent in this project (same pattern as archive_project)
-        async with get_session() as session:
-            agents_result = await session.execute(
-                select(Agent).where(
-                    cast(Any, Agent.project_id) == project_id,
-                    cast(Any, Agent.registration_token).isnot(None),
-                )
-            )
-            token_agents = agents_result.scalars().all()
-            if token_agents and (
-                not registration_token or not any(
-                    hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
-                )
-            ):
-                raise ValueError("Invalid registration_token — must match a registered agent in the project")
+        await _authenticate_project_admin(
+            ctx,
+            project,
+            registration_token,
+            action="hard_delete_project",
+        )
 
         deleted_counts: dict[str, int] = {}
 
@@ -5456,6 +5746,7 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         project_key: str,
         agent_name: str,
+        registration_token: Optional[str] = None,
         include_recent_commits: bool = True,
         commit_limit: int = 5,
         format: Optional[str] = None,
@@ -5485,7 +5776,14 @@ def build_mcp_server() -> FastMCP:
             Agent profile augmented with { recent_commits: [{hexsha, summary, authored_ts}] } when requested.
         """
         project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="whois",
+        )
         profile = _agent_to_dict(agent)
         recent: list[dict[str, Any]] = []
         if include_recent_commits:
@@ -5571,17 +5869,16 @@ def build_mcp_server() -> FastMCP:
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
         agent = await _create_agent_record(project, unique_name, program, model, task_description)
-        # Update attachments policy and generate registration token
-        token = secrets.token_urlsafe(32)
+        # Update attachments policy and ensure a registration token exists
         async with get_session() as session:
             db_agent = await session.get(Agent, agent.id)
             if db_agent:
                 db_agent.attachments_policy = ap
-                db_agent.registration_token = token
                 session.add(db_agent)
                 await session.commit()
                 await session.refresh(db_agent)
                 agent = db_agent
+        agent, token = await _ensure_agent_registration_token(agent)
         archive = await ensure_archive(settings, project.slug)
         try:
             async with _archive_write_lock(archive):
@@ -5596,6 +5893,7 @@ def build_mcp_server() -> FastMCP:
                         await rollback_session.delete(db_agent)
                         await rollback_session.commit()
             raise
+        _bind_session_agent(ctx, project, agent)
         await ctx.info(f"Created new agent identity '{agent.name}' for project '{project.human_key}'.")
         result = _agent_to_dict(agent)
         result["registration_token"] = token
@@ -6080,14 +6378,15 @@ def build_mcp_server() -> FastMCP:
                 c.print(Panel(body, title=title, border_style="green"))
             except Exception:
                 logger.debug("Failed to log send_message call with rich console", exc_info=True)
-        sender = await _get_agent(project, sender_name)
-        # Verify sender identity token if provided
-        verified_sender = False
-        if sender_token is not None:
-            if sender.registration_token and hmac.compare_digest(sender_token, sender.registration_token):
-                verified_sender = True
-            elif sender.registration_token:
-                raise ValueError(f"sender_token does not match registered token for agent '{sender_name}'")
+        sender = await _authenticate_agent(
+            ctx,
+            project,
+            sender_name,
+            sender_token,
+            token_param="sender_token",
+            action="send_message",
+        )
+        verified_sender = True
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
         if settings_local.contact_enforcement_enabled:
@@ -6108,7 +6407,11 @@ def build_mcp_server() -> FastMCP:
                         stmt = (
                             select(Message, sender_alias.name)
                             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                            .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
+                            .where(
+                                cast(Any, Message.project_id) == project.id,
+                                or_(*criteria),
+                                _message_visible_to_agent_clause(sender.id or 0),
+                            )
                             .limit(500)
                         )
                         thread_rows = [(row[0], row[1]) for row in (await s.execute(stmt)).all()]
@@ -6871,6 +7174,7 @@ def build_mcp_server() -> FastMCP:
         cc: Optional[list[str]] = None,
         bcc: Optional[list[str]] = None,
         subject_prefix: str = "Re:",
+        sender_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -6935,9 +7239,16 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
-        sender = await _get_agent(project, sender_name)
+        sender = await _authenticate_agent(
+            ctx,
+            project,
+            sender_name,
+            sender_token,
+            token_param="sender_token",
+            action="reply_message",
+        )
         settings_local = get_settings()
-        original = await _get_message(project, message_id)
+        original = await _get_visible_message(project, sender, message_id)
         original_sender = await _get_agent_by_id(project, original.sender_id)
         thread_key = original.thread_id or str(original.id)
         subject_prefix_clean = subject_prefix.strip()
@@ -7125,6 +7436,7 @@ def build_mcp_server() -> FastMCP:
         to_project: Optional[str] = None,
         reason: str = "",
         ttl_seconds: int = 7 * 24 * 3600,
+        registration_token: Optional[str] = None,
         # Optional quality-of-life flags; ignored by clients that don't pass them
         register_if_missing: bool = True,
         program: Optional[str] = None,
@@ -7158,7 +7470,14 @@ def build_mcp_server() -> FastMCP:
         """
         project = await _get_project_by_identifier(project_key)
         settings = get_settings()
-        a = await _get_agent(project, from_agent)
+        a = await _authenticate_agent(
+            ctx,
+            project,
+            from_agent,
+            registration_token,
+            token_param="registration_token",
+            action="request_contact",
+        )
         # Allow explicit external addressing in to_agent as project:<slug>#<Name>
         target_project = project
         target_name = to_agent
@@ -7297,6 +7616,7 @@ def build_mcp_server() -> FastMCP:
         accept: bool,
         ttl_seconds: int = 30 * 24 * 3600,
         from_project: Optional[str] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Approve or deny a contact request."""
@@ -7304,7 +7624,14 @@ def build_mcp_server() -> FastMCP:
         # Resolve remote requestor project if provided
         a_project = project if not from_project else await _get_project_by_identifier(from_project)
         a = await _get_agent(a_project, from_agent)
-        b = await _get_agent(project, to_agent)
+        b = await _authenticate_agent(
+            ctx,
+            project,
+            to_agent,
+            registration_token,
+            token_param="registration_token",
+            action="respond_contact",
+        )
         # Warn on TTL auto-correction
         if accept and ttl_seconds < 60:
             await ctx.info(
@@ -7362,11 +7689,19 @@ def build_mcp_server() -> FastMCP:
         ctx: Context,
         project_key: str,
         agent_name: str,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """List contact links for an agent in a project."""
         project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="list_contacts",
+        )
         out: list[dict[str, Any]] = []
         async with get_session() as s:
             rows = await s.execute(
@@ -7397,11 +7732,19 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         policy: str,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """Set contact policy for an agent: open | auto | contacts_only | block_all."""
         project = await _get_project_by_identifier(project_key)
-        agent = await _get_agent(project, agent_name)
+        agent = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="set_contact_policy",
+        )
         pol = (policy or "auto").lower()
         if pol not in {"open", "auto", "contacts_only", "block_all"}:
             pol = "auto"
@@ -7430,6 +7773,7 @@ def build_mcp_server() -> FastMCP:
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
         topic: Optional[str] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
@@ -7490,7 +7834,14 @@ def build_mcp_server() -> FastMCP:
                 pass
         try:
             project = await _get_project_by_identifier(project_key)
-            agent = await _get_agent(project, agent_name)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="fetch_inbox",
+            )
             items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts, topic=topic)
             if settings.notifications.enabled:
                 with suppress(Exception):
@@ -7515,6 +7866,8 @@ def build_mcp_server() -> FastMCP:
         limit: int = 50,
         include_bodies: bool = True,
         since_ts: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
@@ -7540,6 +7893,14 @@ def build_mcp_server() -> FastMCP:
         """
         _validate_iso_timestamp(since_ts, "since_ts")
         project = await _get_project_by_identifier(project_key)
+        viewer = await _resolve_authenticated_agent(
+            ctx,
+            project,
+            agent_name=agent_name,
+            provided_token=registration_token,
+            token_param="registration_token",
+            action="fetch_topic",
+        )
         if not topic_name or not topic_name.strip():
             raise ToolExecutionError(
                 "INVALID_ARGUMENT",
@@ -7560,6 +7921,7 @@ def build_mcp_server() -> FastMCP:
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, func.lower(Message.topic)) == topic_name.strip().lower(),
+                    _message_visible_to_agent_clause(viewer.id or 0),
                 )
                 .order_by(desc(Message.created_ts))
                 .limit(limit)
@@ -7591,6 +7953,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         message_id: int,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -7632,8 +7995,15 @@ def build_mcp_server() -> FastMCP:
                 pass
         try:
             project = await _get_project_by_identifier(project_key)
-            agent = await _get_agent(project, agent_name)
-            await _get_message(project, message_id)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="mark_message_read",
+            )
+            await _get_visible_message(project, agent, message_id)
             read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
             await ctx.info(f"Marked message {message_id} read for '{agent.name}'.")
             return {"message_id": message_id, "read": bool(read_ts), "read_at": _iso(read_ts) if read_ts else None}
@@ -7661,6 +8031,7 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         agent_name: str,
         message_id: int,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -7705,8 +8076,15 @@ def build_mcp_server() -> FastMCP:
                 pass
         try:
             project = await _get_project_by_identifier(project_key)
-            agent = await _get_agent(project, agent_name)
-            await _get_message(project, message_id)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="acknowledge_message",
+            )
+            await _get_visible_message(project, agent, message_id)
             read_ts = await _update_recipient_timestamp(agent, message_id, "read_ts")
             ack_ts = await _update_recipient_timestamp(agent, message_id, "ack_ts")
             await ctx.info(f"Acknowledged message {message_id} for '{agent.name}'.")
@@ -7744,6 +8122,7 @@ def build_mcp_server() -> FastMCP:
         model: str,
         task_description: str = "",
         agent_name: Optional[str] = None,
+        registration_token: Optional[str] = None,
         file_reservation_paths: Optional[list[str]] = None,
         file_reservation_reason: str = "macro-session",
         file_reservation_ttl_seconds: int = 3600,
@@ -7757,7 +8136,20 @@ def build_mcp_server() -> FastMCP:
         _validate_program_model(program, model)
         settings = get_settings()
         project = await _ensure_project(human_key)
+        if agent_name:
+            existing_agent = await _find_agent_optional(project, agent_name)
+            if existing_agent is not None:
+                await _authenticate_agent(
+                    ctx,
+                    project,
+                    existing_agent.name,
+                    registration_token,
+                    token_param="registration_token",
+                    action="macro_start_session for an existing identity",
+                )
         agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
+        agent, token = await _ensure_agent_registration_token(agent)
+        _bind_session_agent(ctx, project, agent)
 
         file_reservations_result: Optional[dict[str, Any]] = None
         if file_reservation_paths:
@@ -7795,6 +8187,7 @@ def build_mcp_server() -> FastMCP:
         return {
             "project": _project_to_dict(project),
             "agent": _agent_to_dict(agent),
+            "registration_token": token,
             "file_reservations": file_reservations_result or {"granted": [], "conflicts": []},
             "inbox": inbox_items,
         }
@@ -7814,6 +8207,7 @@ def build_mcp_server() -> FastMCP:
         program: str,
         model: str,
         agent_name: Optional[str] = None,
+        registration_token: Optional[str] = None,
         task_description: str = "",
         register_if_missing: bool = True,
         include_examples: bool = True,
@@ -7831,11 +8225,31 @@ def build_mcp_server() -> FastMCP:
         project = await _get_project_by_identifier(project_key)
         if register_if_missing:
             _validate_program_model(program, model)
+            if agent_name:
+                existing_agent = await _find_agent_optional(project, agent_name)
+                if existing_agent is not None:
+                    await _authenticate_agent(
+                        ctx,
+                        project,
+                        existing_agent.name,
+                        registration_token,
+                        token_param="registration_token",
+                        action="macro_prepare_thread for an existing identity",
+                    )
             agent = await _get_or_create_agent(project, agent_name, program, model, task_description, settings)
         else:
             if not agent_name:
                 raise ValueError("agent_name is required when register_if_missing is False.")
-            agent = await _get_agent(project, agent_name)
+            agent = await _authenticate_agent(
+                ctx,
+                project,
+                agent_name,
+                registration_token,
+                token_param="registration_token",
+                action="macro_prepare_thread",
+            )
+        agent, token = await _ensure_agent_registration_token(agent)
+        _bind_session_agent(ctx, project, agent)
 
         inbox_items = await _list_inbox(
             project,
@@ -7851,6 +8265,7 @@ def build_mcp_server() -> FastMCP:
             include_examples,
             llm_mode,
             llm_model,
+            viewer_agent=agent,
         )
         await ctx.info(
             f"macro_prepare_thread prepared agent '{agent.name}' for thread '{thread_id}' "
@@ -7859,6 +8274,7 @@ def build_mcp_server() -> FastMCP:
         return {
             "project": _project_to_dict(project),
             "agent": _agent_to_dict(agent),
+            "registration_token": token,
             "thread": {"thread_id": thread_id, "summary": summary, "examples": examples, "total_messages": total_messages},
             "inbox": inbox_items,
         }
@@ -7945,6 +8361,8 @@ def build_mcp_server() -> FastMCP:
         welcome_subject: Optional[str] = None,
         welcome_body: Optional[str] = None,
         to_project: Optional[str] = None,
+        requester_registration_token: Optional[str] = None,
+        target_registration_token: Optional[str] = None,
         # Aliases for compatibility
         agent_name: Optional[str] = None,
         to_agent: Optional[str] = None,
@@ -8010,9 +8428,23 @@ def build_mcp_server() -> FastMCP:
         # approve the AgentLink directly without generating extra "intro" messages.
         if auto_accept and not target_project_key and not (welcome_subject and welcome_body):
             project = await _get_project_by_identifier(project_key)
-            a = await _get_agent(project, real_requester)
+            a = await _authenticate_agent(
+                ctx,
+                project,
+                real_requester,
+                requester_registration_token,
+                token_param="requester_registration_token",
+                action="macro_contact_handshake requester approval",
+            )
             try:
-                b = await _get_agent(project, real_target)
+                b = await _authenticate_agent(
+                    ctx,
+                    project,
+                    real_target,
+                    target_registration_token,
+                    token_param="target_registration_token",
+                    action="macro_contact_handshake target approval",
+                )
             except (NoResultFound, ToolExecutionError) as exc:
                 is_not_found = isinstance(exc, NoResultFound) or (
                     isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
@@ -8112,6 +8544,8 @@ def build_mcp_server() -> FastMCP:
             "ttl_seconds": ttl_seconds,
             "format": "json",
         }
+        if requester_registration_token:
+            request_payload["registration_token"] = requester_registration_token
         if target_project_key:
             request_payload["to_project"] = target_project_key
         if register_if_missing:
@@ -8137,6 +8571,8 @@ def build_mcp_server() -> FastMCP:
                 "ttl_seconds": ttl_seconds,
                 "format": "json",
             }
+            if target_registration_token:
+                respond_payload["registration_token"] = target_registration_token
             if target_project_key:
                 respond_payload["from_project"] = project_key
             respond_tool_result = await respond_tool.run(respond_payload)
@@ -8155,6 +8591,7 @@ def build_mcp_server() -> FastMCP:
                         "subject": welcome_subject,
                         "body_md": welcome_body,
                         "thread_id": thread_id,
+                        "sender_token": requester_registration_token,
                         "format": "json",
                     }
                 )
@@ -8176,6 +8613,8 @@ def build_mcp_server() -> FastMCP:
         project_key: str,
         query: str,
         limit: int = 20,
+        agent_name: Optional[str] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> Any:
         """
@@ -8217,6 +8656,14 @@ def build_mcp_server() -> FastMCP:
         ```
         """
         project = await _get_project_by_identifier(project_key)
+        viewer = await _resolve_authenticated_agent(
+            ctx,
+            project,
+            agent_name=agent_name,
+            provided_token=registration_token,
+            token_param="registration_token",
+            action="search_messages",
+        )
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
@@ -8262,12 +8709,22 @@ def build_mcp_server() -> FastMCP:
                         FROM fts_messages
                         JOIN messages m ON fts_messages.rowid = m.id
                         JOIN agents a ON m.sender_id = a.id
-                        WHERE m.project_id = :project_id AND fts_messages MATCH :query
+                        WHERE m.project_id = :project_id
+                          AND (
+                                m.sender_id = :agent_id
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM message_recipients mr
+                                    WHERE mr.message_id = m.id
+                                      AND mr.agent_id = :agent_id
+                                )
+                          )
+                          AND fts_messages MATCH :query
                         ORDER BY bm25(fts_messages) ASC
                         LIMIT :limit
                         """
                     ),
-                    {"project_id": project.id, "query": sanitized_query, "limit": limit},
+                    {"project_id": project.id, "agent_id": viewer.id, "query": sanitized_query, "limit": limit},
                 )
                 rows = list(result.mappings().all())
         except Exception as fts_err:
@@ -8284,7 +8741,7 @@ def build_mcp_server() -> FastMCP:
                 rows = []
             else:
                 clauses = []
-                params: dict[str, Any] = {"project_id": project.id, "limit": limit}
+                params: dict[str, Any] = {"project_id": project.id, "agent_id": viewer.id, "limit": limit}
                 for idx, term in enumerate(fallback_terms):
                     key = f"t{idx}"
                     params[key] = f"%{_like_escape(term)}%"
@@ -8300,7 +8757,17 @@ def build_mcp_server() -> FastMCP:
                                    m.thread_id, a.name AS sender_name
                             FROM messages m
                             JOIN agents a ON m.sender_id = a.id
-                            WHERE m.project_id = :project_id AND {where_clause}
+                            WHERE m.project_id = :project_id
+                              AND (
+                                    m.sender_id = :agent_id
+                                    OR EXISTS (
+                                        SELECT 1
+                                        FROM message_recipients mr
+                                        WHERE mr.message_id = m.id
+                                          AND mr.agent_id = :agent_id
+                                    )
+                              )
+                              AND {where_clause}
                             ORDER BY m.created_ts DESC
                             LIMIT :limit
                             """
@@ -8351,6 +8818,8 @@ def build_mcp_server() -> FastMCP:
         llm_mode: bool = True,
         llm_model: Optional[str] = None,
         per_thread_limit: int = 50,
+        agent_name: Optional[str] = None,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -8393,16 +8862,25 @@ def build_mcp_server() -> FastMCP:
         """
         # Detect multi-thread mode by checking for comma-separated IDs
         thread_ids = [t.strip() for t in thread_id.split(",") if t.strip()]
+        project = await _get_project_by_identifier(project_key)
+        viewer = await _resolve_authenticated_agent(
+            ctx,
+            project,
+            agent_name=agent_name,
+            provided_token=registration_token,
+            token_param="registration_token",
+            action="summarize_thread",
+        )
 
         if len(thread_ids) == 1:
             # Single-thread mode: detailed summary with examples
-            project = await _get_project_by_identifier(project_key)
             summary, examples, total_messages = await _compute_thread_summary(
                 project,
                 thread_ids[0],
                 include_examples,
                 llm_mode,
                 llm_model,
+                viewer_agent=viewer,
             )
             await ctx.info(
                 f"Summarized thread '{thread_ids[0]}' for project '{project.human_key}' with {total_messages} messages"
@@ -8410,7 +8888,6 @@ def build_mcp_server() -> FastMCP:
             return {"thread_id": thread_ids[0], "summary": summary, "examples": examples}
 
         # Multi-thread mode: aggregate digest
-        project = await _get_project_by_identifier(project_key)
         if project.id is None:
             raise ValueError("Project must have an id before summarizing threads.")
         await ensure_schema()
@@ -8433,7 +8910,11 @@ def build_mcp_server() -> FastMCP:
                 stmt = (
                     select(Message, sender_alias.name)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                    .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
+                    .where(
+                        cast(Any, Message.project_id) == project.id,
+                        or_(*criteria),
+                        _message_visible_to_agent_clause(viewer.id or 0),
+                    )
                     .order_by(asc(cast(Any, Message.created_ts)))
                     .limit(per_thread_limit)
                 )
