@@ -371,6 +371,116 @@ async def test_send_message_cross_project_auto_contact_preserves_recipient_kind(
 
 
 @pytest.mark.asyncio
+async def test_reply_message_enforces_local_contact_policy_for_new_recipient(isolated_env):
+    """reply_message should not bypass local contacts_only policy for a newly added recipient."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/security/reply-contact-policy"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-contact-policy", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-contact-policy", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-contact-policy", "program": "codex", "model": "gpt-5", "name": "PurpleBear"},
+        )
+        await client.call_tool(
+            "set_contact_policy",
+            {"project_key": "/security/reply-contact-policy", "agent_name": "PurpleBear", "policy": "contacts_only"},
+        )
+
+        seed = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "/security/reply-contact-policy",
+                "sender_name": "BlueLake",
+                "to": ["GreenCastle"],
+                "subject": "Seed",
+                "body_md": "start thread",
+            },
+        )
+        seed_id = (seed.data.get("deliveries") or [])[0]["payload"]["id"]
+
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "reply_message",
+                {
+                    "project_key": "/security/reply-contact-policy",
+                    "message_id": seed_id,
+                    "sender_name": "GreenCastle",
+                    "to": ["PurpleBear"],
+                    "body_md": "looping in a new recipient",
+                },
+            )
+        assert "Contact approval required for recipients: PurpleBear" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_reply_message_supports_agent_at_project_external_address(isolated_env):
+    """reply_message should route approved cross-project recipients addressed as Agent@project."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/security/reply-xproj-backend"})
+        await client.call_tool("ensure_project", {"human_key": "/security/reply-xproj-ops"})
+        green = await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-xproj-backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-xproj-backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        ops = await client.call_tool(
+            "register_agent",
+            {"project_key": "/security/reply-xproj-ops", "program": "codex", "model": "gpt-5", "name": "OpsBot"},
+        )
+        green_token = green.data["registration_token"]
+        ops_token = ops.data["registration_token"]
+        ops_name = ops.data["name"]
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": "/security/reply-xproj-backend",
+                "requester": "GreenCastle",
+                "target": ops_name,
+                "to_project": "/security/reply-xproj-ops",
+                "auto_accept": True,
+                "requester_registration_token": green_token,
+                "target_registration_token": ops_token,
+            },
+        )
+
+        seed = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "/security/reply-xproj-backend",
+                "sender_name": "BlueLake",
+                "to": ["GreenCastle"],
+                "subject": "Seed",
+                "body_md": "start thread",
+            },
+        )
+        seed_id = (seed.data.get("deliveries") or [])[0]["payload"]["id"]
+
+        reply = await client.call_tool(
+            "reply_message",
+            {
+                "project_key": "/security/reply-xproj-backend",
+                "message_id": seed_id,
+                "sender_name": "GreenCastle",
+                "to": [f"{ops_name}@/security/reply-xproj-ops"],
+                "body_md": "routing externally from a reply",
+            },
+        )
+        assert any(delivery["project"] == "/security/reply-xproj-ops" for delivery in reply.data["deliveries"])
+
+
+@pytest.mark.asyncio
 async def test_search_and_summarize_thread_respect_recipient_visibility(isolated_env):
     """Only senders/recipients, including BCC, can discover a private thread."""
     server = build_mcp_server()
