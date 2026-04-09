@@ -378,6 +378,16 @@ class TestLockHealing:
 class TestAsyncFileLock:
     """Tests for AsyncFileLock behavior."""
 
+    def test_file_lock_destructor_tolerates_shutdown_globals(self, tmp_path, monkeypatch):
+        """__del__ should not crash if module globals are gone during interpreter shutdown."""
+        from mcp_agent_mail import storage as storage_module
+
+        lock = AsyncFileLock(tmp_path / "shutdown.lock")
+        monkeypatch.setattr(storage_module, "_LOCK_INSTANCES_GUARD", None)
+        monkeypatch.setattr(storage_module, "_ACTIVE_LOCK_INSTANCES", None)
+
+        lock.__del__()
+
     @pytest.mark.asyncio
     async def test_file_lock_writes_metadata(self, isolated_env):
         """AsyncFileLock writes owner metadata."""

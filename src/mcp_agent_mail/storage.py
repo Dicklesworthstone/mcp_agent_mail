@@ -730,8 +730,15 @@ class AsyncFileLock:
             _ACTIVE_LOCK_INSTANCES[id(self)] = self
 
     def __del__(self) -> None:
-        with _LOCK_INSTANCES_GUARD:
-            _ACTIVE_LOCK_INSTANCES.pop(id(self), None)
+        lock_instances_guard = globals().get("_LOCK_INSTANCES_GUARD")
+        active_lock_instances = globals().get("_ACTIVE_LOCK_INSTANCES")
+        if lock_instances_guard is None or active_lock_instances is None:
+            return
+        try:
+            with lock_instances_guard:
+                active_lock_instances.pop(id(self), None)
+        except Exception:
+            return
 
     def _force_close_fd(self) -> bool:
         """Force-close the underlying SoftFileLock file descriptor if still open.
