@@ -19,6 +19,7 @@ import shlex
 import shutil
 import subprocess
 import time
+import weakref
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -4434,8 +4435,8 @@ def build_mcp_server() -> FastMCP:
     )
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
-    session_agent_bindings: defaultdict[str, set[tuple[int, int]]] = defaultdict(set)
-    session_current_agents: defaultdict[str, dict[int, int]] = defaultdict(dict)
+    session_agent_bindings: weakref.WeakKeyDictionary[Any, set[tuple[int, int]]] = weakref.WeakKeyDictionary()
+    session_current_agents: weakref.WeakKeyDictionary[Any, dict[int, int]] = weakref.WeakKeyDictionary()
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -4449,16 +4450,33 @@ def build_mcp_server() -> FastMCP:
             raise ValueError("Project and agent must have ids before binding MCP sessions.")
         return project.id, agent.id
 
+    def _session_bindings_for(ctx: Context) -> set[tuple[int, int]]:
+        session = ctx.session
+        bindings = session_agent_bindings.get(session)
+        if bindings is None:
+            bindings = set()
+            session_agent_bindings[session] = bindings
+        return bindings
+
+    def _session_current_agents_for(ctx: Context) -> dict[int, int]:
+        session = ctx.session
+        current_agents = session_current_agents.get(session)
+        if current_agents is None:
+            current_agents = {}
+            session_current_agents[session] = current_agents
+        return current_agents
+
     def _bind_session_agent(ctx: Context, project: Project, agent: Agent) -> None:
         project_id, agent_id = _project_agent_key(project, agent)
-        session_id = ctx.session_id
-        session_agent_bindings[session_id].add((project_id, agent_id))
-        session_current_agents[session_id][project_id] = agent_id
+        bindings = _session_bindings_for(ctx)
+        current_agents = _session_current_agents_for(ctx)
+        bindings.add((project_id, agent_id))
+        current_agents[project_id] = agent_id
 
     def _session_is_bound_to_agent(ctx: Context, project: Project, agent: Agent) -> bool:
         if project.id is None or agent.id is None:
             return False
-        return (project.id, agent.id) in session_agent_bindings.get(ctx.session_id, set())
+        return (project.id, agent.id) in _session_bindings_for(ctx)
 
     async def _resolve_session_agent_for_project(
         ctx: Context,
@@ -4466,15 +4484,14 @@ def build_mcp_server() -> FastMCP:
     ) -> Agent | None:
         if project.id is None:
             return None
-        session_id = ctx.session_id
-        current_agent_id = session_current_agents.get(session_id, {}).get(project.id)
+        current_agent_id = _session_current_agents_for(ctx).get(project.id)
         if current_agent_id is not None:
             with suppress(NoResultFound):
                 return await _get_agent_by_id(project, current_agent_id)
 
         bound_agent_ids = [
             agent_id
-            for bound_project_id, agent_id in session_agent_bindings.get(session_id, set())
+            for bound_project_id, agent_id in _session_bindings_for(ctx)
             if bound_project_id == project.id
         ]
         if len(bound_agent_ids) == 1:
@@ -6560,37 +6577,56 @@ def build_mcp_server() -> FastMCP:
 
             if blocked_recipients:
                 remedies = [
-                    "Call request_contact(project_key, from_agent, to_agent) to request approval",
-                    "Call macro_contact_handshake(project_key, requester, target, auto_accept=true) to automate",
+                    "Call request_contact(project_key, from_agent, to_agent, registration_token=...) to create a pending approval request",
+                    "Have the recipient approve it with respond_contact(project_key, to_agent, from_agent, accept=True, registration_token=...)",
+                    "Use macro_contact_handshake(..., auto_accept=True, requester_registration_token=..., target_registration_token=...) only when both agents can authenticate in the same MCP session",
                 ]
-                attempted: list[str] = []
+                auto_requested: list[str] = []
+                auto_approved: list[str] = []
                 # Respect explicit flag or server default ergonomics
                 effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                 if effective_auto_contact:
                     try:
                         from fastmcp.tools.tool import FunctionTool
-                        # Prefer a single handshake with auto_accept=true
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
-                        for nm in blocked_recipients:
-                            try:
-                                await handshake.run(
-                                    {
-                                        "ctx": ctx,
-                                        "project_key": project.human_key,
-                                        "requester": sender.name,
-                                        "target": nm,
-                                        "reason": "auto-handshake by send_message",
-                                        "auto_accept": True,
-                                        "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                        "format": "json",
-                                    }
-                                )
-                                attempted.append(nm)
-                            except Exception:
-                                logger.exception("Failed to run auto-handshake for recipient %r", nm)
 
-                        # If auto-retry is enabled and at least one handshake happened, re-evaluate recipients once
-                        if settings_local.contact_auto_retry_enabled and attempted:
+                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
+                        request_tool = cast(FunctionTool, cast(Any, request_contact))
+                        for nm in list(dict.fromkeys(blocked_recipients)):
+                            rec = recipient_agents.get(nm)
+                            if rec is None:
+                                continue
+                            try:
+                                if _session_is_bound_to_agent(ctx, project, rec):
+                                    await handshake.run(
+                                        {
+                                            "ctx": ctx,
+                                            "project_key": project.human_key,
+                                            "requester": sender.name,
+                                            "target": nm,
+                                            "reason": "in-session auto-approval by send_message",
+                                            "auto_accept": True,
+                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                            "format": "json",
+                                        }
+                                    )
+                                    auto_approved.append(nm)
+                                else:
+                                    await request_tool.run(
+                                        {
+                                            "ctx": ctx,
+                                            "project_key": project.human_key,
+                                            "from_agent": sender.name,
+                                            "to_agent": nm,
+                                            "reason": "auto contact request created by send_message",
+                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                            "format": "json",
+                                        }
+                                    )
+                                    auto_requested.append(nm)
+                            except Exception:
+                                logger.exception("Failed to auto-resolve contact for recipient %r", nm)
+
+                        if settings_local.contact_auto_retry_enabled and auto_approved:
                             blocked_recipients = []
                             # Re-fetch recipient agents in batch for re-evaluation
                             recipient_agents_retry = await _get_agents_batch_lenient(project, all_recipient_names)
@@ -6619,7 +6655,7 @@ def build_mcp_server() -> FastMCP:
                                     if link.first() is None:
                                         blocked_recipients.append(rec.name)
                     except Exception:
-                        logger.exception("Failed to run auto-handshakes or re-evaluate contacts after approval attempts")
+                        logger.exception("Failed to auto-resolve contacts or re-evaluate recipients after in-session approvals")
                 if blocked_recipients:
                     err_type: str = "CONTACT_REQUIRED"
                     blocked_sorted = sorted(set(blocked_recipients))
@@ -6631,42 +6667,37 @@ def build_mcp_server() -> FastMCP:
                     err_msg_parts = [
                         f"Contact approval required for recipients: {recipient_list}.",
                         (
-                            "Before retrying, request approval with "
+                            "Before retrying, create a pending request with "
                             f"`request_contact(project_key={project_expr}, from_agent={sender_expr}, "
-                            f"to_agent={target_expr})` or run "
-                            f"`macro_contact_handshake(project_key={project_expr}, requester={sender_expr}, "
-                            f"target={target_expr}, auto_accept=True)`."
+                            f"to_agent={target_expr})`, then have the recipient approve it with "
+                            f"`respond_contact(project_key={project_expr}, to_agent={target_expr}, "
+                            f"from_agent={sender_expr}, accept=True)`."
                         ),
                         "Alternatively, send your message inside a recent thread that already includes them by reusing its thread_id.",
                     ]
-                    if attempted:
+                    if auto_requested:
                         err_msg_parts.append(
-                            f"Automatic handshake attempts already ran for: {', '.join(attempted)}; wait for approval or retry the suggested calls explicitly."
+                            "Pending contact requests were created for: "
+                            + ", ".join(sorted(set(auto_requested)))
+                            + ". Wait for approval before retrying."
+                        )
+                    if auto_approved:
+                        err_msg_parts.append(
+                            "In-session auto-approvals already ran for: "
+                            + ", ".join(sorted(set(auto_approved)))
+                            + ". Any remaining blocked recipients still need explicit approval."
                         )
                     err_msg: str = " ".join(err_msg_parts)
                     err_data: dict[str, Any] = {
                         "recipients_blocked": sorted(set(blocked_recipients)),
                         "remedies": remedies,
-                        "auto_contact_attempted": attempted,
+                        "auto_contact_requested": sorted(set(auto_requested)),
+                        "auto_contact_auto_approved": sorted(set(auto_approved)),
                     }
                     # Provide actionable sample calls
                     try:
                         if blocked_recipients:
                             examples: list[dict[str, Any]] = []
-                            # Show a macro example for the first blocked recipient
-                            examples.append(
-                                {
-                                    "tool": "macro_contact_handshake",
-                                    "arguments": {
-                                        "project_key": project.human_key,
-                                        "requester": sender.name,
-                                        "target": blocked_recipients[0],
-                                        "auto_accept": True,
-                                        "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                    },
-                                }
-                            )
-                            # Also include direct request_contact examples
                             for nm in blocked_recipients[:3]:
                                 examples.append(
                                     {
@@ -6728,8 +6759,8 @@ def build_mcp_server() -> FastMCP:
                 canonical = sanitized or (trimmed if trimmed else None)
                 return trimmed or value, keys, canonical
 
-            unknown_local: set[str] = set()
-            unknown_external: dict[str, list[str]] = defaultdict(list)
+            unknown_local: dict[str, set[str]] = defaultdict(set)
+            unknown_external: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
 
             class _ContactBlocked(Exception):
                 pass
@@ -6754,7 +6785,7 @@ def build_mcp_server() -> FastMCP:
                         except Exception:
                             logger.debug("Failed to parse explicit external address: %s", candidate, exc_info=True)
                             label = slug_part.strip() if "slug_part" in locals() and slug_part.strip() else "(invalid project)"
-                            unknown_external[label].append(candidate.strip() or candidate)
+                            unknown_external[label][candidate.strip() or candidate].add(kind)
                             continue
 
                     # Alternate explicit format: <AgentName>@<project-identifier>
@@ -6769,16 +6800,16 @@ def build_mcp_server() -> FastMCP:
                             except Exception:
                                 logger.debug("Failed to resolve external project %r for %r", project_part.strip(), name_part, exc_info=True)
                                 label = project_part.strip() or "(invalid project)"
-                                unknown_external[label].append(candidate.strip() or candidate)
+                                unknown_external[label][candidate.strip() or candidate].add(kind)
                                 continue
 
                     display_value, key_candidates, canonical = _normalize(agent_fragment)
                     if not key_candidates or not canonical:
                         if explicit_override:
                             label = target_project_label or "(unknown project)"
-                            unknown_external[label].append(candidate.strip() or candidate)
+                            unknown_external[label][candidate.strip() or candidate].add(kind)
                         else:
-                            unknown_local.add(candidate.strip() or candidate)
+                            unknown_local[candidate.strip() or candidate].add(kind)
                         continue
 
                     # Always allow self-send (local context only)
@@ -6852,9 +6883,9 @@ def build_mcp_server() -> FastMCP:
 
                     if explicit_override:
                         label = target_project_label or "(unknown project)"
-                        unknown_external[label].append(display_value or candidate.strip() or candidate)
+                        unknown_external[label][display_value or candidate.strip() or candidate].add(kind)
                     else:
-                        unknown_local.add(display_value or candidate.strip() or candidate)
+                        unknown_local[display_value or candidate.strip() or candidate].add(kind)
 
             try:
                 await _route(to, "to")
@@ -6885,62 +6916,91 @@ def build_mcp_server() -> FastMCP:
                             newly_registered.add(missing)
                         except Exception:
                             logger.exception("Failed to auto-register recipient %r in project %r", missing, project.human_key)
-                    unknown_local.difference_update(newly_registered)
                     # Re-run routing for any that were registered
                     if newly_registered:
                         from contextlib import suppress
                         with suppress(_ContactBlocked):
-                            await _route(list(newly_registered), "to")
+                            for name in sorted(newly_registered):
+                                for route_kind in sorted(unknown_local.get(name, {"to"})):
+                                    await _route([name], route_kind)
+                                unknown_local.pop(name, None)
                 # Attempt cross-project handshakes for unknown external recipients if allowed
+                approved_external_routes: list[tuple[str, str]] = []
                 attempted_external: list[str] = []
+                requested_external: list[str] = []
                 try:
                     effective_auto_contact = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
                     if effective_auto_contact and unknown_external:
                         from fastmcp.tools.tool import FunctionTool
                         handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
+                        request_tool = cast(FunctionTool, cast(Any, request_contact))
                         # Iterate over a copy since we may mutate/resolve entries
-                        for label, names in list(unknown_external.items()):
+                        for label, pending_names in list(unknown_external.items()):
                             try:
                                 target_proj = await _get_project_by_identifier(label)
                             except Exception:
                                 logger.debug("Failed to resolve external project %r for handshake", label, exc_info=True)
                                 continue
-                            for nm in list(names):
+                            target_project_ref = target_proj.human_key or target_proj.slug or label
+                            for nm, route_kinds in list(pending_names.items()):
+                                display_target = f"{nm}@{target_project_ref}"
                                 try:
-                                    await handshake.run(
-                                        {
-                                            "ctx": ctx,
-                                            "project_key": project.human_key,
-                                            "requester": sender.name,
-                                            "target": nm,
-                                            "to_project": target_proj.human_key or target_proj.slug,
-                                            "reason": "auto-handshake by send_message",
-                                            "auto_accept": True,
-                                            "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
-                                            "register_if_missing": True,
-                                            "format": "json",
-                                        }
-                                    )
-                                    attempted_external.append(f"{nm}@{label}")
+                                    target_agent = await _find_agent_optional(target_proj, nm)
+                                    if target_agent is not None and _session_is_bound_to_agent(ctx, target_proj, target_agent):
+                                        await handshake.run(
+                                            {
+                                                "ctx": ctx,
+                                                "project_key": project.human_key,
+                                                "requester": sender.name,
+                                                "target": nm,
+                                                "to_project": target_proj.human_key or target_proj.slug,
+                                                "reason": "in-session auto-approval by send_message",
+                                                "auto_accept": True,
+                                                "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                                "register_if_missing": True,
+                                                "format": "json",
+                                            }
+                                        )
+                                        attempted_external.append(display_target)
+                                        for route_kind in sorted(route_kinds):
+                                            approved_external_routes.append((display_target, route_kind))
+                                    else:
+                                        await request_tool.run(
+                                            {
+                                                "ctx": ctx,
+                                                "project_key": project.human_key,
+                                                "from_agent": sender.name,
+                                                "to_agent": nm,
+                                                "to_project": target_proj.human_key or target_proj.slug,
+                                                "reason": "auto contact request created by send_message",
+                                                "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
+                                                "register_if_missing": True,
+                                                "program": sender.program,
+                                                "model": sender.model,
+                                                "task_description": sender.task_description,
+                                                "format": "json",
+                                            }
+                                        )
+                                        requested_external.append(display_target)
                                 except Exception:
-                                    logger.exception("Failed to run auto-handshake for external recipient %r@%r", nm, label)
-                        # Re-route any that we attempted to handshake for
-                        if attempted_external:
+                                    logger.exception("Failed to auto-resolve contact for external recipient %r@%r", nm, label)
+                        # Re-route any that were approved in-session
+                        if approved_external_routes:
                             from contextlib import suppress
                             with suppress(_ContactBlocked):
-                                for item in attempted_external:
-                                    await _route([item], "to")
+                                for item, route_kind in approved_external_routes:
+                                    await _route([item], route_kind)
                             # Purge unknown_external entries that now have approved links
                             try:
                                 async with get_session() as scheck:
-                                    for label, names in list(unknown_external.items()):
+                                    for label, pending_names in list(unknown_external.items()):
                                         try:
                                             tproj = await _get_project_by_identifier(label)
                                         except Exception:
                                             logger.debug("Failed to verify approved links for project %r", label, exc_info=True)
                                             continue
-                                        remaining: list[str] = []
-                                        for nm in list(names):
+                                        remaining: dict[str, set[str]] = {}
+                                        for nm, route_kinds in list(pending_names.items()):
                                             lookup_value = (nm or "").strip().lower()
                                             rows = await scheck.execute(
                                                 select(AgentLink, Project, Agent)
@@ -6956,15 +7016,15 @@ def build_mcp_server() -> FastMCP:
                                                 .limit(1)
                                             )
                                             if rows.first() is None:
-                                                remaining.append(nm)
+                                                remaining[nm] = route_kinds
                                         if remaining:
                                             unknown_external[label] = remaining
                                         else:
                                             unknown_external.pop(label, None)
                             except Exception:
-                                logger.exception("Failed to purge resolved unknown_external entries after auto-handshakes")
+                                logger.exception("Failed to purge resolved unknown_external entries after in-session approvals")
                 except Exception:
-                    logger.exception("Failed to run auto-handshakes for unknown external recipients")
+                    logger.exception("Failed to auto-resolve contact for unknown external recipients")
                 # If everything resolved after auto-actions, skip error path
                 still_unknown = bool(unknown_local) or any(v for v in unknown_external.values())
                 if not still_unknown:
@@ -6997,8 +7057,15 @@ def build_mcp_server() -> FastMCP:
                 # Include auto actions we tried
                 if still_unknown and attempted_external:
                     data_payload["auto_contact_attempted_external"] = attempted_external
+                if still_unknown and requested_external:
+                    data_payload["auto_contact_requested_external"] = requested_external
                 if still_unknown:
                     hint = f"Use resource://agents/{project.slug} to list registered agents or register new identities."
+                    if requested_external:
+                        parts.append(
+                            "pending external contact requests were created for "
+                            + ", ".join(sorted(set(requested_external)))
+                        )
                     parts.append(hint)
                     message = "Unable to send message — " + "; ".join(parts)
                     data_payload["hint"] = hint
@@ -7022,15 +7089,17 @@ def build_mcp_server() -> FastMCP:
                             for nm in names[:5]:
                                 suggestions.append(
                                     {
-                                        "tool": "macro_contact_handshake",
+                                        "tool": "request_contact",
                                         "arguments": {
                                             "project_key": project.human_key,
-                                            "requester": sender.name,
-                                            "target": nm,
+                                            "from_agent": sender.name,
+                                            "to_agent": nm,
                                             "to_project": label,
-                                            "auto_accept": True,
                                             "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                             "register_if_missing": True,
+                                            "program": sender.program,
+                                            "model": sender.model,
+                                            "task_description": sender.task_description,
                                         },
                                     }
                                 )
@@ -10898,7 +10967,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["respond_contact", "set_contact_policy"],
                         "expected_frequency": "Occasional—when new communication lines are needed.",
                         "required_capabilities": ["contact"],
-                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake')"}],
+                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake', registration_token='<requester token>')"}],
                     },
                     {
                         "name": "respond_contact",
@@ -10907,7 +10976,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["request_contact"],
                         "expected_frequency": "As often as requests arrive.",
                         "required_capabilities": ["contact"],
-                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True)"}],
+                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True, registration_token='<target token>')"}],
                     },
                     {
                         "name": "list_contacts",
@@ -10931,7 +11000,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["fetch_inbox", "summarize_thread"],
                         "expected_frequency": "Regular during investigation phases.",
                         "required_capabilities": ["search"],
-                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20)"}],
+                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20, agent_name='OpsBot', registration_token='<agent token>')"}],
                     },
                     {
                         "name": "summarize_thread",
@@ -10941,8 +11010,8 @@ def build_mcp_server() -> FastMCP:
                         "expected_frequency": "When threads exceed quick skim length or at cadence checkpoints.",
                         "required_capabilities": ["search", "summarization"],
                         "usage_examples": [
-                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True)"},
-                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99')"},
+                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True, agent_name='OpsBot', registration_token='<agent token>')"},
+                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99', agent_name='OpsBot', registration_token='<agent token>')"},
                         ],
                     },
                 ],
@@ -11018,7 +11087,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["request_contact", "respond_contact", "send_message"],
                         "expected_frequency": "When onboarding new agent pairs.",
                         "required_capabilities": ["workflow", "contact", "messaging"],
-                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
+                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, requester_registration_token='<requester token>', target_registration_token='<target token>', welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
                     },
                 ],
             },
@@ -11542,8 +11611,11 @@ def build_mcp_server() -> FastMCP:
 
         Example
         -------
+        If the caller has not already authenticated as the viewer in this MCP session,
+        include `agent` and `agent_token`.
+
         ```json
-        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend"}}
+        {"jsonrpc":"2.0","id":"r5","method":"resources/read","params":{"uri":"resource://message/1234?project=/abs/path/backend&agent=BlueLake&agent_token=<registration_token>"}}
         ```
         """
         # Support toolkits that pass query in the template segment
@@ -11627,13 +11699,16 @@ def build_mcp_server() -> FastMCP:
 
         Example
         -------
+        If the caller has not already authenticated as the viewer in this MCP session,
+        include both `agent` and `agent_token`.
+
         ```json
-        {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&include_bodies=true"}}
+        {"jsonrpc":"2.0","id":"r6","method":"resources/read","params":{"uri":"resource://thread/TKT-123?project=/abs/path/backend&agent=BlueLake&agent_token=<registration_token>&include_bodies=true"}}
         ```
 
         Numeric seed example (message id as thread seed):
         ```json
-        {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend"}}
+        {"jsonrpc":"2.0","id":"r6b","method":"resources/read","params":{"uri":"resource://thread/1234?project=/abs/path/backend&agent=BlueLake&agent_token=<registration_token>"}}
         ```
         """
         # Robust query parsing: some FastMCP versions do not inject query args.
@@ -11775,12 +11850,15 @@ def build_mcp_server() -> FastMCP:
 
         Example
         -------
+        If the caller has not already authenticated as this agent in the current MCP session,
+        include `agent_token=<registration_token>`.
+
         ```json
-        {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true"}}
+        {"jsonrpc":"2.0","id":"r7","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&limit=10&urgent_only=true&agent_token=<registration_token>"}}
         ```
         Incremental fetch example (using since_ts):
         ```json
-        {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z"}}
+        {"jsonrpc":"2.0","id":"r7b","method":"resources/read","params":{"uri":"resource://inbox/BlueLake?project=/abs/path/backend&since_ts=2025-10-23T15:00:00Z&agent_token=<registration_token>"}}
         ```
         """
         # Robust query parsing: some FastMCP versions do not inject query args.
@@ -12308,31 +12386,16 @@ def build_mcp_server() -> FastMCP:
         )
         items = await _list_inbox(project_obj, agent_obj, limit, urgent_only=False, include_bodies=False, since_ts=None)
 
-        # Attach recent commit summaries touching the archive (best-effort)
-        commits_index: dict[str, dict[str, str]] = {}
-        try:
-            archive = await ensure_archive(settings, project_obj.slug)
-            repo: Repo = archive.repo
-            for commit in repo.iter_commits(paths=["."], max_count=200):
-                # Heuristic: extract message id from commit summary when present in canonical subject format
-                # Expected: "mail: <from> -> ... | <subject>"
-                summary = str(commit.summary)
-                hexsha = commit.hexsha[:12]
-                if hexsha not in commits_index:
-                    commits_index[hexsha] = {"hexsha": hexsha, "summary": summary}
-        except Exception:
-            pass
-
-        # Map messages to nearest commit (best-effort: none if not determinable)
         out: list[dict[str, Any]] = []
         for item in items:
-            commit_meta = None
-            # We cannot cheaply know exact commit per message without parsing message ids from log; keep null
-            # but preserve structure for clients
-            if commits_index:
-                commit_meta = next(iter(commits_index.values()))  # provide at least one recent reference
             payload = dict(item)
-            payload["commit"] = commit_meta
+            try:
+                msg_obj = await _get_message(project_obj, int(item["id"]))
+                commit_info = await _commit_info_for_message(settings, project_obj, msg_obj)
+                if commit_info:
+                    payload["commit"] = commit_info
+            except Exception:
+                pass
             out.append(payload)
         payload = {"project": project_obj.human_key, "agent": agent_obj.name, "count": len(out), "messages": out}
         return _apply_resource_output_format(
