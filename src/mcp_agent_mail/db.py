@@ -31,7 +31,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
-from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel

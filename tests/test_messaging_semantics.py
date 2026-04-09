@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from mcp_agent_mail.app import build_mcp_server
 
@@ -127,3 +128,144 @@ async def test_acknowledge_idempotent_multiple_calls(isolated_env):
         assert second.data.get("acknowledged_at") == first_ack_at
 
 
+@pytest.mark.asyncio
+async def test_send_message_requires_sender_token_across_sessions(isolated_env):
+    """A fresh session cannot impersonate an existing sender without sender_token."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/spoof-send"})
+        sender = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/spoof-send", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        sender_token = sender.data["registration_token"]
+
+    async with Client(server) as attacker_client:
+        with pytest.raises(ToolError) as exc_info:
+            await attacker_client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/security/spoof-send",
+                    "sender_name": "GreenCastle",
+                    "to": ["GreenCastle"],
+                    "subject": "Forged",
+                    "body_md": "This should fail",
+                },
+            )
+        assert "sender_token" in str(exc_info.value)
+
+    async with Client(server) as sender_client:
+        result = await sender_client.call_tool(
+            "send_message",
+                {
+                    "project_key": "/security/spoof-send",
+                    "sender_name": "GreenCastle",
+                    "sender_token": sender_token,
+                    "to": ["GreenCastle"],
+                    "subject": "Legit",
+                    "body_md": "This should succeed",
+                },
+        )
+    assert result.data["verified_sender"] is True
+    assert result.data["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_search_and_summarize_thread_respect_recipient_visibility(isolated_env):
+    """Only senders/recipients, including BCC, can discover a private thread."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/private-thread"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/private-thread", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/private-thread", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        purple = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/private-thread", "program": "codex", "model": "gpt-5", "name": "PurpleBear"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+        purple_token = purple.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        await sender_client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": "/security/private-thread",
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "auto_accept": True,
+                "requester_registration_token": green_token,
+                "target_registration_token": blue_token,
+            },
+        )
+        await sender_client.call_tool(
+            "send_message",
+            {
+                "project_key": "/security/private-thread",
+                "sender_name": "GreenCastle",
+                "sender_token": green_token,
+                "to": ["GreenCastle"],
+                "bcc": ["BlueLake"],
+                "subject": "Private plan",
+                "body_md": "ultra-secret launch sequence",
+                "thread_id": "SEC-THREAD-1",
+            },
+        )
+
+    async with Client(server) as bcc_client:
+        search_result = await bcc_client.call_tool(
+            "search_messages",
+            {
+                "project_key": "/security/private-thread",
+                "query": "ultra-secret",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+            },
+        )
+        assert len(search_result.structured_content["result"]) == 1
+
+        summary_result = await bcc_client.call_tool(
+            "summarize_thread",
+            {
+                "project_key": "/security/private-thread",
+                "thread_id": "SEC-THREAD-1",
+                "include_examples": True,
+                "llm_mode": False,
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+            },
+        )
+        assert summary_result.data["summary"]["total_messages"] == 1
+        assert len(summary_result.data["examples"]) == 1
+
+    async with Client(server) as outsider_client:
+        search_result = await outsider_client.call_tool(
+            "search_messages",
+            {
+                "project_key": "/security/private-thread",
+                "query": "ultra-secret",
+                "agent_name": "PurpleBear",
+                "registration_token": purple_token,
+            },
+        )
+        assert search_result.structured_content["result"] == []
+
+        summary_result = await outsider_client.call_tool(
+            "summarize_thread",
+            {
+                "project_key": "/security/private-thread",
+                "thread_id": "SEC-THREAD-1",
+                "include_examples": True,
+                "llm_mode": False,
+                "agent_name": "PurpleBear",
+                "registration_token": purple_token,
+            },
+        )
+        assert summary_result.data["summary"]["total_messages"] == 0
+        assert summary_result.data["examples"] == []

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from fastmcp import Client
@@ -529,6 +530,73 @@ async def test_thread_resource_with_include_bodies(isolated_env):
         assert len(data["messages"]) >= 1
         msg = data["messages"][0]
         assert "body_md" in msg, "Should include body"
+
+
+@pytest.mark.asyncio
+async def test_thread_resource_only_returns_visible_messages(isolated_env):
+    """thread resource should hide private messages from non-participants."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/threadprivate"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "ThreadPrivate", "program": "test", "model": "test", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "ThreadPrivate", "program": "test", "model": "test", "name": "BlueLake"},
+        )
+        purple = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "ThreadPrivate", "program": "test", "model": "test", "name": "PurpleBear"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+        purple_token = purple.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        await sender_client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": "ThreadPrivate",
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "auto_accept": True,
+                "requester_registration_token": green_token,
+                "target_registration_token": blue_token,
+            },
+        )
+        await sender_client.call_tool(
+            "send_message",
+            {
+                "project_key": "ThreadPrivate",
+                "sender_name": "GreenCastle",
+                "sender_token": green_token,
+                "to": ["GreenCastle"],
+                "bcc": ["BlueLake"],
+                "subject": "Private thread",
+                "body_md": "Classified body",
+                "thread_id": "THREAD-PRIVATE-1",
+            },
+        )
+
+    async with Client(server) as outsider_client:
+        outsider_blocks = await outsider_client.read_resource(
+            "resource://thread/THREAD-PRIVATE-1"
+            f"?project=ThreadPrivate&agent=PurpleBear&agent_token={quote(purple_token)}&include_bodies=true"
+        )
+        outsider_data = parse_resource_json(outsider_blocks)
+        assert outsider_data["messages"] == []
+
+    async with Client(server) as bcc_client:
+        bcc_blocks = await bcc_client.read_resource(
+            "resource://thread/THREAD-PRIVATE-1"
+            f"?project=ThreadPrivate&agent=BlueLake&agent_token={quote(blue_token)}&include_bodies=true"
+        )
+        bcc_data = parse_resource_json(bcc_blocks)
+        assert len(bcc_data["messages"]) == 1
+        assert bcc_data["messages"][0]["subject"] == "Private thread"
+        assert bcc_data["messages"][0]["body_md"] == "Classified body"
 
 
 # ============================================================================

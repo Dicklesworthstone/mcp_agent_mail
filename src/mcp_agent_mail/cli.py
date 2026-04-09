@@ -28,7 +28,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import httpx
 import typer
 import uvicorn
-from filelock import FileLock, Timeout as LockTimeout
+from filelock import BaseFileLock, FileLock, Timeout as LockTimeout
 from rich.console import Console
 from rich.table import Table
 from sqlalchemy import (
@@ -687,7 +687,7 @@ async def _get_product_record(key: str) -> Product:
 _SERVER_LOCK_FILENAME = "server.lock"
 
 
-def _acquire_server_lock(settings: Any = None) -> FileLock:
+def _acquire_server_lock(settings: Any = None) -> BaseFileLock:
     """Acquire an exclusive lock on server.lock inside the resolved STORAGE_ROOT.
 
     Ensures only one Agent Mail server process can own a given storage root at a
@@ -2627,8 +2627,12 @@ def hard_delete_agent(
         proj = await _get_project_record(project)
         agent = await _get_agent_record(proj, agent_name)
 
-        # Verify registration token if the agent has one
-        if agent.registration_token and not _hmac.compare_digest(registration_token or "", agent.registration_token):
+        if not agent.registration_token:
+            raise ValueError(
+                "Agent has no registration_token, so hard delete cannot be authenticated. "
+                "Re-register or mint a token locally before retrying."
+            )
+        if not _hmac.compare_digest(registration_token or "", agent.registration_token):
             raise ValueError("Invalid registration_token — only the agent's owner can hard-delete it")
 
         agent_id = agent.id
@@ -2805,7 +2809,7 @@ def hard_delete_project(
         project_id = proj.id
         project_slug = proj.slug
 
-        # Verify caller owns at least one agent in this project
+        # Verify caller owns at least one token-bearing agent in this project
         async with get_session() as session:
             agents_result = await session.execute(
                 select(Agent).where(
@@ -2814,12 +2818,15 @@ def hard_delete_project(
                 )
             )
             token_agents = agents_result.scalars().all()
-            if token_agents and (
-                not registration_token or not any(
-                    _hmac.compare_digest(registration_token, a.registration_token)
-                    for a in token_agents
-                    if a.registration_token
+            if not token_agents:
+                raise ValueError(
+                    "Project has no token-bearing agents, so hard delete cannot be authenticated. "
+                    "Register or create an agent identity first."
                 )
+            if not registration_token or not any(
+                _hmac.compare_digest(registration_token, a.registration_token)
+                for a in token_agents
+                if a.registration_token
             ):
                 raise ValueError("Invalid registration_token — must match a registered agent in the project")
 
