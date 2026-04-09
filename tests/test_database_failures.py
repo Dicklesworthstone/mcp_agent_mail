@@ -447,6 +447,22 @@ class TestEngineAndFactory:
         # (the engine will be recreated on next access)
 
     @pytest.mark.asyncio
+    async def test_reset_database_state_while_loop_running(self, isolated_env):
+        """reset_database_state should safely dispose the engine even inside an active event loop."""
+        await ensure_schema()
+        engine = get_engine()
+        assert engine is not None
+
+        reset_database_state()
+
+        await ensure_schema()
+        async with get_session() as session:
+            from sqlalchemy import text
+
+            result = await session.execute(text("SELECT 1"))
+            assert result.scalar() == 1
+
+    @pytest.mark.asyncio
     async def test_get_session_factory_creates_factory(self, isolated_env):
         """get_session_factory creates and returns session factory."""
         factory = get_session_factory()

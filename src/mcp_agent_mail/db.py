@@ -22,6 +22,7 @@ import contextvars
 import logging
 import random
 import re
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
@@ -583,12 +584,11 @@ async def get_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[A
     finally:
         # Ensure session close completes even under cancellation (anyio cancel scopes
         # will raise asyncio.CancelledError which is BaseException in Python 3.14).
-        close_task = asyncio.create_task(session.close())
         try:
-            await asyncio.shield(close_task)
+            await asyncio.shield(session.close())
         except BaseException:
             with suppress(BaseException):
-                await close_task
+                await session.close()
             raise
 
 
@@ -635,12 +635,11 @@ async def get_immediate_session(*, check_circuit_breaker: bool = False) -> Async
             await session.rollback()
         raise
     finally:
-        close_task = asyncio.create_task(session.close())
         try:
-            await asyncio.shield(close_task)
+            await asyncio.shield(session.close())
         except BaseException:
             with suppress(BaseException):
-                await close_task
+                await session.close()
             raise
 
 
@@ -728,8 +727,25 @@ def reset_database_state() -> None:
                 running = None
 
             if running is not None and running.is_running():
-                # Can't block; fall back to sync pool disposal (best effort).
-                engine.sync_engine.dispose()
+                # Pytest fixture teardown can happen while an event loop is still active.
+                # In that case, disposing asynchronously in a helper thread avoids leaving
+                # aiosqlite connections for GC to clean up later.
+                dispose_error: Exception | None = None
+
+                def _dispose_in_thread() -> None:
+                    nonlocal dispose_error
+                    try:
+                        asyncio.run(engine.dispose())
+                    except Exception as exc:  # pragma: no cover - best-effort fallback path
+                        dispose_error = exc
+
+                dispose_thread = threading.Thread(target=_dispose_in_thread, name="db-dispose", daemon=True)
+                dispose_thread.start()
+                dispose_thread.join(timeout=5.0)
+                if dispose_thread.is_alive():
+                    raise TimeoutError("Timed out waiting for async engine disposal in helper thread.")
+                if dispose_error is not None:
+                    raise dispose_error
             else:
                 try:
                     loop = asyncio.get_event_loop()
