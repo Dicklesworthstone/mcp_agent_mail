@@ -1691,7 +1691,7 @@ sequenceDiagram
 
 - `search_messages(project_key, query, limit?)` uses FTS5 over subject and body.
 - `summarize_thread(project_key, thread_id, include_examples?)` extracts key points, actions, and participants from the thread.
-- `reply_message(project_key, message_id, sender_name, body_md, ...)` creates a subject-prefixed reply, preserving or creating a thread.
+- `reply_message(project_key, message_id, sender_name, body_md, ..., sender_token?)` creates a subject-prefixed reply, preserving or creating a thread.
 
 ### Semantics & invariants
 

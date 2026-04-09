@@ -6776,15 +6776,17 @@ def build_mcp_server() -> FastMCP:
                     # Explicit external addressing: project:<slug-or-key>#<AgentName>
                     if candidate.startswith("project:") and "#" in candidate:
                         explicit_override = True
+                        parsed_project_label: str | None = None
                         try:
                             _, rest = candidate.split(":", 1)
                             slug_part, agent_part = rest.split("#", 1)
-                            target_project_override = await _get_project_by_identifier(slug_part.strip())
+                            parsed_project_label = slug_part.strip() or None
+                            target_project_override = await _get_project_by_identifier(parsed_project_label or "")
                             target_project_label = target_project_override.human_key or target_project_override.slug
                             agent_fragment = agent_part
                         except Exception:
                             logger.debug("Failed to parse explicit external address: %s", candidate, exc_info=True)
-                            label = slug_part.strip() if "slug_part" in locals() and slug_part.strip() else "(invalid project)"
+                            label = parsed_project_label or "(invalid project)"
                             unknown_external[label][candidate.strip() or candidate].add(kind)
                             continue
 
@@ -7296,10 +7298,13 @@ def build_mcp_server() -> FastMCP:
         Examples
         --------
         Minimal reply to original sender:
+        If the caller has not already authenticated as `sender_name` in this MCP session,
+        include `sender_token`.
+
         ```json
         {"jsonrpc":"2.0","id":"6","method":"tools/call","params":{"name":"reply_message","arguments":{
           "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
-          "body_md":"Questions about the migration plan..."
+          "body_md":"Questions about the migration plan...","sender_token":"<registration_token>"
         }}}
         ```
 
@@ -7307,7 +7312,8 @@ def build_mcp_server() -> FastMCP:
         ```json
         {"jsonrpc":"2.0","id":"6c","method":"tools/call","params":{"name":"reply_message","arguments":{
           "project_key":"/abs/path/backend","message_id":1234,"sender_name":"BlueLake",
-          "body_md":"Looping ops.","to":["GreenCastle"],"cc":["RedCat"],"subject_prefix":"RE:"
+          "body_md":"Looping ops.","to":["GreenCastle"],"cc":["RedCat"],"subject_prefix":"RE:",
+          "sender_token":"<registration_token>"
         }}}
         ```
         """
@@ -7338,37 +7344,115 @@ def build_mcp_server() -> FastMCP:
         local_cc: list[str] = []
         local_bcc: list[str] = []
         external: dict[int, dict[str, Any]] = {}
+        unknown_local: set[str] = set()
+        unknown_external: dict[str, set[str]] = defaultdict(set)
 
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
-            local_names = {row[0] for row in existing.fetchall()}
+            local_lookup: dict[str, str] = {}
+            for row in existing.fetchall():
+                canonical_name = (row[0] or "").strip()
+                if not canonical_name:
+                    continue
+                sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
+                for key in {canonical_name.lower(), sanitized_canonical.lower()}:
+                    local_lookup.setdefault(key, canonical_name)
+
+            sender_candidate_keys = {
+                key.lower()
+                for key in (
+                    (sender.name or "").strip(),
+                    sanitize_agent_name(sender.name or "") or "",
+                )
+                if key
+            }
 
             class _ContactBlocked(Exception):
                 pass
 
+            def _normalize(value: str) -> tuple[str, set[str], Optional[str]]:
+                trimmed = (value or "").strip()
+                sanitized = sanitize_agent_name(trimmed)
+                keys: set[str] = set()
+                if trimmed:
+                    keys.add(trimmed.lower())
+                if sanitized:
+                    keys.add(sanitized.lower())
+                canonical = sanitized or (trimmed if trimmed else None)
+                return trimmed or value, keys, canonical
+
             async def _route(name_list: list[str], kind: str) -> None:
-                for nm in name_list:
+                for raw in name_list:
+                    candidate = raw or ""
+                    explicit_override = False
                     target_project_override: Project | None = None
-                    target_name_override: str | None = None
-                    if nm.startswith("project:") and "#" in nm:
+                    target_project_label: str | None = None
+                    agent_fragment = candidate
+
+                    if candidate.startswith("project:") and "#" in candidate:
+                        parsed_project_label: str | None = None
                         try:
-                            _, rest = nm.split(":", 1)
+                            explicit_override = True
+                            _, rest = candidate.split(":", 1)
                             slug_part, agent_part = rest.split("#", 1)
-                            target_project_override = await _get_project_by_identifier(slug_part)
-                            target_name_override = agent_part.strip()
+                            parsed_project_label = slug_part.strip() or None
+                            target_project_override = await _get_project_by_identifier(parsed_project_label or "")
+                            target_project_label = target_project_override.human_key or target_project_override.slug
+                            agent_fragment = agent_part
                         except Exception:
-                            target_project_override = None
-                            target_name_override = None
-                    if nm in local_names:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
+                            label = parsed_project_label or "(invalid project)"
+                            unknown_external[label].add(candidate.strip() or candidate)
+                            continue
+
+                    if not explicit_override and "@" in candidate:
+                        name_part, project_part = candidate.split("@", 1)
+                        if name_part.strip() and project_part.strip():
+                            try:
+                                target_project_override = await _get_project_by_identifier(project_part.strip())
+                                target_project_label = target_project_override.human_key or target_project_override.slug
+                                agent_fragment = name_part
+                                explicit_override = True
+                            except Exception:
+                                label = project_part.strip() or "(invalid project)"
+                                unknown_external[label].add(candidate.strip() or candidate)
+                                continue
+
+                    display_value, key_candidates, canonical = _normalize(agent_fragment)
+                    if not key_candidates or not canonical:
+                        if explicit_override:
+                            label = target_project_label or "(unknown project)"
+                            unknown_external[label].add(candidate.strip() or candidate)
                         else:
-                            local_bcc.append(nm)
+                            unknown_local.add(candidate.strip() or candidate)
                         continue
+
+                    if not explicit_override and sender_candidate_keys.intersection(key_candidates):
+                        if kind == "to":
+                            local_to.append(sender.name)
+                        elif kind == "cc":
+                            local_cc.append(sender.name)
+                        else:
+                            local_bcc.append(sender.name)
+                        continue
+
+                    if not explicit_override:
+                        resolved_local = None
+                        for key in key_candidates:
+                            resolved_local = local_lookup.get(key)
+                            if resolved_local:
+                                break
+                        if resolved_local:
+                            if kind == "to":
+                                local_to.append(resolved_local)
+                            elif kind == "cc":
+                                local_cc.append(resolved_local)
+                            else:
+                                local_bcc.append(resolved_local)
+                            continue
+
+                    lookup_value = canonical.lower()
                     rows = None
-                    if target_project_override is not None and target_name_override:
+                    if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
                             select(AgentLink, Project, Agent)
                             .join(Project, Project.id == AgentLink.b_project_id)
@@ -7378,7 +7462,7 @@ def build_mcp_server() -> FastMCP:
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
                                 cast(Any, Project.id == target_project_override.id),
-                                cast(Any, Agent.name == target_name_override),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
@@ -7391,7 +7475,7 @@ def build_mcp_server() -> FastMCP:
                                 cast(Any, AgentLink.a_project_id) == project.id,
                                 cast(Any, AgentLink.a_agent_id) == sender.id,
                                 cast(Any, AgentLink.status == "approved"),
-                                cast(Any, Agent.name == nm),
+                                cast(Any, func.lower(Agent.name) == lookup_value),
                             )
                             .limit(1)
                         )
@@ -7405,12 +7489,11 @@ def build_mcp_server() -> FastMCP:
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
-                        if kind == "to":
-                            local_to.append(nm)
-                        elif kind == "cc":
-                            local_cc.append(nm)
+                        if explicit_override:
+                            label = target_project_label or "(unknown project)"
+                            unknown_external[label].add(display_value or candidate.strip() or candidate)
                         else:
-                            local_bcc.append(nm)
+                            unknown_local.add(display_value or candidate.strip() or candidate)
 
         try:
             await _route(to_names, "to")
@@ -7418,6 +7501,179 @@ def build_mcp_server() -> FastMCP:
             await _route(bcc_list, "bcc")
         except _ContactBlocked:
             return {"error": {"type": "CONTACT_BLOCKED", "message": "Recipient is not accepting messages."}}
+
+        if unknown_local or unknown_external:
+            parts: list[str] = []
+            err_data: dict[str, Any] = {}
+            if unknown_local:
+                missing_local = sorted({name for name in unknown_local if name})
+                parts.append(
+                    f"local recipients {', '.join(missing_local)} are not registered in project '{project.human_key}'"
+                )
+                err_data["unknown_local"] = missing_local
+            if unknown_external:
+                formatted_external = {
+                    label: sorted({name for name in names if name})
+                    for label, names in unknown_external.items()
+                }
+                ext_parts = [
+                    f"{', '.join(names)} @ {label}"
+                    for label, names in sorted(formatted_external.items())
+                    if names
+                ]
+                if ext_parts:
+                    parts.append("external recipients missing approved contact links: " + "; ".join(ext_parts))
+                err_data["unknown_external"] = formatted_external
+            hint = f"Use resource://agents/{project.slug} to list registered agents, or request_contact(...) to create a cross-project link first."
+            parts.append(hint)
+            message = "Unable to send reply — " + "; ".join(parts)
+            err_data["hint"] = hint
+            raise ToolExecutionError("RECIPIENT_NOT_FOUND", message, recoverable=True, data=err_data)
+
+        if settings_local.contact_enforcement_enabled:
+            auto_ok_names: set[str] = set()
+            try:
+                sender_alias = aliased(Agent)
+                criteria: list[Any] = [cast(Any, Message.thread_id) == thread_key]
+                try:
+                    seed_id = int(thread_key)
+                    criteria.append(cast(Any, Message.id) == seed_id)
+                except (ValueError, TypeError):
+                    pass
+                async with get_session() as s_contact:
+                    stmt = (
+                        select(Message, sender_alias.name)
+                        .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                        .where(
+                            cast(Any, Message.project_id) == project.id,
+                            or_(*criteria),
+                            _message_visible_to_agent_clause(sender.id or 0),
+                        )
+                        .limit(500)
+                    )
+                    thread_rows = [(row[0], row[1]) for row in (await s_contact.execute(stmt)).all()]
+                    participants: set[str] = {n for _m, n in thread_rows if n}
+                    message_ids = [m.id for m, _ in thread_rows if m.id is not None]
+                    if message_ids:
+                        recipient_rows = await s_contact.execute(
+                            select(Agent.name)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
+                            .where(cast(Any, MessageRecipient.message_id).in_(message_ids))
+                        )
+                        participants.update({row[0] for row in recipient_rows.all() if row[0]})
+                    auto_ok_names.update(participants)
+            except Exception:
+                logger.exception("Failed to fetch thread participants for reply contact auto-allow (thread_id=%s)", thread_key)
+
+            blocked_recipients: list[str] = []
+            all_local_names = list(dict.fromkeys(local_to + local_cc + local_bcc))
+            recipient_agents = await _get_agents_batch_lenient(project, all_local_names)
+            now_utc = datetime.now(timezone.utc)
+            ttl = timedelta(seconds=int(settings_local.contact_auto_ttl_seconds))
+            since_dt = now_utc - ttl
+            async with get_session() as s_contact:
+                recent_ok_names: set[str] = set()
+                try:
+                    if all_local_names:
+                        sent_stmt = (
+                            select(Agent.name)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.agent_id) == Agent.id)
+                            .join(Message, cast(Any, MessageRecipient.message_id) == Message.id)
+                            .where(
+                                cast(Any, Message.project_id) == project.id,
+                                cast(Any, Message.sender_id) == sender.id,
+                                cast(Any, Message.created_ts) > _naive_utc(since_dt),
+                                cast(Any, Agent.name).in_(all_local_names),
+                            )
+                        )
+                        sent_rows = await s_contact.execute(sent_stmt)
+                        recent_ok_names.update({row[0] for row in sent_rows.all() if row[0]})
+
+                        sender_alias2 = aliased(Agent)
+                        recv_stmt = (
+                            select(sender_alias2.name)
+                            .join(Message, cast(Any, Message.sender_id) == sender_alias2.id)
+                            .join(MessageRecipient, cast(Any, MessageRecipient.message_id) == Message.id)
+                            .where(
+                                cast(Any, Message.project_id) == project.id,
+                                cast(Any, MessageRecipient.agent_id) == sender.id,
+                                cast(Any, Message.created_ts) > _naive_utc(since_dt),
+                                cast(Any, sender_alias2.name).in_(all_local_names),
+                            )
+                        )
+                        recv_rows = await s_contact.execute(recv_stmt)
+                        recent_ok_names.update({row[0] for row in recv_rows.all() if row[0]})
+                except Exception:
+                    logger.exception("Failed to batch fetch recent contacts for reply auto-allow heuristics")
+                    recent_ok_names = set()
+
+                approved_link_ids: set[int] = set()
+                try:
+                    recipient_ids = [rec.id for rec in recipient_agents.values() if rec is not None and rec.id is not None]
+                    if recipient_ids:
+                        link_rows = await s_contact.execute(
+                            select(AgentLink.b_agent_id)
+                            .where(
+                                cast(Any, AgentLink.a_project_id) == project.id,
+                                cast(Any, AgentLink.a_agent_id) == sender.id,
+                                cast(Any, AgentLink.b_project_id) == project.id,
+                                cast(Any, AgentLink.status == "approved"),
+                                cast(Any, AgentLink.b_agent_id).in_(recipient_ids),
+                            )
+                        )
+                        approved_link_ids.update({row[0] for row in link_rows.all() if row and row[0] is not None})
+                except Exception:
+                    logger.exception("Failed to batch fetch approved agent links for reply_message")
+
+                for nm in local_to + local_cc + local_bcc:
+                    if nm in auto_ok_names:
+                        continue
+                    rec = recipient_agents.get(nm)
+                    if rec is None or rec.name == sender.name:
+                        continue
+                    if getattr(rec, "retired_at", None) is not None:
+                        raise ToolExecutionError(
+                            "AGENT_RETIRED",
+                            f"Agent '{nm}' is retired and no longer accepts new messages. "
+                            "Use unretire_agent to restore it first.",
+                            recoverable=True,
+                            data={"agent_name": nm, "retired_at": _iso(rec.retired_at)},
+                        )
+                    rec_policy = getattr(rec, "contact_policy", "auto").lower()
+                    if rec_policy == "open":
+                        continue
+                    if rec_policy == "block_all":
+                        raise ToolExecutionError(
+                            "CONTACT_BLOCKED",
+                            "Recipient is not accepting messages.",
+                            recoverable=True,
+                        )
+                    if rec_policy == "auto" and rec.name in recent_ok_names:
+                        continue
+                    if rec.id is not None and rec.id in approved_link_ids:
+                        continue
+                    blocked_recipients.append(rec.name)
+
+            if blocked_recipients:
+                blocked_sorted = sorted(set(blocked_recipients))
+                recipient_list = ", ".join(blocked_sorted)
+                sample_target = blocked_sorted[0]
+                project_expr = repr(project.human_key)
+                sender_expr = repr(sender.name)
+                target_expr = repr(sample_target)
+                err_msg = (
+                    f"Contact approval required for recipients: {recipient_list}. "
+                    f"Before retrying, create a pending request with "
+                    f"`request_contact(project_key={project_expr}, from_agent={sender_expr}, to_agent={target_expr})`, "
+                    f"then have the recipient approve it with "
+                    f"`respond_contact(project_key={project_expr}, to_agent={target_expr}, from_agent={sender_expr}, accept=True)`."
+                )
+                raise ToolExecutionError(
+                    "CONTACT_REQUIRED",
+                    err_msg,
+                    recoverable=True,
+                    data={"recipients_blocked": blocked_sorted},
+                )
 
         deliveries: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
@@ -10925,7 +11181,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["send_message"],
                         "expected_frequency": "Frequent when collaborating inside a thread.",
                         "required_capabilities": ["messaging"],
-                        "usage_examples": [{"hint": "Thread reply", "sample": "reply_message(project_key='backend', message_id=42, sender_name='BlueLake', body_md='Got it!')"}],
+                        "usage_examples": [{"hint": "Thread reply", "sample": "reply_message(project_key='backend', message_id=42, sender_name='BlueLake', body_md='Got it!', sender_token='<sender token>')"}],
                     },
                     {
                         "name": "fetch_inbox",
@@ -10967,7 +11223,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["respond_contact", "set_contact_policy"],
                         "expected_frequency": "Occasional—when new communication lines are needed.",
                         "required_capabilities": ["contact"],
-                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='OpsBot', to_agent='BlueLake', registration_token='<requester token>')"}],
+                        "usage_examples": [{"hint": "Ask permission", "sample": "request_contact(project_key='backend', from_agent='GreenCastle', to_agent='BlueLake', registration_token='<requester token>')"}],
                     },
                     {
                         "name": "respond_contact",
@@ -10976,7 +11232,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["request_contact"],
                         "expected_frequency": "As often as requests arrive.",
                         "required_capabilities": ["contact"],
-                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='OpsBot', accept=True, registration_token='<target token>')"}],
+                        "usage_examples": [{"hint": "Approve", "sample": "respond_contact(project_key='backend', to_agent='BlueLake', from_agent='GreenCastle', accept=True, registration_token='<target token>')"}],
                     },
                     {
                         "name": "list_contacts",
@@ -11000,7 +11256,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["fetch_inbox", "summarize_thread"],
                         "expected_frequency": "Regular during investigation phases.",
                         "required_capabilities": ["search"],
-                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20, agent_name='OpsBot', registration_token='<agent token>')"}],
+                        "usage_examples": [{"hint": "FTS", "sample": "search_messages(project_key='backend', query='\"build plan\" AND users', limit=20, agent_name='GreenCastle', registration_token='<agent token>')"}],
                     },
                     {
                         "name": "summarize_thread",
@@ -11010,8 +11266,8 @@ def build_mcp_server() -> FastMCP:
                         "expected_frequency": "When threads exceed quick skim length or at cadence checkpoints.",
                         "required_capabilities": ["search", "summarization"],
                         "usage_examples": [
-                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True, agent_name='OpsBot', registration_token='<agent token>')"},
-                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99', agent_name='OpsBot', registration_token='<agent token>')"},
+                            {"hint": "Single thread", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123', include_examples=True, agent_name='GreenCastle', registration_token='<agent token>')"},
+                            {"hint": "Multi-thread digest", "sample": "summarize_thread(project_key='backend', thread_id='TKT-123,UX-42,BUG-99', agent_name='GreenCastle', registration_token='<agent token>')"},
                         ],
                     },
                 ],
@@ -11069,7 +11325,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["register_agent", "summarize_thread", "fetch_inbox"],
                         "expected_frequency": "Whenever onboarding a new contributor to an active thread.",
                         "required_capabilities": ["workflow", "messaging", "summarization"],
-                        "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='ThreadHelper')"}],
+                        "usage_examples": [{"hint": "Join thread", "sample": "macro_prepare_thread(project_key='backend', thread_id='TKT-123', program='codex', model='gpt5', agent_name='GreenCastle')"}],
                     },
                     {
                         "name": "macro_file_reservation_cycle",
@@ -11087,7 +11343,7 @@ def build_mcp_server() -> FastMCP:
                         "related": ["request_contact", "respond_contact", "send_message"],
                         "expected_frequency": "When onboarding new agent pairs.",
                         "required_capabilities": ["workflow", "contact", "messaging"],
-                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='OpsBot', target='BlueLake', auto_accept=true, requester_registration_token='<requester token>', target_registration_token='<target token>', welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
+                        "usage_examples": [{"hint": "Automated handshake", "sample": "macro_contact_handshake(project_key='backend', requester='GreenCastle', target='BlueLake', auto_accept=true, requester_registration_token='<requester token>', target_registration_token='<target token>', welcome_subject='Hello', welcome_body='Excited to collaborate!')"}],
                     },
                 ],
             },
