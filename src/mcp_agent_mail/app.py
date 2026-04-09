@@ -34,7 +34,7 @@ import uuid
 from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
-from sqlalchemy import asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, exists as _sa_exists, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
+from sqlalchemy import and_ as _sa_and, asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, exists as _sa_exists, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import aliased
 
@@ -126,6 +126,10 @@ def delete(*args: Any, **kwargs: Any) -> Any:
 
 def or_(*clauses: Any) -> Any:
     return _sa_or(*clauses)
+
+
+def and_(*clauses: Any) -> Any:
+    return _sa_and(*clauses)
 
 
 def exists(*args: Any, **kwargs: Any) -> Any:
@@ -10339,6 +10343,8 @@ def build_mcp_server() -> FastMCP:
             product_key: str,
             query: str,
             limit: int = 20,
+            agent_name: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> Any:
             """
@@ -10355,23 +10361,31 @@ def build_mcp_server() -> FastMCP:
                     return []
 
             await ensure_schema()
+            _product, _projects, authorized = await _authenticate_product_agents(
+                ctx,
+                product_key,
+                agent_name=agent_name,
+                provided_token=registration_token,
+                token_param="registration_token",
+                action="search_messages_product",
+            )
+            proj_ids = [project.id for project, _agent in authorized if project.id is not None]
+            if not proj_ids:
+                return []
+            authorized_map = {
+                project.id: agent.id
+                for project, agent in authorized
+                if project.id is not None and agent.id is not None
+            }
             rows: list[Any] = []
             async with get_session() as session:
-                prod = await _get_product_by_key(session, product_key.strip())
-                if prod is None:
-                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-                proj_ids_rows = await session.execute(
-                    select(ProductProjectLink.project_id).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))
-                )
-                proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
-                if not proj_ids:
-                    return []
                 # FTS search limited to projects in proj_ids
                 try:
                     result = await session.execute(
                         text(
                             """
                             SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                   m.sender_id,
                                    m.thread_id, a.name AS sender_name, m.project_id
                             FROM fts_messages
                             JOIN messages m ON fts_messages.rowid = m.id
@@ -10403,6 +10417,7 @@ def build_mcp_server() -> FastMCP:
                             text(
                                 f"""
                                 SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                                       m.sender_id,
                                        m.thread_id, a.name AS sender_name, m.project_id
                                 FROM messages m
                                 JOIN agents a ON m.sender_id = a.id
@@ -10414,6 +10429,25 @@ def build_mcp_server() -> FastMCP:
                             params,
                         )
                         rows = list(result.mappings().all())
+            visible_rows = rows
+            if rows:
+                message_ids = [int(row["id"]) for row in rows]
+                recipients_by_message: dict[int, set[int]] = {}
+                async with get_session() as session:
+                    recipient_rows = await session.execute(
+                        select(MessageRecipient.message_id, MessageRecipient.agent_id).where(
+                            cast(Any, MessageRecipient.message_id).in_(message_ids)
+                        )
+                    )
+                    for message_id, recipient_agent_id in recipient_rows.all():
+                        recipients_by_message.setdefault(int(message_id), set()).add(int(recipient_agent_id))
+                visible_rows = []
+                for row in rows:
+                    project_agent_id = authorized_map.get(int(row["project_id"]))
+                    if project_agent_id is None:
+                        continue
+                    if int(row["sender_id"]) == project_agent_id or project_agent_id in recipients_by_message.get(int(row["id"]), set()):
+                        visible_rows.append(row)
             items = [
                 {
                     "id": row["id"],
@@ -10425,7 +10459,7 @@ def build_mcp_server() -> FastMCP:
                     "from": row["sender_name"],
                     "project_id": row["project_id"],
                 }
-                for row in rows
+                for row in visible_rows
             ]
             try:
                 from fastmcp.tools.tool import ToolResult
@@ -10438,6 +10472,8 @@ def build_mcp_server() -> FastMCP:
             product_key: str,
             query: str,
             limit: int = 20,
+            agent_name: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> Any:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
@@ -10453,30 +10489,22 @@ def build_mcp_server() -> FastMCP:
             urgent_only: bool = False,
             include_bodies: bool = False,
             since_ts: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> list[dict[str, Any]]:
             """
             Retrieve recent messages for an agent across all projects linked to a product (non-mutating).
             """
-            await ensure_schema()
-            # Collect linked projects
-            async with get_session() as session:
-                prod = await _get_product_by_key(session, product_key.strip())
-                if prod is None:
-                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-                proj_rows = await session.execute(
-                    select(Project).join(ProductProjectLink, cast(Any, ProductProjectLink.project_id) == Project.id).where(
-                        cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id)
-                    )
-                )
-                projects: list[Project] = list(proj_rows.scalars().all())
-            # For each project, if agent exists, list inbox items
+            _product, _projects, authorized = await _authenticate_product_agents(
+                ctx,
+                product_key,
+                agent_name=agent_name,
+                provided_token=registration_token,
+                token_param="registration_token",
+                action="fetch_inbox_product",
+            )
             messages: list[dict[str, Any]] = []
-            for project in projects:
-                try:
-                    ag = await _get_agent(project, agent_name)
-                except Exception:
-                    continue
+            for project, ag in authorized:
                 proj_items = await _list_inbox(project, ag, limit, urgent_only, include_bodies, since_ts)
                 for item in proj_items:
                     item["project_id"] = item.get("project_id") or project.id
@@ -10496,6 +10524,7 @@ def build_mcp_server() -> FastMCP:
             urgent_only: bool = False,
             include_bodies: bool = False,
             since_ts: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> list[dict[str, Any]]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
@@ -10511,6 +10540,8 @@ def build_mcp_server() -> FastMCP:
             llm_mode: bool = True,
             llm_model: Optional[str] = None,
             per_thread_limit: Optional[int] = None,
+            agent_name: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
             """
@@ -10526,20 +10557,30 @@ def build_mcp_server() -> FastMCP:
             if seed_id is not None:
                 criteria.append(cast(Any, Message.id) == seed_id)
 
-            async with get_session() as session:
-                prod = await _get_product_by_key(session, product_key.strip())
-                if prod is None:
-                    raise ToolExecutionError("NOT_FOUND", f"Product '{product_key}' not found.", recoverable=True)
-                proj_ids_rows = await session.execute(
-                    select(ProductProjectLink.project_id).where(cast(Any, ProductProjectLink.product_id) == cast(Any, prod.id))
+            _product, _projects, authorized = await _authenticate_product_agents(
+                ctx,
+                product_key,
+                agent_name=agent_name,
+                provided_token=registration_token,
+                token_param="registration_token",
+                action="summarize_thread_product",
+            )
+            visibility_clauses = [
+                and_(
+                    cast(Any, Message.project_id) == project.id,
+                    _message_visible_to_agent_clause(agent.id or 0),
                 )
-                proj_ids = [int(row[0]) for row in proj_ids_rows.fetchall()]
-                if not proj_ids:
-                    return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
+                for project, agent in authorized
+                if project.id is not None and agent.id is not None
+            ]
+            if not visibility_clauses:
+                return {"thread_id": thread_id, "summary": {"participants": [], "key_points": [], "action_items": [], "total_messages": 0}, "examples": []}
+
+            async with get_session() as session:
                 stmt = (
                     select(Message, sender_alias.name)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                    .where(cast(Any, Message.project_id).in_(proj_ids), or_(*cast(Any, criteria)))
+                    .where(or_(*cast(Any, criteria)), or_(*visibility_clauses))
                     .order_by(asc(cast(Any, Message.created_ts)))
                 )
                 if per_thread_limit:
@@ -10615,6 +10656,8 @@ def build_mcp_server() -> FastMCP:
             llm_mode: bool = True,
             llm_model: Optional[str] = None,
             per_thread_limit: Optional[int] = None,
+            agent_name: Optional[str] = None,
+            registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
@@ -11401,10 +11444,13 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://message/{message_id}{?project,format}", mime_type="application/json")
+    @mcp.resource("resource://message/{message_id}{?project,agent,agent_token,format}", mime_type="application/json")
     async def message_resource(
+        ctx: Context,
         message_id: str,
         project: Optional[str] = None,
+        agent: Optional[str] = None,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -11447,6 +11493,10 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and parsed.get("project"):
                     project = parsed["project"][0]
+                if agent is None and parsed.get("agent"):
+                    agent = parsed["agent"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
@@ -11461,7 +11511,15 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for message resource")
         else:
             project_obj = await _get_project_by_identifier(project)
-        message = await _get_message(project_obj, int(message_id))
+        viewer = await _resolve_authenticated_agent(
+            ctx,
+            project_obj,
+            agent_name=agent,
+            provided_token=agent_token,
+            token_param="agent_token",
+            action="resource://message/{message_id}",
+        )
+        message = await _get_visible_message(project_obj, viewer, int(message_id))
         sender = await _get_agent_by_id(project_obj, message.sender_id)
         payload = _message_to_dict(message, include_body=True)
         payload["from"] = sender.name
@@ -11472,10 +11530,13 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://thread/{thread_id}{?project,include_bodies,format}", mime_type="application/json")
+    @mcp.resource("resource://thread/{thread_id}{?project,agent,agent_token,include_bodies,format}", mime_type="application/json")
     async def thread_resource(
+        ctx: Context,
         thread_id: str,
         project: Optional[str] = None,
+        agent: Optional[str] = None,
+        agent_token: Optional[str] = None,
         include_bodies: bool = False,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -11524,6 +11585,10 @@ def build_mcp_server() -> FastMCP:
                 parsed = parse_qs(qs, keep_blank_values=False)
                 if project is None and "project" in parsed and parsed["project"]:
                     project = parsed["project"][0]
+                if agent is None and parsed.get("agent"):
+                    agent = parsed["agent"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("include_bodies"):
                     val = parsed["include_bodies"][0].strip().lower()
                     include_bodies = val in ("1", "true", "t", "yes", "y")
@@ -11561,6 +11626,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for thread resource")
         else:
             project_obj = await _get_project_by_identifier(project)
+        viewer = await _resolve_authenticated_agent(
+            ctx,
+            project_obj,
+            agent_name=agent,
+            provided_token=agent_token,
+            token_param="agent_token",
+            action="resource://thread/{thread_id}",
+        )
 
         if project_obj.id is None:
             raise ValueError("Project must have an id before listing threads.")
@@ -11577,7 +11650,11 @@ def build_mcp_server() -> FastMCP:
             stmt = (
                 select(Message, sender_alias.name)
                 .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
-                .where(cast(Any, Message.project_id == project_obj.id), or_(*cast(Any, criteria)))
+                .where(
+                    cast(Any, Message.project_id == project_obj.id),
+                    or_(*cast(Any, criteria)),
+                    _message_visible_to_agent_clause(viewer.id or 0),
+                )
                 .order_by(asc(cast(Any, Message.created_ts)))
             )
             result = await session.execute(stmt)
@@ -11600,12 +11677,14 @@ def build_mcp_server() -> FastMCP:
         mime_type="application/json",
     )
     async def inbox_resource(
+        ctx: Context,
         agent: str,
         project: Optional[str] = None,
         since_ts: Optional[str] = None,
         urgent_only: bool = False,
         include_bodies: bool = False,
         limit: int = 20,
+        agent_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -11655,6 +11734,8 @@ def build_mcp_server() -> FastMCP:
                     project = parsed["project"][0]
                 if since_ts is None and "since_ts" in parsed and parsed["since_ts"]:
                     since_ts = parsed["since_ts"][0]
+                if agent_token is None and parsed.get("agent_token"):
+                    agent_token = parsed["agent_token"][0]
                 if parsed.get("urgent_only"):
                     val = parsed["urgent_only"][0].strip().lower()
                     urgent_only = val in ("1", "true", "t", "yes", "y")
@@ -11684,7 +11765,14 @@ def build_mcp_server() -> FastMCP:
                 raise ValueError("project parameter is required for inbox resource")
         else:
             project_obj = await _get_project_by_identifier(project)
-        agent_obj = await _get_agent(project_obj, agent)
+        agent_obj = await _authenticate_agent(
+            ctx,
+            project_obj,
+            agent,
+            agent_token,
+            token_param="agent_token",
+            action="resource://inbox/{agent}",
+        )
         messages = await _list_inbox(project_obj, agent_obj, limit, urgent_only, include_bodies, since_ts)
         # Enrich with commit info for canonical markdown files (best-effort)
         enriched: list[dict[str, Any]] = []
