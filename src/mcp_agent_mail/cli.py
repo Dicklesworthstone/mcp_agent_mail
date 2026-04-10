@@ -139,7 +139,27 @@ def _add_message_sender_column(table: Table) -> None:
 
 def _add_message_timestamp_column(table: Table) -> None:
     """Use a compact timestamp column so sender addresses don't get truncated."""
-    table.add_column("created_ts", no_wrap=True, min_width=16)
+    table.add_column("created_ts", overflow="fold", max_width=16)
+
+
+def _new_compact_message_table(title: str) -> Table:
+    """Render multi-column message tables cleanly in 80-column terminals."""
+    return Table(title=title, show_lines=False, pad_edge=False, collapse_padding=True)
+
+
+def _extract_jsonrpc_result(payload: Any) -> Any:
+    """Unwrap FastMCP HTTP JSON-RPC responses into the underlying tool payload."""
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return result
+    structured = result.get("structuredContent")
+    if not isinstance(structured, dict):
+        structured = result.get("structured_content")
+    if isinstance(structured, dict):
+        return structured.get("result", structured)
+    return result
 
 
 def _run_async(coro: Any) -> Any:
@@ -336,7 +356,7 @@ def products_ensure(
             }
             resp = client.post(server_url, json=req, headers=headers)
             data = resp.json()
-            result = (data or {}).get("result") or {}
+            result = _extract_jsonrpc_result(data) or {}
             if result:
                 resp_data = result
     except Exception:
@@ -520,7 +540,7 @@ def products_search(
     if not rows:
         console.print("[yellow]No results.[/]")
         return
-    t = Table(title=f"Product search: '{query}'", show_lines=False)
+    t = _new_compact_message_table(f"Product search: '{query}'")
     t.add_column("project_id")
     t.add_column("id")
     t.add_column("subject")
@@ -577,7 +597,7 @@ def products_inbox(
             }
             resp = client.post(server_url, json=req, headers=headers)
             data = resp.json()
-            result = (data or {}).get("result")
+            result = _extract_jsonrpc_result(data)
             rows = result if isinstance(result, list) else []
     except Exception:
         rows = []
@@ -658,7 +678,7 @@ def products_inbox(
     if not rows:
         console.print("[yellow]No messages found.[/]")
         return
-    t = Table(title=f"Inbox for {agent} in product '{product_key}'", show_lines=False)
+    t = _new_compact_message_table(f"Inbox for {agent} in product '{product_key}'")
     t.add_column("project_id")
     t.add_column("id")
     t.add_column("subject")
@@ -713,7 +733,7 @@ def products_summarize_thread(
             }
             resp = client.post(server_url, json=req, headers=headers)
             data = resp.json()
-            result = (data or {}).get("result") or {}
+            result = _extract_jsonrpc_result(data) or {}
     except Exception:
         result = {}
     if not result:
@@ -743,7 +763,7 @@ def products_summarize_thread(
             act.add_row(str(a))
         console.print(act)
     if examples:
-        ex = Table(title="Examples", show_lines=False)
+        ex = _new_compact_message_table("Examples")
         ex.add_column("id")
         ex.add_column("subject")
         _add_message_sender_column(ex)
@@ -3462,7 +3482,7 @@ def am_run(
                         }
                         resp = client.post(server_url, json=req, headers=headers)
                         data = resp.json()
-                        result = (data or {}).get("result") or {}
+                        result = _extract_jsonrpc_result(data) or {}
                         conflicts = list(result.get("conflicts") or [])
                 except Exception:
                     use_server = False
