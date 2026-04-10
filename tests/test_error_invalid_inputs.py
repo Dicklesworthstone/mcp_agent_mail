@@ -691,6 +691,76 @@ async def test_release_file_reservations_nonexistent_agent(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_release_file_reservations_rejects_empty_paths(isolated_env):
+    """release_file_reservations should reject an explicit empty paths filter."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/releaseemptypaths"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "ReleaseEmptyPaths", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "ReleaseEmptyPaths",
+                "agent_name": agent_name,
+                "paths": ["src/**"],
+                "ttl_seconds": 300,
+            },
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            await client.call_tool(
+                "release_file_reservations",
+                {
+                    "project_key": "ReleaseEmptyPaths",
+                    "agent_name": agent_name,
+                    "paths": [],
+                },
+            )
+
+        assert "empty" in str(excinfo.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_release_file_reservations_rejects_empty_ids(isolated_env):
+    """release_file_reservations should reject an explicit empty id filter."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/releaseemptyids"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "ReleaseEmptyIds", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "ReleaseEmptyIds",
+                "agent_name": agent_name,
+                "paths": ["src/**"],
+                "ttl_seconds": 300,
+            },
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            await client.call_tool(
+                "release_file_reservations",
+                {
+                    "project_key": "ReleaseEmptyIds",
+                    "agent_name": agent_name,
+                    "file_reservation_ids": [],
+                },
+            )
+
+        assert "empty" in str(excinfo.value).lower()
+
+
+@pytest.mark.asyncio
 async def test_renew_file_reservations_nonexistent_agent(isolated_env):
     """renew_file_reservations should fail for non-existent agent."""
     server = build_mcp_server()
@@ -709,6 +779,76 @@ async def test_renew_file_reservations_nonexistent_agent(isolated_env):
         except ToolError as e:
             error_str = str(e).lower()
             assert "not found" in error_str or "agent" in error_str
+
+
+@pytest.mark.asyncio
+async def test_renew_file_reservations_rejects_empty_paths(isolated_env):
+    """renew_file_reservations should reject an explicit empty paths filter."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/renewemptypaths"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "RenewEmptyPaths", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "RenewEmptyPaths",
+                "agent_name": agent_name,
+                "paths": ["src/**"],
+                "ttl_seconds": 300,
+            },
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            await client.call_tool(
+                "renew_file_reservations",
+                {
+                    "project_key": "RenewEmptyPaths",
+                    "agent_name": agent_name,
+                    "paths": [],
+                },
+            )
+
+        assert "empty" in str(excinfo.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_renew_file_reservations_rejects_empty_ids(isolated_env):
+    """renew_file_reservations should reject an explicit empty id filter."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/renewemptyids"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "RenewEmptyIds", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "RenewEmptyIds",
+                "agent_name": agent_name,
+                "paths": ["src/**"],
+                "ttl_seconds": 300,
+            },
+        )
+
+        with pytest.raises(ToolError) as excinfo:
+            await client.call_tool(
+                "renew_file_reservations",
+                {
+                    "project_key": "RenewEmptyIds",
+                    "agent_name": agent_name,
+                    "file_reservation_ids": [],
+                },
+            )
+
+        assert "empty" in str(excinfo.value).lower()
 
 
 # ============================================================================

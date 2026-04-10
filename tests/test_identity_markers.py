@@ -2,8 +2,13 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+from typer.testing import CliRunner
+
 from mcp_agent_mail.app import _resolve_project_identity
+from mcp_agent_mail.cli import app
 from mcp_agent_mail.config import get_settings
+
+runner = CliRunner()
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -68,3 +73,87 @@ def test_remote_fingerprint_when_no_markers(tmp_path: Path, monkeypatch) -> None
     ident = _resolve_project_identity(str(repo))
     assert ident["project_uid"] == expected_uid
 
+
+def test_projects_mark_identity_commit_only_commits_marker(
+    isolated_env, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    get_settings.cache_clear()
+
+    repo = tmp_path / "repo4"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Unit Test")
+    _git(repo, "config", "user.email", "test@example.com")
+
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "Initial commit")
+
+    (repo / "unrelated.txt").write_text("pending\n", encoding="utf-8")
+    _git(repo, "add", "unrelated.txt")
+
+    result = runner.invoke(app, ["projects", "mark-identity", str(repo), "--commit"])
+
+    assert result.exit_code == 0, result.output
+
+    committed_files = {
+        line for line in _git(repo, "show", "--pretty=format:", "--name-only", "HEAD").splitlines() if line
+    }
+    assert committed_files == {".agent-mail-project-id"}
+
+    staged_files = {line for line in _git(repo, "diff", "--cached", "--name-only").splitlines() if line}
+    assert "unrelated.txt" in staged_files
+    assert ".agent-mail-project-id" not in staged_files
+
+
+def test_projects_mark_identity_uses_repo_root_uid_from_subdirectory(
+    isolated_env, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WORKTREES_ENABLED", "0")
+    monkeypatch.delenv("PROJECT_IDENTITY_MODE", raising=False)
+    get_settings.cache_clear()
+
+    repo = tmp_path / "repo-subdir-marker"
+    subdir = repo / "nested" / "work"
+    subdir.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Unit Test")
+    _git(repo, "config", "user.email", "test@example.com")
+
+    root_uid = _resolve_project_identity(str(repo))["project_uid"]
+    subdir_uid = _resolve_project_identity(str(subdir))["project_uid"]
+    assert root_uid != subdir_uid
+
+    result = runner.invoke(app, ["projects", "mark-identity", str(subdir), "--no-commit"])
+
+    assert result.exit_code == 0, result.output
+    assert (repo / ".agent-mail-project-id").read_text(encoding="utf-8").strip() == root_uid
+
+
+def test_projects_discovery_init_writes_yaml_at_repo_root(
+    isolated_env, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WORKTREES_ENABLED", "0")
+    get_settings.cache_clear()
+
+    repo = tmp_path / "repo5"
+    subdir = repo / "nested" / "work"
+    subdir.mkdir(parents=True)
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Unit Test")
+    _git(repo, "config", "user.email", "test@example.com")
+
+    result = runner.invoke(app, ["projects", "discovery-init", str(subdir), "--product", "prod-123"])
+
+    assert result.exit_code == 0, result.output
+
+    root_uid = _resolve_project_identity(str(repo))["project_uid"]
+    root_yaml = repo / ".agent-mail.yaml"
+    nested_yaml = subdir / ".agent-mail.yaml"
+    assert root_yaml.exists()
+    assert not nested_yaml.exists()
+
+    content = root_yaml.read_text(encoding="utf-8")
+    assert f"project_uid: {root_uid}" in content
+    assert "product_uid: prod-123" in content

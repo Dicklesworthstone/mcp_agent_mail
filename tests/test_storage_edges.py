@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -667,3 +668,173 @@ async def test_restore_from_backup_rejects_manifest_without_restore_payload(tmp_
     settings = get_settings()
     with pytest.raises(ValueError, match="database backup or at least one archive bundle"):
         await restore_from_backup(settings, backup_path)
+
+
+@pytest.mark.asyncio
+async def test_restore_from_backup_reports_missing_sqlite_target_for_database_payload(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://agent:mail@localhost:5432/mcp")
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    backup_path = tmp_path / "backup"
+    backup_path.mkdir()
+    database_copy = backup_path / "payload" / "db-copy.sqlite3"
+    database_copy.parent.mkdir(parents=True, exist_ok=True)
+    database_copy.write_text("db", encoding="utf-8")
+    (backup_path / "manifest.json").write_text(
+        json.dumps({
+            "version": 1,
+            "created_at": "2026-04-10T00:00:00+00:00",
+            "reason": "postgres-target",
+            "database_path": "payload/db-copy.sqlite3",
+            "project_bundles": [],
+            "storage_root": str(tmp_path / "archive"),
+            "restore_instructions": "test",
+        }),
+        encoding="utf-8",
+    )
+
+    settings = get_settings()
+
+    dry_run_result = await restore_from_backup(settings, backup_path, dry_run=True)
+    assert dry_run_result["would_restore_database"] is False
+    assert dry_run_result["errors"] == [
+        "Current configuration does not use a SQLite database file; cannot restore database payload"
+    ]
+
+    restore_result = await restore_from_backup(settings, backup_path)
+    assert restore_result["database_restored"] is False
+    assert restore_result["errors"] == [
+        "Current configuration does not use a SQLite database file; cannot restore database payload"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_commit_queue_restarts_after_stop(monkeypatch):
+    import mcp_agent_mail.storage as storage_module
+
+    queue = storage_module._CommitQueue(max_wait_ms=1.0)
+    await queue.start()
+    await queue.stop()
+
+    monkeypatch.setattr(storage_module, "_COMMIT_QUEUE", queue)
+    monkeypatch.setattr(storage_module, "_COMMIT_QUEUE_LOCK", None)
+
+    restarted = await storage_module._get_commit_queue()
+    assert restarted is not queue
+    assert restarted.stats["running"] is True
+
+    await restarted.stop()
+    monkeypatch.setattr(storage_module, "_COMMIT_QUEUE", None)
+    monkeypatch.setattr(storage_module, "_COMMIT_QUEUE_LOCK", None)
+
+
+@pytest.mark.asyncio
+async def test_commit_queue_start_restarts_done_task():
+    import mcp_agent_mail.storage as storage_module
+
+    queue = storage_module._CommitQueue(max_wait_ms=1.0)
+    stale_task = asyncio.create_task(asyncio.sleep(0))
+    queue._task = stale_task
+    await stale_task
+
+    await queue.start()
+
+    assert queue.stats["running"] is True
+    assert queue._task is not stale_task
+
+    await queue.stop()
+
+
+@pytest.mark.asyncio
+async def test_commit_queue_stop_drains_pending_requests(isolated_env, monkeypatch):
+    import mcp_agent_mail.storage as storage_module
+
+    queue = storage_module._CommitQueue(max_batch_size=1, max_wait_ms=1.0)
+    settings = get_settings()
+    repo_root = Path("/tmp/commit-queue-stop")
+    first_started = asyncio.Event()
+    second_enqueued = asyncio.Event()
+    release_first = asyncio.Event()
+    committed_messages: list[str] = []
+
+    async def fake_commit_direct(
+        repo_root_arg: Path,
+        settings_arg,
+        message: str,
+        rel_paths,
+    ) -> None:
+        committed_messages.append(message)
+        if len(committed_messages) == 1:
+            first_started.set()
+            await release_first.wait()
+
+    monkeypatch.setattr(storage_module, "_commit_direct", fake_commit_direct)
+    original_put_nowait = queue._queue.put_nowait
+
+    def put_nowait_and_signal(request) -> None:
+        original_put_nowait(request)
+        if request.message == "second":
+            second_enqueued.set()
+
+    monkeypatch.setattr(queue._queue, "put_nowait", put_nowait_and_signal)
+
+    await queue.start()
+    first_task = asyncio.create_task(queue.enqueue(repo_root, settings, "first", ["a.txt"]))
+    await asyncio.wait_for(first_started.wait(), timeout=1.0)
+
+    second_task = asyncio.create_task(queue.enqueue(repo_root, settings, "second", ["b.txt"]))
+    await asyncio.wait_for(second_enqueued.wait(), timeout=1.0)
+
+    stop_task = asyncio.create_task(queue.stop(timeout_seconds=1.0))
+    release_first.set()
+
+    await asyncio.wait_for(stop_task, timeout=1.0)
+    await asyncio.wait_for(first_task, timeout=1.0)
+    await asyncio.wait_for(second_task, timeout=1.0)
+
+    assert committed_messages == ["first", "second"]
+    assert queue.stats["running"] is False
+
+
+@pytest.mark.asyncio
+async def test_commit_queue_batch_ignores_cancelled_waiter(isolated_env, monkeypatch):
+    import mcp_agent_mail.storage as storage_module
+
+    queue = storage_module._CommitQueue(max_wait_ms=1.0)
+    settings = get_settings()
+    committed_messages: list[str] = []
+
+    async def fake_commit_direct(
+        repo_root_arg: Path,
+        settings_arg,
+        message: str,
+        rel_paths,
+    ) -> None:
+        committed_messages.append(message)
+
+    monkeypatch.setattr(storage_module, "_commit_direct", fake_commit_direct)
+
+    first_request = storage_module._CommitRequest(
+        repo_root=Path("/tmp/commit-queue-cancel"),
+        settings=settings,
+        message="first",
+        rel_paths=["a.txt"],
+    )
+    second_request = storage_module._CommitRequest(
+        repo_root=Path("/tmp/commit-queue-cancel"),
+        settings=settings,
+        message="second",
+        rel_paths=["b.txt"],
+    )
+    first_request.future.cancel()
+
+    await queue._process_batch([first_request, second_request])
+
+    assert first_request.future.cancelled() is True
+    assert second_request.future.done() is True
+    assert second_request.future.cancelled() is False
+    assert second_request.future.exception() is None
+    assert committed_messages == ["batch: 2 commits\n\n- first\n- second"]
+    assert queue.stats["commits"] == 1

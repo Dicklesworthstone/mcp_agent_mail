@@ -17,7 +17,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -289,13 +289,51 @@ def _find_repo_root(start: Path) -> Optional[Path]:
     return None
 
 
+def _resolve_git_config_path(repo_root: Path) -> Optional[Path]:
+    dot_git = repo_root / ".git"
+    if dot_git.is_dir():
+        config_path = dot_git / "config"
+        return config_path if config_path.exists() else None
+    if not dot_git.is_file():
+        return None
+
+    try:
+        gitdir_line = dot_git.read_text(encoding="utf-8", errors="ignore").splitlines()[0].strip()
+    except (IndexError, OSError):
+        return None
+    if not gitdir_line.lower().startswith("gitdir:"):
+        return None
+
+    git_dir = Path(gitdir_line[7:].strip())
+    if not git_dir.is_absolute():
+        git_dir = (repo_root / git_dir).resolve()
+
+    config_path = git_dir / "config"
+    if config_path.exists():
+        return config_path
+
+    commondir_path = git_dir / "commondir"
+    try:
+        common_dir_value = commondir_path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return None
+    if not common_dir_value:
+        return None
+
+    common_dir = Path(common_dir_value)
+    if not common_dir.is_absolute():
+        common_dir = (git_dir / common_dir).resolve()
+    config_path = common_dir / "config"
+    return config_path if config_path.exists() else None
+
+
 def _read_git_remotes(repo_root: Path) -> list[str]:
-    config_path = repo_root / ".git" / "config"
-    if not config_path.exists():
+    config_path = _resolve_git_config_path(repo_root)
+    if config_path is None:
         return []
     parser = configparser.ConfigParser()
     try:
-        parser.read(config_path)
+        parser.read(config_path, encoding="utf-8")
     except Exception:
         return []
     urls: list[str] = []
@@ -309,7 +347,8 @@ def _read_git_remotes(repo_root: Path) -> list[str]:
 
 def detect_hosting_hints(output_dir: Path) -> list[HostingHint]:
     signals: dict[str, list[str]] = defaultdict(list)
-    repo_root = _find_repo_root(Path.cwd())
+    resolved_output_dir = output_dir.expanduser().resolve()
+    repo_root = _find_repo_root(resolved_output_dir)
     remote_urls: list[str] = []
     if repo_root:
         remote_urls = _read_git_remotes(repo_root)
@@ -352,11 +391,11 @@ def detect_hosting_hints(output_dir: Path) -> list[HostingHint]:
         docs_dir = repo_root / "docs"
         if docs_dir.exists():
             try:
-                if output_dir.is_relative_to(docs_dir):
+                if resolved_output_dir.is_relative_to(docs_dir):
                     signals["github_pages"].append("Export path inside docs/ directory")
             except AttributeError:
                 try:
-                    output_dir.relative_to(docs_dir)
+                    resolved_output_dir.relative_to(docs_dir)
                     signals["github_pages"].append("Export path inside docs/ directory")
                 except ValueError:
                     pass
@@ -547,7 +586,10 @@ def sign_manifest(
         # Expand and validate public key output path
         public_out = public_out.expanduser().resolve()
         if public_out.exists():
-            raise ShareExportError(f"Public key output file already exists: {public_out}")
+            if public_out.is_dir():
+                raise ShareExportError(f"Public key output path must be a file: {public_out}")
+            if not overwrite:
+                raise ShareExportError(f"Public key output file already exists: {public_out}")
 
         # Ensure parent directory exists
         try:
@@ -570,14 +612,25 @@ def encrypt_bundle(bundle_path: Path, recipients: Sequence[str]) -> Optional[Pat
     if not age_exe:
         raise ShareExportError("`age` CLI not found in PATH. Install age to enable bundle encryption.")
 
+    bundle_path = bundle_path.expanduser().resolve()
+    if not bundle_path.exists():
+        raise ShareExportError(f"Bundle file not found: {bundle_path}")
+    if not bundle_path.is_file():
+        raise ShareExportError(f"Bundle path must be a file: {bundle_path}")
+
     encrypted_path = bundle_path.with_suffix(bundle_path.suffix + ".age")
+    if encrypted_path.exists():
+        raise ShareExportError(
+            f"Encrypted output path already exists: {encrypted_path}"
+        )
     cmd = [age_exe]
     for recipient in recipients:
         cmd.extend(["-r", recipient])
     cmd.extend(["-o", str(encrypted_path), str(bundle_path)])
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise ShareExportError(f"age encryption failed: {result.stderr.strip()}")
+        detail = result.stderr.strip() or result.stdout.strip() or f"age exited with status {result.returncode}"
+        raise ShareExportError(f"age encryption failed: {detail}")
     return encrypted_path
 
 
@@ -1900,6 +1953,28 @@ def _build_viewer_sri(bundle_root: Path) -> dict[str, str]:
     return sri_map
 
 
+def _resolve_bundle_asset_path(bundle_root: Path, relative_path: str) -> Path:
+    if "\\" in relative_path:
+        raise ShareExportError(
+            f"Invalid SRI asset path: {relative_path!r} uses backslashes; bundle paths must be POSIX-style."
+        )
+
+    posix_path = PurePosixPath(relative_path)
+    if posix_path.is_absolute() or any(part == ".." for part in posix_path.parts):
+        raise ShareExportError(
+            f"Invalid SRI asset path: {relative_path!r} must stay within the bundle root."
+        )
+
+    candidate = (bundle_root / Path(*posix_path.parts)).resolve()
+    try:
+        candidate.relative_to(bundle_root)
+    except ValueError as exc:
+        raise ShareExportError(
+            f"Invalid SRI asset path: {relative_path!r} must stay within the bundle root."
+        ) from exc
+    return candidate
+
+
 def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dict[str, Any]:
     bundle_root = Path(bundle_path).expanduser().resolve()
     manifest_path = bundle_root / "manifest.json"
@@ -1920,7 +1995,11 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
     sri_entries = cast(dict[str, str], viewer_section.get("sri", {}))
     sri_failures: list[str] = []
     for relative_path, expected in sri_entries.items():
-        target = bundle_root / relative_path
+        try:
+            target = _resolve_bundle_asset_path(bundle_root, relative_path)
+        except ShareExportError as exc:
+            sri_failures.append(str(exc))
+            continue
         if not target.exists():
             sri_failures.append(f"Missing asset for SRI entry: {relative_path}")
             continue
@@ -1943,6 +2022,14 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
             raise ShareExportError(f"Failed to read manifest.sig.json: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise ShareExportError(f"manifest.sig.json is not valid JSON: {exc}") from exc
+
+        algorithm = str(sig_payload.get("algorithm") or "").strip().lower()
+        if not algorithm:
+            raise ShareExportError("manifest.sig.json missing algorithm field.")
+        if algorithm != "ed25519":
+            raise ShareExportError(
+                f"Unsupported signature algorithm in manifest.sig.json: {algorithm}"
+            )
 
         key_b64 = public_key or sig_payload.get("public_key")
         signature_b64 = sig_payload.get("signature")
@@ -1969,6 +2056,15 @@ def verify_bundle(bundle_path: Path, *, public_key: Optional[str] = None) -> dic
             signature_verified = True
         except BadSignatureError as exc:
             raise ShareExportError("Manifest signature verification failed.") from exc
+
+        manifest_sha256 = str(sig_payload.get("manifest_sha256") or "").strip().lower()
+        if not manifest_sha256:
+            raise ShareExportError("manifest.sig.json missing manifest_sha256 field.")
+        actual_manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        if manifest_sha256 != actual_manifest_sha256:
+            raise ShareExportError(
+                "manifest.sig.json manifest_sha256 does not match manifest.json."
+            )
         signature_checked = True
 
     if sri_failures:
@@ -2001,8 +2097,12 @@ def decrypt_with_age(
     encrypted_path = encrypted_path.expanduser().resolve()
     if not encrypted_path.exists():
         raise ShareExportError(f"Encrypted file not found: {encrypted_path}")
+    if not encrypted_path.is_file():
+        raise ShareExportError(f"Encrypted path must be a file: {encrypted_path}")
 
     output_path = output_path.expanduser().resolve()
+    if output_path.exists():
+        raise ShareExportError(f"Refusing to overwrite existing output file: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [age_exe, "-d", "-o", str(output_path)]
@@ -2019,8 +2119,8 @@ def decrypt_with_age(
     cmd.append(str(encrypted_path))
     result = subprocess.run(cmd, capture_output=True, text=True, input=input_text)
     if result.returncode != 0:
-        stderr = result.stderr.strip() or result.stdout.strip()
-        raise ShareExportError(f"age decryption failed: {stderr}")
+        detail = result.stderr.strip() or result.stdout.strip() or f"age exited with status {result.returncode}"
+        raise ShareExportError(f"age decryption failed: {detail}")
 
 
 def write_bundle_scaffolding(

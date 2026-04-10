@@ -7,6 +7,7 @@ import threading
 import urllib.request
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -258,6 +259,303 @@ def test_detect_hosting_hints_sort_order(monkeypatch, tmp_path: Path) -> None:
         "netlify",
         "s3",
     ]
+
+
+def test_detect_hosting_hints_uses_output_dir_repo_when_cwd_elsewhere(
+    monkeypatch, tmp_path: Path
+) -> None:
+    repo_root = tmp_path / "bundle-repo"
+    output_dir = repo_root / "docs" / "mailbox"
+    output_dir.mkdir(parents=True)
+    git_dir = repo_root / ".git"
+    git_dir.mkdir()
+    (git_dir / "config").write_text(
+        '\n'.join(
+            [
+                '[remote "origin"]',
+                "    url = git@github.com:example/shared-mailbox.git",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    workflows_dir = repo_root / ".github" / "workflows"
+    workflows_dir.mkdir(parents=True)
+    (workflows_dir / "pages.yml").write_text("name: github-pages\n", encoding="utf-8")
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    monkeypatch.chdir(outside_dir)
+    for key in (
+        "GITHUB_REPOSITORY",
+        "CF_PAGES",
+        "CF_ACCOUNT_ID",
+        "NETLIFY",
+        "NETLIFY_SITE_ID",
+        "AWS_S3_BUCKET",
+        "AWS_BUCKET",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    hints = share.detect_hosting_hints(output_dir)
+
+    github_hint = next(hint for hint in hints if hint.key == "github_pages")
+    assert any("Git remote" in signal for signal in github_hint.signals)
+    assert "Workflow pages.yml references Pages" in github_hint.signals
+    assert "Export path inside docs/ directory" in github_hint.signals
+
+
+def test_detect_hosting_hints_reads_remotes_from_gitfile_worktree(
+    monkeypatch, tmp_path: Path
+) -> None:
+    repo_root = tmp_path / "worktree-bundle"
+    repo_root.mkdir()
+    output_dir = repo_root / "bundle"
+    output_dir.mkdir()
+
+    git_dir = repo_root / ".git-data"
+    worktree_git_dir = git_dir / "worktrees" / "bundle"
+    worktree_git_dir.mkdir(parents=True)
+    (repo_root / ".git").write_text("gitdir: .git-data/worktrees/bundle\n", encoding="utf-8")
+    (worktree_git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    (git_dir / "config").write_text(
+        '\n'.join(
+            [
+                '[remote "origin"]',
+                "    url = https://github.com/example/worktree-pages.git",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    outside_dir = tmp_path / "outside-worktree"
+    outside_dir.mkdir()
+    monkeypatch.chdir(outside_dir)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+
+    hints = share.detect_hosting_hints(output_dir)
+
+    github_hint = next(hint for hint in hints if hint.key == "github_pages")
+    assert any(
+        signal == "Git remote: https://github.com/example/worktree-pages.git"
+        for signal in github_hint.signals
+    )
+
+
+def test_load_bundle_export_config_preserves_explicit_zero_thresholds(tmp_path: Path) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest = {
+        "export_config": {
+            "projects": ["demo"],
+            "inline_threshold": 0,
+            "detach_threshold": 0,
+            "chunk_threshold": 1024,
+            "chunk_size": 65536,
+            "scrub_preset": "strict",
+        },
+        "project_scope": {"requested": ["fallback"]},
+        "attachments": {"config": {}},
+        "scrub": {"preset": "standard"},
+        "database": {},
+    }
+    (bundle_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    config = cli_module._load_bundle_export_config(bundle_dir)
+
+    assert config.projects == ["demo"]
+    assert config.inline_threshold == 0
+    assert config.detach_threshold == 0
+    assert config.chunk_threshold == 1024
+    assert config.chunk_size == 65536
+    assert config.scrub_preset == "strict"
+
+
+def test_share_update_removes_stale_signature_and_reports_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest = {
+        "export_config": {
+            "projects": ["demo"],
+            "inline_threshold": 64,
+            "detach_threshold": 1024,
+            "chunk_threshold": 20 * 1024 * 1024,
+            "chunk_size": 4 * 1024 * 1024,
+            "scrub_preset": "standard",
+        },
+        "project_scope": {"requested": ["demo"]},
+        "attachments": {"config": {"inline_threshold": 64, "detach_threshold": 1024}},
+        "scrub": {"preset": "standard"},
+        "database": {},
+    }
+    (bundle_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (bundle_dir / "manifest.sig.json").write_text('{"stale": true}\n', encoding="utf-8")
+
+    database_path = tmp_path / "mailbox.sqlite3"
+    database_path.write_bytes(b"db")
+
+    def fake_create_snapshot_context(*, snapshot_path: Path, **_kwargs: object) -> share.SnapshotContext:
+        snapshot_path.write_bytes(b"snapshot")
+        return share.SnapshotContext(
+            snapshot_path=snapshot_path,
+            scope=share.ProjectScopeResult(projects=[share.ProjectRecord(1, "demo", "/repo/demo")], removed_count=0),
+            scrub_summary=share.ScrubSummary(
+                preset="standard",
+                pseudonym_salt="standard",
+                agents_total=1,
+                agents_pseudonymized=0,
+                ack_flags_cleared=1,
+                recipients_cleared=1,
+                file_reservations_removed=0,
+                agent_links_removed=0,
+                secrets_replaced=0,
+                attachments_sanitized=0,
+                bodies_redacted=0,
+                attachments_cleared=0,
+            ),
+            fts_enabled=False,
+        )
+
+    def fake_build_bundle_assets(
+        _snapshot_path: Path,
+        output_dir: Path,
+        **_kwargs: object,
+    ) -> share.BundleArtifacts:
+        refreshed_manifest = {
+            "export_config": manifest["export_config"],
+            "project_scope": manifest["project_scope"],
+            "attachments": {"config": {"inline_threshold": 64, "detach_threshold": 1024}},
+            "scrub": {"preset": "standard"},
+            "database": {},
+        }
+        (output_dir / "manifest.json").write_text(json.dumps(refreshed_manifest), encoding="utf-8")
+        return share.BundleArtifacts(
+            attachments_manifest={"stats": {"inline": 0, "copied": 0, "externalized": 0, "missing": 0}},
+            chunk_manifest=None,
+            viewer_data=None,
+        )
+
+    monkeypatch.setattr(cli_module, "resolve_sqlite_database_path", lambda: database_path)
+    monkeypatch.setattr(cli_module, "create_snapshot_context", fake_create_snapshot_context)
+    monkeypatch.setattr(cli_module, "build_bundle_assets", fake_build_bundle_assets)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        lambda: SimpleNamespace(storage=SimpleNamespace(root=str(tmp_path / "storage"))),
+    )
+    monkeypatch.setattr(cli_module, "detect_hosting_hints", lambda _path: [])
+
+    runner = CliRunner()
+    result = runner.invoke(cli_module.app, ["share", "update", str(bundle_dir), "--no-zip"])
+
+    assert result.exit_code == 0, result.output
+    assert not (bundle_dir / "manifest.sig.json").exists()
+    assert "Removed stale manifest.sig.json during update" in result.output
+
+
+def test_share_update_prunes_stale_chunk_files_and_reports_it(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+    manifest = {
+        "export_config": {
+            "projects": ["demo"],
+            "inline_threshold": 64,
+            "detach_threshold": 1024,
+            "chunk_threshold": 2048,
+            "chunk_size": 1024,
+            "scrub_preset": "standard",
+        },
+        "project_scope": {"requested": ["demo"]},
+        "attachments": {"config": {"inline_threshold": 64, "detach_threshold": 1024}},
+        "scrub": {"preset": "standard"},
+        "database": {},
+    }
+    (bundle_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    chunks_dir = bundle_dir / "chunks"
+    chunks_dir.mkdir()
+    stale_chunk = chunks_dir / "mailbox.sqlite3.part-0002"
+    stale_chunk.write_bytes(b"stale-chunk")
+
+    database_path = tmp_path / "mailbox.sqlite3"
+    database_path.write_bytes(b"db")
+
+    def fake_create_snapshot_context(*, snapshot_path: Path, **_kwargs: object) -> share.SnapshotContext:
+        snapshot_path.write_bytes(b"snapshot")
+        return share.SnapshotContext(
+            snapshot_path=snapshot_path,
+            scope=share.ProjectScopeResult(projects=[share.ProjectRecord(1, "demo", "/repo/demo")], removed_count=0),
+            scrub_summary=share.ScrubSummary(
+                preset="standard",
+                pseudonym_salt="standard",
+                agents_total=1,
+                agents_pseudonymized=0,
+                ack_flags_cleared=1,
+                recipients_cleared=1,
+                file_reservations_removed=0,
+                agent_links_removed=0,
+                secrets_replaced=0,
+                attachments_sanitized=0,
+                bodies_redacted=0,
+                attachments_cleared=0,
+            ),
+            fts_enabled=False,
+        )
+
+    def fake_build_bundle_assets(
+        _snapshot_path: Path,
+        output_dir: Path,
+        **_kwargs: object,
+    ) -> share.BundleArtifacts:
+        refreshed_manifest = {
+            "export_config": manifest["export_config"],
+            "project_scope": manifest["project_scope"],
+            "attachments": {"config": {"inline_threshold": 64, "detach_threshold": 1024}},
+            "scrub": {"preset": "standard"},
+            "database": {
+                "chunk_manifest": {
+                    "chunk_count": 1,
+                    "chunk_size": 1024,
+                    "threshold_bytes": 2048,
+                }
+            },
+        }
+        (output_dir / "manifest.json").write_text(json.dumps(refreshed_manifest), encoding="utf-8")
+        fresh_chunks = output_dir / "chunks"
+        fresh_chunks.mkdir()
+        (fresh_chunks / "mailbox.sqlite3.part-0001").write_bytes(b"fresh-chunk")
+        (output_dir / "mailbox.sqlite3.config.json").write_text(
+            json.dumps({"chunk_count": 1, "chunk_size": 1024, "threshold_bytes": 2048}),
+            encoding="utf-8",
+        )
+        return share.BundleArtifacts(
+            attachments_manifest={"stats": {"inline": 0, "copied": 0, "externalized": 0, "missing": 0}},
+            chunk_manifest={"chunk_count": 1, "chunk_size": 1024},
+            viewer_data=None,
+        )
+
+    monkeypatch.setattr(cli_module, "resolve_sqlite_database_path", lambda: database_path)
+    monkeypatch.setattr(cli_module, "create_snapshot_context", fake_create_snapshot_context)
+    monkeypatch.setattr(cli_module, "build_bundle_assets", fake_build_bundle_assets)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        lambda: SimpleNamespace(storage=SimpleNamespace(root=str(tmp_path / "storage"))),
+    )
+    monkeypatch.setattr(cli_module, "detect_hosting_hints", lambda _path: [])
+
+    runner = CliRunner()
+    result = runner.invoke(cli_module.app, ["share", "update", str(bundle_dir), "--no-zip"])
+
+    assert result.exit_code == 0, result.output
+    assert not stale_chunk.exists()
+    assert (chunks_dir / "mailbox.sqlite3.part-0001").exists()
+    assert "Pruned 1 stale chunk file" in result.output
+    assert "remain on disk" not in result.output
 
 
 def test_scrub_snapshot_pseudonymizes_and_clears(tmp_path: Path) -> None:
@@ -818,6 +1116,30 @@ def test_verify_bundle_missing_sri_asset(tmp_path: Path) -> None:
         share.verify_bundle(tmp_path)
 
 
+def test_verify_bundle_rejects_sri_asset_outside_bundle_root(tmp_path: Path) -> None:
+    """SRI entries must not resolve outside the verified bundle directory."""
+    bundle_dir = tmp_path / "bundle"
+    bundle_dir.mkdir()
+
+    outside_asset = tmp_path / "outside.js"
+    outside_asset.write_text("console.log('outside');", encoding="utf-8")
+
+    manifest_data = {
+        "version": "1.0",
+        "viewer": {
+            "sri": {
+                "../outside.js": share._compute_sri(outside_asset),
+            }
+        },
+    }
+
+    manifest_path = bundle_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="must stay within the bundle root"):
+        share.verify_bundle(bundle_dir)
+
+
 def test_decrypt_with_age_requires_age_binary(tmp_path: Path, monkeypatch) -> None:
     """Test that decrypt_with_age fails gracefully when age is not installed."""
     monkeypatch.setattr(share.shutil, "which", lambda x: None)
@@ -853,6 +1175,62 @@ def test_decrypt_with_age_validation(tmp_path: Path, monkeypatch) -> None:
     missing_identity = tmp_path / "nonexistent.txt"
     with pytest.raises(ShareExportError, match="Identity file not found"):
         share.decrypt_with_age(encrypted, output, identity=missing_identity)
+
+
+def test_decrypt_with_age_rejects_directory_input(tmp_path: Path, monkeypatch) -> None:
+    """Decryption should reject directory inputs before invoking age."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    encrypted_dir = tmp_path / "encrypted_dir"
+    encrypted_dir.mkdir()
+    identity = tmp_path / "identity.txt"
+    identity.write_text("AGE-SECRET-KEY-1...", encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="Encrypted path must be a file"):
+        share.decrypt_with_age(encrypted_dir, tmp_path / "out", identity=identity)
+
+
+def test_decrypt_with_age_refuses_existing_output(tmp_path: Path, monkeypatch) -> None:
+    """Decryption should not overwrite an existing destination file."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    encrypted = tmp_path / "bundle.age"
+    encrypted.write_bytes(b"encrypted data")
+    output = tmp_path / "bundle"
+    output.write_bytes(b"existing data")
+    identity = tmp_path / "identity.txt"
+    identity.write_text("AGE-SECRET-KEY-1...", encoding="utf-8")
+
+    monkeypatch.setattr(
+        share.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("age should not be invoked when output already exists"),
+    )
+
+    with pytest.raises(ShareExportError, match="Refusing to overwrite existing output file"):
+        share.decrypt_with_age(encrypted, output, identity=identity)
+
+
+def test_decrypt_with_age_reports_exit_code_when_age_emits_no_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Decryption failures should remain actionable even if age prints nothing."""
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    encrypted = tmp_path / "bundle.age"
+    encrypted.write_bytes(b"encrypted data")
+    identity = tmp_path / "identity.txt"
+    identity.write_text("AGE-SECRET-KEY-1...", encoding="utf-8")
+
+    class Result:
+        returncode = 7
+        stderr = ""
+        stdout = ""
+
+    monkeypatch.setattr(share.subprocess, "run", lambda *args, **kwargs: Result())
+
+    with pytest.raises(ShareExportError, match=r"status 7"):
+        share.decrypt_with_age(encrypted, tmp_path / "out", identity=identity)
 
 
 def test_sri_computation(tmp_path: Path) -> None:
@@ -1015,6 +1393,43 @@ def test_encrypt_bundle_with_invalid_recipient(tmp_path: Path, monkeypatch) -> N
         share.encrypt_bundle(bundle, ["notavalidrecipient"])
 
 
+def test_encrypt_bundle_refuses_existing_output(tmp_path: Path, monkeypatch) -> None:
+    """Encryption should not overwrite an existing .age artifact."""
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"test data")
+    encrypted = tmp_path / "bundle.zip.age"
+    encrypted.write_bytes(b"existing encrypted data")
+
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+    monkeypatch.setattr(
+        share.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("age should not be invoked when output already exists"),
+    )
+
+    with pytest.raises(ShareExportError, match="Encrypted output path already exists"):
+        share.encrypt_bundle(bundle, ["age1recipient..."])
+
+
+def test_encrypt_bundle_reports_stdout_error_when_stderr_empty(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Encryption failures should surface stdout if stderr is empty."""
+    bundle = tmp_path / "bundle.zip"
+    bundle.write_bytes(b"test data")
+
+    class Result:
+        returncode = 1
+        stderr = ""
+        stdout = "recipient rejected"
+
+    monkeypatch.setattr(share.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(share.shutil, "which", lambda x: "/usr/bin/age" if x == "age" else None)
+
+    with pytest.raises(ShareExportError, match=r"recipient rejected"):
+        share.encrypt_bundle(bundle, ["age1recipient..."])
+
+
 def test_encrypt_bundle_returns_none_for_empty_recipients(tmp_path: Path) -> None:
     """Test that encrypt_bundle returns None when no recipients provided."""
     bundle = tmp_path / "bundle.zip"
@@ -1140,6 +1555,30 @@ def test_sign_manifest_with_missing_manifest(tmp_path: Path) -> None:
         share.sign_manifest(manifest_path, signing_key_path, tmp_path)
 
 
+def test_sign_manifest_overwrites_existing_public_key_when_requested(tmp_path: Path) -> None:
+    """overwrite=True should refresh the exported public key file for share update flows."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+
+    public_out = tmp_path / "signing.pub"
+    public_out.write_text("stale-key", encoding="utf-8")
+
+    signature_info = share.sign_manifest(
+        manifest_path,
+        signing_key_path,
+        tmp_path,
+        public_out=public_out,
+        overwrite=True,
+    )
+
+    assert public_out.read_text(encoding="utf-8") == signature_info["public_key"]
+
+
 def test_verify_bundle_with_sri_and_signature_both_valid(tmp_path: Path) -> None:
     """Test verification succeeds when both SRI and signature are valid."""
     pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
@@ -1171,6 +1610,46 @@ def test_verify_bundle_with_sri_and_signature_both_valid(tmp_path: Path) -> None
     assert result["sri_checked"] is True
     assert result["signature_checked"] is True
     assert result["signature_verified"] is True
+
+
+def test_verify_bundle_rejects_manifest_sha256_mismatch(tmp_path: Path) -> None:
+    """Verification should fail if manifest.sig.json records the wrong manifest hash."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+    share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+    sig_path = tmp_path / "manifest.sig.json"
+    sig_payload = json.loads(sig_path.read_text(encoding="utf-8"))
+    sig_payload["manifest_sha256"] = "0" * 64
+    sig_path.write_text(json.dumps(sig_payload), encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="manifest_sha256"):
+        share.verify_bundle(tmp_path)
+
+
+def test_verify_bundle_rejects_unsupported_signature_algorithm(tmp_path: Path) -> None:
+    """Verification should fail if manifest.sig.json advertises a different algorithm."""
+    pytest.importorskip("nacl", reason="PyNaCl required for signing tests")
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"version": "1.0"}), encoding="utf-8")
+
+    signing_key_path = tmp_path / "key.key"
+    signing_key_path.write_bytes(b"A" * 32)
+    share.sign_manifest(manifest_path, signing_key_path, tmp_path)
+
+    sig_path = tmp_path / "manifest.sig.json"
+    sig_payload = json.loads(sig_path.read_text(encoding="utf-8"))
+    sig_payload["algorithm"] = "rsa"
+    sig_path.write_text(json.dumps(sig_payload), encoding="utf-8")
+
+    with pytest.raises(ShareExportError, match="Unsupported signature algorithm"):
+        share.verify_bundle(tmp_path)
 
 
 def test_create_performance_indexes(tmp_path: Path) -> None:

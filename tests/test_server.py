@@ -160,7 +160,7 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
         )
         assert release.data["released"] == 1
 
-        file_reservations_resource = await client.read_resource("resource://file_reservations/backend")
+        file_reservations_resource = await client.read_resource("resource://file_reservations/backend?active_only=false")
         payload = json.loads(file_reservations_resource[0].text)
         assert any(entry["path_pattern"] == "src/app.py" and entry["released_ts"] is not None for entry in payload)
 
@@ -269,6 +269,297 @@ async def test_build_slot_tools_offload_git_and_slot_file_io(isolated_env, monke
         assert released.data["released"] is True
 
     assert slot_io_events >= {"exists", "glob", "read_text"}
+
+
+@pytest.mark.asyncio
+async def test_build_slot_renew_missing_lease_is_noop(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        renewed = await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert renewed.data["renewed"] is False
+        assert renewed.data["expires_ts"] is None
+
+    slot_dir = (
+        Path(get_settings().storage.root).expanduser().resolve()
+        / "projects"
+        / "backend"
+        / "build_slots"
+        / "frontend-build"
+    )
+    assert list(slot_dir.glob("*.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_build_slot_release_missing_lease_is_noop(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        released = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert released.data["released"] is False
+
+    slot_dir = (
+        Path(get_settings().storage.root).expanduser().resolve()
+        / "projects"
+        / "backend"
+        / "build_slots"
+        / "frontend-build"
+    )
+    assert list(slot_dir.glob("*.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_build_slot_renew_released_lease_is_noop(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+
+        renewed = await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert renewed.data["renewed"] is False
+        assert renewed.data["expires_ts"] is None
+
+
+@pytest.mark.asyncio
+async def test_build_slot_renew_and_release_honor_explicit_branch_when_repo_branch_changes(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+
+    @contextlib.contextmanager
+    def fake_git_repo(path, search_parent_directories=True):
+        current_branch = "feature"
+
+        class _Git:
+            def rev_parse(self, *args):
+                return current_branch
+
+        class _ActiveBranch:
+            name = current_branch
+
+        class _Repo:
+            active_branch = _ActiveBranch()
+            git = _Git()
+
+            def close(self):
+                return None
+
+        yield _Repo()
+
+    monkeypatch.setattr("mcp_agent_mail.app._git_repo", fake_git_repo)
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        acquired = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "branch": "main",
+                "registration_token": token,
+            },
+        )
+        assert acquired.data["granted"]["branch"] == "main"
+
+        renewed = await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "branch": "main",
+                "registration_token": token,
+            },
+        )
+        assert renewed.data["renewed"] is True
+
+        released = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "branch": "main",
+                "registration_token": token,
+            },
+        )
+        assert released.data["released"] is True
+
+
+@pytest.mark.asyncio
+async def test_build_slot_conflicts_respect_both_requester_and_holder_exclusivity(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        blue = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        green = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "GreenHill",
+                "task_description": "build slots",
+            },
+        )
+
+        blue_token = blue.data["registration_token"]
+        green_token = green.data["registration_token"]
+
+        await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "shared-first",
+                "exclusive": False,
+                "registration_token": blue_token,
+            },
+        )
+        exclusive_second = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "GreenHill",
+                "slot": "shared-first",
+                "exclusive": True,
+                "registration_token": green_token,
+            },
+        )
+        assert [entry["agent"] for entry in exclusive_second.data["conflicts"]] == ["BlueLake"]
+
+        await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "exclusive-first",
+                "exclusive": True,
+                "registration_token": blue_token,
+            },
+        )
+        shared_second = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "GreenHill",
+                "slot": "exclusive-first",
+                "exclusive": False,
+                "registration_token": green_token,
+            },
+        )
+        assert [entry["agent"] for entry in shared_second.data["conflicts"]] == ["BlueLake"]
 
 
 @pytest.mark.asyncio

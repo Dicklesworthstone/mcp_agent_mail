@@ -208,6 +208,72 @@ async def test_macro_contact_handshake_welcome(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_macro_contact_handshake_rejects_partial_welcome(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="welcome_subject and welcome_body"):
+            await client.call_tool(
+                "macro_contact_handshake",
+                {
+                    "project_key": "Backend",
+                    "requester": "GreenCastle",
+                    "target": "BlueLake",
+                    "auto_accept": True,
+                    "welcome_subject": "Welcome only",
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_cross_project_welcome(isolated_env):
+    backend = "/data/projects/backend"
+    frontend = "/data/projects/frontend"
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": backend})
+        await client.call_tool("ensure_project", {"human_key": frontend})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": backend, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": frontend, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        res = await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend,
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "to_project": frontend,
+                "auto_accept": True,
+                "welcome_subject": "Cross-project welcome",
+                "welcome_body": "hello from backend",
+            },
+        )
+
+        welcome = res.data.get("welcome_message") or {}
+        assert welcome.get("deliveries")
+
+        inbox_blocks = await client.read_resource("resource://inbox/BlueLake?project=/data/projects/frontend&limit=10")
+        raw = inbox_blocks[0].text if inbox_blocks else "{}"
+        data = json.loads(raw)
+        assert any(item.get("subject") == "Cross-project welcome" for item in data.get("messages", []))
+
+
+@pytest.mark.asyncio
 async def test_macro_contact_handshake_registers_missing_target(isolated_env):
     backend = "/data/projects/backend"
     frontend = "/data/projects/frontend"
@@ -240,6 +306,39 @@ async def test_macro_contact_handshake_registers_missing_target(isolated_env):
         data = json.loads(raw)
         names = {agent.get("name") for agent in data.get("agents", [])}
         assert "RedDog" in names
+
+
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_respects_register_if_missing_false(isolated_env):
+    backend = "/data/projects/backend"
+    frontend = "/data/projects/frontend"
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": backend})
+        await client.call_tool("ensure_project", {"human_key": frontend})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": backend, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="not found"):
+            await client.call_tool(
+                "macro_contact_handshake",
+                {
+                    "project_key": backend,
+                    "requester": "BlueLake",
+                    "target": "RedDog",
+                    "to_project": frontend,
+                    "register_if_missing": False,
+                    "auto_accept": False,
+                },
+            )
+
+        agents_blocks = await client.read_resource(f"resource://agents/{slugify(frontend)}")
+        raw = agents_blocks[0].text if agents_blocks else "{}"
+        data = json.loads(raw)
+        names = {agent.get("name") for agent in data.get("agents", [])}
+        assert "RedDog" not in names
 
 
 @pytest.mark.asyncio

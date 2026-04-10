@@ -139,7 +139,7 @@ class _CommitQueue:
 
     async def start(self) -> None:
         """Start the background queue processor."""
-        if self._task is not None:
+        if self._task is not None and not self._task.done():
             return
         self._stopped = False
         self._task = asyncio.create_task(self._process_loop())
@@ -196,7 +196,7 @@ class _CommitQueue:
         self._enqueued += 1
 
         # If queue processor isn't running, fall back to direct commit
-        if self._task is None or self._task.done():
+        if self._stopped or self._task is None or self._task.done():
             await _commit_direct(repo_root, settings, message, rel_paths)
             return
 
@@ -213,7 +213,7 @@ class _CommitQueue:
 
     async def _process_loop(self) -> None:
         """Background loop that processes queued commits."""
-        while not self._stopped:
+        while True:
             try:
                 # Wait for first request with timeout
                 try:
@@ -222,10 +222,14 @@ class _CommitQueue:
                         timeout=self._max_wait_ms / 1000.0,
                     )
                 except asyncio.TimeoutError:
+                    if self._stopped and self._queue.empty():
+                        return
                     continue
 
                 # Skip sentinel requests
                 if first.settings is None:
+                    if self._stopped and self._queue.empty():
+                        return
                     continue
 
                 # Collect more requests if available (non-blocking)
@@ -244,10 +248,25 @@ class _CommitQueue:
 
                 # Process the batch
                 await self._process_batch(batch)
+                if self._stopped and self._queue.empty():
+                    return
 
             except Exception as e:
                 _logger.exception("commit_queue.error", extra={"error": str(e)})
+                if self._stopped and self._queue.empty():
+                    return
                 await asyncio.sleep(0.1)  # Back off on errors
+
+    @staticmethod
+    def _finish_request(request: _CommitRequest, error: Exception | None = None) -> None:
+        """Settle a queued request unless its waiter has already gone away."""
+        future = request.future
+        if future.done():
+            return
+        if error is None:
+            future.set_result(None)
+        else:
+            future.set_exception(error)
 
     async def _process_batch(self, batch: list[_CommitRequest]) -> None:
         """Process a batch of commit requests.
@@ -272,10 +291,10 @@ class _CommitQueue:
                 req = requests[0]
                 try:
                     await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
-                    req.future.set_result(None)
+                    self._finish_request(req)
                     self._commits += 1
                 except Exception as e:
-                    req.future.set_exception(e)
+                    self._finish_request(req, e)
             else:
                 # Multiple requests to same repo - try to batch if no path conflicts
                 all_paths: set[str] = set()
@@ -307,7 +326,7 @@ class _CommitQueue:
                             merged_paths,
                         )
                         for req in requests:
-                            req.future.set_result(None)
+                            self._finish_request(req)
                         self._commits += 1
                         # Record batch size
                         self._batch_sizes.append(len(requests))
@@ -315,16 +334,16 @@ class _CommitQueue:
                             self._batch_sizes.pop(0)
                     except Exception as e:
                         for req in requests:
-                            req.future.set_exception(e)
+                            self._finish_request(req, e)
                 else:
                     # Process sequentially (conflicts or large batch)
                     for req in requests:
                         try:
                             await _commit_direct(req.repo_root, req.settings, req.message, req.rel_paths)
-                            req.future.set_result(None)
+                            self._finish_request(req)
                             self._commits += 1
                         except Exception as e:
-                            req.future.set_exception(e)
+                            self._finish_request(req, e)
 
 
 # Global commit queue instance (lazily initialized)
@@ -343,10 +362,10 @@ def _get_commit_queue_lock() -> asyncio.Lock:
 async def _get_commit_queue() -> _CommitQueue:
     """Get or create the global commit queue."""
     global _COMMIT_QUEUE
-    if _COMMIT_QUEUE is not None:
+    if _COMMIT_QUEUE is not None and _COMMIT_QUEUE._task is not None and not _COMMIT_QUEUE._task.done():
         return _COMMIT_QUEUE
     async with _get_commit_queue_lock():
-        if _COMMIT_QUEUE is None:
+        if _COMMIT_QUEUE is None or _COMMIT_QUEUE._task is None or _COMMIT_QUEUE._task.done():
             _COMMIT_QUEUE = _CommitQueue()
             await _COMMIT_QUEUE.start()
         return _COMMIT_QUEUE
@@ -3331,15 +3350,22 @@ async def restore_from_backup(
     if dry_run:
         would_restore_database = False
         if manifest.database_path is not None:
-            try:
-                _resolve_backup_file_artifact(backup_path, manifest.database_path)
-                would_restore_database = True
-            except FileNotFoundError:
-                results["errors"].append(f"Database backup not found: {manifest.database_path}")
-            except IsADirectoryError:
+            db_path = get_database_path(settings)
+            if db_path is None:
                 results["errors"].append(
-                    f"Database backup artifact is not a file: {manifest.database_path}"
+                    "Current configuration does not use a SQLite database file; "
+                    "cannot restore database payload"
                 )
+            else:
+                try:
+                    _resolve_backup_file_artifact(backup_path, manifest.database_path)
+                    would_restore_database = True
+                except FileNotFoundError:
+                    results["errors"].append(f"Database backup not found: {manifest.database_path}")
+                except IsADirectoryError:
+                    results["errors"].append(
+                        f"Database backup artifact is not a file: {manifest.database_path}"
+                    )
         would_restore_bundles: list[str] = []
         for bundle_ref in manifest.project_bundles:
             try:
@@ -3367,7 +3393,12 @@ async def restore_from_backup(
 
     if db_backup is not None:
         db_path = get_database_path(settings)
-        if db_path:
+        if db_path is None:
+            results["errors"].append(
+                "Current configuration does not use a SQLite database file; "
+                "cannot restore database payload"
+            )
+        else:
             try:
 
                 def _restore_db() -> None:

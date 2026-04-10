@@ -1205,6 +1205,12 @@ def _extract_format_param(params: dict[str, Any]) -> Optional[str]:
     return cast(Optional[str], raw)
 
 
+def _require_project_resource_param(project: Optional[str], *, resource_name: str) -> str:
+    if project is None or not project.strip():
+        raise ValueError(f"project parameter is required for {resource_name}")
+    return project
+
+
 @dataclass(slots=True)
 class FileReservationStatus:
     reservation: FileReservation
@@ -5176,6 +5182,72 @@ def build_mcp_server() -> FastMCP:
             raise RuntimeError("Message payload was not generated.")
         return payload
 
+    def _extract_delivery_error_payload(payload: Any) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        error_payload = payload.get("error")
+        if not isinstance(error_payload, dict):
+            return None
+        return dict(error_payload)
+
+    def _with_delivery_project(error_payload: dict[str, Any], project: Project) -> dict[str, Any]:
+        payload = dict(error_payload)
+        payload.setdefault("project", project.human_key)
+        return payload
+
+    def _delivery_failure_from_exception(project: Project, exc: Exception) -> dict[str, Any]:
+        if isinstance(exc, ToolExecutionError):
+            return _with_delivery_project(exc.to_payload()["error"], project)
+        message = str(exc).strip() or f"Failed to deliver message to project '{project.human_key}'."
+        return _with_delivery_project({"type": "DELIVERY_FAILED", "message": message}, project)
+
+    def _collect_delivery_result(
+        deliveries: list[dict[str, Any]],
+        delivery_errors: list[dict[str, Any]],
+        project: Project,
+        payload: dict[str, Any],
+    ) -> None:
+        error_payload = _extract_delivery_error_payload(payload)
+        if error_payload is not None:
+            delivery_errors.append(_with_delivery_project(error_payload, project))
+            return
+        deliveries.append({"project": project.human_key, "payload": payload})
+
+    def _summarize_delivery_failures(
+        delivery_errors: Sequence[dict[str, Any]],
+        *,
+        summary_message: str,
+    ) -> dict[str, Any]:
+        if len(delivery_errors) == 1:
+            return dict(delivery_errors[0])
+        return {
+            "type": "DELIVERY_FAILED",
+            "message": summary_message,
+            "errors": [dict(error) for error in delivery_errors],
+        }
+
+    async def _contact_request_notification_exists(
+        project: Project,
+        sender: Agent,
+        recipient: Agent,
+    ) -> bool:
+        if project.id is None or sender.id is None or recipient.id is None:
+            return False
+        subject = f"Contact request from {sender.name}"
+        async with get_session() as session:
+            existing = await session.execute(
+                select(Message.id)
+                .join(MessageRecipient, cast(Any, MessageRecipient.message_id) == Message.id)
+                .where(
+                    cast(Any, Message.project_id) == project.id,
+                    cast(Any, Message.sender_id) == sender.id,
+                    cast(Any, Message.subject) == subject,
+                    cast(Any, MessageRecipient.agent_id) == recipient.id,
+                )
+                .limit(1)
+            )
+            return existing.first() is not None
+
     @mcp.tool(name="health_check", description="Return basic readiness information for the Agent Mail server.")
     @_instrument_tool("health_check", cluster=CLUSTER_SETUP, capabilities={"infrastructure"}, complexity="low")
     async def health_check(ctx: Context, format: Optional[str] = None) -> dict[str, Any]:
@@ -6391,7 +6463,7 @@ def build_mcp_server() -> FastMCP:
         thread_id: Optional[str] = None,
         broadcast: bool = False,
         topic: Optional[str] = None,
-        auto_contact_if_blocked: bool = False,
+        auto_contact_if_blocked: Optional[bool] = None,
         sender_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
@@ -6838,7 +6910,11 @@ def build_mcp_server() -> FastMCP:
                 auto_requested: list[str] = []
                 auto_approved: list[str] = []
                 # Respect explicit flag or server default ergonomics
-                effective_auto_contact: bool = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                effective_auto_contact = (
+                    bool(getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                    if auto_contact_if_blocked is None
+                    else auto_contact_if_blocked
+                )
                 if effective_auto_contact:
                     try:
                         from fastmcp.tools.tool import FunctionTool
@@ -7203,7 +7279,11 @@ def build_mcp_server() -> FastMCP:
                 attempted_external: list[str] = []
                 requested_external: list[str] = []
                 try:
-                    effective_auto_contact = bool(auto_contact_if_blocked or getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                    effective_auto_contact = (
+                        bool(getattr(settings_local, "messaging_auto_handshake_on_block", True))
+                        if auto_contact_if_blocked is None
+                        else auto_contact_if_blocked
+                    )
                     if effective_auto_contact and unknown_external:
                         from fastmcp.tools.tool import FunctionTool
                         handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
@@ -7390,6 +7470,7 @@ def build_mcp_server() -> FastMCP:
                     )
 
         deliveries: list[dict[str, Any]] = []
+        delivery_errors: list[dict[str, Any]] = []
         # Local deliver if any
         if local_to or local_cc or local_bcc:
             payload_local = await _deliver_message(
@@ -7409,7 +7490,7 @@ def build_mcp_server() -> FastMCP:
                 thread_id,
                 topic=topic,
             )
-            deliveries.append({"project": project.human_key, "payload": payload_local})
+            _collect_delivery_result(deliveries, delivery_errors, project, payload_local)
         # External per-target project deliver using the original sender identity.
         for _pid, group in external.items():
             p: Project = group["project"]
@@ -7431,17 +7512,22 @@ def build_mcp_server() -> FastMCP:
                     thread_id,
                     topic=topic,
                 )
-                deliveries.append({"project": p.human_key, "payload": payload_ext})
-            except Exception:
+                _collect_delivery_result(deliveries, delivery_errors, p, payload_ext)
+            except Exception as exc:
                 logger.exception("Failed to deliver message to external project %r", p.human_key)
+                delivery_errors.append(_delivery_failure_from_exception(p, exc))
                 continue
 
-        # If a single delivery returned a structured error payload, bubble it up to top-level
-        if len(deliveries) == 1:
-            maybe_payload = deliveries[0].get("payload")
-            if isinstance(maybe_payload, dict) and isinstance(maybe_payload.get("error"), dict):
-                return {"error": maybe_payload["error"]}
+        if not deliveries and delivery_errors:
+            return {
+                "error": _summarize_delivery_failures(
+                    delivery_errors,
+                    summary_message="Message delivery failed for all target projects.",
+                )
+            }
         result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries), "verified_sender": verified_sender}
+        if delivery_errors:
+            result["delivery_errors"] = delivery_errors
         # Back-compat: expose top-level attachments when a single local delivery exists
         if len(deliveries) == 1:
             payload = deliveries[0].get("payload") or {}
@@ -7613,7 +7699,7 @@ def build_mcp_server() -> FastMCP:
             if original_sender.project_id == project.id
             else _format_cross_project_agent_address(original_sender_project.slug, original_sender.name)
         )
-        to_names = to or [default_reply_target]
+        to_names = [default_reply_target] if to is None else to
         cc_list = cc or []
         bcc_list = bcc or []
 
@@ -7968,6 +8054,7 @@ def build_mcp_server() -> FastMCP:
                 )
 
         deliveries: list[dict[str, Any]] = []
+        delivery_errors: list[dict[str, Any]] = []
         if local_to or local_cc or local_bcc:
             payload_local = await _deliver_message(
                 ctx,
@@ -7986,7 +8073,7 @@ def build_mcp_server() -> FastMCP:
                 thread_id=thread_key,
                 topic=original.topic,
             )
-            deliveries.append({"project": project.human_key, "payload": payload_local})
+            _collect_delivery_result(deliveries, delivery_errors, project, payload_local)
 
         for _pid, group in external.items():
             target_project: Project = group["project"]
@@ -8008,17 +8095,25 @@ def build_mcp_server() -> FastMCP:
                     thread_id=thread_key,
                     topic=original.topic,
                 )
-                deliveries.append({"project": target_project.human_key, "payload": payload_ext})
-            except Exception:
+                _collect_delivery_result(deliveries, delivery_errors, target_project, payload_ext)
+            except Exception as exc:
+                logger.exception("Failed to deliver reply to external project %r", target_project.human_key)
+                delivery_errors.append(_delivery_failure_from_exception(target_project, exc))
                 continue
 
         if not deliveries:
-            return {
+            payload: dict[str, Any] = {
                 "thread_id": thread_key,
                 "reply_to": message_id,
                 "deliveries": [],
                 "count": 0,
             }
+            if delivery_errors:
+                payload["error"] = _summarize_delivery_failures(
+                    delivery_errors,
+                    summary_message="Reply delivery failed for all target projects.",
+                )
+            return payload
 
         base_payload = deliveries[0].get("payload") or {}
         primary_payload = dict(base_payload) if isinstance(base_payload, dict) else {}
@@ -8026,6 +8121,8 @@ def build_mcp_server() -> FastMCP:
         primary_payload["reply_to"] = message_id
         primary_payload["deliveries"] = deliveries
         primary_payload["count"] = len(deliveries)
+        if delivery_errors:
+            primary_payload["delivery_errors"] = delivery_errors
         if len(deliveries) == 1:
             attachments = base_payload.get("attachments") if isinstance(base_payload, dict) else None
             if attachments is not None:
@@ -8190,11 +8287,16 @@ def build_mcp_server() -> FastMCP:
                 await s.commit()
                 should_notify = False
 
+        subject = f"Contact request from {a.name}"
+        body = reason or f"{a.name} requests permission to contact {b.name}."
+        if not should_notify:
+            should_notify = not await _contact_request_notification_exists(target_project, a, b)
+
+        notification_message: dict[str, Any] | None = None
+        notification_error: dict[str, Any] | None = None
         if should_notify:
             # Send an intro message with ack_required.
-            subject = f"Contact request from {a.name}"
-            body = reason or f"{a.name} requests permission to contact {b.name}."
-            await _deliver_message(
+            notification_payload = await _deliver_message(
                 ctx,
                 "request_contact",
                 target_project,
@@ -8210,7 +8312,25 @@ def build_mcp_server() -> FastMCP:
                 ack_required=True,
                 thread_id=None,
             )
-        return {"from": a.name, "from_project": project.human_key, "to": b.name, "to_project": target_project.human_key, "status": "pending", "expires_ts": _iso(exp)}
+            error_payload = _extract_delivery_error_payload(notification_payload)
+            if error_payload is not None:
+                notification_error = _with_delivery_project(error_payload, target_project)
+            else:
+                notification_message = notification_payload
+
+        result: dict[str, Any] = {
+            "from": a.name,
+            "from_project": project.human_key,
+            "to": b.name,
+            "to_project": target_project.human_key,
+            "status": "pending",
+            "expires_ts": _iso(exp),
+        }
+        if notification_message is not None:
+            result["notification_message"] = notification_message
+        if notification_error is not None:
+            result["notification_error"] = notification_error
+        return result
 
     @mcp.tool(name="respond_contact")
     @_instrument_tool(
@@ -8780,7 +8900,7 @@ def build_mcp_server() -> FastMCP:
         _bind_session_agent(ctx, project, agent)
 
         file_reservations_result: Optional[dict[str, Any]] = None
-        if file_reservation_paths:
+        if file_reservation_paths is not None:
             # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
             from fastmcp.tools.tool import FunctionTool
 
@@ -9010,6 +9130,32 @@ def build_mcp_server() -> FastMCP:
         real_requester = (requester or agent_name or "").strip()
         real_target = (target or to_agent or "").strip()
         target_project_key = (to_project or "").strip()
+        if welcome_subject is not None:
+            welcome_subject = welcome_subject.strip()
+            if not welcome_subject:
+                raise ToolExecutionError(
+                    "INVALID_ARGUMENT",
+                    "welcome_subject cannot be blank when provided.",
+                    recoverable=True,
+                    data={"argument": "welcome_subject"},
+                )
+        if welcome_body is not None and not welcome_body.strip():
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "welcome_body cannot be blank when provided.",
+                recoverable=True,
+                data={"argument": "welcome_body"},
+            )
+        if (welcome_subject is None) != (welcome_body is None):
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "welcome_subject and welcome_body must be provided together.",
+                recoverable=True,
+                data={
+                    "welcome_subject_provided": welcome_subject is not None,
+                    "welcome_body_provided": welcome_body is not None,
+                },
+            )
         if not real_requester or not real_target:
             # Best-effort inference to honor "obvious intent"
             try:
@@ -9173,14 +9319,13 @@ def build_mcp_server() -> FastMCP:
             "to_agent": real_target,
             "reason": reason,
             "ttl_seconds": ttl_seconds,
+            "register_if_missing": register_if_missing,
             "format": "json",
         }
         if requester_registration_token:
             request_payload["registration_token"] = requester_registration_token
         if target_project_key:
             request_payload["to_project"] = target_project_key
-        if register_if_missing:
-            request_payload["register_if_missing"] = True
         if program:
             request_payload["program"] = program
         if model:
@@ -9192,6 +9337,11 @@ def build_mcp_server() -> FastMCP:
 
         response_result = None
         if auto_accept:
+            target_auth_token = target_registration_token
+            if target_auth_token is None:
+                response_project = await _get_project_by_identifier(target_project_key or project_key)
+                response_agent = await _get_agent(response_project, real_target)
+                response_agent, target_auth_token = await _ensure_agent_registration_token(response_agent)
             respond_tool = cast(FunctionTool, cast(Any, respond_contact))
             respond_payload: dict[str, Any] = {
                 "ctx": ctx,
@@ -9202,23 +9352,24 @@ def build_mcp_server() -> FastMCP:
                 "ttl_seconds": ttl_seconds,
                 "format": "json",
             }
-            if target_registration_token:
-                respond_payload["registration_token"] = target_registration_token
+            if target_auth_token:
+                respond_payload["registration_token"] = target_auth_token
             if target_project_key:
                 respond_payload["from_project"] = project_key
             respond_tool_result = await respond_tool.run(respond_payload)
             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
         welcome_result = None
-        if welcome_subject and welcome_body and not target_project_key:
+        if welcome_subject and welcome_body:
             try:
+                welcome_recipients = [real_target] if not target_project_key else [f"{real_target}@{target_project_key}"]
                 send_tool = cast(FunctionTool, cast(Any, send_message))
                 send_tool_result = await send_tool.run(
                     {
                         "ctx": ctx,
                         "project_key": project_key,
                         "sender_name": real_requester,
-                        "to": [real_target],
+                        "to": welcome_recipients,
                         "subject": welcome_subject,
                         "body_md": welcome_body,
                         "thread_id": thread_id,
@@ -10292,6 +10443,20 @@ def build_mcp_server() -> FastMCP:
         }}}
         ```
         """
+        if paths == []:
+            raise ToolExecutionError(
+                error_type="EMPTY_PATHS",
+                message="paths cannot be an empty list. Omit paths to release all active reservations, or provide at least one path pattern.",
+                recoverable=True,
+                data={"provided": paths},
+            )
+        if file_reservation_ids == []:
+            raise ToolExecutionError(
+                error_type="EMPTY_IDS",
+                message="file_reservation_ids cannot be an empty list. Omit file_reservation_ids to release all active reservations, or provide at least one reservation id.",
+                recoverable=True,
+                data={"provided": file_reservation_ids},
+            )
         if get_settings().tools_log_enabled:
             try:
                 from rich.console import Console
@@ -10595,6 +10760,20 @@ def build_mcp_server() -> FastMCP:
         dict
             { renewed: int, file_reservations: [{id, path_pattern, old_expires_ts, new_expires_ts}] }
         """
+        if paths == []:
+            raise ToolExecutionError(
+                error_type="EMPTY_PATHS",
+                message="paths cannot be an empty list. Omit paths to renew all active reservations, or provide at least one path pattern.",
+                recoverable=True,
+                data={"provided": paths},
+            )
+        if file_reservation_ids == []:
+            raise ToolExecutionError(
+                error_type="EMPTY_IDS",
+                message="file_reservation_ids cannot be an empty list. Omit file_reservation_ids to renew all active reservations, or provide at least one reservation id.",
+                recoverable=True,
+                data={"provided": file_reservation_ids},
+            )
         if get_settings().tools_log_enabled:
             try:
                 from rich.console import Console
@@ -10624,6 +10803,14 @@ def build_mcp_server() -> FastMCP:
         await ensure_schema()
         now = datetime.now(timezone.utc)
         bump = max(60, int(extend_seconds))
+        stale_auto_releases = await _expire_stale_file_reservations(project.id)
+        if stale_auto_releases:
+            summary = ", ".join(
+                f"{status.agent.name}:{status.reservation.path_pattern}"
+                for status in stale_auto_releases[:5]
+            )
+            extra = f" ({summary})" if summary else ""
+            await ctx.info(f"Auto-released {len(stale_auto_releases)} stale file_reservation(s){extra}.")
 
         # Use a single IMMEDIATE session for the read + write so the
         # renewal is atomic and immediately visible to other connections.
@@ -10634,6 +10821,7 @@ def build_mcp_server() -> FastMCP:
                     cast(Any, FileReservation.project_id) == project.id,
                     cast(Any, FileReservation.agent_id) == agent.id,
                     cast(Any, FileReservation.released_ts).is_(None),
+                    cast(Any, FileReservation.expires_ts) > _naive_utc(now),
                 )
                 .order_by(asc(cast(Any, FileReservation.expires_ts)))
             )
@@ -10701,6 +10889,18 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 return None
 
+        def _is_active_build_slot_lease(data: dict[str, Any], now: datetime) -> bool:
+            if data.get("released_ts"):
+                return False
+            exp = data.get("expires_ts")
+            if exp:
+                try:
+                    if datetime.fromisoformat(exp) <= now:
+                        return False
+                except Exception:
+                    pass
+            return True
+
         def _read_active_slots(slot_path: Path, now: datetime) -> list[dict[str, Any]]:
             results: list[dict[str, Any]] = []
             if not slot_path.exists():
@@ -10708,14 +10908,8 @@ def build_mcp_server() -> FastMCP:
             for f in slot_path.glob("*.json"):
                 try:
                     data = json.loads(f.read_text(encoding="utf-8"))
-                    exp = data.get("expires_ts")
-                    if exp:
-                        try:
-                            if datetime.fromisoformat(exp) <= now:
-                                continue
-                        except Exception:
-                            pass
-                    results.append(data)
+                    if isinstance(data, dict) and _is_active_build_slot_lease(cast(dict[str, Any], data), now):
+                        results.append(cast(dict[str, Any], data))
                 except Exception:
                     continue
             return results
@@ -10726,6 +10920,17 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 return {}
 
+        def _read_existing_build_slot_lease(lease_path: Path) -> dict[str, Any] | None:
+            try:
+                if not lease_path.is_file():
+                    return None
+                data = json.loads(lease_path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+            if not isinstance(data, dict):
+                return None
+            return cast(dict[str, Any], data)
+
         @mcp.tool(name="acquire_build_slot")
         @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
         async def acquire_build_slot(
@@ -10733,6 +10938,7 @@ def build_mcp_server() -> FastMCP:
             project_key: str,
             agent_name: str,
             slot: str,
+            branch: Optional[str] = None,
             ttl_seconds: int = 3600,
             exclusive: bool = True,
             registration_token: Optional[str] = None,
@@ -10756,21 +10962,20 @@ def build_mcp_server() -> FastMCP:
             await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
             active = await asyncio.to_thread(_read_active_slots, slot_path, now)
 
-            branch = await asyncio.to_thread(_compute_branch, project.human_key)
-            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
+            holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
+            holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
 
             conflicts: list[dict[str, Any]] = []
-            if exclusive:
-                for entry in active:
-                    if entry.get("agent") == agent.name and entry.get("branch") == branch:
-                        continue
-                    if entry.get("exclusive", True):
-                        conflicts.append(entry)
+            for entry in active:
+                if entry.get("agent") == agent.name and entry.get("branch") == holder_branch:
+                    continue
+                if exclusive or entry.get("exclusive", True):
+                    conflicts.append(entry)
             payload = {
                 "slot": slot,
                 "agent": agent.name,
-                "branch": branch,
+                "branch": holder_branch,
                 "exclusive": exclusive,
                 "acquired_ts": _iso(now),
                 "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
@@ -10788,6 +10993,7 @@ def build_mcp_server() -> FastMCP:
             project_key: str,
             agent_name: str,
             slot: str,
+            branch: Optional[str] = None,
             extend_seconds: int = 1800,
             registration_token: Optional[str] = None,
             format: Optional[str] = None,
@@ -10807,12 +11013,14 @@ def build_mcp_server() -> FastMCP:
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
-            branch = await asyncio.to_thread(_compute_branch, project.human_key)
-            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
+            holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
+            holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
-            current = await asyncio.to_thread(_read_build_slot_lease, lease_path)
+            current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
+            if current is None or not _is_active_build_slot_lease(current, now):
+                return {"renewed": False, "expires_ts": None}
             new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
-            current.update({"slot": slot, "agent": agent.name, "branch": branch, "expires_ts": new_exp})
+            current.update({"slot": slot, "agent": agent.name, "branch": holder_branch, "expires_ts": new_exp})
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
             return {"renewed": True, "expires_ts": new_exp}
@@ -10824,6 +11032,7 @@ def build_mcp_server() -> FastMCP:
             project_key: str,
             agent_name: str,
             slot: str,
+            branch: Optional[str] = None,
             registration_token: Optional[str] = None,
             format: Optional[str] = None,
         ) -> dict[str, Any]:
@@ -10842,12 +11051,14 @@ def build_mcp_server() -> FastMCP:
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
-            branch = await asyncio.to_thread(_compute_branch, project.human_key)
-            holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
+            holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
+            holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
+            data = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
+            if data is None:
+                return {"released": False, "released_at": _iso(now)}
             released = False
             try:
-                data = await asyncio.to_thread(_read_build_slot_lease, lease_path)
                 data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
                 await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
                 released = True
@@ -12176,7 +12387,7 @@ def build_mcp_server() -> FastMCP:
     @mcp.resource("resource://file_reservations/{slug}{?active_only,format}", mime_type="application/json")
     async def file_reservations_resource(
         slug: str,
-        active_only: bool = False,
+        active_only: bool = True,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """
@@ -12312,17 +12523,9 @@ def build_mcp_server() -> FastMCP:
                 format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
-        if project is None:
-            # Try to infer project by message id when unique
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(select(Project, Message).join(Message, cast(Any, Message.project_id) == Project.id).where(cast(Any, Message.id) == int(message_id)).limit(2))
-                data = rows.all()
-            if len(data) == 1:
-                project_obj = data[0][0]
-            else:
-                raise ValueError("project parameter is required for message resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="message resource")
+        )
         viewer = await _resolve_authenticated_agent(
             ctx,
             project_obj,
@@ -12419,36 +12622,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        # Determine project if omitted by client
-        if project is None:
-            # Auto-detect project using numeric seed (message id) or unique thread key
-            async with get_session() as s_auto:
-                try:
-                    msg_id = int(thread_id)
-                except ValueError:
-                    msg_id = None
-                if msg_id is not None:
-                    rows = await s_auto.execute(
-                        select(Project)
-                        .join(Message, cast(Any, Message.project_id) == Project.id)
-                        .where(cast(Any, Message.id) == msg_id)
-                        .limit(2)
-                    )
-                    projects = [row[0] for row in rows.all()]
-                else:
-                    rows = await s_auto.execute(
-                        select(Project)
-                        .join(Message, cast(Any, Message.project_id) == Project.id)
-                        .where(cast(Any, Message.thread_id == thread_id))
-                        .limit(2)
-                    )
-                    projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for thread resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="thread resource")
+        )
         viewer = await _resolve_authenticated_agent(
             ctx,
             project_obj,
@@ -12590,22 +12766,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            # Auto-detect project by agent name if uniquely identifiable
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for inbox resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="inbox resource")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -12679,21 +12842,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for urgent view")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="urgent view")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -12765,21 +12916,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for ack view")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="ack view")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -12863,21 +13002,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for stale acks view")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="stale acks view")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -12966,21 +13093,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for ack-overdue view")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="ack-overdue view")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -13061,21 +13176,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for mailbox resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="mailbox resource")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -13136,21 +13239,9 @@ def build_mcp_server() -> FastMCP:
                 format_value = format_value or _extract_format_param(parsed)
             except Exception:
                 pass
-        if project is None:
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for mailbox-with-commits resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="mailbox-with-commits resource")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,
@@ -13215,22 +13306,9 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
 
-        if project is None:
-            # Auto-detect project by agent name if uniquely identifiable
-            async with get_session() as s_auto:
-                rows = await s_auto.execute(
-                    select(Project)
-                    .join(Agent, cast(Any, Agent.project_id) == Project.id)
-                    .where(func.lower(Agent.name) == agent.lower())
-                    .limit(2)
-                )
-                projects = [row[0] for row in rows.all()]
-            if len(projects) == 1:
-                project_obj = projects[0]
-            else:
-                raise ValueError("project parameter is required for outbox resource")
-        else:
-            project_obj = await _get_project_by_identifier(project)
+        project_obj = await _get_project_by_identifier(
+            _require_project_resource_param(project, resource_name="outbox resource")
+        )
         agent_obj = await _authenticate_agent(
             ctx,
             project_obj,

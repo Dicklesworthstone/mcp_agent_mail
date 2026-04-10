@@ -48,6 +48,44 @@ async def test_reply_message_inherits_thread_and_subject_prefix(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_reply_message_explicit_empty_to_does_not_restore_default_recipient(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/reply-empty-to"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "ReplyEmptyTo", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        original = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "ReplyEmptyTo",
+                "sender_name": "BlueLake",
+                "to": ["BlueLake"],
+                "subject": "Plan",
+                "body_md": "body",
+            },
+        )
+        original_payload = (original.data.get("deliveries") or [{}])[0].get("payload", {})
+        original_id = int(original_payload["id"])
+
+        reply = await client.call_tool(
+            "reply_message",
+            {
+                "project_key": "ReplyEmptyTo",
+                "message_id": original_id,
+                "sender_name": "BlueLake",
+                "to": [],
+                "body_md": "no recipients on purpose",
+            },
+        )
+        assert reply.data["count"] == 0
+        assert reply.data["deliveries"] == []
+        assert reply.data["thread_id"] == (original_payload.get("thread_id") or str(original_id))
+        assert reply.data["reply_to"] == original_id
+
+
+@pytest.mark.asyncio
 async def test_mark_read_then_ack_updates_state(isolated_env):
     server = build_mcp_server()
     async with Client(server) as client:
@@ -232,6 +270,63 @@ async def test_send_message_auto_contact_requests_pending_approval_without_targe
 
 
 @pytest.mark.asyncio
+async def test_send_message_explicit_false_disables_local_auto_contact(isolated_env):
+    """Explicit false should override the server default and avoid creating contact requests."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-disabled"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-disabled", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-disabled", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        with pytest.raises(ToolError):
+            await sender_client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/security/auto-contact-disabled",
+                    "sender_name": "GreenCastle",
+                    "sender_token": green_token,
+                    "to": ["BlueLake"],
+                    "subject": "No auto contact",
+                    "body_md": "stay blocked",
+                    "auto_contact_if_blocked": False,
+                },
+            )
+
+        contacts = await sender_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "/security/auto-contact-disabled",
+                "agent_name": "GreenCastle",
+                "registration_token": green_token,
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert not any(item["to"] == "BlueLake" and item["status"] == "pending" for item in contact_items)
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/security/auto-contact-disabled",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert not any(item["subject"] == "Contact request from GreenCastle" for item in messages)
+
+
+@pytest.mark.asyncio
 async def test_send_message_auto_contact_auto_approves_when_target_is_authenticated_in_session(isolated_env):
     """Same-session authenticated agents can still use the one-step auto-approval path."""
     server = build_mcp_server()
@@ -327,6 +422,64 @@ async def test_send_message_auto_contact_requests_cross_project_approval_without
         )
         messages = inbox.structured_content["result"]
         assert any(item["subject"] == "Contact request from GreenCastle" for item in messages)
+
+
+@pytest.mark.asyncio
+async def test_send_message_explicit_false_disables_cross_project_auto_contact(isolated_env):
+    """Explicit false should prevent the external auto-handshake path from creating requests."""
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-false-backend"})
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/security/auto-contact-false-frontend"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-false-backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/security/auto-contact-false-frontend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+    async with Client(server) as sender_client:
+        with pytest.raises(ToolError):
+            await sender_client.call_tool(
+                "send_message",
+                {
+                    "project_key": "/security/auto-contact-false-backend",
+                    "sender_name": "GreenCastle",
+                    "sender_token": green_token,
+                    "to": ["BlueLake@/security/auto-contact-false-frontend"],
+                    "subject": "No external auto contact",
+                    "body_md": "stay blocked",
+                    "auto_contact_if_blocked": False,
+                },
+            )
+
+        contacts = await sender_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "/security/auto-contact-false-backend",
+                "agent_name": "GreenCastle",
+                "registration_token": green_token,
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert not any(item["to"] == "BlueLake" and item["status"] == "pending" for item in contact_items)
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/security/auto-contact-false-frontend",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert not any(item["subject"] == "Contact request from GreenCastle" for item in messages)
 
 
 @pytest.mark.asyncio
@@ -600,6 +753,157 @@ async def test_cross_project_sender_identity_does_not_collide_with_same_name_loc
         assert backend_payload["from"] == "BlueLake"
         assert backend_payload["from_project"] == ops_key
         assert get_db_health_status()["pool"]["checked_out"] == 0
+
+
+@pytest.mark.asyncio
+async def test_send_message_does_not_count_external_delivery_errors_as_success(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        backend_key = "/security/send-partial-backend"
+        ops_key = "/security/send-partial-ops"
+
+        await client.call_tool("ensure_project", {"human_key": backend_key})
+        await client.call_tool("ensure_project", {"human_key": ops_key})
+
+        sender = await client.call_tool(
+            "register_agent",
+            {"project_key": backend_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        receiver = await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5", "name": "RedStone"},
+        )
+        receiver_name = receiver.data["name"]
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend_key,
+                "requester": "GreenCastle",
+                "target": receiver_name,
+                "to_project": ops_key,
+                "auto_accept": True,
+                "requester_registration_token": sender.data["registration_token"],
+                "target_registration_token": receiver.data["registration_token"],
+            },
+        )
+
+        reservation = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": ops_key,
+                "agent_name": "RedStone",
+                "paths": [f"agents/{receiver_name}/inbox/*/*/*.md"],
+                "ttl_seconds": 1800,
+                "exclusive": True,
+            },
+        )
+        assert reservation.data["granted"]
+
+        sent = await client.call_tool(
+            "send_message",
+            {
+                "project_key": backend_key,
+                "sender_name": "GreenCastle",
+                "sender_token": sender.data["registration_token"],
+                "to": ["GreenCastle", f"{receiver_name}@{ops_key}"],
+                "subject": "Partial delivery",
+                "body_md": "one local write, one blocked external write",
+            },
+        )
+
+        assert sent.data["count"] == 1
+        assert [delivery["project"] for delivery in sent.data["deliveries"]] == [backend_key]
+        delivery_errors = sent.data.get("delivery_errors") or []
+        assert len(delivery_errors) == 1
+        assert delivery_errors[0]["type"] == "FILE_RESERVATION_CONFLICT"
+        assert delivery_errors[0]["project"] == ops_key
+
+
+@pytest.mark.asyncio
+async def test_reply_message_surfaces_external_delivery_failures(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        backend_key = "/security/reply-failure-backend"
+        ops_key = "/security/reply-failure-ops"
+
+        await client.call_tool("ensure_project", {"human_key": backend_key})
+        await client.call_tool("ensure_project", {"human_key": ops_key})
+
+        sender = await client.call_tool(
+            "register_agent",
+            {"project_key": backend_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        receiver = await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": backend_key, "program": "codex", "model": "gpt-5", "name": "RedStone"},
+        )
+        receiver_name = receiver.data["name"]
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend_key,
+                "requester": "GreenCastle",
+                "target": receiver_name,
+                "to_project": ops_key,
+                "auto_accept": True,
+                "requester_registration_token": sender.data["registration_token"],
+                "target_registration_token": receiver.data["registration_token"],
+            },
+        )
+
+        seed = await client.call_tool(
+            "send_message",
+            {
+                "project_key": backend_key,
+                "sender_name": "GreenCastle",
+                "sender_token": sender.data["registration_token"],
+                "to": [f"{receiver_name}@{ops_key}"],
+                "subject": "Seed external thread",
+                "body_md": "start the thread externally",
+            },
+        )
+        ops_delivery = next(
+            delivery for delivery in (seed.data.get("deliveries") or []) if delivery["project"] == ops_key
+        )
+        ops_message_id = ops_delivery["payload"]["id"]
+
+        reservation = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": backend_key,
+                "agent_name": "RedStone",
+                "paths": ["agents/GreenCastle/inbox/*/*/*.md"],
+                "ttl_seconds": 1800,
+                "exclusive": True,
+            },
+        )
+        assert reservation.data["granted"]
+
+        reply = await client.call_tool(
+            "reply_message",
+            {
+                "project_key": ops_key,
+                "message_id": ops_message_id,
+                "sender_name": receiver_name,
+                "sender_token": receiver.data["registration_token"],
+                "body_md": "this cross-project reply should be blocked by the reservation",
+            },
+        )
+
+        assert reply.data["count"] == 0
+        error = reply.data.get("error") or {}
+        assert error["type"] == "FILE_RESERVATION_CONFLICT"
+        assert error["project"] == backend_key
 
 
 @pytest.mark.asyncio
