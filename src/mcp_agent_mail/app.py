@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 import weakref
@@ -1904,6 +1905,60 @@ def _compute_project_slug(human_key: str) -> str:
     return slugify(human_key)
 
 
+def _project_lookup_base_dir() -> Path:
+    """Return the best available logical cwd for project-key normalization."""
+    cwd_path = Path.cwd()
+    raw_pwd = os.environ.get("PWD", "").strip()
+    if raw_pwd:
+        try:
+            pwd_path = Path(raw_pwd).expanduser()
+        except Exception:
+            pwd_path = None
+        else:
+            if pwd_path.is_absolute():
+                with suppress(OSError):
+                    if pwd_path.exists() and pwd_path.samefile(cwd_path):
+                        return pwd_path
+    return cwd_path
+
+
+def _canonicalize_project_identifier(identifier: str) -> str:
+    """Normalize path-like project identifiers without collapsing symlink identities."""
+    try:
+        candidate = Path(identifier).expanduser()
+    except Exception:
+        return identifier
+    looks_like_path = candidate.is_absolute() or identifier.startswith(("~", ".", "..")) or any(
+        sep in identifier for sep in ("/", "\\")
+    )
+    if not looks_like_path:
+        return identifier
+    absolute_candidate = candidate if candidate.is_absolute() else _project_lookup_base_dir() / candidate
+    return os.path.normpath(str(absolute_candidate))
+
+
+def _delete_tree_with_counts(root: Path) -> tuple[int, int]:
+    """Delete a directory tree and return the number of nested files/directories removed."""
+    if not root.exists():
+        return 0, 0
+    files_removed = 0
+    dirs_removed = 0
+    for item in root.rglob("*"):
+        if item.is_file():
+            files_removed += 1
+        elif item.is_dir():
+            dirs_removed += 1
+    shutil.rmtree(root)
+    return files_removed, dirs_removed
+
+
+def _delete_project_archive_tree(storage_root: str, project_slug: str) -> tuple[int, int]:
+    """Delete a project's archive subtree without blocking the event loop."""
+    archive_root = Path(storage_root).expanduser().resolve()
+    project_dir = archive_root / "projects" / project_slug
+    return _delete_tree_with_counts(project_dir)
+
+
 def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     """
     Resolve identity details for a given human_key path.
@@ -1916,12 +1971,12 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
     settings_local = get_settings()
     mode_config = (settings_local.project_identity_mode or "dir").strip().lower()
     mode_used = "dir" if not settings_local.worktrees_enabled else mode_config
-    target_path = str(Path(human_key).expanduser().resolve())
+    target_path = _canonicalize_project_identifier(human_key)
 
     if not settings_local.worktrees_enabled:
         # Keep default behavior lightweight when worktree features are disabled.
         # (Avoid touching GitPython / spawning git subprocesses unnecessarily.)
-        slug_value = slugify(human_key)
+        slug_value = _compute_project_slug(target_path)
         try:
             project_uid = hashlib.sha1(target_path.encode("utf-8")).hexdigest()[:20]
         except Exception:
@@ -1930,7 +1985,7 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
             "slug": slug_value,
             "identity_mode_used": "dir",
             "canonical_path": target_path,
-            "human_key": human_key,
+            "human_key": target_path,
             "repo_root": None,
             "git_common_dir": None,
             "branch": None,
@@ -2179,6 +2234,12 @@ def _resolve_project_identity(human_key: str) -> dict[str, Any]:
         pass
     return payload
 
+
+def _normalize_project_human_key(human_key: str) -> str:
+    # Collapse redundant separators and ".." segments without following symlinks.
+    return os.path.normpath(human_key)
+
+
 async def _ensure_project(human_key: str) -> Project:
     await ensure_schema()
     # Normalize the path (collapse //, .., trailing slashes) WITHOUT following
@@ -2186,7 +2247,7 @@ async def _ensure_project(human_key: str) -> Project:
     # Using os.path.normpath instead of Path.resolve() — the latter calls
     # realpath() which follows symlinks and can collapse unrelated projects
     # onto the same DB row (see GitHub issue #126).
-    human_key = os.path.normpath(human_key)
+    human_key = _normalize_project_human_key(human_key)
     slug = _compute_project_slug(human_key)
     for attempt in range(6):
         try:
@@ -2286,14 +2347,7 @@ async def _get_project_by_identifier(identifier: str) -> Project:
         )
 
     raw_identifier = identifier.strip()
-    canonical_identifier = raw_identifier
-    # Resolve absolute paths to canonical form so symlink aliases map to one project.
-    try:
-        candidate = Path(raw_identifier).expanduser()
-        if candidate.is_absolute():
-            canonical_identifier = str(candidate.resolve())
-    except Exception:
-        canonical_identifier = raw_identifier
+    canonical_identifier = await asyncio.to_thread(_canonicalize_project_identifier, raw_identifier)
 
     # Detect common placeholder patterns - these indicate unconfigured hooks/settings
     _placeholder_patterns = [
@@ -2597,6 +2651,28 @@ async def _read_file_preview(path: Path, *, max_chars: int) -> str:
     return await asyncio.to_thread(_read)
 
 
+def _collect_project_profile_candidates(base_path: Path) -> list[tuple[str, Path]]:
+    if not base_path.exists():
+        return []
+
+    candidates: list[tuple[str, Path]] = []
+    seen_files: set[tuple[int, int]] = set()
+    for rel_name in _PROJECT_PROFILE_FILENAMES:
+        candidate = base_path / rel_name
+        try:
+            stat_result = candidate.stat()
+        except Exception:
+            continue
+        if not stat.S_ISREG(stat_result.st_mode):
+            continue
+        file_key = (stat_result.st_dev, stat_result.st_ino)
+        if file_key in seen_files:
+            continue
+        seen_files.add(file_key)
+        candidates.append((rel_name, candidate))
+    return candidates
+
+
 async def _build_project_profile(
     project: Project,
     agent_names: list[str],
@@ -2608,21 +2684,16 @@ async def _build_project_profile(
     ]
 
     base_path = Path(project.human_key)
-    if base_path.exists():
-        total_chars = 0
-        seen_files: set[Path] = set()
-        for rel_name in _PROJECT_PROFILE_FILENAMES:
-            candidate = base_path / rel_name
-            if candidate in seen_files or not candidate.exists() or not candidate.is_file():
-                continue
-            preview = await _read_file_preview(candidate, max_chars=_PROJECT_PROFILE_PER_FILE_CHARS)
-            if not preview:
-                continue
-            pieces.append(f"===== {rel_name} =====\n{preview}")
-            seen_files.add(candidate)
-            total_chars += len(preview)
-            if total_chars >= _PROJECT_PROFILE_MAX_TOTAL_CHARS:
-                break
+    total_chars = 0
+    profile_candidates = await asyncio.to_thread(_collect_project_profile_candidates, base_path)
+    for rel_name, candidate in profile_candidates:
+        preview = await _read_file_preview(candidate, max_chars=_PROJECT_PROFILE_PER_FILE_CHARS)
+        if not preview:
+            continue
+        pieces.append(f"===== {rel_name} =====\n{preview}")
+        total_chars += len(preview)
+        if total_chars >= _PROJECT_PROFILE_MAX_TOTAL_CHARS:
+            break
     return "\n\n".join(pieces)
 
 
@@ -3012,7 +3083,10 @@ async def _generate_unique_agent_name(
     archive = await ensure_archive(settings, project.slug)
 
     async def available(candidate: str) -> bool:
-        return not await _agent_name_exists(project, candidate) and not (archive.root / "agents" / candidate).exists()
+        if await _agent_name_exists(project, candidate):
+            return False
+        candidate_path = archive.root / "agents" / candidate
+        return not await asyncio.to_thread(candidate_path.exists)
 
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if name_hint:
@@ -5233,7 +5307,20 @@ def build_mcp_server() -> FastMCP:
         payload = _project_to_dict(project)
         # Worktree identity metadata is opt-in to keep default calls lightweight and stable.
         if settings.worktrees_enabled:
-            payload.update(_resolve_project_identity(human_key))
+            identity_payload = _resolve_project_identity(human_key)
+            payload["identity"] = identity_payload
+            for key in (
+                "identity_mode_used",
+                "canonical_path",
+                "repo_root",
+                "git_common_dir",
+                "branch",
+                "worktree_name",
+                "core_ignorecase",
+                "normalized_remote",
+                "project_uid",
+            ):
+                payload[key] = identity_payload.get(key)
         return payload
 
     @mcp.tool(name="register_agent")
@@ -5702,14 +5789,7 @@ def build_mcp_server() -> FastMCP:
             settings = get_settings()
             archive = await ensure_archive(settings, project.slug)
             agent_dir = archive.root / "agents" / agent_name
-            if agent_dir.exists():
-                # Count files before removal for reporting
-                for item in agent_dir.rglob("*"):
-                    if item.is_file():
-                        files_removed += 1
-                    elif item.is_dir():
-                        dirs_removed += 1
-                shutil.rmtree(agent_dir)
+            files_removed, dirs_removed = await asyncio.to_thread(_delete_tree_with_counts, agent_dir)
         except Exception as exc:
             fs_errors.append(f"Failed to remove agent archive directory: {exc}")
 
@@ -5897,15 +5977,11 @@ def build_mcp_server() -> FastMCP:
         fs_errors: list[str] = []
         try:
             settings = get_settings()
-            archive_root = Path(settings.storage.root).expanduser().resolve()
-            project_dir = archive_root / "projects" / project_slug
-            if project_dir.exists():
-                for item in project_dir.rglob("*"):
-                    if item.is_file():
-                        files_removed += 1
-                    elif item.is_dir():
-                        dirs_removed += 1
-                shutil.rmtree(project_dir)
+            files_removed, dirs_removed = await asyncio.to_thread(
+                _delete_project_archive_tree,
+                settings.storage.root,
+                project_slug,
+            )
         except Exception as exc:
             fs_errors.append(f"Failed to remove project archive directory: {exc}")
 
@@ -9880,6 +9956,9 @@ def build_mcp_server() -> FastMCP:
         await ctx.info(f"Fetched {len(items)} stored summaries for project '{project.human_key}'.")
         return items
 
+    def _resolve_code_repo_path(code_repo_path: str) -> Path:
+        return Path(code_repo_path).expanduser().resolve()
+
     @mcp.tool(name="install_precommit_guard")
     @_instrument_tool("install_precommit_guard", cluster=CLUSTER_SETUP, capabilities={"infrastructure", "repository"}, project_arg="project_key")
     async def install_precommit_guard(
@@ -9902,7 +9981,7 @@ def build_mcp_server() -> FastMCP:
             except Exception:
                 pass
         project = await _get_project_by_identifier(project_key)
-        repo_path = Path(code_repo_path).expanduser().resolve()
+        repo_path = await asyncio.to_thread(_resolve_code_repo_path, code_repo_path)
         hook_path = await install_guard_script(settings, project.slug, repo_path)
         await _ctx_info_safe(ctx, f"Installed pre-commit guard for project '{project.human_key}' at {hook_path}.")
         return {"hook": str(hook_path)}
@@ -9924,7 +10003,7 @@ def build_mcp_server() -> FastMCP:
                 Console().print(Panel.fit(f"repo={code_repo_path}", title="tool: uninstall_precommit_guard", border_style="green"))
             except Exception:
                 pass
-        repo_path = Path(code_repo_path).expanduser().resolve()
+        repo_path = await asyncio.to_thread(_resolve_code_repo_path, code_repo_path)
         removed = await uninstall_guard_script(repo_path)
         if removed:
             await _ctx_info_safe(ctx, f"Removed pre-commit guard at {repo_path / '.git/hooks/pre-commit'}.")
@@ -10641,6 +10720,12 @@ def build_mcp_server() -> FastMCP:
                     continue
             return results
 
+        def _read_build_slot_lease(lease_path: Path) -> dict[str, Any]:
+            try:
+                return cast(dict[str, Any], json.loads(lease_path.read_text(encoding="utf-8")))
+            except Exception:
+                return {}
+
         @mcp.tool(name="acquire_build_slot")
         @_instrument_tool("acquire_build_slot", cluster=CLUSTER_BUILD_SLOTS, capabilities={"build"}, project_arg="project_key", agent_arg="agent_name")
         async def acquire_build_slot(
@@ -10669,9 +10754,9 @@ def build_mcp_server() -> FastMCP:
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
             await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
-            active = _read_active_slots(slot_path, now)
+            active = await asyncio.to_thread(_read_active_slots, slot_path, now)
 
-            branch = _compute_branch(project.human_key)
+            branch = await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
 
@@ -10722,13 +10807,10 @@ def build_mcp_server() -> FastMCP:
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
-            branch = _compute_branch(project.human_key)
+            branch = await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
-            try:
-                current = json.loads(lease_path.read_text(encoding="utf-8"))
-            except Exception:
-                current = {}
+            current = await asyncio.to_thread(_read_build_slot_lease, lease_path)
             new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
             current.update({"slot": slot, "agent": agent.name, "branch": branch, "expires_ts": new_exp})
             with contextlib.suppress(Exception):
@@ -10760,14 +10842,12 @@ def build_mcp_server() -> FastMCP:
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
             slot_path = _slot_dir(archive, slot)
-            branch = _compute_branch(project.human_key)
+            branch = await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
             released = False
             try:
-                data = {}
-                if lease_path.exists():
-                    data = json.loads(lease_path.read_text(encoding="utf-8"))
+                data = await asyncio.to_thread(_read_build_slot_lease, lease_path)
                 data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
                 await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
                 released = True
@@ -10775,8 +10855,7 @@ def build_mcp_server() -> FastMCP:
                 released = False
             return {"released": released, "released_at": _iso(now)}
 
-    @mcp.resource("resource://config/environment{?format}", mime_type="application/json")
-    def environment_resource(format: Optional[str] = None) -> dict[str, Any]:
+    def _read_environment_resource(format: Optional[str] = None) -> dict[str, Any]:
         """
         Inspect the server's current environment and HTTP settings.
 
@@ -10819,6 +10898,14 @@ def build_mcp_server() -> FastMCP:
             resource_name="resource://config/environment",
             format_value=format,
         )
+
+    @mcp.resource("resource://config/environment", mime_type="application/json")
+    def environment_resource_exact() -> dict[str, Any]:
+        return _read_environment_resource()
+
+    @mcp.resource("resource://config/environment{?format}", mime_type="application/json")
+    def environment_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return _read_environment_resource(format)
 
     # --- Product Bus (Phase 2): ensure/link/search/resources ---------------------------------
 
@@ -11334,6 +11421,23 @@ def build_mcp_server() -> FastMCP:
         ) -> dict[str, Any]:
             raise ToolExecutionError("FEATURE_DISABLED", "Product Bus is disabled. Enable WORKTREES_ENABLED to use this tool.")
     if settings.worktrees_enabled:
+        def _render_identity_resource_payload(
+            project_identifier: Optional[str],
+            *,
+            format_value: Optional[str],
+            resource_name: str,
+        ) -> dict[str, Any]:
+            if not project_identifier:
+                raise ValueError("project parameter is required for identity resource")
+            target_path = _canonicalize_project_identifier(project_identifier)
+            payload = _resolve_project_identity(target_path)
+            return _apply_resource_output_format(
+                payload,
+                settings=settings,
+                resource_name=resource_name,
+                format_value=format_value,
+            )
+
         @mcp.resource("resource://identity/{project}{?format}", mime_type="application/json")
         def identity_resource(project: str, format: Optional[str] = None) -> dict[str, Any]:
             """
@@ -11342,16 +11446,13 @@ def build_mcp_server() -> FastMCP:
             """
             raw_path, query_params = _split_slug_and_query(project)
             format_value = format or query_params.get("format")
-            target_path = str(Path(raw_path).expanduser().resolve())
-            payload = _resolve_project_identity(target_path)
-            return _apply_resource_output_format(
-                payload,
-                settings=settings,
-                resource_name="resource://identity/{project}",
+            return _render_identity_resource_payload(
+                raw_path,
                 format_value=format_value,
+                resource_name="resource://identity/{project}",
             )
-    @mcp.resource("resource://tooling/directory{?format}", mime_type="application/json")
-    def tooling_directory_resource(format: Optional[str] = None) -> dict[str, Any]:
+
+    def _read_tooling_directory_resource(format: Optional[str] = None) -> dict[str, Any]:
         """
         Provide a clustered view of exposed MCP tools to combat option overload.
 
@@ -11688,8 +11789,15 @@ def build_mcp_server() -> FastMCP:
             format_value=format,
         )
 
-    @mcp.resource("resource://tooling/schemas{?format}", mime_type="application/json")
-    def tooling_schemas_resource(format: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://tooling/directory", mime_type="application/json")
+    def tooling_directory_resource_exact() -> dict[str, Any]:
+        return _read_tooling_directory_resource()
+
+    @mcp.resource("resource://tooling/directory{?format}", mime_type="application/json")
+    def tooling_directory_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return _read_tooling_directory_resource(format)
+
+    def _read_tooling_schemas_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Expose JSON-like parameter schemas for tools/macros to prevent drift.
 
         This is a lightweight, hand-maintained view focusing on the most error-prone
@@ -11735,8 +11843,15 @@ def build_mcp_server() -> FastMCP:
             format_value=format,
         )
 
-    @mcp.resource("resource://tooling/metrics{?format}", mime_type="application/json")
-    def tooling_metrics_resource(format: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://tooling/schemas", mime_type="application/json")
+    def tooling_schemas_resource_exact() -> dict[str, Any]:
+        return _read_tooling_schemas_resource()
+
+    @mcp.resource("resource://tooling/schemas{?format}", mime_type="application/json")
+    def tooling_schemas_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return _read_tooling_schemas_resource(format)
+
+    def _read_tooling_metrics_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Expose aggregated tool call/error counts for analysis."""
         payload = {
             "generated_at": _iso(datetime.now(timezone.utc)),
@@ -11749,8 +11864,15 @@ def build_mcp_server() -> FastMCP:
             format_value=format,
         )
 
-    @mcp.resource("resource://tooling/locks{?format}", mime_type="application/json")
-    def tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
+    @mcp.resource("resource://tooling/metrics", mime_type="application/json")
+    def tooling_metrics_resource_exact() -> dict[str, Any]:
+        return _read_tooling_metrics_resource()
+
+    @mcp.resource("resource://tooling/metrics{?format}", mime_type="application/json")
+    def tooling_metrics_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return _read_tooling_metrics_resource(format)
+
+    def _read_tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Return lock metadata from the shared archive storage."""
 
         settings_local = get_settings()
@@ -11761,6 +11883,14 @@ def build_mcp_server() -> FastMCP:
             resource_name="resource://tooling/locks",
             format_value=format,
         )
+
+    @mcp.resource("resource://tooling/locks", mime_type="application/json")
+    def tooling_locks_resource_exact() -> dict[str, Any]:
+        return _read_tooling_locks_resource()
+
+    @mcp.resource("resource://tooling/locks{?format}", mime_type="application/json")
+    def tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return _read_tooling_locks_resource(format)
 
     @mcp.resource("resource://tooling/capabilities/{agent}{?project,format}", mime_type="application/json")
     def tooling_capabilities_resource(
@@ -11850,8 +11980,7 @@ def build_mcp_server() -> FastMCP:
             format_value=format_value,
         )
 
-    @mcp.resource("resource://projects{?format}", mime_type="application/json")
-    async def projects_resource(format: Optional[str] = None) -> list[dict[str, Any]]:
+    async def _read_projects_resource(format: Optional[str] = None) -> list[dict[str, Any]]:
         """
         List all projects known to the server in creation order.
 
@@ -11868,7 +11997,7 @@ def build_mcp_server() -> FastMCP:
         Example
         -------
         ```json
-        {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://projects"}}
+        {"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"resource://tooling/projects"}}
         ```
         """
         settings = get_settings()
@@ -11886,9 +12015,17 @@ def build_mcp_server() -> FastMCP:
             return _apply_resource_output_format(
                 payload,
                 settings=settings,
-                resource_name="resource://projects",
+                resource_name="resource://tooling/projects",
                 format_value=format,
             )
+
+    @mcp.resource("resource://tooling/projects", mime_type="application/json")
+    async def projects_resource_exact() -> list[dict[str, Any]]:
+        return await _read_projects_resource()
+
+    @mcp.resource("resource://tooling/projects{?format}", mime_type="application/json")
+    async def projects_resource(format: Optional[str] = None) -> list[dict[str, Any]]:
+        return await _read_projects_resource(format)
 
     @mcp.resource("resource://project/{slug}{?format}", mime_type="application/json")
     async def project_detail(slug: str, format: Optional[str] = None) -> dict[str, Any]:
