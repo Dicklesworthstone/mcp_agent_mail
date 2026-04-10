@@ -1469,6 +1469,29 @@ def test_build_materialized_views_preserves_external_sender_origin(tmp_path: Pat
     finally:
         conn.close()
 
+    build_materialized_views(snapshot)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT sender_name, sender_display, sender_project_id, sender_project_slug,
+                   sender_project_name, sender_address
+            FROM message_overview_mv
+            WHERE id = 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["sender_name"] == "BlueLake"
+        assert row["sender_display"] == "BlueLake@source"
+        assert row["sender_project_id"] == 2
+        assert row["sender_project_slug"] == "source"
+        assert row["sender_project_name"] == "/repo/source"
+        assert row["sender_address"] == "project:source#BlueLake"
+    finally:
+        conn.close()
+
 
 def test_build_materialized_views_supports_legacy_fts_without_sender_id(tmp_path: Path) -> None:
     snapshot = tmp_path / "legacy_fts.sqlite3"
@@ -1534,28 +1557,5 @@ def test_build_materialized_views_supports_legacy_fts_without_sender_id(tmp_path
         assert row["sender_display"] == ""
         assert row["sender_project_slug"] is None
         assert row["sender_address"] is None
-    finally:
-        conn.close()
-
-    build_materialized_views(snapshot)
-
-    conn = sqlite3.connect(snapshot)
-    try:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT sender_name, sender_display, sender_project_id, sender_project_slug,
-                   sender_project_name, sender_address
-            FROM message_overview_mv
-            WHERE id = 1
-            """
-        ).fetchone()
-        assert row is not None
-        assert row["sender_name"] == "BlueLake"
-        assert row["sender_display"] == "BlueLake@source"
-        assert row["sender_project_id"] == 2
-        assert row["sender_project_slug"] == "source"
-        assert row["sender_project_name"] == "/repo/source"
-        assert row["sender_address"] == "project:source#BlueLake"
     finally:
         conn.close()
