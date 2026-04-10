@@ -161,10 +161,14 @@ def render_precommit_script(archive: ProjectArchive) -> str:
         f"STORAGE_ROOT = Path({json.dumps(storage_root)})",
         "",
         "# Gate variables (presence) and mode",
-        "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
+        "TRUTHY = {\"1\",\"true\",\"t\",\"yes\",\"y\"}",
+        "GATE_ENABLED = (",
+        "    os.environ.get(\"WORKTREES_ENABLED\", \"0\").strip().lower() in TRUTHY",
+        "    or os.environ.get(\"GIT_IDENTITY_ENABLED\", \"0\").strip().lower() in TRUTHY",
+        ")",
         "",
         "# Exit early if gate is not enabled (WORKTREES_ENABLED=0 and GIT_IDENTITY_ENABLED=0)",
-        "if GATE.strip().lower() not in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
+        "if not GATE_ENABLED:",
         "    sys.exit(0)",
         "",
         "# Advisory/blocking mode: default to 'block' unless explicitly set to 'warn'.",
@@ -348,10 +352,14 @@ def render_prepush_script(archive: ProjectArchive) -> str:
         f"FILE_RESERVATIONS_DIR = Path({json.dumps(file_reservations_dir)})",
         "",
         "# Gate variables (presence) and mode",
-        "GATE = (os.environ.get(\"WORKTREES_ENABLED\",\"0\") or os.environ.get(\"GIT_IDENTITY_ENABLED\",\"0\") or \"0\")",
+        "TRUTHY = {\"1\",\"true\",\"t\",\"yes\",\"y\"}",
+        "GATE_ENABLED = (",
+        "    os.environ.get(\"WORKTREES_ENABLED\", \"0\").strip().lower() in TRUTHY",
+        "    or os.environ.get(\"GIT_IDENTITY_ENABLED\", \"0\").strip().lower() in TRUTHY",
+        ")",
         "",
         "# Exit early if gate is not enabled (WORKTREES_ENABLED=0 and GIT_IDENTITY_ENABLED=0)",
-        "if GATE.strip().lower() not in {\"1\",\"true\",\"t\",\"yes\",\"y\"}:",
+        "if not GATE_ENABLED:",
         "    sys.exit(0)",
         "",
         "MODE = (os.environ.get(\"AGENT_MAIL_GUARD_MODE\",\"block\") or \"block\").strip().lower()",
@@ -669,6 +677,21 @@ async def uninstall_guard(repo_path: Path) -> bool:
         # List all files, excluding our plugin
         return any(item.is_file() and item.name != "50-agent-mail.py" for item in run_dir.iterdir())
 
+    def _agent_mail_shims(hook_name: str) -> list[Path]:
+        shim_signatures = {
+            hooks_dir / f"{hook_name}.cmd": f'python "%DIR%{hook_name}" %*',
+            hooks_dir / f"{hook_name}.ps1": f"Join-Path $PSScriptRoot '{hook_name}'",
+        }
+        matches: list[Path] = []
+        for shim_path, signature in shim_signatures.items():
+            try:
+                content = shim_path.read_text("utf-8")
+            except Exception:
+                continue
+            if signature in content:
+                matches.append(shim_path)
+        return matches
+
     # Remove our hooks.d plugins if present
     for sub in ("pre-commit", "pre-push"):
         plugin = hooks_dir / "hooks.d" / sub / "50-agent-mail.py"
@@ -703,14 +726,20 @@ async def uninstall_guard(repo_path: Path) -> bool:
                     # No other plugins, but .orig exists - restore original hook
                     await asyncio.to_thread(hook_path.unlink)
                     await asyncio.to_thread(orig_path.replace, hook_path)
+                    for shim_path in await asyncio.to_thread(_agent_mail_shims, hook_name):
+                        await asyncio.to_thread(shim_path.unlink)
                     removed = True
                 else:
                     # No other plugins and no .orig - safe to remove chain-runner
                     await asyncio.to_thread(hook_path.unlink)
+                    for shim_path in await asyncio.to_thread(_agent_mail_shims, hook_name):
+                        await asyncio.to_thread(shim_path.unlink)
                     removed = True
             elif is_legacy_hook:
                 # Legacy single-file hook (not chain-runner) - safe to remove
                 await asyncio.to_thread(hook_path.unlink)
+                for shim_path in await asyncio.to_thread(_agent_mail_shims, hook_name):
+                    await asyncio.to_thread(shim_path.unlink)
                 removed = True
 
     return removed

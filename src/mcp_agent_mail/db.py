@@ -893,3 +893,16 @@ def get_database_path(settings: Settings | None = None) -> Path | None:
         return None
 
     return Path(db_path)
+
+
+def get_sqlite_sidecar_paths(db_path: Path) -> tuple[Path, Path]:
+    """Return the WAL and SHM sidecar paths for a SQLite database file."""
+    return (
+        db_path.with_name(f"{db_path.name}-wal"),
+        db_path.with_name(f"{db_path.name}-shm"),
+    )
+
+
+def get_sqlite_pre_restore_path(db_path: Path) -> Path:
+    """Return the safety-backup path used before overwriting a SQLite database."""
+    return db_path.with_name(f"{db_path.name}.pre-restore")
