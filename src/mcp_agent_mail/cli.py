@@ -118,6 +118,30 @@ def _cli_sender_display(
     )
 
 
+def _format_cli_timestamp(value: Any) -> str:
+    """Render timestamps compactly so important identity columns stay visible."""
+    dt = _parse_iso_datetime(value)
+    if dt is not None:
+        return dt.strftime("%Y-%m-%d %H:%M")
+    if hasattr(value, "strftime"):
+        with suppress(Exception):
+            return value.strftime("%Y-%m-%d %H:%M")
+    if hasattr(value, "isoformat"):
+        with suppress(Exception):
+            return value.isoformat()
+    return str(value or "")
+
+
+def _add_message_sender_column(table: Table) -> None:
+    """Keep sender addresses readable in narrow terminals."""
+    table.add_column("from", overflow="fold", min_width=15)
+
+
+def _add_message_timestamp_column(table: Table) -> None:
+    """Use a compact timestamp column so sender addresses don't get truncated."""
+    table.add_column("created_ts", no_wrap=True, min_width=16)
+
+
 def _run_async(coro: Any) -> Any:
     """Run an async coroutine and ensure database cleanup on exit.
 
@@ -500,15 +524,15 @@ def products_search(
     t.add_column("project_id")
     t.add_column("id")
     t.add_column("subject")
-    t.add_column("from")
-    t.add_column("created_ts")
+    _add_message_sender_column(t)
+    _add_message_timestamp_column(t)
     for r in rows:
         t.add_row(
             str(r["project_id"]),
             str(r["id"]),
             r["subject"],
             str(r.get("sender_display") or r.get("sender_name") or "Unknown"),
-            r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]),
+            _format_cli_timestamp(r.get("created_ts")),
         )
     console.print(t)
 
@@ -638,14 +662,18 @@ def products_inbox(
     t.add_column("project_id")
     t.add_column("id")
     t.add_column("subject")
-    t.add_column("from")
+    _add_message_sender_column(t)
     t.add_column("importance")
-    t.add_column("created_ts")
+    _add_message_timestamp_column(t)
     for r in rows:
-        created = r.get("created_ts")
-        if hasattr(created, "isoformat"):
-            created = created.isoformat()
-        t.add_row(str(r.get("project_id", "")), str(r.get("id", "")), str(r.get("subject", "")), str(r.get("from", "")), str(r.get("importance", "")), str(created or ""))
+        t.add_row(
+            str(r.get("project_id", "")),
+            str(r.get("id", "")),
+            str(r.get("subject", "")),
+            str(r.get("from", "")),
+            str(r.get("importance", "")),
+            _format_cli_timestamp(r.get("created_ts")),
+        )
     console.print(t)
 
 
@@ -718,10 +746,15 @@ def products_summarize_thread(
         ex = Table(title="Examples", show_lines=False)
         ex.add_column("id")
         ex.add_column("subject")
-        ex.add_column("from")
-        ex.add_column("created_ts")
+        _add_message_sender_column(ex)
+        _add_message_timestamp_column(ex)
         for e in examples:
-            ex.add_row(str(e.get("id", "")), str(e.get("subject", "")), str(e.get("from", "")), str(e.get("created_ts", "")))
+            ex.add_row(
+                str(e.get("id", "")),
+                str(e.get("subject", "")),
+                str(e.get("from", "")),
+                _format_cli_timestamp(e.get("created_ts")),
+            )
         console.print(ex)
 
 
