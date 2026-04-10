@@ -44,7 +44,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query, build_mcp_server
+from .app import _sanitize_fts_query, _sender_display_name, build_mcp_server
 from .config import get_settings
 from .db import ensure_schema, get_session, reset_database_state
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -98,6 +98,24 @@ ARCHIVE_METADATA_FILENAME = "metadata.json"
 ARCHIVE_SNAPSHOT_RELATIVE = Path("snapshot") / "mailbox.sqlite3"
 ARCHIVE_STORAGE_DIRNAME = Path("storage_repo")
 DEFAULT_ARCHIVE_SCRUB_PRESET = "archive"
+
+
+def _cli_sender_display(
+    *,
+    message_project_id: int | None,
+    sender_name: str | None,
+    sender_project_id: int | None,
+    sender_project_slug: str | None,
+) -> str:
+    canonical_sender = (sender_name or "").strip()
+    if not canonical_sender:
+        return "Unknown"
+    return _sender_display_name(
+        message_project_id=message_project_id,
+        sender_name=canonical_sender,
+        sender_project_id=sender_project_id,
+        sender_project_slug=sender_project_slug,
+    )
 
 
 def _run_async(coro: Any) -> Any:
@@ -446,10 +464,13 @@ def products_search(
                     text(
                         """
                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name, m.project_id
+                               m.thread_id, m.project_id,
+                               a.name AS sender_name, a.project_id AS sender_project_id,
+                               sp.slug AS sender_project_slug
                         FROM fts_messages
                         JOIN messages m ON fts_messages.rowid = m.id
                         JOIN agents a ON m.sender_id = a.id
+                        LEFT JOIN projects sp ON sp.id = a.project_id
                         WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
                         ORDER BY bm25(fts_messages) ASC
                         LIMIT :limit
@@ -457,7 +478,17 @@ def products_search(
                     ).bindparams(bindparam("proj_ids", expanding=True)),
                     {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
                 )
-                return [dict(row) for row in result.mappings().all()]
+                rows = []
+                for row in result.mappings().all():
+                    item = dict(row)
+                    item["sender_display"] = _cli_sender_display(
+                        message_project_id=item.get("project_id"),
+                        sender_name=item.get("sender_name"),
+                        sender_project_id=item.get("sender_project_id"),
+                        sender_project_slug=item.get("sender_project_slug"),
+                    )
+                    rows.append(item)
+                return rows
             except Exception:
                 # FTS query failed - return empty results
                 return []
@@ -472,7 +503,13 @@ def products_search(
     t.add_column("from")
     t.add_column("created_ts")
     for r in rows:
-        t.add_row(str(r["project_id"]), str(r["id"]), r["subject"], r["sender_name"], r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]))
+        t.add_row(
+            str(r["project_id"]),
+            str(r["id"]),
+            r["subject"],
+            str(r.get("sender_display") or r.get("sender_name") or "Unknown"),
+            r["created_ts"].isoformat() if hasattr(r["created_ts"], "isoformat") else str(r["created_ts"]),
+        )
     console.print(t)
 
 
@@ -544,10 +581,21 @@ def products_inbox(
                     assert agent_row.id is not None
                     from sqlalchemy.orm import aliased as _aliased  # local to avoid top-level churn
                     sender_alias = _aliased(Agent)
+                    sender_project_alias = _aliased(Project)
                     stmt = (
-                        select(Message, MessageRecipient.kind, sender_alias.name)
+                        select(
+                            Message,
+                            MessageRecipient.kind,
+                            sender_alias.name,
+                            sender_alias.project_id,
+                            sender_project_alias.slug,
+                        )
                         .join(MessageRecipient, cast(ColumnElement[bool], MessageRecipient.message_id == Message.id))
                         .join(sender_alias, cast(ColumnElement[bool], Message.sender_id == sender_alias.id))
+                        .outerjoin(
+                            sender_project_alias,
+                            cast(ColumnElement[bool], sender_alias.project_id == sender_project_alias.id),
+                        )
                         .where(and_(cast(ColumnElement[bool], Message.project_id == proj.id), cast(ColumnElement[bool], MessageRecipient.agent_id == agent_row.id)))
                         .order_by(desc(cast(Any, Message.created_ts)))
                         .limit(limit)
@@ -560,7 +608,7 @@ def products_inbox(
                         if parsed is not None:
                             stmt = stmt.where(Message.created_ts > parsed.replace(tzinfo=None))
                     res = await session.execute(stmt)
-                    for msg, kind, sender_name in res.all():
+                    for msg, kind, sender_name, sender_project_id, sender_project_slug in res.all():
                         payload = {
                             "id": msg.id,
                             "project_id": proj.id,
@@ -568,7 +616,12 @@ def products_inbox(
                             "importance": msg.importance,
                             "ack_required": msg.ack_required,
                             "created_ts": msg.created_ts,
-                            "from": sender_name,
+                            "from": _cli_sender_display(
+                                message_project_id=proj.id,
+                                sender_name=sender_name,
+                                sender_project_id=sender_project_id,
+                                sender_project_slug=sender_project_slug,
+                            ),
                             "kind": kind,
                         }
                         if include_bodies:
