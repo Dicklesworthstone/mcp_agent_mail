@@ -1,5 +1,6 @@
 import contextlib
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -170,6 +171,104 @@ async def test_file_reservation_conflicts_and_release(isolated_env):
         assert active_reservations[0]["agent"] == beta_name
         assert active_reservations[0]["path_pattern"] == "src/app.py"
         assert active_reservations[0]["released_ts"] is None
+
+
+@pytest.mark.asyncio
+async def test_build_slot_tools_offload_git_and_slot_file_io(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    main_thread = threading.main_thread()
+    path_type = type(Path("/"))
+    original_exists = path_type.exists
+    original_glob = path_type.glob
+    original_read_text = path_type.read_text
+    slot_io_events: set[str] = set()
+
+    def _guard_slot_path(path: Path, event: str) -> None:
+        if "build_slots" not in path.parts:
+            return
+        slot_io_events.add(event)
+        assert threading.current_thread() is not main_thread
+
+    def checked_exists(self: Path) -> bool:
+        _guard_slot_path(self, "exists")
+        return original_exists(self)
+
+    def checked_glob(self: Path, pattern: str, *args, **kwargs):
+        _guard_slot_path(self, "glob")
+        return original_glob(self, pattern, *args, **kwargs)
+
+    def checked_read_text(self: Path, *args, **kwargs) -> str:
+        _guard_slot_path(self, "read_text")
+        return original_read_text(self, *args, **kwargs)
+
+    @contextlib.contextmanager
+    def fake_git_repo(*args, **kwargs):
+        assert threading.current_thread() is not main_thread
+
+        class _Branch:
+            name = "main"
+
+        class _Repo:
+            active_branch = _Branch()
+
+        yield _Repo()
+
+    monkeypatch.setattr("mcp_agent_mail.app._git_repo", fake_git_repo)
+    monkeypatch.setattr(path_type, "exists", checked_exists)
+    monkeypatch.setattr(path_type, "glob", checked_glob)
+    monkeypatch.setattr(path_type, "read_text", checked_read_text)
+
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        acquired = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert acquired.data["granted"]["branch"] == "main"
+
+        renewed = await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert renewed.data["renewed"] is True
+
+        released = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert released.data["released"] is True
+
+    assert slot_io_events >= {"exists", "glob", "read_text"}
 
 
 @pytest.mark.asyncio
@@ -499,7 +598,13 @@ async def test_search_and_summarize(isolated_env):
 
 
 @pytest.mark.asyncio
-async def test_attachment_conversion(isolated_env):
+async def test_attachment_conversion(isolated_env, monkeypatch):
+    monkeypatch.setenv("ALLOW_ABSOLUTE_ATTACHMENT_PATHS", "true")
+    from mcp_agent_mail import config as _config
+
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
     storage_root = Path(get_settings().storage.root).expanduser().resolve()
     image_path = storage_root.parent / "temp.png"
     image = Image.new("RGB", (2, 2), color=(255, 0, 0))
@@ -533,6 +638,62 @@ async def test_attachment_conversion(isolated_env):
         project_root = storage_root / "projects" / "backend"
         attachment_files = list((project_root / "attachments").rglob("*.webp"))
         assert attachment_files
+    image_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_attachment_conversion_offloads_absolute_path_resolution(isolated_env, monkeypatch):
+    monkeypatch.setenv("ALLOW_ABSOLUTE_ATTACHMENT_PATHS", "true")
+    from mcp_agent_mail import config as _config, storage as _storage
+
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    storage_root = Path(get_settings().storage.root).expanduser().resolve()
+    image_path = storage_root.parent / "temp-offload.png"
+    image = Image.new("RGB", (2, 2), color=(0, 0, 255))
+    image.save(image_path)
+
+    main_thread = threading.main_thread()
+    original_resolve = _storage._expanduser_resolve_path
+    seen_resolve = 0
+
+    def checked_resolve(path: Path) -> Path:
+        nonlocal seen_resolve
+        if path == image_path:
+            seen_resolve += 1
+            assert threading.current_thread() is not main_thread
+        return original_resolve(path)
+
+    monkeypatch.setattr(_storage, "_expanduser_resolve_path", checked_resolve)
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueStone",
+            },
+        )
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "BlueStone",
+                "to": ["BlueStone"],
+                "subject": "Image Offload",
+                "body_md": f"Here is an image ![pic]({image_path})",
+                "attachment_paths": [str(image_path)],
+            },
+        )
+
+    attachments = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("attachments")
+    assert attachments
+    assert seen_resolve >= 1
     image_path.unlink(missing_ok=True)
 
 
@@ -576,6 +737,7 @@ async def test_rich_logger_does_not_throw(isolated_env, monkeypatch):
 async def test_server_level_attachment_policy_override(isolated_env, monkeypatch):
     # Force server to convert images regardless of agent policy
     monkeypatch.setenv("CONVERT_IMAGES", "true")
+    monkeypatch.setenv("ALLOW_ABSOLUTE_ATTACHMENT_PATHS", "true")
     from mcp_agent_mail import config as _config
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()

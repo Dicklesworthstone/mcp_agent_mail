@@ -293,6 +293,36 @@ async def test_archive_browser_file_nonexistent(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_archive_read_routes_do_not_create_missing_project_archives(isolated_env):
+    """Read-only archive routes must not create projects on disk for nonexistent slugs."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    missing_project_dir = Path(settings.storage.root) / "projects" / "ghost-project"
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        browser_resp = await client.get("/mail/archive/browser", params={"project": "ghost-project"})
+        file_resp = await client.get(
+            "/mail/archive/browser/ghost-project/file",
+            params={"path": "agents/BlueLake/profile.json"},
+        )
+        snapshot_resp = await client.get(
+            "/mail/archive/time-travel/snapshot",
+            params={
+                "project": "ghost-project",
+                "agent": "BlueLake",
+                "timestamp": "2099-12-31T23:59:59Z",
+            },
+        )
+
+    assert browser_resp.status_code == 200
+    assert file_resp.status_code == 404
+    assert snapshot_resp.status_code == 200
+    assert missing_project_dir.exists() is False
+
+
+@pytest.mark.asyncio
 async def test_archive_browser_path_traversal_prevention(isolated_env):
     """Test that path traversal attempts are blocked."""
     settings = _config.get_settings()

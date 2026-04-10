@@ -57,7 +57,7 @@ async def test_resource_format_toon_envelope(isolated_env, monkeypatch):
     server = build_mcp_server()
 
     async with Client(server) as client:
-        blocks = await client.read_resource("resource://projects?format=toon")
+        blocks = await client.read_resource("resource://tooling/projects?format=toon")
         assert blocks and blocks[0].text
         payload = json.loads(blocks[0].text)
         assert payload.get("format") == "toon"

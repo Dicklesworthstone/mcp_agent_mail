@@ -144,7 +144,7 @@ class TestDifferentEndpointLimits:
             # Resources should still work (independent limit)
             r4 = await client.post(
                 settings.http.path,
-                json=_rpc("resources/read", {"uri": "resource://projects"}),
+                json=_rpc("resources/read", {"uri": "resource://tooling/projects"}),
             )
             # May be 200 or error, but not 429 since resources has its own limit
             # If 200 or some other error (not auth related), resources limit wasn't hit
@@ -168,14 +168,14 @@ class TestDifferentEndpointLimits:
             # First resource request should succeed
             r1 = await client.post(
                 settings.http.path,
-                json=_rpc("resources/read", {"uri": "resource://projects"}),
+                json=_rpc("resources/read", {"uri": "resource://tooling/projects"}),
             )
             assert r1.status_code == 200
 
             # Second should be rate limited
             r2 = await client.post(
                 settings.http.path,
-                json=_rpc("resources/read", {"uri": "resource://projects"}),
+                json=_rpc("resources/read", {"uri": "resource://tooling/projects"}),
             )
             assert r2.status_code == 429
 

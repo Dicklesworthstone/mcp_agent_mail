@@ -275,6 +275,70 @@ async def test_hard_delete_project_rejects_legacy_tokenless_project(isolated_env
 
 
 @pytest.mark.asyncio
+async def test_hard_delete_project_removes_archive_tree(isolated_env, tmp_path):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_result = await client.call_tool("ensure_project", {"human_key": "/deletable/project"})
+        project_payload = project_result.data.get("project") or project_result.data
+        slug = project_payload["slug"]
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "/deletable/project", "program": "test", "model": "test"},
+        )
+        registration_token = agent_result.data["registration_token"]
+
+        archive_file = tmp_path / "storage" / "projects" / slug / "messages" / "dummy.txt"
+        archive_file.parent.mkdir(parents=True, exist_ok=True)
+        archive_file.write_text("dummy archive content", encoding="utf-8")
+
+        result = await client.call_tool(
+            "hard_delete_project",
+            {
+                "project_key": "/deletable/project",
+                "confirmation": "I UNDERSTAND",
+                "registration_token": registration_token,
+            },
+        )
+
+    assert result.data["status"] == "hard_deleted"
+    assert result.data["deleted_counts"]["archive_files_removed"] >= 1
+    assert not (tmp_path / "storage" / "projects" / slug).exists()
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_agent_removes_archive_tree(isolated_env, tmp_path):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_result = await client.call_tool("ensure_project", {"human_key": "/deletable/agent"})
+        project_payload = project_result.data.get("project") or project_result.data
+        slug = project_payload["slug"]
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "/deletable/agent", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+        registration_token = agent_result.data["registration_token"]
+
+        agent_archive_dir = tmp_path / "storage" / "projects" / slug / "agents" / agent_name
+        agent_archive_dir.mkdir(parents=True, exist_ok=True)
+        (agent_archive_dir / "dummy.txt").write_text("dummy archive content", encoding="utf-8")
+
+        result = await client.call_tool(
+            "hard_delete_agent",
+            {
+                "project_key": "/deletable/agent",
+                "agent_name": agent_name,
+                "confirmation": "I UNDERSTAND",
+                "registration_token": registration_token,
+            },
+        )
+
+    assert result.data["status"] == "hard_deleted"
+    assert result.data["deleted_counts"]["archive_files_removed"] >= 1
+    assert not agent_archive_dir.exists()
+
+
+@pytest.mark.asyncio
 async def test_send_message_empty_subject(isolated_env):
     """send_message should handle empty subject gracefully or reject."""
     server = build_mcp_server()

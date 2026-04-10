@@ -14,6 +14,8 @@ Reference: mcp_agent_mail-9z6
 from __future__ import annotations
 
 import contextlib
+import os
+import threading
 from typing import Any
 
 import pytest
@@ -22,7 +24,8 @@ from httpx import ASGITransport, AsyncClient
 from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema
-from mcp_agent_mail.http import build_http_app
+from mcp_agent_mail.http import _collect_retention_quota_report, build_http_app
+from mcp_agent_mail.storage import ensure_archive
 
 
 def _rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -92,6 +95,54 @@ class TestServerConfiguration:
         server = build_mcp_server()
         app = build_http_app(settings, server)
         assert app is not None
+
+    @pytest.mark.asyncio
+    async def test_retention_quota_report_offloads_scan(self, isolated_env, monkeypatch):
+        """Retention quota scans should run off the main event-loop thread."""
+        settings = _config.get_settings()
+        main_thread = threading.main_thread()
+
+        def fake_report(_settings):
+            assert threading.current_thread() is not main_thread
+            return {
+                "old_messages": 3,
+                "retention_max_age_days": 180,
+                "total_attachments_bytes": 1024,
+                "quota_limit_bytes": 2048,
+                "per_project_attach": {"backend": 1024},
+                "per_project_inbox_counts": {"backend": 2},
+            }
+
+        monkeypatch.setattr("mcp_agent_mail.http._collect_retention_quota_report_sync", fake_report)
+
+        report = await _collect_retention_quota_report(settings)
+        assert report["old_messages"] == 3
+        assert report["per_project_attach"]["backend"] == 1024
+
+    @pytest.mark.asyncio
+    async def test_retention_quota_report_scans_project_archive_layout(self, isolated_env):
+        """Quota scans should read STORAGE_ROOT/projects/<slug>, not STORAGE_ROOT/<slug>."""
+        settings = _config.get_settings()
+        archive = await ensure_archive(settings, "backend")
+
+        message_path = archive.root / "messages" / "2026" / "04" / "retention-check.md"
+        message_path.parent.mkdir(parents=True, exist_ok=True)
+        message_path.write_text("message", encoding="utf-8")
+        old_ts = message_path.stat().st_mtime - (400 * 86400)
+        os.utime(message_path, (old_ts, old_ts))
+
+        inbox_path = archive.root / "agents" / "BlueLake" / "inbox" / "2026" / "04" / "msg.md"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        inbox_path.write_text("inbox", encoding="utf-8")
+
+        attachment_path = archive.root / "attachments" / "thumb.webp"
+        attachment_path.parent.mkdir(parents=True, exist_ok=True)
+        attachment_path.write_bytes(b"RIFFfakewebp")
+
+        report = await _collect_retention_quota_report(settings)
+        assert report["old_messages"] >= 1
+        assert report["per_project_inbox_counts"]["backend"] >= 1
+        assert report["per_project_attach"]["backend"] == attachment_path.stat().st_size
 
 
 # =============================================================================
@@ -315,7 +366,7 @@ class TestResourceReadsOverHTTP:
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 settings.http.path,
-                json=_rpc("resources/read", {"uri": "resource://projects"}),
+                json=_rpc("resources/read", {"uri": "resource://tooling/projects"}),
             )
             assert response.status_code == 200
             data = response.json()

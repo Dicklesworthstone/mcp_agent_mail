@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mcp_agent_mail.config import get_settings
-from mcp_agent_mail.guard import install_guard, render_precommit_script, uninstall_guard
+from mcp_agent_mail.guard import install_guard, install_prepush_guard, render_precommit_script, uninstall_guard
 from mcp_agent_mail.storage import ensure_archive
 
 
@@ -65,4 +65,31 @@ async def test_guard_render_and_conflict_message(isolated_env, tmp_path: Path):
     removed = await uninstall_guard(repo_dir)
     assert removed is True
 
+
+@pytest.mark.asyncio
+async def test_uninstall_guard_removes_agent_mail_windows_shims(isolated_env, tmp_path: Path):
+    settings = get_settings()
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    proc_init = await asyncio.create_subprocess_exec("git", "init", cwd=str(repo_dir))
+    assert (await proc_init.wait()) == 0
+
+    await install_guard(settings, "backend", repo_dir)
+    await install_prepush_guard(settings, "backend", repo_dir)
+
+    hooks_dir = repo_dir / ".git" / "hooks"
+    assert (hooks_dir / "pre-commit.cmd").exists()
+    assert (hooks_dir / "pre-commit.ps1").exists()
+    assert (hooks_dir / "pre-push.cmd").exists()
+    assert (hooks_dir / "pre-push.ps1").exists()
+
+    removed = await uninstall_guard(repo_dir)
+
+    assert removed is True
+    assert not (hooks_dir / "pre-commit").exists()
+    assert not (hooks_dir / "pre-commit.cmd").exists()
+    assert not (hooks_dir / "pre-commit.ps1").exists()
+    assert not (hooks_dir / "pre-push").exists()
+    assert not (hooks_dir / "pre-push.cmd").exists()
+    assert not (hooks_dir / "pre-push.ps1").exists()
 
