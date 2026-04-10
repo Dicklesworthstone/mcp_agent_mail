@@ -678,18 +678,22 @@ async def test_reply_message_rejects_expired_local_approved_contact(isolated_env
             {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "PurpleBear"},
+        )
+        await client.call_tool(
             "set_contact_policy",
-            {"project_key": project_key, "agent_name": "BlueLake", "policy": "contacts_only"},
+            {"project_key": project_key, "agent_name": "PurpleBear", "policy": "contacts_only"},
         )
         await client.call_tool(
             "request_contact",
-            {"project_key": project_key, "from_agent": "GreenCastle", "to_agent": "BlueLake"},
+            {"project_key": project_key, "from_agent": "GreenCastle", "to_agent": "PurpleBear"},
         )
         await client.call_tool(
             "respond_contact",
-            {"project_key": project_key, "to_agent": "BlueLake", "from_agent": "GreenCastle", "accept": True},
+            {"project_key": project_key, "to_agent": "PurpleBear", "from_agent": "GreenCastle", "accept": True},
         )
-        await _expire_contact_link(project_key, "GreenCastle", "BlueLake")
+        await _expire_contact_link(project_key, "GreenCastle", "PurpleBear")
 
         seed = await client.call_tool(
             "send_message",
@@ -710,10 +714,11 @@ async def test_reply_message_rejects_expired_local_approved_contact(isolated_env
                     "project_key": project_key,
                     "message_id": seed_id,
                     "sender_name": "GreenCastle",
+                    "to": ["PurpleBear"],
                     "body_md": "expired approvals must not authorize replies",
                 },
             )
-        assert "Contact approval required for recipients: BlueLake" in str(exc_info.value)
+        assert "Contact approval required for recipients: PurpleBear" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -732,22 +737,23 @@ async def test_send_message_rejects_expired_cross_project_approved_contact(isola
         )
         receiver = await client.call_tool(
             "register_agent",
-            {"project_key": ops_key, "program": "codex", "model": "gpt-5", "name": "OpsBot"},
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5"},
         )
+        receiver_name = receiver.data["name"]
 
         await client.call_tool(
             "macro_contact_handshake",
             {
                 "project_key": backend_key,
                 "requester": "GreenCastle",
-                "target": "OpsBot",
+                "target": receiver_name,
                 "to_project": ops_key,
                 "auto_accept": True,
                 "requester_registration_token": sender.data["registration_token"],
                 "target_registration_token": receiver.data["registration_token"],
             },
         )
-        await _expire_contact_link(backend_key, "GreenCastle", "OpsBot", target_project_key=ops_key)
+        await _expire_contact_link(backend_key, "GreenCastle", receiver_name, target_project_key=ops_key)
 
         with pytest.raises(ToolError) as exc_info:
             await client.call_tool(
@@ -756,13 +762,13 @@ async def test_send_message_rejects_expired_cross_project_approved_contact(isola
                     "project_key": backend_key,
                     "sender_name": "GreenCastle",
                     "sender_token": sender.data["registration_token"],
-                    "to": [f"OpsBot@{ops_key}"],
+                    "to": [f"{receiver_name}@{ops_key}"],
                     "subject": "Expired external approval",
                     "body_md": "stale external approvals must not route mail",
                     "auto_contact_if_blocked": False,
                 },
             )
-        assert "external recipients missing approved contact links: OpsBot @ /security/send-expired-ops" in str(
+        assert f"external recipients missing approved contact links: {receiver_name} @ /security/send-expired-ops" in str(
             exc_info.value
         )
 
