@@ -17,6 +17,9 @@ class _StaticJsonResponse:
     def json(self):
         return self._payload
 
+    def raise_for_status(self):
+        return None
+
 
 def _seed_backend() -> None:
     async def _seed() -> None:
@@ -217,6 +220,24 @@ def test_cli_products_ensure_reads_structured_content_response(isolated_env, mon
     assert "Suite" in res.stdout
 
 
+def test_cli_products_ensure_surfaces_server_error_without_local_fallback(isolated_env, monkeypatch):
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        return _StaticJsonResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": "cli-products-ensure",
+                "error": {"message": "permission denied"},
+            }
+        )
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "ensure", "suite", "--name", "Suite"])
+    assert res.exit_code == 1
+    assert "Product" not in res.stdout
+
+
 def test_cli_products_inbox_reads_structured_content_response(isolated_env, monkeypatch):
     runner = CliRunner()
 
@@ -247,6 +268,25 @@ def test_cli_products_inbox_reads_structured_content_response(isolated_env, monk
     assert res.exit_code == 0
     assert "BlueLake@source" in res.stdout
     assert "No messages found." not in res.stdout
+
+
+def test_cli_products_inbox_surfaces_server_error_without_local_fallback(isolated_env, monkeypatch):
+    _seed_product_cross_project_sender()
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        return _StaticJsonResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": "cli-products-inbox",
+                "error": {"message": "forbidden"},
+            }
+        )
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "inbox", "Suite", "BlueLake", "--limit", "5"])
+    assert res.exit_code == 1
+    assert "BlueLake@source" not in res.stdout
 
 
 def test_cli_products_summarize_thread_reads_structured_content_response(isolated_env, monkeypatch):
