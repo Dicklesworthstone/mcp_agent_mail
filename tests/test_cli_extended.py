@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import httpx
 from typer.testing import CliRunner
 
 from mcp_agent_mail.cli import app
@@ -186,7 +187,7 @@ def test_cli_products_inbox_fallback_disambiguates_cross_project_sender(isolated
     runner = CliRunner()
 
     def fake_post(self, *args, **kwargs):
-        raise RuntimeError("server unavailable")
+        raise httpx.ConnectError("server unavailable")
 
     monkeypatch.setattr("httpx.Client.post", fake_post)
     res = runner.invoke(app, ["products", "inbox", "Suite", "BlueLake", "--limit", "5"])
