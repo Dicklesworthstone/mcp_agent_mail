@@ -3245,7 +3245,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             overseer_name,
                             valid_recipients,
                             extra_paths=None,
-                            commit_text=f"Human Overseer message: {subject}"
+                            commit_text=f"Human Overseer message: {subject}",
+                            sender_outbox_name=overseer_name,
                         )
                     except Exception as git_error:
                         # Rollback database transaction if Git write fails

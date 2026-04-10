@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -479,6 +481,124 @@ async def test_reply_message_supports_agent_at_project_external_address(isolated
             },
         )
         assert any(delivery["project"] == "/security/reply-xproj-ops" for delivery in reply.data["deliveries"])
+        assert get_db_health_status()["pool"]["checked_out"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cross_project_sender_identity_does_not_collide_with_same_name_local_agent(isolated_env):
+    """Cross-project mail must not leak into a same-name local agent's outbox or contact auto-allow heuristics."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        backend_key = "/security/xproj-origin-backend"
+        ops_key = "/security/xproj-origin-ops"
+
+        await client.call_tool("ensure_project", {"human_key": backend_key})
+        await client.call_tool("ensure_project", {"human_key": ops_key})
+
+        source = await client.call_tool(
+            "register_agent",
+            {"project_key": backend_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        receiver = await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        lookalike = await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        source_token = source.data["registration_token"]
+        receiver_token = receiver.data["registration_token"]
+        lookalike_token = lookalike.data["registration_token"]
+
+        await client.call_tool(
+            "set_contact_policy",
+            {"project_key": ops_key, "agent_name": "GreenCastle", "policy": "contacts_only"},
+        )
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend_key,
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "to_project": ops_key,
+                "auto_accept": True,
+                "requester_registration_token": source_token,
+                "target_registration_token": receiver_token,
+            },
+        )
+
+        sent = await client.call_tool(
+            "send_message",
+            {
+                "project_key": backend_key,
+                "sender_name": "GreenCastle",
+                "sender_token": source_token,
+                "to": [f"BlueLake@{ops_key}"],
+                "subject": "Cross-project origin",
+                "body_md": "hello from the real backend sender",
+                "thread_id": "XPROJ-IDENTITY-1",
+            },
+        )
+        ext_delivery = next(delivery for delivery in sent.data["deliveries"] if delivery["project"] == ops_key)
+        ext_payload = ext_delivery["payload"]
+        ext_message_id = ext_payload["id"]
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": ops_key,
+                "agent_name": "BlueLake",
+                "registration_token": receiver_token,
+                "include_bodies": True,
+            },
+        )
+        delivered = next(item for item in inbox.structured_content["result"] if item["id"] == ext_message_id)
+        assert delivered["from"] == "GreenCastle"
+        assert delivered["from_project"] == backend_key
+        assert delivered["from_address"].endswith("#GreenCastle")
+
+        outbox_blocks = await client.read_resource(
+            f"resource://outbox/GreenCastle?project={ops_key}&agent_token={lookalike_token}"
+        )
+        outbox_payload = json.loads(outbox_blocks[0].text or "{}")
+        assert outbox_payload["count"] == 0
+
+        msg_blocks = await client.read_resource(
+            f"resource://message/{ext_message_id}?project={ops_key}&agent=BlueLake&agent_token={receiver_token}"
+        )
+        msg_payload = json.loads(msg_blocks[0].text or "{}")
+        assert msg_payload["from"] == "GreenCastle"
+        assert msg_payload["from_project"] == backend_key
+
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "reply_message",
+                {
+                    "project_key": ops_key,
+                    "message_id": ext_message_id,
+                    "sender_name": "BlueLake",
+                    "sender_token": receiver_token,
+                    "to": ["GreenCastle"],
+                    "body_md": "trying to loop in the local lookalike",
+                },
+            )
+        assert "Contact approval required for recipients: GreenCastle" in str(exc_info.value)
+
+        reply = await client.call_tool(
+            "reply_message",
+            {
+                "project_key": ops_key,
+                "message_id": ext_message_id,
+                "sender_name": "BlueLake",
+                "sender_token": receiver_token,
+                "body_md": "replying to the actual external sender",
+            },
+        )
+        backend_delivery = next(delivery for delivery in reply.data["deliveries"] if delivery["project"] == backend_key)
+        backend_payload = backend_delivery["payload"]
+        assert backend_payload["from"] == "BlueLake"
+        assert backend_payload["from_project"] == ops_key
         assert get_db_health_status()["pool"]["checked_out"] == 0
 
 
