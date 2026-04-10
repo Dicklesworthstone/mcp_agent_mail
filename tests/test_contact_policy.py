@@ -235,6 +235,65 @@ async def test_macro_contact_handshake_rejects_partial_welcome(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_macro_contact_handshake_rejects_welcome_without_auto_accept(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="require auto_accept=True"):
+            await client.call_tool(
+                "macro_contact_handshake",
+                {
+                    "project_key": "Backend",
+                    "requester": "GreenCastle",
+                    "target": "BlueLake",
+                    "welcome_subject": "Welcome",
+                    "welcome_body": "hello before approval",
+                },
+            )
+
+        inbox_blocks = await client.read_resource("resource://inbox/BlueLake?project=Backend&limit=10")
+        raw = inbox_blocks[0].text if inbox_blocks else "{}"
+        data = json.loads(raw)
+        assert not data.get("messages")
+
+
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_rejects_same_agent_same_project(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="self-contact"):
+            await client.call_tool(
+                "macro_contact_handshake",
+                {
+                    "project_key": "Backend",
+                    "requester": "BlueLake",
+                    "target": "BlueLake",
+                    "auto_accept": True,
+                },
+            )
+
+        inbox_blocks = await client.read_resource("resource://inbox/BlueLake?project=Backend&limit=10")
+        raw = inbox_blocks[0].text if inbox_blocks else "{}"
+        data = json.loads(raw)
+        assert not data.get("messages")
+
+
+@pytest.mark.asyncio
 async def test_macro_contact_handshake_cross_project_welcome(isolated_env):
     backend = "/data/projects/backend"
     frontend = "/data/projects/frontend"

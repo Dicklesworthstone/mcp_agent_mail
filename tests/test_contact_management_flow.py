@@ -209,6 +209,43 @@ async def test_request_contact_creates_pending_link(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_request_contact_rejects_same_agent_same_project(isolated_env):
+    """Self-contact in the same project should be rejected as unnecessary."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/self-request"
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="self-contact"):
+            await client.call_tool(
+                "request_contact",
+                {
+                    "project_key": project_key,
+                    "from_agent": "BlueLake",
+                    "to_agent": "BlueLake",
+                },
+            )
+
+        agent_id = await get_agent_id(project_key, "BlueLake")
+        assert agent_id is not None
+        assert await get_agent_link_from_db(agent_id, agent_id) is None
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": "BlueLake",
+                "include_bodies": True,
+            },
+        )
+        assert get_inbox_items(inbox) == []
+
+
+@pytest.mark.asyncio
 async def test_contact_request_appears_in_inbox(isolated_env):
     """Contact request sends a message to recipient's inbox."""
     server = build_mcp_server()
@@ -378,6 +415,100 @@ async def test_approve_contact_request(isolated_env):
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         assert link is not None
         assert link["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_request_contact_preserves_existing_approved_link(isolated_env):
+    """Re-requesting an already approved contact should not downgrade it back to pending."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/re-request-approved"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "reason": "Initial request",
+            },
+        )
+        await client.call_tool(
+            "respond_contact",
+            {
+                "project_key": project_key,
+                "to_agent": agent_b,
+                "from_agent": agent_a,
+                "accept": True,
+            },
+        )
+        agent_a_id = await get_agent_id(project_key, agent_a)
+        agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None
+        assert agent_b_id is not None
+        approved_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert approved_link is not None
+        approved_expires = approved_link["expires_ts"]
+        assert approved_expires is not None
+
+        second = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "reason": "Still approved",
+            },
+        )
+        assert second.data["status"] == "approved"
+        assert "notification_message" not in second.data
+        assert second.data["expires_ts"] is not None
+        link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert link is not None
+        assert link["status"] == "approved"
+        assert link["expires_ts"] >= approved_expires
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": agent_b,
+                "include_bodies": True,
+            },
+        )
+        contact_requests = [
+            item for item in get_inbox_items(inbox) if item.get("subject") == f"Contact request from {agent_a}"
+        ]
+        assert len(contact_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_respond_contact_rejects_same_agent_same_project(isolated_env):
+    """Self-approval should not create a same-agent AgentLink."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/self-respond"
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": "BlueLake"},
+        )
+
+        with pytest.raises(Exception, match="self-contact"):
+            await client.call_tool(
+                "respond_contact",
+                {
+                    "project_key": project_key,
+                    "to_agent": "BlueLake",
+                    "from_agent": "BlueLake",
+                    "accept": True,
+                },
+            )
+
+        agent_id = await get_agent_id(project_key, "BlueLake")
+        assert agent_id is not None
+        assert await get_agent_link_from_db(agent_id, agent_id) is None
 
 
 @pytest.mark.asyncio
