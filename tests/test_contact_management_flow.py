@@ -24,7 +24,7 @@ Reference: mcp_agent_mail-njf
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastmcp import Client
@@ -113,6 +113,53 @@ def _parse_db_datetime(value):
     if isinstance(dt, datetime) and dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt
+
+
+async def _expire_contact_link(
+    project_key: str,
+    from_agent: str,
+    to_agent: str,
+    *,
+    target_project_key: str | None = None,
+) -> None:
+    target_key = target_project_key or project_key
+    expired_db = (
+        (datetime.now(UTC) - timedelta(minutes=5))
+        .astimezone(UTC)
+        .replace(tzinfo=None)
+        .strftime("%Y-%m-%d %H:%M:%S.%f")
+    )
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE agent_links
+                SET expires_ts = :expired, updated_ts = :expired
+                WHERE a_project_id = (SELECT id FROM projects WHERE human_key = :project_key)
+                  AND a_agent_id = (
+                      SELECT a.id
+                      FROM agents a
+                      JOIN projects p ON p.id = a.project_id
+                      WHERE p.human_key = :project_key AND a.name = :from_agent
+                  )
+                  AND b_project_id = (SELECT id FROM projects WHERE human_key = :target_project_key)
+                  AND b_agent_id = (
+                      SELECT a.id
+                      FROM agents a
+                      JOIN projects p ON p.id = a.project_id
+                      WHERE p.human_key = :target_project_key AND a.name = :to_agent
+                  )
+                """
+            ),
+            {
+                "expired": expired_db,
+                "project_key": project_key,
+                "from_agent": from_agent,
+                "target_project_key": target_key,
+                "to_agent": to_agent,
+            },
+        )
+        await session.commit()
 
 
 # ============================================================================
@@ -379,6 +426,112 @@ async def test_request_contact_retries_notification_when_initial_delivery_fails(
         )
         items_after = get_inbox_items(inbox_after)
         assert any(item.get("subject") == f"Contact request from {agent_a}" for item in items_after)
+
+
+@pytest.mark.asyncio
+async def test_request_contact_preserves_existing_pending_link(isolated_env):
+    """Re-requesting an active pending contact should not shorten its pending TTL."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/re-request-pending"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        first = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "ttl_seconds": 3600,
+            },
+        )
+        assert first.data["status"] == "pending"
+
+        agent_a_id = await get_agent_id(project_key, agent_a)
+        agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None
+        assert agent_b_id is not None
+        first_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert first_link is not None
+        first_expires = _parse_db_datetime(first_link["expires_ts"])
+
+        second = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "ttl_seconds": 60,
+            },
+        )
+
+        second_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert second_link is not None
+        second_expires = _parse_db_datetime(second_link["expires_ts"])
+        assert second.data["status"] == "pending"
+        assert datetime.fromisoformat(second.data["expires_ts"]) >= first_expires
+        assert second_link["status"] == "pending"
+        assert second_expires >= first_expires
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": agent_b,
+                "include_bodies": True,
+            },
+        )
+        pending_requests = [
+            item for item in get_inbox_items(inbox) if item.get("subject") == f"Contact request from {agent_a}"
+        ]
+        assert len(pending_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_request_contact_renotifies_after_pending_link_expires(isolated_env):
+    """Retrying after a pending request expires should send a fresh notification."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/re-request-expired-pending"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        first = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "ttl_seconds": 60,
+            },
+        )
+        assert first.data["status"] == "pending"
+        await _expire_contact_link(project_key, agent_a, agent_b)
+
+        second = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "ttl_seconds": 3600,
+            },
+        )
+        assert second.data["status"] == "pending"
+        notification_message = second.data.get("notification_message") or {}
+        assert notification_message.get("subject") == f"Contact request from {agent_a}"
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": agent_b,
+                "include_bodies": True,
+            },
+        )
+        pending_requests = [
+            item for item in get_inbox_items(inbox) if item.get("subject") == f"Contact request from {agent_a}"
+        ]
+        assert len(pending_requests) == 2
 
 
 # ============================================================================

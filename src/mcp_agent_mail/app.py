@@ -8305,6 +8305,9 @@ def build_mcp_server() -> FastMCP:
                 is_active_approved = previous_status == "approved" and (
                     link.expires_ts is None or link.expires_ts > naive_now
                 )
+                is_active_pending = previous_status == "pending" and (
+                    link.expires_ts is None or link.expires_ts > naive_now
+                )
                 link.reason = reason
                 link.updated_ts = naive_now
                 if is_active_approved:
@@ -8315,11 +8318,19 @@ def build_mcp_server() -> FastMCP:
                     else:
                         link.expires_ts = max(link.expires_ts, exp)
                         result_expires = link.expires_ts
+                elif is_active_pending:
+                    result_status = "pending"
+                    should_notify = False
+                    if link.expires_ts is None:
+                        link.expires_ts = exp
+                    else:
+                        link.expires_ts = max(link.expires_ts, exp)
+                    result_expires = link.expires_ts
                 else:
                     link.status = "pending"
                     link.expires_ts = exp
                     result_expires = exp
-                    should_notify = previous_status != "pending"
+                    should_notify = previous_status != "pending" or not is_active_pending
                 s.add(link)
             else:
                 link = AgentLink(
@@ -8351,25 +8362,38 @@ def build_mcp_server() -> FastMCP:
                 link = existing.scalars().first()
                 if link is None:
                     raise
+                previous_status = link.status
                 link.reason = reason
                 link.updated_ts = naive_now
-                is_active_approved = link.status == "approved" and (
+                is_active_approved = previous_status == "approved" and (
+                    link.expires_ts is None or link.expires_ts > naive_now
+                )
+                is_active_pending = previous_status == "pending" and (
                     link.expires_ts is None or link.expires_ts > naive_now
                 )
                 if is_active_approved:
                     result_status = "approved"
+                    should_notify = False
                     if link.expires_ts is None:
                         result_expires = None
                     else:
                         link.expires_ts = max(link.expires_ts, exp)
                         result_expires = link.expires_ts
+                elif is_active_pending:
+                    result_status = "pending"
+                    should_notify = False
+                    if link.expires_ts is None:
+                        link.expires_ts = exp
+                    else:
+                        link.expires_ts = max(link.expires_ts, exp)
+                    result_expires = link.expires_ts
                 else:
                     link.status = "pending"
                     link.expires_ts = exp
                     result_expires = exp
+                    should_notify = previous_status != "pending" or not is_active_pending
                 s.add(link)
                 await s.commit()
-                should_notify = False
 
         subject = f"Contact request from {a.name}"
         body = reason or f"{a.name} requests permission to contact {b.name}."
@@ -10788,6 +10812,35 @@ def build_mcp_server() -> FastMCP:
                 "already_released": True,
             }
 
+        now = datetime.now(timezone.utc)
+        naive_now = _naive_utc(now)
+        if reservation.expires_ts is not None and reservation.expires_ts <= naive_now:
+            # Normalize TTL-expired reservations to released before applying stale-activity heuristics.
+            async with get_immediate_session() as session:
+                await session.execute(
+                    update(FileReservation)
+                    .where(
+                        cast(Any, FileReservation.id) == file_reservation_id,
+                        cast(Any, FileReservation.project_id) == project.id,
+                        cast(Any, FileReservation.released_ts).is_(None),
+                        cast(Any, FileReservation.expires_ts) <= naive_now,
+                    )
+                    .values(released_ts=naive_now)
+                )
+                await session.commit()
+
+            reservation.released_ts = naive_now
+            await _write_file_reservation_records(
+                project,
+                [(reservation, holder)],
+            )
+            return {
+                "released": 0,
+                "released_at": _iso(naive_now),
+                "already_released": True,
+                "expired": True,
+            }
+
         statuses = await _collect_file_reservation_statuses(project, include_released=False)
         target_status = next((status for status in statuses if status.reservation.id == reservation.id), None)
         if target_status is None:
@@ -10809,8 +10862,6 @@ def build_mcp_server() -> FastMCP:
                 },
             )
 
-        now = datetime.now(timezone.utc)
-        naive_now = _naive_utc(now)
         # Use BEGIN IMMEDIATE so the forced release is immediately visible (#130).
         async with get_immediate_session() as session:
             await session.execute(
