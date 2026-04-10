@@ -54,12 +54,12 @@ async def test_reply_message_explicit_empty_to_does_not_restore_default_recipien
         await client.call_tool("ensure_project", {"human_key": "/reply-empty-to"})
         await client.call_tool(
             "register_agent",
-            {"project_key": "ReplyEmptyTo", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+            {"project_key": "/reply-empty-to", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
         )
         original = await client.call_tool(
             "send_message",
             {
-                "project_key": "ReplyEmptyTo",
+                "project_key": "/reply-empty-to",
                 "sender_name": "BlueLake",
                 "to": ["BlueLake"],
                 "subject": "Plan",
@@ -72,7 +72,7 @@ async def test_reply_message_explicit_empty_to_does_not_restore_default_recipien
         reply = await client.call_tool(
             "reply_message",
             {
-                "project_key": "ReplyEmptyTo",
+                "project_key": "/reply-empty-to",
                 "message_id": original_id,
                 "sender_name": "BlueLake",
                 "to": [],
