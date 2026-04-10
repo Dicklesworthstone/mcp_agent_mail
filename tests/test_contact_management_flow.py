@@ -24,6 +24,8 @@ Reference: mcp_agent_mail-njf
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from fastmcp import Client
 from sqlalchemy import text
@@ -102,6 +104,12 @@ async def get_project_id(human_key: str) -> int | None:
         )
         row = result.first()
         return row[0] if row else None
+
+
+def _parse_db_datetime(value):
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
 
 
 # ============================================================================
@@ -481,6 +489,61 @@ async def test_request_contact_preserves_existing_approved_link(isolated_env):
             item for item in get_inbox_items(inbox) if item.get("subject") == f"Contact request from {agent_a}"
         ]
         assert len(contact_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_respond_contact_preserves_existing_approved_link(isolated_env):
+    """Re-approving an active contact should not shorten its approval window."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/reapprove-approved"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+            },
+        )
+        await client.call_tool(
+            "respond_contact",
+            {
+                "project_key": project_key,
+                "to_agent": agent_b,
+                "from_agent": agent_a,
+                "accept": True,
+                "ttl_seconds": 3600,
+            },
+        )
+
+        agent_a_id = await get_agent_id(project_key, agent_a)
+        agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None
+        assert agent_b_id is not None
+        first_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert first_link is not None
+        first_expires = _parse_db_datetime(first_link["expires_ts"])
+
+        second = await client.call_tool(
+            "respond_contact",
+            {
+                "project_key": project_key,
+                "to_agent": agent_b,
+                "from_agent": agent_a,
+                "accept": True,
+                "ttl_seconds": 60,
+            },
+        )
+
+        second_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert second_link is not None
+        second_expires = _parse_db_datetime(second_link["expires_ts"])
+        assert second.data["approved"] is True
+        assert datetime.fromisoformat(second.data["expires_ts"]) >= first_expires
+        assert second_link["status"] == "approved"
+        assert second_expires >= first_expires
 
 
 @pytest.mark.asyncio
@@ -1029,6 +1092,55 @@ async def test_macro_contact_handshake_auto_accept(isolated_env):
         link = await get_agent_link_from_db(agent_a_id, agent_b_id)
         if link:
             assert link["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_auto_accept_preserves_existing_approved_link(isolated_env):
+    """Repeated same-project auto-accept handshakes should not shorten an active approval."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/macro_auto_monotonic"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        first = await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": project_key,
+                "requester": agent_a,
+                "target": agent_b,
+                "auto_accept": True,
+                "ttl_seconds": 3600,
+            },
+        )
+
+        agent_a_id = await get_agent_id(project_key, agent_a)
+        agent_b_id = await get_agent_id(project_key, agent_b)
+        assert agent_a_id is not None
+        assert agent_b_id is not None
+        first_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert first_link is not None
+        first_expires = _parse_db_datetime(first_link["expires_ts"])
+
+        second = await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": project_key,
+                "requester": agent_a,
+                "target": agent_b,
+                "auto_accept": True,
+                "ttl_seconds": 60,
+            },
+        )
+
+        second_link = await get_agent_link_from_db(agent_a_id, agent_b_id)
+        assert second_link is not None
+        second_expires = _parse_db_datetime(second_link["expires_ts"])
+        response = second.data["response"]
+        assert first.data["response"]["status"] == "approved"
+        assert response["status"] == "approved"
+        assert datetime.fromisoformat(response["expires_ts"]) >= first_expires
+        assert second_link["status"] == "approved"
+        assert second_expires >= first_expires
 
 
 # ============================================================================

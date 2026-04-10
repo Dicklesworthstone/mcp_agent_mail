@@ -12,14 +12,23 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 from fastmcp import Client
+from sqlalchemy import text
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_session
 from mcp_agent_mail.utils import validate_agent_name_format
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_db_datetime(value):
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    return value
 
 
 # ============================================================================
@@ -95,6 +104,86 @@ async def test_window_id_reused_on_subsequent_registration(isolated_env, monkeyp
         assert name1 == name2, "Same window UUID should produce same agent name"
         assert result2.data.get("window_id") == window_uuid
         logger.debug("Window identity reused: uuid=%s, name=%s", window_uuid, name1)
+
+
+@pytest.mark.asyncio
+async def test_window_id_reregister_does_not_shorten_active_expiry(isolated_env, monkeypatch):
+    """Refreshing an active window identity should extend from its later expiry, not from now."""
+    window_uuid = str(uuid.uuid4())
+    monkeypatch.setenv("MCP_AGENT_MAIL_WINDOW_ID", window_uuid)
+
+    from mcp_agent_mail.config import clear_settings_cache
+    clear_settings_cache()
+
+    server = build_mcp_server()
+    project_key = "/test/window_monotonic"
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": project_key,
+                "program": "test-program",
+                "model": "test-model",
+            },
+        )
+
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT wi.expires_ts
+                FROM window_identities wi
+                JOIN projects p ON p.id = wi.project_id
+                WHERE p.human_key = :project_key AND wi.window_uuid = :window_uuid
+                """
+            ),
+            {"project_key": project_key, "window_uuid": window_uuid},
+        )
+        original_expiry = _parse_db_datetime(result.scalar_one())
+        extended_expiry = original_expiry + timedelta(days=30)
+        await session.execute(
+            text(
+                """
+                UPDATE window_identities
+                SET expires_ts = :expires_ts
+                WHERE window_uuid = :window_uuid
+                  AND project_id = (SELECT id FROM projects WHERE human_key = :project_key)
+                """
+            ),
+            {
+                "expires_ts": extended_expiry,
+                "window_uuid": window_uuid,
+                "project_key": project_key,
+            },
+        )
+        await session.commit()
+
+    async with Client(server) as client:
+        await client.call_tool(
+            "register_agent",
+            {
+                "project_key": project_key,
+                "program": "test-program-v2",
+                "model": "test-model-v2",
+            },
+        )
+
+    async with get_session() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT wi.expires_ts
+                FROM window_identities wi
+                JOIN projects p ON p.id = wi.project_id
+                WHERE p.human_key = :project_key AND wi.window_uuid = :window_uuid
+                """
+            ),
+            {"project_key": project_key, "window_uuid": window_uuid},
+        )
+        refreshed_expiry = _parse_db_datetime(result.scalar_one())
+
+    assert refreshed_expiry >= extended_expiry
 
 
 @pytest.mark.asyncio

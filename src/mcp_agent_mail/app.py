@@ -3067,9 +3067,12 @@ async def _touch_window_identity(
         db_identity = await session.get(WindowIdentity, identity.id)
         if db_identity:
             db_identity.last_active_ts = now
-            db_identity.expires_ts = now + timedelta(days=ttl_days)
+            base = max(now, db_identity.expires_ts) if db_identity.expires_ts is not None else now
+            db_identity.expires_ts = base + timedelta(days=ttl_days)
             session.add(db_identity)
             await session.commit()
+            identity.last_active_ts = db_identity.last_active_ts
+            identity.expires_ts = db_identity.expires_ts
 
 
 def _validate_window_uuid(value: str) -> bool:
@@ -8448,7 +8451,9 @@ def build_mcp_server() -> FastMCP:
             )
         now = datetime.now(timezone.utc)
         naive_now = _naive_utc(now)
-        exp = naive_now + timedelta(seconds=max(60, ttl_seconds)) if accept else None
+        approved_exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
+        exp = approved_exp if accept else None
+        result_expires: datetime | None = exp
         updated = 0
         async with get_session() as s:
             existing = await s.execute(
@@ -8461,9 +8466,25 @@ def build_mcp_server() -> FastMCP:
             )
             link = existing.scalars().first()
             if link:
-                link.status = "approved" if accept else "blocked"
                 link.updated_ts = naive_now
-                link.expires_ts = exp
+                if accept:
+                    is_active_approved = link.status == "approved" and (
+                        link.expires_ts is None or link.expires_ts > naive_now
+                    )
+                    link.status = "approved"
+                    if is_active_approved:
+                        if link.expires_ts is None:
+                            result_expires = None
+                        else:
+                            link.expires_ts = max(link.expires_ts, approved_exp)
+                            result_expires = link.expires_ts
+                    else:
+                        link.expires_ts = exp
+                        result_expires = exp
+                else:
+                    link.status = "blocked"
+                    link.expires_ts = None
+                    result_expires = None
                 s.add(link)
                 updated = 1
             else:
@@ -8484,7 +8505,13 @@ def build_mcp_server() -> FastMCP:
                     updated = 1
             await s.commit()
         await ctx.info(f"Contact {'approved' if accept else 'denied'}: {from_agent} -> {to_agent}")
-        return {"from": from_agent, "to": to_agent, "approved": bool(accept), "expires_ts": _iso(exp) if exp else None, "updated": updated}
+        return {
+            "from": from_agent,
+            "to": to_agent,
+            "approved": bool(accept),
+            "expires_ts": _iso(result_expires) if result_expires is not None else None,
+            "updated": updated,
+        }
 
     @mcp.tool(name="list_contacts")
     @_instrument_tool(
@@ -9336,6 +9363,7 @@ def build_mcp_server() -> FastMCP:
             now = datetime.now(timezone.utc)
             naive_now = _naive_utc(now)
             exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
+            result_expires: datetime | None = exp
 
             async with get_session() as s:
                 existing = await s.execute(
@@ -9348,10 +9376,21 @@ def build_mcp_server() -> FastMCP:
                 )
                 link = existing.scalars().first()
                 if link:
-                    link.status = "approved"
                     link.reason = reason
                     link.updated_ts = naive_now
-                    link.expires_ts = exp
+                    is_active_approved = link.status == "approved" and (
+                        link.expires_ts is None or link.expires_ts > naive_now
+                    )
+                    link.status = "approved"
+                    if is_active_approved:
+                        if link.expires_ts is None:
+                            result_expires = None
+                        else:
+                            link.expires_ts = max(link.expires_ts, exp)
+                            result_expires = link.expires_ts
+                    else:
+                        link.expires_ts = exp
+                        result_expires = exp
                     s.add(link)
                 else:
                     link = AgentLink(
@@ -9382,10 +9421,21 @@ def build_mcp_server() -> FastMCP:
                     link = existing.scalars().first()
                     if link is None:
                         raise
-                    link.status = "approved"
                     link.reason = reason
                     link.updated_ts = naive_now
-                    link.expires_ts = exp
+                    is_active_approved = link.status == "approved" and (
+                        link.expires_ts is None or link.expires_ts > naive_now
+                    )
+                    link.status = "approved"
+                    if is_active_approved:
+                        if link.expires_ts is None:
+                            result_expires = None
+                        else:
+                            link.expires_ts = max(link.expires_ts, exp)
+                            result_expires = link.expires_ts
+                    else:
+                        link.expires_ts = exp
+                        result_expires = exp
                     s.add(link)
                     await s.commit()
 
@@ -9395,7 +9445,7 @@ def build_mcp_server() -> FastMCP:
                 "to": b.name,
                 "to_project": project.human_key,
                 "status": "approved",
-                "expires_ts": _iso(exp),
+                "expires_ts": _iso(result_expires) if result_expires is not None else None,
             }
             return {"request": approved_payload, "response": approved_payload, "welcome_message": None}
 
@@ -10443,6 +10493,15 @@ def build_mcp_server() -> FastMCP:
 
                 for path in paths:
                     conflicting_holders: list[dict[str, Any]] = []
+                    existing_self_reservation = next(
+                        (
+                            file_reservation_record
+                            for file_reservation_record, _holder_name in existing_reservations
+                            if file_reservation_record.agent_id == agent.id
+                            and file_reservation_record.path_pattern == path
+                        ),
+                        None,
+                    )
 
                     # Fast path: skip detailed check if path cannot conflict with any reservation
                     if path in potentially_conflicting_paths:
@@ -10461,19 +10520,30 @@ def build_mcp_server() -> FastMCP:
                     if conflicting_holders:
                         # Advisory model: still grant the file_reservation but surface conflicts
                         conflicts.append({"path": path, "holders": conflicting_holders})
-                    # Create reservation inline within the IMMEDIATE transaction
-                    # (instead of _create_file_reservation which opens its own session)
-                    expires = _naive_utc() + timedelta(seconds=ttl_seconds)
-                    file_reservation = FileReservation(
-                        project_id=project.id,
-                        agent_id=agent.id,
-                        path_pattern=path,
-                        exclusive=exclusive,
-                        reason=reason,
-                        expires_ts=expires,
-                    )
-                    session.add(file_reservation)
-                    await session.flush()  # Assigns id without committing
+                    requested_exp = _naive_utc() + timedelta(seconds=ttl_seconds)
+                    if existing_self_reservation is not None:
+                        current_exp = existing_self_reservation.expires_ts
+                        if getattr(current_exp, "tzinfo", None) is not None:
+                            current_exp = _naive_utc(current_exp)
+                        existing_self_reservation.exclusive = exclusive
+                        if reason or not existing_self_reservation.reason:
+                            existing_self_reservation.reason = reason
+                        existing_self_reservation.expires_ts = max(requested_exp, current_exp)
+                        file_reservation = existing_self_reservation
+                        session.add(file_reservation)
+                    else:
+                        # Create reservation inline within the IMMEDIATE transaction
+                        # (instead of _create_file_reservation which opens its own session)
+                        file_reservation = FileReservation(
+                            project_id=project.id,
+                            agent_id=agent.id,
+                            path_pattern=path,
+                            exclusive=exclusive,
+                            reason=reason,
+                            expires_ts=requested_exp,
+                        )
+                        session.add(file_reservation)
+                        await session.flush()  # Assigns id without committing
                     file_reservation_payload = _file_reservation_payload(
                         project,
                         file_reservation,
