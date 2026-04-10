@@ -10,6 +10,14 @@ from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.models import Agent, Message, MessageRecipient, Product, ProductProjectLink, Project
 
 
+class _StaticJsonResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
 def _seed_backend() -> None:
     async def _seed() -> None:
         await ensure_schema()
@@ -163,3 +171,100 @@ def test_cli_products_inbox_fallback_disambiguates_cross_project_sender(isolated
     assert res.exit_code == 0
     assert "BlueLake@source" in res.stdout
 
+
+def test_cli_products_ensure_reads_structured_content_response(isolated_env, monkeypatch):
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        return _StaticJsonResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": "cli-products-ensure",
+                "result": {
+                    "structuredContent": {
+                        "id": 99,
+                        "product_uid": "suite",
+                        "name": "Suite",
+                        "created_at": "2026-04-10T02:35:00Z",
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "ensure", "suite", "--name", "Suite"])
+    assert res.exit_code == 0
+    assert "99" in res.stdout
+    assert "Suite" in res.stdout
+
+
+def test_cli_products_inbox_reads_structured_content_response(isolated_env, monkeypatch):
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        return _StaticJsonResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": "cli-products-inbox",
+                "result": {
+                    "structuredContent": {
+                        "result": [
+                            {
+                                "project_id": 2,
+                                "id": 7,
+                                "subject": "Server Inbox Message",
+                                "from": "BlueLake@source",
+                                "importance": "high",
+                                "created_ts": "2026-04-10T02:35:00Z",
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "inbox", "Suite", "BlueLake", "--limit", "5"])
+    assert res.exit_code == 0
+    assert "BlueLake@source" in res.stdout
+    assert "No messages found." not in res.stdout
+
+
+def test_cli_products_summarize_thread_reads_structured_content_response(isolated_env, monkeypatch):
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        return _StaticJsonResponse(
+            {
+                "jsonrpc": "2.0",
+                "id": "cli-products-summarize-thread",
+                "result": {
+                    "structuredContent": {
+                        "result": {
+                            "summary": {
+                                "participants": ["BlueLake@source", "BlueLake"],
+                                "total_messages": 1,
+                                "open_actions": 0,
+                                "done_actions": 1,
+                                "key_points": ["Server summary point"],
+                                "action_items": ["Follow up"],
+                            },
+                            "examples": [
+                                {
+                                    "id": 7,
+                                    "subject": "Server Thread Message",
+                                    "from": "BlueLake@source",
+                                    "created_ts": "2026-04-10T02:35:00Z",
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        )
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "summarize-thread", "Suite", "cross-thread", "--no-llm"])
+    assert res.exit_code == 0
+    assert "Server summary point" in res.stdout
+    assert "BlueLake@source" in res.stdout
