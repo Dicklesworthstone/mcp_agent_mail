@@ -18,7 +18,7 @@ import time
 import warnings
 import webbrowser
 from contextlib import nullcontext, suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -47,14 +47,20 @@ from sqlalchemy.sql import ColumnElement
 
 from .app import (
     _LIKE_ESCAPE_CHAR,
+    _canonicalize_project_identifier,
     _extract_like_terms,
     _like_escape,
     _sanitize_fts_query,
     _sender_display_name,
     build_mcp_server,
 )
-from .config import get_settings
-from .db import ensure_schema, get_session, reset_database_state
+from .config import clear_settings_cache, get_settings
+from .db import (
+    ensure_schema,
+    get_session,
+    get_sqlite_sidecar_paths,
+    reset_database_state,
+)
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
 from .http import build_http_app
 from .models import (
@@ -171,12 +177,148 @@ def _extract_jsonrpc_result(payload: Any, *, request_name: str) -> Any:
     result = payload.get("result")
     if not isinstance(result, dict):
         return result
-    structured = result.get("structuredContent")
-    if not isinstance(structured, dict):
-        structured = result.get("structured_content")
-    if isinstance(structured, dict):
-        return structured.get("result", structured)
+    structured_missing = object()
+    structured = result.get("structuredContent", structured_missing)
+    if structured is structured_missing:
+        structured = result.get("structured_content", structured_missing)
+    if structured is not structured_missing:
+        if isinstance(structured, dict):
+            return structured.get("result", structured)
+        return structured
     return result
+
+
+def _parse_jsonrpc_response(response: Any, *, request_name: str) -> Any:
+    """Decode an HTTP JSON-RPC response with a CLI-facing parse error."""
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        status_suffix = f" HTTP {status_code}" if status_code is not None else " HTTP error"
+        raise click.ClickException(f"{request_name}:{status_suffix} from server") from exc
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise click.ClickException(f"{request_name}: invalid JSON response from server") from exc
+    return _extract_jsonrpc_result(payload, request_name=request_name)
+
+
+async def _lookup_agent_registration_token(project_human_key: str, agent_name: str) -> str | None:
+    """Resolve a locally stored registration token for a project/agent pair."""
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(
+            select(Agent.registration_token)
+            .join(Project, cast(ColumnElement[bool], Agent.project_id == Project.id))
+            .where(
+                cast(ColumnElement[bool], Project.human_key == project_human_key),
+                func.lower(Agent.name) == agent_name.lower(),
+            )
+        )
+        token = result.scalar_one_or_none()
+    if token is None:
+        return None
+    normalized_token = str(token).strip()
+    return normalized_token or None
+
+
+async def _lookup_product_registration_token(product_key: str, agent_name: str) -> str | None:
+    """Resolve a unique locally stored registration token for a product/agent pair."""
+    await ensure_schema()
+    async with get_session() as session:
+        product = (
+            await session.execute(
+                select(Product).where(
+                    or_(
+                        cast(ColumnElement[bool], Product.product_uid == product_key),
+                        cast(ColumnElement[bool], Product.name == product_key),
+                    )
+                )
+            )
+        ).scalars().first()
+        if product is None or product.id is None:
+            return None
+        token_rows = await session.execute(
+            select(Agent.registration_token)
+            .join(Project, cast(ColumnElement[bool], Agent.project_id == Project.id))
+            .join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id))
+            .where(
+                cast(ColumnElement[bool], ProductProjectLink.product_id == product.id),
+                func.lower(Agent.name) == agent_name.lower(),
+            )
+        )
+        tokens = {
+            str(token).strip()
+            for token in token_rows.scalars().all()
+            if str(token or "").strip()
+        }
+    if len(tokens) != 1:
+        return None
+    return next(iter(tokens))
+
+
+async def _resolve_local_product_agents(
+    product_key: str,
+    agent_name: str,
+    registration_token: str | None,
+) -> tuple[Product, list[tuple[Project, Agent]], str | None]:
+    """Resolve locally authorized product agents using the same token semantics as the server."""
+    import hmac as _hmac
+
+    await ensure_schema()
+    async with get_session() as session:
+        product = (
+            await session.execute(
+                select(Product).where(
+                    or_(
+                        cast(ColumnElement[bool], Product.product_uid == product_key),
+                        cast(ColumnElement[bool], Product.name == product_key),
+                    )
+                )
+            )
+        ).scalars().first()
+        if product is None:
+            raise ValueError(f"Product '{product_key}' not found")
+        assert product.id is not None
+        rows = await session.execute(
+            select(Project, Agent)
+            .join(ProductProjectLink, cast(ColumnElement[bool], ProductProjectLink.project_id == Project.id))
+            .join(Agent, cast(ColumnElement[bool], Agent.project_id == Project.id))
+            .where(
+                cast(ColumnElement[bool], ProductProjectLink.product_id == product.id),
+                func.lower(Agent.name) == agent_name.lower(),
+            )
+        )
+        project_agents = list(rows.all())
+
+    effective_token = (registration_token or "").strip() or None
+    if effective_token is None:
+        unique_tokens = {
+            str(agent.registration_token).strip()
+            for _project, agent in project_agents
+            if str(agent.registration_token or "").strip()
+        }
+        if len(unique_tokens) == 1:
+            effective_token = next(iter(unique_tokens))
+
+    authorized: list[tuple[Project, Agent]] = []
+    if effective_token is not None:
+        for project, agent in project_agents:
+            stored_token = str(agent.registration_token or "").strip()
+            if stored_token and _hmac.compare_digest(effective_token, stored_token):
+                authorized.append((project, agent))
+
+    return product, authorized, effective_token
+
+
+def _require_cli_product_auth(command_name: str, product_key: str, agent_name: str, effective_token: str | None) -> str:
+    """Require a concrete product auth token for server-first or local fallback reads."""
+    if effective_token:
+        return effective_token
+    raise click.ClickException(
+        f"{command_name} requires --registration-token / $AGENT_MAIL_REGISTRATION_TOKEN for agent '{agent_name}' "
+        f"or a single unambiguous locally stored token linked to product '{product_key}'."
+    )
 
 
 def _run_async(coro: Any) -> Any:
@@ -270,16 +412,13 @@ doctor_app = typer.Typer(help="Diagnose and repair mailbox health issues")
 app.add_typer(doctor_app, name="doctor")
 
 
+def _canonical_project_path(path: Path) -> Path:
+    return Path(_canonicalize_project_identifier(str(path)))
+
+
 async def _get_project_record(identifier: str) -> Project:
     raw_identifier = identifier.strip()
-    canonical_identifier = raw_identifier
-    # Resolve absolute paths to canonical form so symlink aliases map to one project.
-    try:
-        candidate = Path(raw_identifier).expanduser()
-        if candidate.is_absolute():
-            canonical_identifier = str(candidate.resolve())
-    except Exception:
-        canonical_identifier = raw_identifier
+    canonical_identifier = await asyncio.to_thread(_canonicalize_project_identifier, raw_identifier)
     slug = slugify(canonical_identifier)
     await ensure_schema()
     async with get_session() as session:
@@ -303,7 +442,12 @@ async def _get_agent_record(project: Project, agent_name: str) -> Agent:
     await ensure_schema()
     async with get_session() as session:
         result = await session.execute(
-            select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == project.id), cast(ColumnElement[bool], Agent.name == agent_name)))
+            select(Agent).where(
+                and_(
+                    cast(ColumnElement[bool], Agent.project_id == project.id),
+                    func.lower(Agent.name) == agent_name.lower(),
+                )
+            )
         )
         agent = result.scalars().first()
         if not agent:
@@ -334,6 +478,26 @@ def _ensure_utc_dt(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _delete_project_archive_tree(storage_root: str, project_slug: str) -> tuple[int, int, list[str]]:
+    """Best-effort removal of a project's archive subtree."""
+    files_removed = 0
+    dirs_removed = 0
+    fs_errors: list[str] = []
+    try:
+        archive_root = Path(storage_root).expanduser().resolve()
+        project_dir = archive_root / "projects" / project_slug
+        if project_dir.exists():
+            for item in project_dir.rglob("*"):
+                if item.is_file():
+                    files_removed += 1
+                elif item.is_dir():
+                    dirs_removed += 1
+            shutil.rmtree(project_dir)
+    except Exception as exc:
+        fs_errors.append(str(exc))
+    return files_removed, dirs_removed, fs_errors
 
 
 @products_app.command("ensure")
@@ -372,9 +536,7 @@ def products_ensure(
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            result = _extract_jsonrpc_result(data, request_name="products ensure") or {}
+            result = _parse_jsonrpc_response(resp, request_name="products ensure") or {}
             if result:
                 resp_data = result
     except httpx.TransportError:
@@ -496,6 +658,18 @@ def products_status(
 def products_search(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     query: Annotated[str, typer.Argument(..., help="FTS query")],
+    agent: Annotated[
+        Optional[str],
+        typer.Option("--agent", "-a", envvar="AGENT_NAME", help="Agent name (defaults to $AGENT_NAME)"),
+    ] = None,
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--registration-token",
+            envvar="AGENT_MAIL_REGISTRATION_TOKEN",
+            help="Agent registration token (defaults to a unique local linked-project token lookup or $AGENT_MAIL_REGISTRATION_TOKEN)",
+        ),
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max results",)] = 20,
 ) -> None:
     """
@@ -506,28 +680,71 @@ def products_search(
     if sanitized_query is None:
         console.print(f"[yellow]Query '{query}' cannot produce search results.[/]")
         return
+    agent_name = (agent or "").strip()
+    if not agent_name:
+        raise click.ClickException("products search requires --agent or $AGENT_NAME.")
+    effective_token = _require_cli_product_auth(
+        "products search",
+        product_key,
+        agent_name,
+        registration_token or _run_async(_lookup_product_registration_token(product_key, agent_name)),
+    )
 
-    async def _run() -> list[dict]:
+    settings = get_settings()
+    server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
+    bearer = settings.http.bearer_token or ""
+    rows: list[dict[str, Any]] | None = None
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            headers = {}
+            if bearer:
+                headers["Authorization"] = f"Bearer {bearer}"
+            req = {
+                "jsonrpc": "2.0",
+                "id": "cli-products-search",
+                "method": "tools/call",
+                "params": {
+                    "name": "search_messages_product",
+                    "arguments": {
+                        "product_key": product_key,
+                        "query": query,
+                        "limit": int(limit),
+                        "agent_name": agent_name,
+                        "registration_token": effective_token,
+                    },
+                },
+            }
+            resp = client.post(server_url, json=req, headers=headers)
+            result = _parse_jsonrpc_response(resp, request_name="products search")
+            rows = result if isinstance(result, list) else []
+    except httpx.TransportError:
+        rows = None
+
+    async def _run_local() -> list[dict]:
         await ensure_schema()
-        async with get_session() as session:
-            stmt_prod = select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key)))
-            prod = (await session.execute(stmt_prod)).scalars().first()
-            if prod is None:
-                raise typer.BadParameter(f"Product '{product_key}' not found.")
-            assert prod.id is not None
-            rows = await session.execute(
-                select(ProductProjectLink.project_id).where(cast(ColumnElement[bool], ProductProjectLink.product_id == prod.id))
+        product, authorized, _ = await _resolve_local_product_agents(product_key, agent_name, effective_token)
+        proj_ids = [project.id for project, _agent in authorized if project.id is not None]
+        if product.id is None:
+            raise typer.BadParameter(f"Product '{product_key}' not found.")
+        authorized_map = {
+            int(project.id): int(agent.id)
+            for project, agent in authorized
+            if project.id is not None and agent.id is not None
+        }
+        if not authorized_map:
+            raise click.ClickException(
+                f"products search: invalid registration token for agent '{agent_name}' on product '{product_key}'."
             )
-            proj_ids = [int(r[0]) for r in rows.fetchall()]
+        async with get_session() as session:
             if not proj_ids:
                 return []
-            rows: list[dict[str, Any]] = []
+            rows_local: list[dict[str, Any]] = []
             try:
                 result = await session.execute(
                     text(
                         """
                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, m.project_id,
+                               m.sender_id, m.thread_id, m.project_id,
                                a.name AS sender_name, a.project_id AS sender_project_id,
                                sp.slug AS sender_project_slug
                         FROM fts_messages
@@ -541,16 +758,7 @@ def products_search(
                     ).bindparams(bindparam("proj_ids", expanding=True)),
                     {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
                 )
-                for row in result.mappings().all():
-                    item = dict(row)
-                    item["sender_display"] = _cli_sender_display(
-                        message_project_id=item.get("project_id"),
-                        sender_name=item.get("sender_name"),
-                        sender_project_id=item.get("sender_project_id"),
-                        sender_project_slug=item.get("sender_project_slug"),
-                    )
-                    rows.append(item)
-                return rows
+                rows_local = [dict(row) for row in result.mappings().all()]
             except Exception:
                 fallback_terms = _extract_like_terms(query)
                 if not fallback_terms:
@@ -568,7 +776,7 @@ def products_search(
                     text(
                         f"""
                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, m.project_id,
+                               m.sender_id, m.thread_id, m.project_id,
                                a.name AS sender_name, a.project_id AS sender_project_id,
                                sp.slug AS sender_project_slug
                         FROM messages m
@@ -581,17 +789,40 @@ def products_search(
                     ).bindparams(bindparam("proj_ids", expanding=True)),
                     params,
                 )
-                for row in result.mappings().all():
-                    item = dict(row)
-                    item["sender_display"] = _cli_sender_display(
-                        message_project_id=item.get("project_id"),
-                        sender_name=item.get("sender_name"),
-                        sender_project_id=item.get("sender_project_id"),
-                        sender_project_slug=item.get("sender_project_slug"),
+                rows_local = [dict(row) for row in result.mappings().all()]
+
+            visible_rows = rows_local
+            if rows_local:
+                message_ids = [int(row["id"]) for row in rows_local]
+                recipient_rows = await session.execute(
+                    select(MessageRecipient.message_id, MessageRecipient.agent_id).where(
+                        cast(Any, MessageRecipient.message_id).in_(message_ids)
                     )
-                    rows.append(item)
-                return rows
-    rows = _run_async(_run())
+                )
+                recipients_by_message: dict[int, set[int]] = {}
+                for message_id, recipient_agent_id in recipient_rows.all():
+                    recipients_by_message.setdefault(int(message_id), set()).add(int(recipient_agent_id))
+                visible_rows = []
+                for row in rows_local:
+                    project_agent_id = authorized_map.get(int(row["project_id"]))
+                    if project_agent_id is None:
+                        continue
+                    if int(row["sender_id"]) == project_agent_id or project_agent_id in recipients_by_message.get(int(row["id"]), set()):
+                        visible_rows.append(row)
+
+            items: list[dict[str, Any]] = []
+            for item in visible_rows:
+                item["sender_display"] = _cli_sender_display(
+                    message_project_id=item.get("project_id"),
+                    sender_name=item.get("sender_name"),
+                    sender_project_id=item.get("sender_project_id"),
+                    sender_project_slug=item.get("sender_project_slug"),
+                )
+                items.append(item)
+            return items
+
+    if rows is None:
+        rows = _run_async(_run_local())
     if not rows:
         console.print("[yellow]No results.[/]")
         return
@@ -616,6 +847,14 @@ def products_search(
 def products_inbox(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     agent: Annotated[str, typer.Argument(..., help="Agent name")],
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--registration-token",
+            envvar="AGENT_MAIL_REGISTRATION_TOKEN",
+            help="Agent registration token (defaults to a unique local linked-project token lookup or $AGENT_MAIL_REGISTRATION_TOKEN)",
+        ),
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", "-l", help="Max messages",)] = 20,
     urgent_only: Annotated[bool, typer.Option("--urgent-only/--all", help="Only high/urgent")] = False,
     include_bodies: Annotated[bool, typer.Option("--include-bodies/--no-bodies", help="Include body_md")] = False,
@@ -628,7 +867,14 @@ def products_inbox(
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
     bearer = settings.http.bearer_token or ""
+    effective_token = _require_cli_product_auth(
+        "products inbox",
+        product_key,
+        agent,
+        registration_token or _run_async(_lookup_product_registration_token(product_key, agent)),
+    )
     # Try server first
+    rows: list[dict[str, Any]] | None = None
     try:
         with httpx.Client(timeout=5.0) as client:
             headers = {}
@@ -647,20 +893,29 @@ def products_inbox(
                         "urgent_only": bool(urgent_only),
                         "include_bodies": bool(include_bodies),
                         "since_ts": since_ts or "",
+                        "registration_token": effective_token,
                     },
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            result = _extract_jsonrpc_result(data, request_name="products inbox")
+            result = _parse_jsonrpc_response(resp, request_name="products inbox")
             rows = result if isinstance(result, list) else []
     except httpx.TransportError:
-        rows = []
-    if not rows:
+        rows = None
+    if rows is None:
         # Fallback: local DB
         async def _fallback() -> list[dict]:
             await ensure_schema()
+            _product, authorized, _ = await _resolve_local_product_agents(product_key, agent, effective_token)
+            authorized_agent_ids = {
+                int(agent_record.id)
+                for _project, agent_record in authorized
+                if agent_record.id is not None
+            }
+            if not authorized_agent_ids:
+                raise click.ClickException(
+                    f"products inbox: invalid registration token for agent '{agent}' on product '{product_key}'."
+                )
             async with get_session() as session:
                 prod = (await session.execute(select(Product).where(or_(cast(ColumnElement[bool], Product.product_uid == product_key), cast(ColumnElement[bool], Product.name == product_key))))).scalars().first()
                 if prod is None:
@@ -675,10 +930,21 @@ def products_inbox(
                 items: list[dict] = []
                 for proj in projects:
                     assert proj.id is not None
-                    agent_row = (await session.execute(select(Agent).where(and_(cast(ColumnElement[bool], Agent.project_id == proj.id), cast(ColumnElement[bool], Agent.name == agent))))).scalars().first()
+                    agent_row = (
+                        await session.execute(
+                            select(Agent).where(
+                                and_(
+                                    cast(ColumnElement[bool], Agent.project_id == proj.id),
+                                    func.lower(Agent.name) == agent.lower(),
+                                )
+                            )
+                        )
+                    ).scalars().first()
                     if not agent_row:
                         continue
                     assert agent_row.id is not None
+                    if int(agent_row.id) not in authorized_agent_ids:
+                        continue
                     from sqlalchemy.orm import aliased as _aliased  # local to avoid top-level churn
                     sender_alias = _aliased(Agent)
                     sender_project_alias = _aliased(Project)
@@ -757,15 +1023,36 @@ def products_inbox(
 def products_summarize_thread(
     product_key: Annotated[str, typer.Argument(..., help="Product uid or name")],
     thread_id: Annotated[str, typer.Argument(..., help="Thread id or key")],
+    agent: Annotated[
+        Optional[str],
+        typer.Option("--agent", "-a", envvar="AGENT_NAME", help="Agent name (defaults to $AGENT_NAME)"),
+    ] = None,
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--registration-token",
+            envvar="AGENT_MAIL_REGISTRATION_TOKEN",
+            help="Agent registration token (defaults to a unique local linked-project token lookup or $AGENT_MAIL_REGISTRATION_TOKEN)",
+        ),
+    ] = None,
     per_thread_limit: Annotated[int, typer.Option("--per-thread-limit", "-n", help="Max messages per thread",)] = 50,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Disable LLM refinement")] = False,
 ) -> None:
     """
     Summarize a thread across all projects in a product. Prefers server tool; minimal fallback if server is unavailable.
     """
+    agent_name = (agent or "").strip()
+    if not agent_name:
+        raise click.ClickException("products summarize-thread requires --agent or $AGENT_NAME.")
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
     bearer = settings.http.bearer_token or ""
+    effective_token = _require_cli_product_auth(
+        "products summarize-thread",
+        product_key,
+        agent_name,
+        registration_token or _run_async(_lookup_product_registration_token(product_key, agent_name)),
+    )
     # Try server
     try:
         with httpx.Client(timeout=8.0) as client:
@@ -784,13 +1071,13 @@ def products_summarize_thread(
                         "include_examples": True,
                         "llm_mode": (not no_llm),
                         "per_thread_limit": int(per_thread_limit),
+                        "agent_name": agent_name,
+                        "registration_token": effective_token,
                     },
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            result = _extract_jsonrpc_result(data, request_name="products summarize-thread") or {}
+            result = _parse_jsonrpc_response(resp, request_name="products summarize-thread") or {}
     except httpx.TransportError:
         result = {}
     if not result:
@@ -912,10 +1199,14 @@ def serve_http(
     resolved_host = host or settings.http.host
     resolved_port = port or settings.http.port
     resolved_path = path or settings.http.path
+    effective_settings = replace(
+        settings,
+        http=replace(settings.http, host=resolved_host, port=resolved_port, path=resolved_path),
+    )
 
     # Display awesome startup banner with database stats
     from . import rich_logger
-    rich_logger.display_startup_banner(settings, resolved_host, resolved_port, resolved_path)
+    rich_logger.display_startup_banner(effective_settings, resolved_host, resolved_port, resolved_path)
 
     # Reset database state after startup banner to prevent connection leak.
     # The banner's _get_database_stats() uses _run_async() which creates connections
@@ -925,7 +1216,7 @@ def serve_http(
     reset_database_state()
 
     server = build_mcp_server()
-    app = build_http_app(settings, server)
+    app = build_http_app(effective_settings, server)
     # Disable WebSockets: HTTP-only MCP transport. Stay compatible with tests that
     # monkeypatch uvicorn.run without the 'ws' parameter.
     import inspect as _inspect
@@ -949,8 +1240,6 @@ def serve_stdio() -> None:
     Tool debug panels are automatically disabled in stdio mode.
     """
     import logging
-
-    from .config import clear_settings_cache
 
     # Disable tool debug logging and rich console output - they output to stdout
     # and would corrupt the stdio protocol
@@ -3107,21 +3396,11 @@ def hard_delete_project(
             await session.commit()
 
         # Phase 2: Filesystem cleanup (best-effort)
-        files_removed = 0
-        dirs_removed = 0
-        fs_errors: list[str] = []
-        try:
-            archive_root = Path(settings.storage.root).expanduser().resolve()
-            project_dir = archive_root / "projects" / project_slug
-            if project_dir.exists():
-                for item in project_dir.rglob("*"):
-                    if item.is_file():
-                        files_removed += 1
-                    elif item.is_dir():
-                        dirs_removed += 1
-                shutil.rmtree(project_dir)
-        except Exception as exc:
-            fs_errors.append(str(exc))
+        files_removed, dirs_removed, fs_errors = await asyncio.to_thread(
+            _delete_project_archive_tree,
+            settings.storage.root,
+            project_slug,
+        )
 
         deleted_counts["archive_files_removed"] = files_removed
         deleted_counts["archive_dirs_removed"] = dirs_removed
@@ -3353,7 +3632,7 @@ def amctl_env(
     """
     Print environment variables useful for build wrappers (slots, caches, artifacts).
     """
-    p = project_path.expanduser().resolve()
+    p = _canonical_project_path(project_path)
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     # Reuse server helper for identity
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
@@ -3396,6 +3675,14 @@ def am_run(
     cmd: Annotated[list[str], typer.Argument(help="Command to run")],
     project_path: Annotated[Path, typer.Option("--path", "-p", help="Path to repo/worktree",)] = Path(),
     agent: Annotated[Optional[str], typer.Option("--agent", "-a", help="Agent name (defaults to $AGENT_NAME)")] = None,
+    registration_token: Annotated[
+        Optional[str],
+        typer.Option(
+            "--registration-token",
+            envvar="AGENT_MAIL_REGISTRATION_TOKEN",
+            help="Agent registration token (defaults to local DB lookup or $AGENT_MAIL_REGISTRATION_TOKEN)",
+        ),
+    ] = None,
     ttl_seconds: Annotated[int, typer.Option("--ttl-seconds", help="Lease TTL seconds (default 3600)")] = 3600,
     shared: Annotated[bool, typer.Option("--shared/--exclusive", help="Shared (non-exclusive) lease",)] = False,
     block_on_conflicts: Annotated[bool, typer.Option("--block-on-conflicts/--no-block-on-conflicts", help="Exit 1 if exclusive conflicts are present")] = False,
@@ -3406,7 +3693,7 @@ def am_run(
     - Renews lease in the background while the child runs.
     - Releases the slot on exit.
     """
-    p = project_path.expanduser().resolve()
+    p = _canonical_project_path(project_path)
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
     ident = _resolve_ident(str(p))
@@ -3467,23 +3754,29 @@ def am_run(
     def _lease_path(slot_dir: Path) -> Path:
         holder = _safe_component(f"{agent_name}__{branch or 'unknown'}")
         return slot_dir / f"{holder}.json"
-    # Ensure local lease path exists upfront so tests can observe it even if server path is used
-    lease_path: Optional[Path] = None
-    try:
-        slot_dir_eager = _run_async(_ensure_slot_paths())
-        lease_path = _lease_path(slot_dir_eager)
-        payload = {
-            "slot": slot,
-            "agent": agent_name,
-            "branch": branch,
-            "exclusive": (not shared),
-            "acquired_ts": datetime.now(timezone.utc).isoformat(),
-            "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
-        }
+
+    def _write_local_release(path: Path) -> None:
+        now = datetime.now(timezone.utc)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
         with suppress(Exception):
-            lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _write_local_renew(path: Path) -> None:
+        now = datetime.now(timezone.utc)
+        new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            current = {}
+        current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp.isoformat()})
+        with suppress(Exception):
+            path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+    lease_path: Optional[Path] = None
     env = os.environ.copy()
     env.update({
         "AM_SLOT": slot,
@@ -3493,9 +3786,10 @@ def am_run(
         "AGENT": agent_name,
         "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
     })
-    # lease_path may already be set by eager creation above
     renew_stop = threading.Event()
     renew_thread: Optional[threading.Thread] = None
+    resolved_registration_token = registration_token
+    slot_acquired = False
     try:
         if worktrees_enabled:
             # Prefer server tools (authority); fallback to local FS leases
@@ -3512,12 +3806,18 @@ def am_run(
                         "params": {"name": "ensure_project", "arguments": {"human_key": str(p)}},
                     }
                     resp = client.post(server_url, json=req, headers=headers)
-                    resp.raise_for_status()
-                    _extract_jsonrpc_result(resp.json(), request_name="am-run ensure_project")
+                    _parse_jsonrpc_response(resp, request_name="am-run ensure_project")
             except httpx.TransportError:
                 use_server = False
 
             if use_server:
+                if not resolved_registration_token:
+                    resolved_registration_token = _run_async(_lookup_agent_registration_token(str(p), agent_name))
+                if not resolved_registration_token:
+                    raise click.ClickException(
+                        "am-run requires a registered agent with a registration token when the server is reachable. "
+                        "Register the agent first, or pass --registration-token / $AGENT_MAIL_REGISTRATION_TOKEN."
+                    )
                 conflicts: list[dict[str, Any]] = []
                 try:
                     with httpx.Client(timeout=5.0) as client:
@@ -3536,14 +3836,14 @@ def am_run(
                                     "slot": slot,
                                     "ttl_seconds": int(ttl_seconds),
                                     "exclusive": (not shared),
+                                    "registration_token": resolved_registration_token,
                                 },
                             },
                         }
                         resp = client.post(server_url, json=req, headers=headers)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        result = _extract_jsonrpc_result(data, request_name="am-run acquire_build_slot") or {}
+                        result = _parse_jsonrpc_response(resp, request_name="am-run acquire_build_slot") or {}
                         conflicts = list(result.get("conflicts") or [])
+                        slot_acquired = True
                 except httpx.TransportError:
                     use_server = False
 
@@ -3557,6 +3857,8 @@ def am_run(
                 if conflicts and (not shared) and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
                     raise typer.Exit(code=1)
+
+                lease_path = _lease_path(_run_async(_ensure_slot_paths()))
 
                 def _renewer_srv() -> None:
                     interval = max(60, ttl_seconds // 2)
@@ -3577,11 +3879,15 @@ def am_run(
                                             "agent_name": agent_name,
                                             "slot": slot,
                                             "extend_seconds": max(60, ttl_seconds // 2),
+                                            "registration_token": resolved_registration_token,
                                         },
                                     },
                                 }
-                                client.post(server_url, json=req, headers=headers)
+                                resp = client.post(server_url, json=req, headers=headers)
+                                _parse_jsonrpc_response(resp, request_name="am-run renew_build_slot")
                         except Exception:
+                            if lease_path:
+                                _write_local_renew(lease_path)
                             continue
 
                 renew_thread = threading.Thread(target=_renewer_srv, name="am-run-renew", daemon=True)
@@ -3615,20 +3921,14 @@ def am_run(
                 }
                 with suppress(Exception):
                     lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                slot_acquired = True
 
                 def _renewer() -> None:
                     interval = max(60, ttl_seconds // 2)
                     while not renew_stop.wait(interval):
                         try:
-                            now = datetime.now(timezone.utc)
-                            new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
-                            try:
-                                current = json.loads(lease_path.read_text(encoding="utf-8")) if lease_path else {}
-                            except Exception:
-                                current = {}
-                            current.update({"expires_ts": new_exp.isoformat()})
                             if lease_path:
-                                lease_path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+                                _write_local_renew(lease_path)
                         except Exception:
                             continue
                 renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
@@ -3638,7 +3938,7 @@ def am_run(
     except FileNotFoundError:
         rc = 127
     finally:
-        if worktrees_enabled:
+        if worktrees_enabled and slot_acquired:
             # Attempt server release; fallback to local lease release
             try:
                 with httpx.Client(timeout=5.0) as client:
@@ -3651,23 +3951,20 @@ def am_run(
                         "method": "tools/call",
                         "params": {
                             "name": "release_build_slot",
-                            "arguments": {"project_key": str(p), "agent_name": agent_name, "slot": slot},
+                            "arguments": {
+                                "project_key": str(p),
+                                "agent_name": agent_name,
+                                "slot": slot,
+                                "registration_token": resolved_registration_token,
+                            },
                         },
                     }
-                    client.post(server_url, json=req, headers=headers)
+                    resp = client.post(server_url, json=req, headers=headers)
+                    _parse_jsonrpc_response(resp, request_name="am-run release_build_slot")
             except Exception:
                 if lease_path:
-                    try:
-                        now = datetime.now(timezone.utc)
-                        try:
-                            data = json.loads(lease_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            data = {}
-                        data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
-                        with suppress(Exception):
-                            lease_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                    except Exception:
-                        pass
+                    with suppress(Exception):
+                        _write_local_release(lease_path)
             finally:
                 renew_stop.set()
                 if renew_thread and renew_thread.is_alive():
@@ -3683,7 +3980,7 @@ def projects_mark_identity(
     """
     Write the current project_uid into a marker file (.agent-mail-project-id).
     """
-    p = project_path.expanduser().resolve()
+    p = _canonical_project_path(project_path)
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
     ident = _resolve_ident(str(p))
     uid = ident.get("project_uid") or ""
@@ -3721,7 +4018,7 @@ def projects_discovery_init(
     """
     Scaffold a discovery YAML file (.agent-mail.yaml) with project_uid (and optional product_uid).
     """
-    p = project_path.expanduser().resolve()
+    p = _canonical_project_path(project_path)
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
     ident = _resolve_ident(str(p))
     uid = ident.get("project_uid") or ""
@@ -3745,61 +4042,14 @@ def mail_status(
     and the slug that would be used for this path.
     """
     settings = get_settings()
-    p = project_path.expanduser().resolve()
+    p = _canonical_project_path(project_path)
     gate = settings.worktrees_enabled
     mode = (settings.project_identity_mode or "dir").strip().lower()
     remote_name = (settings.project_identity_remote or "origin").strip()
-
-    def _norm_remote(url: Optional[str]) -> Optional[str]:
-        if not url:
-            return None
-        u = url.strip()
-        try:
-            if u.startswith("git@"):
-                host = u.split("@", 1)[1].split(":", 1)[0]
-                path = u.split(":", 1)[1]
-            else:
-                from urllib.parse import urlparse as _urlparse
-                pr = _urlparse(u)
-                host = pr.hostname or ""
-                path = (pr.path or "")
-        except Exception:
-            return None
-        if not host:
-            return None
-        path = path.lstrip("/")
-        if path.endswith(".git"):
-            path = path[:-4]
-        parts = [seg for seg in path.split("/") if seg]
-        if len(parts) < 2:
-            return None
-        owner, repo = parts[0], parts[1]
-        return f"{host}/{owner}/{repo}"
-
-    normalized_remote: Optional[str] = None
-    repo = None
-    try:
-        from git import Repo as _Repo  # local import to avoid CLI startup cost
-        repo = _Repo(str(p), search_parent_directories=True)
-        try:
-            url = repo.git.remote("get-url", remote_name).strip() or None
-        except Exception:
-            try:
-                r = next((r for r in repo.remotes if r.name == remote_name), None)
-                url = next(iter(r.urls), None) if r and r.urls else None
-            except Exception:
-                url = None
-        normalized_remote = _norm_remote(url)
-    except Exception:
-        normalized_remote = None
-    finally:
-        if repo is not None:
-            with suppress(Exception):
-                repo.close()
-
-    # Compute a candidate slug using the same logic as the server helper (summarized)
-    from mcp_agent_mail.app import _compute_project_slug as _compute_slug
-    slug_value = _compute_slug(str(p))
+    from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
+    ident = _resolve_ident(str(p))
+    normalized_remote = ident.get("normalized_remote")
+    slug_value = ident["slug"]
 
     table = Table(title="Mail routing status", show_lines=False)
     table.add_column("Field")
@@ -3809,7 +4059,7 @@ def mail_status(
     table.add_row("PROJECT_IDENTITY_REMOTE", remote_name)
     table.add_row("normalized_remote", normalized_remote or "")
     table.add_row("slug", slug_value)
-    table.add_row("path", str(p))
+    table.add_row("path", ident["human_key"])
     console.print(table)
 
 
@@ -4595,6 +4845,7 @@ def config_set_port(
         console.print(f"[red]Error:[/red] Failed to write {env_path}: {e}")
         raise typer.Exit(code=1) from e
 
+    clear_settings_cache()
     console.print("\n[dim]Note: Restart the server for changes to take effect[/dim]")
 
 
@@ -4846,6 +5097,12 @@ class DiagnosticResult:
     repair_available: bool = False
 
 
+async def _resolve_doctor_project(project_identifier: str | None) -> Project | None:
+    if not project_identifier:
+        return None
+    return await _get_project_record(project_identifier)
+
+
 @doctor_app.command("check")
 def doctor_check(
     project: Annotated[
@@ -4871,12 +5128,19 @@ def doctor_check(
         settings = get_settings()
         await ensure_schema()
         results: list[DiagnosticResult] = []
+        project_record = await _resolve_doctor_project(project)
+        project_id = project_record.id if project_record is not None else None
+        project_slug = project_record.slug if project_record is not None else None
 
         # Check 1: Stale locks
         from .storage import collect_lock_status
 
-        lock_status = collect_lock_status(settings)
-        stale_locks = lock_status.get("stale_locks", [])
+        lock_status = collect_lock_status(settings, project_slug=project_slug)
+        stale_locks = [
+            cast(str, lock.get("path"))
+            for lock in lock_status.get("locks", [])
+            if lock.get("stale_suspected") and isinstance(lock.get("path"), str)
+        ]
         if stale_locks:
             results.append(DiagnosticResult(
                 name="Locks",
@@ -4932,11 +5196,21 @@ def doctor_check(
         # Check 3: Orphaned records
         async with get_session() as session:
             # Count orphaned message recipients (no agent)
-            orphan_query = text("""
-                SELECT COUNT(*) FROM message_recipients mr
-                WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
-            """)
-            result = await session.execute(orphan_query)
+            if project_id is None:
+                orphan_query = text("""
+                    SELECT COUNT(*) FROM message_recipients mr
+                    WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+                """)
+                result = await session.execute(orphan_query)
+            else:
+                orphan_query = text("""
+                    SELECT COUNT(*)
+                    FROM message_recipients mr
+                    JOIN messages m ON m.id = mr.message_id
+                    WHERE m.project_id = :pid
+                    AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+                """)
+                result = await session.execute(orphan_query, {"pid": project_id})
             orphan_count = result.scalar() or 0
             if orphan_count > 0:
                 results.append(DiagnosticResult(
@@ -4953,12 +5227,25 @@ def doctor_check(
                 ))
 
             # Check 4: FTS index consistency
-            fts_query = text("""
-                SELECT
-                    (SELECT COUNT(*) FROM messages) as msg_count,
-                    (SELECT COUNT(*) FROM fts_messages) as fts_count
-            """)
-            result = await session.execute(fts_query)
+            if project_id is None:
+                fts_query = text("""
+                    SELECT
+                        (SELECT COUNT(*) FROM messages) as msg_count,
+                        (SELECT COUNT(*) FROM fts_messages) as fts_count
+                """)
+                result = await session.execute(fts_query)
+            else:
+                fts_query = text("""
+                    SELECT
+                        (SELECT COUNT(*) FROM messages WHERE project_id = :pid) as msg_count,
+                        (
+                            SELECT COUNT(*)
+                            FROM fts_messages
+                            JOIN messages m ON m.id = fts_messages.rowid
+                            WHERE m.project_id = :pid
+                        ) as fts_count
+                """)
+                result = await session.execute(fts_query, {"pid": project_id})
             counts = result.fetchone()
             if counts:
                 msg_count, fts_count = counts
@@ -4979,12 +5266,13 @@ def doctor_check(
             # Check 5: Expired file reservations
             # Use naive UTC datetime for consistency with how FileReservation stores timestamps
             now = datetime.now(timezone.utc).replace(tzinfo=None)
-            expired_query = select(func.count()).select_from(FileReservation).where(
-                and_(
-                    cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
-                    cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
-                )
-            )
+            expired_conditions = [
+                cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
+            ]
+            if project_id is not None:
+                expired_conditions.append(cast(ColumnElement[bool], FileReservation.project_id == project_id))
+            expired_query = select(func.count()).select_from(FileReservation).where(and_(*expired_conditions))
             result = await session.execute(expired_query)
             expired_count = result.scalar() or 0
             if expired_count > 0:
@@ -5003,8 +5291,7 @@ def doctor_check(
 
         # Check 6: WAL/journal files
         if db_path and db_path.exists():
-            wal_path = db_path.with_suffix(".sqlite3-wal")
-            shm_path = db_path.with_suffix(".sqlite3-shm")
+            wal_path, shm_path = get_sqlite_sidecar_paths(db_path)
             orphan_files: list[str] = []
             if wal_path.exists():
                 orphan_files.append(str(wal_path))
@@ -5117,7 +5404,7 @@ def doctor_repair(
     - Auto-fixes safe issues: stale locks, expired file reservations
     - Prompts for confirmation on data-affecting repairs
 
-    Creates a backup before any destructive operation.
+    Creates a backup before any destructive operation and aborts if backup creation fails.
     """
 
     async def _run() -> dict[str, Any]:
@@ -5125,6 +5412,9 @@ def doctor_repair(
 
         settings = get_settings()
         await ensure_schema()
+        project_record = await _resolve_doctor_project(project)
+        project_id = project_record.id if project_record is not None else None
+        project_slug = project_record.slug if project_record is not None else None
         repair_results: dict[str, Any] = {
             "backup_path": None,
             "safe_repairs": [],
@@ -5138,17 +5428,13 @@ def doctor_repair(
             try:
                 backup_path = await create_diagnostic_backup(
                     settings,
-                    project_slug=project,
                     backup_dir=backup_dir,
                     reason="doctor-repair",
                 )
                 repair_results["backup_path"] = str(backup_path)
                 console.print(f"[green]Backup created:[/green] {backup_path}")
             except Exception as e:
-                repair_results["errors"].append(f"Backup failed: {e}")
-                console.print(f"[red]Backup failed:[/red] {e}")
-                if not yes and not typer.confirm("Continue without backup?", default=False):
-                    return repair_results
+                raise RuntimeError(f"Backup failed: {e}") from e
 
         # Step 2: Safe repairs (auto-applied)
         console.print("\n[bold]Safe Repairs (auto-applied):[/bold]")
@@ -5159,7 +5445,7 @@ def doctor_repair(
             repair_results["safe_repairs"].append({"action": "heal_locks", "dry_run": True})
         else:
             try:
-                lock_result = await heal_archive_locks(settings)
+                lock_result = await heal_archive_locks(settings, project_slug=project_slug)
                 healed = lock_result.get("healed", 0)
                 if healed > 0:
                     console.print(f"  [green]Healed {healed} stale lock(s)[/green]")
@@ -5174,13 +5460,14 @@ def doctor_repair(
         async with get_session() as session:
             # Use naive UTC datetime for consistency with how FileReservation stores timestamps
             now = datetime.now(timezone.utc).replace(tzinfo=None)
+            expired_conditions = [
+                cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
+                cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
+            ]
+            if project_id is not None:
+                expired_conditions.append(cast(ColumnElement[bool], FileReservation.project_id == project_id))
             if dry_run:
-                expired_query = select(func.count()).select_from(FileReservation).where(
-                    and_(
-                        cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
-                        cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
-                    )
-                )
+                expired_query = select(func.count()).select_from(FileReservation).where(and_(*expired_conditions))
                 result = await session.execute(expired_query)
                 count = result.scalar() or 0
                 console.print(f"  [dim]Would release {count} expired reservation(s)[/dim]")
@@ -5191,12 +5478,7 @@ def doctor_repair(
 
                 update_stmt = (
                     update(FileReservation)
-                    .where(
-                        and_(
-                            cast(ColumnElement[bool], cast(Any, FileReservation.released_ts).is_(None)),
-                            cast(ColumnElement[bool], cast(Any, FileReservation.expires_ts) < now),
-                        )
-                    )
+                    .where(and_(*expired_conditions))
                     .values(released_ts=now)
                 )
                 result = await session.execute(update_stmt)
@@ -5213,11 +5495,21 @@ def doctor_repair(
 
         # 3a: Clean orphaned message recipients
         async with get_session() as session:
-            orphan_count_query = text("""
-                SELECT COUNT(*) FROM message_recipients mr
-                WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
-            """)
-            result = await session.execute(orphan_count_query)
+            if project_id is None:
+                orphan_count_query = text("""
+                    SELECT COUNT(*) FROM message_recipients mr
+                    WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+                """)
+                result = await session.execute(orphan_count_query)
+            else:
+                orphan_count_query = text("""
+                    SELECT COUNT(*)
+                    FROM message_recipients mr
+                    JOIN messages m ON m.id = mr.message_id
+                    WHERE m.project_id = :pid
+                    AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = mr.agent_id)
+                """)
+                result = await session.execute(orphan_count_query, {"pid": project_id})
             orphan_count = result.scalar() or 0
 
             if orphan_count > 0:
@@ -5225,11 +5517,21 @@ def doctor_repair(
                     console.print(f"  [dim]Would delete {orphan_count} orphaned recipient record(s)[/dim]")
                     repair_results["data_repairs"].append({"action": "delete_orphans", "count": orphan_count, "dry_run": True})
                 elif yes or typer.confirm(f"  Delete {orphan_count} orphaned message recipient record(s)?", default=False):
-                    delete_query = text("""
-                        DELETE FROM message_recipients
-                        WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = message_recipients.agent_id)
-                    """)
-                    await session.execute(delete_query)
+                    if project_id is None:
+                        delete_query = text("""
+                            DELETE FROM message_recipients
+                            WHERE NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = message_recipients.agent_id)
+                        """)
+                        await session.execute(delete_query)
+                    else:
+                        delete_query = text("""
+                            DELETE FROM message_recipients
+                            WHERE message_id IN (
+                                SELECT m.id FROM messages m WHERE m.project_id = :pid
+                            )
+                            AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = message_recipients.agent_id)
+                        """)
+                        await session.execute(delete_query, {"pid": project_id})
                     await session.commit()
                     console.print(f"  [green]Deleted {orphan_count} orphaned record(s)[/green]")
                     repair_results["data_repairs"].append({"action": "delete_orphans", "deleted": orphan_count})
@@ -5328,14 +5630,38 @@ def doctor_restore(
         raise typer.Exit(code=1)
 
     # Show backup info
-    with manifest_path.open() as f:
-        manifest = json.load(f)
+    try:
+        from .storage import _parse_backup_manifest, _resolve_backup_file_artifact
+
+        with manifest_path.open(encoding="utf-8") as f:
+            manifest = _parse_backup_manifest(json.load(f))
+        if manifest.database_path is not None:
+            try:
+                _resolve_backup_file_artifact(backup_path, manifest.database_path)
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"manifest.json references missing artifact: {manifest.database_path}"
+                ) from exc
+            except IsADirectoryError as exc:
+                raise ValueError(
+                    f"manifest.json artifact is not a file: {manifest.database_path}"
+                ) from exc
+        for bundle_ref in manifest.project_bundles:
+            try:
+                _resolve_backup_file_artifact(backup_path, bundle_ref)
+            except FileNotFoundError as exc:
+                raise ValueError(f"manifest.json references missing artifact: {bundle_ref}") from exc
+            except IsADirectoryError as exc:
+                raise ValueError(f"manifest.json artifact is not a file: {bundle_ref}") from exc
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        console.print(f"[red]Invalid backup manifest:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     console.print("\n[bold cyan]Restore from Backup[/bold cyan]")
-    console.print(f"  Created: {manifest.get('created_at', 'unknown')}")
-    console.print(f"  Reason: {manifest.get('reason', 'unknown')}")
-    console.print(f"  Has database: {'Yes' if manifest.get('database_path') else 'No'}")
-    console.print(f"  Bundles: {len(manifest.get('project_bundles', []))}")
+    console.print(f"  Created: {manifest.created_at}")
+    console.print(f"  Reason: {manifest.reason}")
+    console.print(f"  Has database: {'Yes' if manifest.database_path else 'No'}")
+    console.print(f"  Bundles: {len(manifest.project_bundles)}")
 
     if dry_run:
         console.print("\n[yellow]Dry run - no changes will be made[/yellow]")
@@ -5347,10 +5673,31 @@ def doctor_restore(
             return
 
     async def _run() -> dict[str, Any]:
-        from .storage import restore_from_backup
+        from .db import get_database_path
+        from .storage import create_diagnostic_backup, restore_from_backup
 
         settings = get_settings()
-        return await restore_from_backup(settings, backup_path, dry_run=dry_run)
+        if dry_run:
+            return await restore_from_backup(settings, backup_path, dry_run=True)
+
+        pre_restore_backup: Path | None = None
+        current_db_path = get_database_path(settings)
+        current_archive_root = await asyncio.to_thread(
+            lambda: Path(settings.storage.root).expanduser().resolve()
+        )
+        has_current_db = bool(
+            current_db_path and await asyncio.to_thread(current_db_path.exists)
+        )
+        has_current_archive = await asyncio.to_thread((current_archive_root / ".git").exists)
+
+        if has_current_db or has_current_archive:
+            pre_restore_backup = await create_diagnostic_backup(settings, reason="pre-restore")
+        restore_result = await restore_from_backup(settings, backup_path, dry_run=False)
+        if pre_restore_backup is not None:
+            restore_result["pre_restore_backup_path"] = str(pre_restore_backup)
+        else:
+            restore_result["pre_restore_backup_skipped_reason"] = "no current database or archive found"
+        return restore_result
 
     try:
         result = _run_async(_run())
@@ -5365,13 +5712,23 @@ def doctor_restore(
         for bundle in result.get("would_restore_bundles", []):
             console.print(f"  - Bundle: {bundle}")
     else:
-        console.print("\n[bold]Restore complete:[/bold]")
+        restore_errors = list(result.get("errors", []))
+        if restore_errors:
+            console.print("\n[bold red]Restore completed with errors:[/bold red]")
+        else:
+            console.print("\n[bold]Restore complete:[/bold]")
+        if result.get("pre_restore_backup_path"):
+            console.print(f"  [cyan]Pre-restore backup:[/cyan] {result['pre_restore_backup_path']}")
+        elif result.get("pre_restore_backup_skipped_reason"):
+            console.print(f"  [dim]Pre-restore backup skipped:[/dim] {result['pre_restore_backup_skipped_reason']}")
         if result.get("database_restored"):
             console.print("  [green]Database restored[/green]")
         for bundle in result.get("bundles_restored", []):
             console.print(f"  [green]Bundle restored:[/green] {bundle}")
-        for error in result.get("errors", []):
+        for error in restore_errors:
             console.print(f"  [red]Error:[/red] {error}")
+        if restore_errors:
+            raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":
