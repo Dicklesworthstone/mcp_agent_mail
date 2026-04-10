@@ -1066,11 +1066,48 @@ def build_materialized_views(snapshot_path: Path) -> None:
         # Ensure recipients table exists to satisfy LEFT JOIN in the view creation
         conn.execute("CREATE TABLE IF NOT EXISTS message_recipients (message_id INTEGER, agent_id INTEGER)")
         # Message overview materialized view
-        # Denormalizes messages with sender names for efficient list rendering
+        # Denormalizes messages with sender names and sender origin for efficient list rendering
         cols = [row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()]
         colset = {c.lower() for c in cols}
         has_thread_id = "thread_id" in colset
         has_sender_id = "sender_id" in colset
+        sender_expr = "a.name" if has_sender_id else "''"
+        sender_display_expr = (
+            "CASE "
+            "WHEN sp.id IS NOT NULL AND sp.id != m.project_id AND COALESCE(sp.slug, '') != '' "
+            "THEN a.name || '@' || sp.slug "
+            "ELSE a.name END"
+            if has_sender_id
+            else "''"
+        )
+        sender_project_id_expr = (
+            "CASE WHEN sp.id IS NOT NULL AND sp.id != m.project_id THEN sp.id ELSE NULL END"
+            if has_sender_id
+            else "NULL"
+        )
+        sender_project_slug_expr = (
+            "CASE WHEN sp.id IS NOT NULL AND sp.id != m.project_id THEN sp.slug ELSE NULL END"
+            if has_sender_id
+            else "NULL"
+        )
+        sender_project_name_expr = (
+            "CASE WHEN sp.id IS NOT NULL AND sp.id != m.project_id THEN sp.human_key ELSE NULL END"
+            if has_sender_id
+            else "NULL"
+        )
+        sender_address_expr = (
+            "CASE "
+            "WHEN sp.id IS NOT NULL AND sp.id != m.project_id AND COALESCE(sp.slug, '') != '' "
+            "THEN 'project:' || sp.slug || '#' || a.name "
+            "ELSE NULL END"
+            if has_sender_id
+            else "NULL"
+        )
+        sender_join = (
+            "JOIN agents a ON m.sender_id = a.id LEFT JOIN projects sp ON a.project_id = sp.id"
+            if has_sender_id
+            else ""
+        )
         if has_thread_id:
             conn.executescript(
                 """
@@ -1085,6 +1122,11 @@ def build_materialized_views(snapshot_path: Path) -> None:
                     m.ack_required,
                     m.created_ts,
                     {sender_expr} AS sender_name,
+                    {sender_display_expr} AS sender_display,
+                    {sender_project_id_expr} AS sender_project_id,
+                    {sender_project_slug_expr} AS sender_project_slug,
+                    {sender_project_name_expr} AS sender_project_name,
+                    {sender_address_expr} AS sender_address,
                     LENGTH(m.body_md) AS body_length,
                     json_array_length(m.attachments) AS attachment_count,
                     SUBSTR(COALESCE(m.body_md, ''), 1, 280) AS latest_snippet,
@@ -1108,8 +1150,13 @@ def build_materialized_views(snapshot_path: Path) -> None:
                 CREATE INDEX idx_msg_overview_importance ON message_overview_mv(importance, created_ts DESC);
                 """
                 .format(
-                    sender_expr=("a.name" if has_sender_id else "''"),
-                    sender_join=("JOIN agents a ON m.sender_id = a.id" if has_sender_id else ""),
+                    sender_expr=sender_expr,
+                    sender_display_expr=sender_display_expr,
+                    sender_project_id_expr=sender_project_id_expr,
+                    sender_project_slug_expr=sender_project_slug_expr,
+                    sender_project_name_expr=sender_project_name_expr,
+                    sender_address_expr=sender_address_expr,
+                    sender_join=sender_join,
                 )
             )
         else:
@@ -1126,6 +1173,11 @@ def build_materialized_views(snapshot_path: Path) -> None:
                     m.ack_required,
                     m.created_ts,
                     {sender_expr} AS sender_name,
+                    {sender_display_expr} AS sender_display,
+                    {sender_project_id_expr} AS sender_project_id,
+                    {sender_project_slug_expr} AS sender_project_slug,
+                    {sender_project_name_expr} AS sender_project_name,
+                    {sender_address_expr} AS sender_address,
                     LENGTH(m.body_md) AS body_length,
                     json_array_length(m.attachments) AS attachment_count,
                     SUBSTR(COALESCE(m.body_md, ''), 1, 280) AS latest_snippet,
@@ -1149,8 +1201,13 @@ def build_materialized_views(snapshot_path: Path) -> None:
                 CREATE INDEX idx_msg_overview_importance ON message_overview_mv(importance, created_ts DESC);
                 """
                 .format(
-                    sender_expr=("a.name" if has_sender_id else "''"),
-                    sender_join=("JOIN agents a ON m.sender_id = a.id" if has_sender_id else ""),
+                    sender_expr=sender_expr,
+                    sender_display_expr=sender_display_expr,
+                    sender_project_id_expr=sender_project_id_expr,
+                    sender_project_slug_expr=sender_project_slug_expr,
+                    sender_project_name_expr=sender_project_name_expr,
+                    sender_address_expr=sender_address_expr,
+                    sender_join=sender_join,
                 )
             )
 
@@ -1220,16 +1277,30 @@ def build_materialized_views(snapshot_path: Path) -> None:
                     m.subject,
                     m.created_ts,
                     m.importance,
-                    a.name AS sender_name,
+                    {sender_expr} AS sender_name,
+                    {sender_display_expr} AS sender_display,
+                    {sender_project_id_expr} AS sender_project_id,
+                    {sender_project_slug_expr} AS sender_project_slug,
+                    {sender_project_name_expr} AS sender_project_name,
+                    {sender_address_expr} AS sender_address,
                     SUBSTR(m.body_md, 1, 200) AS snippet
                 FROM messages m
-                JOIN agents a ON m.sender_id = a.id
+                {sender_join}
                 ORDER BY m.created_ts DESC;
 
                 -- Index for FTS result lookups
                 CREATE INDEX idx_fts_overview_rowid ON fts_search_overview_mv(rowid);
                 CREATE INDEX idx_fts_overview_created ON fts_search_overview_mv(created_ts DESC);
                 """
+                .format(
+                    sender_expr=sender_expr,
+                    sender_display_expr=sender_display_expr,
+                    sender_project_id_expr=sender_project_id_expr,
+                    sender_project_slug_expr=sender_project_slug_expr,
+                    sender_project_name_expr=sender_project_name_expr,
+                    sender_address_expr=sender_address_expr,
+                    sender_join=sender_join,
+                )
             )
         except sqlite3.OperationalError:
             # FTS5 not available or not configured, skip this view

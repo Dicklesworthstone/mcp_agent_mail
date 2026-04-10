@@ -15,7 +15,11 @@ from mcp_agent_mail.http import build_http_app
 from mcp_agent_mail.storage import ensure_archive, write_agent_profile
 
 
-async def _setup_test_data(settings: _config.Settings) -> dict:
+async def _setup_test_data(
+    settings: _config.Settings,
+    *,
+    include_cross_project_sender: bool = False,
+) -> dict:
     """Create test project, agent, and messages for viewer tests."""
     await ensure_schema()
 
@@ -88,6 +92,65 @@ async def _setup_test_data(settings: _config.Settings) -> dict:
             )
         await session.commit()
 
+        cross_project_message_id = None
+        if include_cross_project_sender:
+            await session.execute(
+                text("INSERT INTO projects (slug, human_key, created_at) VALUES (:slug, :hk, datetime('now'))"),
+                {"slug": "source-proj", "hk": "/tmp/source-proj"},
+            )
+            await session.commit()
+            row = await session.execute(text("SELECT id FROM projects WHERE slug = :slug"), {"slug": "source-proj"})
+            source_project_id = row.scalar()
+
+            await session.execute(
+                text(
+                    "INSERT INTO agents (name, project_id, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) "
+                    "VALUES (:name, :pid, :prog, :model, :task, datetime('now'), datetime('now'), 'auto', 'auto')"
+                ),
+                {
+                    "name": "BlueLake",
+                    "pid": source_project_id,
+                    "prog": "claude-code",
+                    "model": "opus-4",
+                    "task": "Cross-project testing",
+                },
+            )
+            await session.commit()
+            row = await session.execute(
+                text(
+                    "SELECT id FROM agents WHERE project_id = :pid AND name = :name"
+                ),
+                {"pid": source_project_id, "name": "BlueLake"},
+            )
+            external_agent_id = row.scalar()
+
+            await session.execute(
+                text(
+                    "INSERT INTO messages (project_id, subject, body_md, importance, ack_required, sender_id, thread_id, created_ts) "
+                    "VALUES (:pid, :subj, :body, :imp, :ack, :sid, :tid, datetime('now'))"
+                ),
+                {
+                    "pid": project_id,
+                    "subj": "Cross Project Notice",
+                    "body": "Sent from another project.",
+                    "imp": "high",
+                    "ack": 0,
+                    "sid": external_agent_id,
+                    "tid": "thread-cross",
+                },
+            )
+            await session.commit()
+            row = await session.execute(
+                text("SELECT id FROM messages WHERE project_id = :pid AND subject = :subj"),
+                {"pid": project_id, "subj": "Cross Project Notice"},
+            )
+            cross_project_message_id = row.scalar()
+            await session.execute(
+                text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, :kind)"),
+                {"mid": cross_project_message_id, "aid": agent_id, "kind": "to"},
+            )
+            await session.commit()
+
     # Also create archive artifacts
     archive = await ensure_archive(settings, "test-proj")
     await write_agent_profile(
@@ -106,6 +169,7 @@ async def _setup_test_data(settings: _config.Settings) -> dict:
         "agent_id": agent_id,
         "agent_name": "BlueLake",
         "message_ids": message_ids,
+        "cross_project_message_id": cross_project_message_id,
     }
 
 
@@ -147,6 +211,26 @@ async def test_mail_unified_inbox_api(isolated_env):
         assert resp.status_code == 200
         data = resp.json()
         assert "messages" in data or "items" in data or isinstance(data, list)
+
+
+@pytest.mark.asyncio
+async def test_mail_unified_inbox_api_disambiguates_external_sender(isolated_env):
+    """Unified inbox JSON should preserve external sender origin."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    data = await _setup_test_data(settings, include_cross_project_sender=True)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/mail/api/unified-inbox")
+        assert resp.status_code == 200
+        payload = resp.json()
+        message = next(item for item in payload["messages"] if item["id"] == data["cross_project_message_id"])
+        assert message["sender"] == "BlueLake@source-proj"
+        assert message["sender_project"] == "/tmp/source-proj"
+        assert message["sender_address"] == "project:source-proj#BlueLake"
 
 
 @pytest.mark.asyncio
@@ -316,6 +400,31 @@ async def test_mail_message_detail(isolated_env):
         assert "text/html" in resp.headers.get("content-type", "")
         # Should show the message subject
         assert "Test Message" in resp.text or "message" in resp.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_mail_message_and_thread_views_disambiguate_external_sender(isolated_env):
+    """Dedicated HTML views should show the external sender's origin."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    data = await _setup_test_data(settings, include_cross_project_sender=True)
+    cross_message_id = data["cross_project_message_id"]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        message_resp = await client.get(f"/mail/test-proj/message/{cross_message_id}")
+        assert message_resp.status_code == 200
+        assert "BlueLake@source-proj" in message_resp.text
+
+        thread_resp = await client.get("/mail/test-proj/thread/thread-cross")
+        assert thread_resp.status_code == 200
+        assert "BlueLake@source-proj" in thread_resp.text
+
+        search_resp = await client.get("/mail/test-proj/search", params={"q": "Cross Project"})
+        assert search_resp.status_code == 200
+        assert "BlueLake@source-proj" in search_resp.text
 
 
 @pytest.mark.asyncio
