@@ -249,6 +249,90 @@ async def test_contact_request_appears_in_inbox(isolated_env):
         assert has_contact_msg, "Should have contact request in inbox"
 
 
+@pytest.mark.asyncio
+async def test_request_contact_retries_notification_when_initial_delivery_fails(isolated_env):
+    """A pending request should retry its inbox notification if the first delivery was blocked."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/request-notify-retry"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+        blocker = "RedStone"
+        inbox_pattern = f"agents/{agent_b}/inbox/*/*/*.md"
+
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": blocker},
+        )
+        reservation = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": blocker,
+                "paths": [inbox_pattern],
+                "ttl_seconds": 1800,
+                "exclusive": True,
+            },
+        )
+        assert reservation.data["granted"]
+
+        first = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "reason": "Initial delivery blocked",
+            },
+        )
+        assert first.data["status"] == "pending"
+        notification_error = first.data.get("notification_error") or {}
+        assert notification_error.get("type") == "FILE_RESERVATION_CONFLICT"
+
+        inbox_before = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": agent_b,
+                "include_bodies": True,
+            },
+        )
+        items_before = get_inbox_items(inbox_before)
+        assert not any(item.get("subject") == f"Contact request from {agent_a}" for item in items_before)
+
+        await client.call_tool(
+            "release_file_reservations",
+            {
+                "project_key": project_key,
+                "agent_name": blocker,
+                "paths": [inbox_pattern],
+            },
+        )
+
+        second = await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+                "reason": "Retry after delivery failure",
+            },
+        )
+        assert second.data["status"] == "pending"
+        notification_message = second.data.get("notification_message") or {}
+        assert notification_message.get("subject") == f"Contact request from {agent_a}"
+
+        inbox_after = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": agent_b,
+                "include_bodies": True,
+            },
+        )
+        items_after = get_inbox_items(inbox_after)
+        assert any(item.get("subject") == f"Contact request from {agent_a}" for item in items_after)
+
+
 # ============================================================================
 # Test: Contact Approval
 # ============================================================================
