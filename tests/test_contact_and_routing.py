@@ -92,8 +92,22 @@ async def test_external_cross_project_routing(isolated_env):
         await s.refresh(p2)
         assert p1.id is not None
         assert p2.id is not None
-        a_sender = Agent(project_id=p1.id, name="Alpha", program="codex", model="gpt-5", task_description="")
-        b_recv = Agent(project_id=p2.id, name="Receiver", program="codex", model="gpt-5", task_description="")
+        a_sender = Agent(
+            project_id=p1.id,
+            name="Alpha",
+            program="codex",
+            model="gpt-5",
+            task_description="",
+            registration_token="alpha-token",
+        )
+        b_recv = Agent(
+            project_id=p2.id,
+            name="Receiver",
+            program="codex",
+            model="gpt-5",
+            task_description="",
+            registration_token="receiver-token",
+        )
         s.add(a_sender)
         s.add(b_recv)
         await s.commit()
@@ -119,6 +133,7 @@ async def test_external_cross_project_routing(isolated_env):
             {
                 "project_key": "Backend",
                 "sender_name": "Alpha",
+                "sender_token": "alpha-token",
                 "to": ["project:ops#Receiver"],
                 "subject": "Cross",
                 "body_md": "hello",

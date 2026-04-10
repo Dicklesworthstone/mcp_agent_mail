@@ -749,6 +749,72 @@ async def test_renew_specific_reservation_by_id(isolated_env):
         assert renew_result.data["renewed"] == 1
 
 
+@pytest.mark.asyncio
+async def test_renew_does_not_revive_expired_reservation_after_overlap_reacquired(isolated_env):
+    """Expired reservations must be re-acquired, not revived by renew."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/res/renew_expired"
+        await client.call_tool("ensure_project", {"human_key": project_key})
+
+        agent1_result = await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": "BlueLake"},
+        )
+        agent2_result = await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "test", "model": "test", "name": "GreenHill"},
+        )
+        agent1_name = agent1_result.data["name"]
+        agent2_name = agent2_result.data["name"]
+
+        first = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent1_name,
+                "paths": ["src/**"],
+                "ttl_seconds": 1,
+                "exclusive": True,
+            },
+        )
+        first_id = first.data["granted"][0]["id"]
+
+        await asyncio.sleep(1.2)
+
+        second = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent2_name,
+                "paths": ["src/app.py"],
+                "ttl_seconds": 300,
+                "exclusive": True,
+            },
+        )
+        assert second.data["granted"]
+
+        renew_result = await client.call_tool(
+            "renew_file_reservations",
+            {
+                "project_key": project_key,
+                "agent_name": agent1_name,
+                "file_reservation_ids": [first_id],
+                "extend_seconds": 600,
+            },
+        )
+
+        assert renew_result.data["renewed"] == 0
+
+        first_record = await get_file_reservation_from_db(first_id)
+        assert first_record is not None
+        assert first_record["released_ts"] is not None
+
+        project_id = await get_project_id(project_key)
+        assert project_id is not None
+        assert await count_active_reservations(project_id) == 1
+
+
 # ============================================================================
 # Test: Force release
 # ============================================================================

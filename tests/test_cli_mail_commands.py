@@ -13,11 +13,13 @@ Reference: mcp_agent_mail-n6z
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from typer.testing import CliRunner
 
-from mcp_agent_mail.app import _compute_project_slug
+from mcp_agent_mail.app import _compute_project_slug, _resolve_project_identity
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import ensure_schema, get_session
@@ -129,8 +131,6 @@ def test_mail_status_basic(isolated_env, tmp_path, monkeypatch):
 
 def test_mail_status_with_git_repo(isolated_env, tmp_path):
     """mail status shows git-related info when in a git repo."""
-    import subprocess
-
     # Initialize a git repo
     repo_dir = tmp_path / "git_repo"
     repo_dir.mkdir()
@@ -156,6 +156,29 @@ def test_mail_status_with_git_repo(isolated_env, tmp_path):
     assert result.exit_code == 0
     assert "slug" in result.stdout
     assert "path" in result.stdout
+
+
+def test_mail_status_uses_repo_root_identity_for_subdirectory_path(isolated_env, tmp_path, monkeypatch):
+    """mail status should report repo-root identity when pointed at a nested path inside a git repo."""
+    monkeypatch.setenv("WORKTREES_ENABLED", "0")
+    get_settings.cache_clear()
+
+    repo_dir = tmp_path / "git_repo_subdir"
+    subdir = repo_dir / "nested" / "work"
+    subdir.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=str(repo_dir), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_dir), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo_dir), check=True)
+
+    root_ident = _resolve_project_identity(str(repo_dir))
+    subdir_ident = _resolve_project_identity(str(subdir))
+    assert root_ident["slug"] != subdir_ident["slug"]
+
+    result = runner.invoke(app, ["mail", "status", str(subdir)])
+
+    assert result.exit_code == 0
+    assert root_ident["slug"] in result.stdout
+    assert str(Path(repo_dir)) in result.stdout
 
 
 def test_mail_status_shows_identity_mode(isolated_env, tmp_path):

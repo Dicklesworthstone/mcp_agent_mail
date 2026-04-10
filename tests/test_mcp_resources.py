@@ -599,6 +599,60 @@ async def test_thread_resource_only_returns_visible_messages(isolated_env):
         assert bcc_data["messages"][0]["body_md"] == "Classified body"
 
 
+@pytest.mark.asyncio
+async def test_message_resource_requires_project(isolated_env):
+    """Message resource must require explicit project scoping."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/messagereq"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "MessageReq", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "MessageReq",
+                "sender_name": agent_name,
+                "to": [agent_name],
+                "subject": "Needs project",
+                "body_md": "body",
+            },
+        )
+        message_id = (result.data.get("deliveries") or [{}])[0].get("payload", {}).get("id")
+
+        with pytest.raises(Exception, match="project"):
+            await client.read_resource(f"resource://message/{message_id}")
+
+
+@pytest.mark.asyncio
+async def test_thread_resource_requires_project(isolated_env):
+    """Thread resource must require explicit project scoping."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/threadreq"})
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "ThreadReq", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+        await client.call_tool(
+            "send_message",
+            {
+                "project_key": "ThreadReq",
+                "sender_name": agent_name,
+                "to": [agent_name],
+                "subject": "Needs project",
+                "body_md": "body",
+                "thread_id": "THREAD-REQ-1",
+            },
+        )
+
+        with pytest.raises(Exception, match="project"):
+            await client.read_resource("resource://thread/THREAD-REQ-1")
+
+
 # ============================================================================
 # Test: resource://file_reservations/{project}
 # ============================================================================
@@ -702,6 +756,62 @@ async def test_file_reservations_resource_active_only(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_file_reservations_resource_defaults_to_active_only(isolated_env):
+    """resource://file_reservations/{project} should default to active reservations only."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/filedefaultactive"})
+
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "FileDefaultActive", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "FileDefaultActive",
+                "agent_name": agent_name,
+                "paths": ["released.py"],
+            },
+        )
+        await client.call_tool(
+            "release_file_reservations",
+            {
+                "project_key": "FileDefaultActive",
+                "agent_name": agent_name,
+                "paths": ["released.py"],
+            },
+        )
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "FileDefaultActive",
+                "agent_name": agent_name,
+                "paths": ["active.py"],
+            },
+        )
+
+        blocks = await client.read_resource("resource://file_reservations/filedefaultactive")
+        data = parse_resource_json(blocks)
+
+        assert data is not None
+        assert isinstance(data, list)
+        active_patterns = [r["path_pattern"] for r in data]
+        assert "active.py" in active_patterns
+        assert "released.py" not in active_patterns
+
+        all_blocks = await client.read_resource("resource://file_reservations/filedefaultactive?active_only=false")
+        all_data = parse_resource_json(all_blocks)
+
+        assert all_data is not None
+        all_patterns = [r["path_pattern"] for r in all_data]
+        assert "active.py" in all_patterns
+        assert "released.py" in all_patterns
+
+
+@pytest.mark.asyncio
 async def test_file_reservations_resource_includes_metadata(isolated_env):
     """File reservations resource includes stale status and timestamps."""
     server = build_mcp_server()
@@ -756,46 +866,39 @@ async def test_project_resource_nonexistent_returns_error(isolated_env):
 
 
 @pytest.mark.asyncio
-async def test_inbox_resource_requires_project(isolated_env):
-    """Inbox resource requires project parameter when agent is ambiguous."""
+@pytest.mark.parametrize(
+    "uri_template",
+    [
+        "resource://inbox/{agent}",
+        "resource://outbox/{agent}",
+        "resource://mailbox/{agent}",
+        "resource://mailbox-with-commits/{agent}",
+        "resource://views/urgent-unread/{agent}",
+        "resource://views/ack-required/{agent}",
+        "resource://views/acks-stale/{agent}",
+        "resource://views/ack-overdue/{agent}",
+    ],
+    ids=[
+        "inbox",
+        "outbox",
+        "mailbox",
+        "mailbox-with-commits",
+        "urgent-unread",
+        "ack-required",
+        "acks-stale",
+        "ack-overdue",
+    ],
+)
+async def test_agent_scoped_resources_require_project(isolated_env, uri_template: str):
+    """Agent-scoped resources must require explicit project scoping."""
     server = build_mcp_server()
     async with Client(server) as client:
-        # Create two projects with same agent name (using known-valid name)
-        await client.call_tool("ensure_project", {"human_key": "/proj1"})
-        await client.call_tool("ensure_project", {"human_key": "/proj2"})
-        await client.call_tool(
-            "register_agent",
-            {"project_key": "Proj1", "program": "test", "model": "test", "name": "BlueLake"},
-        )
-        await client.call_tool(
-            "register_agent",
-            {"project_key": "Proj2", "program": "test", "model": "test", "name": "BlueLake"},
-        )
-
-        try:
-            # Without project parameter, should fail or require clarification
-            await client.read_resource("resource://inbox/BlueLake")
-            # May succeed if auto-detection works, or fail
-        except Exception as e:
-            # Expected - ambiguous agent requires project
-            error_str = str(e).lower()
-            assert "project" in error_str or "required" in error_str or "ambiguous" in error_str
-
-
-@pytest.mark.asyncio
-async def test_outbox_resource_requires_project(isolated_env):
-    """Outbox resource requires project parameter."""
-    server = build_mcp_server()
-    async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/outboxreq"})
+        await client.call_tool("ensure_project", {"human_key": "/project-required"})
         agent_result = await client.call_tool(
             "register_agent",
-            {"project_key": "OutboxReq", "program": "test", "model": "test"},
+            {"project_key": "project-required", "program": "test", "model": "test"},
         )
         agent_name = agent_result.data["name"]
 
-        try:
-            await client.read_resource(f"resource://outbox/{agent_name}")
-            pytest.fail("Should require project parameter")
-        except Exception as e:
-            assert "project" in str(e).lower()
+        with pytest.raises(Exception, match="project"):
+            await client.read_resource(uri_template.format(agent=agent_name))

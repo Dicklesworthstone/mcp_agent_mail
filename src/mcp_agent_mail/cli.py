@@ -21,9 +21,9 @@ from contextlib import nullcontext, suppress
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Iterable, List, Optional, Sequence, cast
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 import click
 import httpx
@@ -414,6 +414,21 @@ app.add_typer(doctor_app, name="doctor")
 
 def _canonical_project_path(path: Path) -> Path:
     return Path(_canonicalize_project_identifier(str(path)))
+
+
+def _resolve_repo_worktree_root(path: Path) -> Path:
+    repo = None
+    try:
+        from git import Repo as _Repo
+
+        repo = _Repo(str(path), search_parent_directories=True)
+        return Path(repo.working_tree_dir or str(path))
+    except Exception:
+        return path
+    finally:
+        if repo is not None:
+            with suppress(Exception):
+                repo.close()
 
 
 async def _get_project_record(identifier: str) -> Project:
@@ -1947,6 +1962,7 @@ def share_update(
     scope = None
     scrub_summary = None
     fts_enabled = False
+    sync_result = BundleSyncResult()
 
     with tempfile.TemporaryDirectory(prefix="mailbox-share-update-") as temp_dir_name:
         temp_path = Path(temp_dir_name)
@@ -2012,7 +2028,7 @@ def share_update(
             )
 
         console.print(f"[cyan]Synchronizing updated bundle into:[/] {bundle_path}")
-        _copy_bundle_contents(temp_path, bundle_path)
+        sync_result = _copy_bundle_contents(temp_path, bundle_path)
 
     assert scope is not None and scrub_summary is not None
 
@@ -2033,9 +2049,14 @@ def share_update(
             console.print(f"[red]Manifest signing failed:[/] {exc}")
             raise typer.Exit(code=1) from exc
     elif existing_signature:
-        console.print(
-            "[yellow]Existing manifest signature may no longer match. Re-run with --signing-key to refresh it.[/]"
-        )
+        if (bundle_path / "manifest.sig.json").exists():
+            console.print(
+                "[yellow]Existing manifest signature may no longer match. Re-run with --signing-key to refresh it.[/]"
+            )
+        else:
+            console.print(
+                "[yellow]Removed stale manifest.sig.json during update. Re-run with --signing-key to refresh the signature.[/]"
+            )
 
     archive_path: Optional[Path] = None
     if zip_bundle:
@@ -2087,7 +2108,15 @@ def share_update(
         console.print("[yellow]Search fallback active (FTS5 unavailable in current sqlite build).[/]")
     if chunk_manifest:
         console.print("[green]✓ Chunk manifest refreshed (mailbox.sqlite3.config.json updated).[/]")
-        console.print("[dim]Existing chunk files beyond the new chunk count remain on disk; remove them manually if needed.[/]")
+        pruned_chunk_files = [
+            path
+            for path in sync_result.removed_files
+            if path.is_relative_to(bundle_path / "chunks")
+        ]
+        if pruned_chunk_files:
+            console.print(
+                f"[green]✓ Pruned {len(pruned_chunk_files)} stale chunk file(s) during bundle sync.[/]"
+            )
 
     if zip_bundle and archive_path:
         console.print(f"[green]✓ Bundle archive available at {archive_path}[/]")
@@ -2373,11 +2402,24 @@ class StoredExportConfig:
     scrub_preset: str
 
 
+@dataclass(slots=True)
+class BundleSyncResult:
+    removed_files: tuple[Path, ...] = ()
+    removed_dirs: tuple[Path, ...] = ()
+
+
 def _coerce_int(value: Any, default: int) -> int:
     try:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _load_bundle_export_config(bundle_dir: Path) -> StoredExportConfig:
@@ -2402,18 +2444,18 @@ def _load_bundle_export_config(bundle_dir: Path) -> StoredExportConfig:
     scrub_preset = str(export_config.get("scrub_preset") or scrub_section.get("preset") or "standard")
 
     inline_threshold = _coerce_int(
-        export_config.get("inline_threshold") or attachments_config.get("inline_threshold"),
+        _coalesce(export_config.get("inline_threshold"), attachments_config.get("inline_threshold")),
         INLINE_ATTACHMENT_THRESHOLD,
     )
     detach_threshold = _coerce_int(
-        export_config.get("detach_threshold") or attachments_config.get("detach_threshold"),
+        _coalesce(export_config.get("detach_threshold"), attachments_config.get("detach_threshold")),
         DETACH_ATTACHMENT_THRESHOLD,
     )
     chunk_threshold = _coerce_int(export_config.get("chunk_threshold"), DEFAULT_CHUNK_THRESHOLD)
 
     chunk_manifest = database_section.get("chunk_manifest") or {}
     chunk_size = _coerce_int(
-        export_config.get("chunk_size") or chunk_manifest.get("chunk_size"),
+        _coalesce(export_config.get("chunk_size"), chunk_manifest.get("chunk_size")),
         DEFAULT_CHUNK_SIZE,
     )
 
@@ -2438,7 +2480,7 @@ def _load_bundle_export_config(bundle_dir: Path) -> StoredExportConfig:
     )
 
 
-def _copy_bundle_contents(source: Path, destination: Path) -> None:
+def _copy_bundle_contents(source: Path, destination: Path) -> BundleSyncResult:
     """Synchronise *destination* with *source* by mirroring files and pruning stale artefacts."""
 
     source = source.resolve()
@@ -2463,15 +2505,18 @@ def _copy_bundle_contents(source: Path, destination: Path) -> None:
 
     # Remove files that are no longer present in the source bundle.
     existing_files = {path for path in destination.rglob("*") if path.is_file()}
-    for stale_file in existing_files - desired_files:
+    stale_files = tuple(sorted(existing_files - desired_files))
+    for stale_file in stale_files:
         # Unlink without following symlinks (we never export symlinks, but be defensive).
         stale_file.unlink(missing_ok=True)
 
     # Remove directories that are no longer needed (deepest first).
     existing_dirs = {path for path in destination.rglob("*") if path.is_dir()}
+    removed_dirs: list[Path] = []
     for stale_dir in sorted(existing_dirs - desired_dirs, key=lambda p: len(p.parts), reverse=True):
         with suppress(OSError):
             stale_dir.rmdir()
+            removed_dirs.append(stale_dir)
 
     # Copy fresh files from source (overwrite in place to handle updated content).
     for root, _, files in os.walk(source):
@@ -2484,16 +2529,20 @@ def _copy_bundle_contents(source: Path, destination: Path) -> None:
             dest_file = dest_root / filename
             shutil.copy2(src_file, dest_file)
 
+    return BundleSyncResult(removed_files=stale_files, removed_dirs=tuple(removed_dirs))
+
 
 def _detect_project_root() -> Path:
     cwd = Path.cwd().resolve()
     candidates = [cwd, *cwd.parents]
-    for candidate in candidates:
-        if (candidate / "pyproject.toml").exists():
-            return candidate
+    pyproject_candidate: Path | None = None
     for candidate in candidates:
         if (candidate / ".git").exists():
             return candidate
+        if pyproject_candidate is None and (candidate / "pyproject.toml").exists():
+            pyproject_candidate = candidate
+    if pyproject_candidate is not None:
+        return pyproject_candidate
     return cwd
 
 
@@ -2524,10 +2573,48 @@ def _format_bytes(value: int) -> str:
     return f"{int(value)} B"
 
 
-def _detect_git_head(repo_path: Path) -> str | None:
-    git_dir = repo_path / ".git"
-    if not git_dir.exists():
+def _resolve_git_dir(repo_path: Path) -> Path | None:
+    git_entry = repo_path / ".git"
+    if git_entry.is_dir():
+        return git_entry
+    if not git_entry.is_file():
         return None
+    try:
+        contents = git_entry.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not contents.lower().startswith("gitdir:"):
+        return None
+    git_dir_raw = contents.split(":", 1)[1].strip()
+    if not git_dir_raw:
+        return None
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        git_dir = (repo_path / git_dir).resolve()
+    return git_dir
+
+
+def _resolve_common_git_dir(git_dir: Path) -> Path:
+    common_dir_file = git_dir / "commondir"
+    if not common_dir_file.exists():
+        return git_dir
+    try:
+        common_dir_raw = common_dir_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return git_dir
+    if not common_dir_raw:
+        return git_dir
+    common_dir = Path(common_dir_raw)
+    if not common_dir.is_absolute():
+        common_dir = (git_dir / common_dir).resolve()
+    return common_dir
+
+
+def _detect_git_head(repo_path: Path) -> str | None:
+    git_dir = _resolve_git_dir(repo_path)
+    if git_dir is None:
+        return None
+    common_git_dir = _resolve_common_git_dir(git_dir)
     head_path = git_dir / "HEAD"
     try:
         head_contents = head_path.read_text(encoding="utf-8").strip()
@@ -2537,11 +2624,11 @@ def _detect_git_head(repo_path: Path) -> str | None:
         return None
     if head_contents.startswith("ref:"):
         ref_name = head_contents.split(" ", 1)[1].strip()
-        ref_path = git_dir / ref_name
+        ref_path = common_git_dir / ref_name
         if ref_path.exists():
             with suppress(OSError):
                 return ref_path.read_text(encoding="utf-8").strip()
-        packed_refs = git_dir / "packed-refs"
+        packed_refs = common_git_dir / "packed-refs"
         if packed_refs.exists():
             with suppress(OSError):
                 for line in packed_refs.read_text(encoding="utf-8").splitlines():
@@ -2600,7 +2687,7 @@ def _load_archive_metadata(zip_path: Path) -> tuple[dict[str, Any], str | None]:
             return cast(dict[str, Any], data), None
     except KeyError:
         return {}, f"{ARCHIVE_METADATA_FILENAME} missing"
-    except (OSError, json.JSONDecodeError) as exc:
+    except (BadZipFile, OSError, json.JSONDecodeError) as exc:
         return {}, f"Invalid metadata: {exc}"
 
 
@@ -2623,6 +2710,98 @@ def _next_backup_path(path: Path, timestamp: str) -> Path:
         candidate = path.with_name(f"{path.name}.backup-{timestamp}-{counter:02d}")
         counter += 1
     return candidate
+
+
+def _resolve_archive_member_path(destination_root: Path, member_name: str) -> Path:
+    normalized_name = member_name.rstrip("/")
+    if not normalized_name:
+        raise ShareExportError("Archive contains an empty member name.")
+    if "\\" in normalized_name:
+        raise ShareExportError(
+            f"Invalid archive member path {member_name!r}: backslashes are not allowed."
+        )
+
+    relative_path = PurePosixPath(normalized_name)
+    if relative_path.is_absolute() or any(part == ".." for part in relative_path.parts):
+        raise ShareExportError(
+            f"Invalid archive member path {member_name!r}: directory traversal is not allowed."
+        )
+
+    candidate = (destination_root / Path(*relative_path.parts)).resolve()
+    try:
+        candidate.relative_to(destination_root)
+    except ValueError as exc:
+        raise ShareExportError(
+            f"Invalid archive member path {member_name!r}: directory traversal is not allowed."
+        ) from exc
+    return candidate
+
+
+def _extract_archive_safely(zip_path: Path, destination_root: Path) -> None:
+    destination_root = destination_root.resolve()
+    try:
+        with ZipFile(zip_path, "r") as archive:
+            for member in archive.infolist():
+                target_path = _resolve_archive_member_path(destination_root, member.filename)
+                if member.is_dir():
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target_path.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+    except BadZipFile as exc:
+        raise ShareExportError(f"Failed to read archive {zip_path}: {exc}") from exc
+    except OSError as exc:
+        raise ShareExportError(f"Failed to extract archive {zip_path}: {exc}") from exc
+
+
+def _remove_restore_target(path: Path) -> None:
+    if not path.exists():
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def _rollback_archive_restore(
+    *,
+    database_path: Path,
+    storage_root: Path,
+    db_backup: Optional[Path],
+    sidecar_backups: Sequence[tuple[Path, Path]],
+    storage_backup: Optional[Path],
+) -> list[str]:
+    rollback_errors: list[str] = []
+
+    def _copy_back(source: Path, destination: Path) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_dir():
+            shutil.copytree(source, destination, dirs_exist_ok=False)
+        else:
+            shutil.copy2(source, destination)
+
+    targets_to_clear = [database_path, storage_root, *(target for target, _backup in sidecar_backups)]
+    for target in targets_to_clear:
+        try:
+            _remove_restore_target(target)
+        except OSError as exc:
+            rollback_errors.append(f"Failed to clear partial restore target {target}: {exc}")
+
+    restore_pairs: list[tuple[Path, Path]] = []
+    if db_backup is not None:
+        restore_pairs.append((db_backup, database_path))
+    restore_pairs.extend((backup, target) for target, backup in sidecar_backups)
+    if storage_backup is not None:
+        restore_pairs.append((storage_backup, storage_root))
+
+    for source, destination in restore_pairs:
+        try:
+            _copy_back(source, destination)
+        except OSError as exc:
+            rollback_errors.append(f"Failed to restore {destination} from backup {source}: {exc}")
+
+    return rollback_errors
 
 
 def _create_mailbox_archive(
@@ -2771,10 +2950,16 @@ def archive_list_states(
 ) -> None:
     archive_dir = _archive_states_dir(create=False)
     if not archive_dir.exists():
+        if json_output:
+            typer.echo("[]")
+            return
         console.print(f"[yellow]Archive directory {archive_dir} does not exist yet.[/]")
         raise typer.Exit(code=0)
     files = sorted(archive_dir.glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not files:
+        if json_output:
+            typer.echo("[]")
+            return
         console.print(f"[yellow]No saved mailbox states found under {archive_dir}.[/]")
         raise typer.Exit(code=0)
     if limit > 0:
@@ -2868,8 +3053,11 @@ def archive_restore_state(
         )
     with tempfile.TemporaryDirectory(prefix="mailbox-restore-") as temp_dir_str:
         temp_dir = Path(temp_dir_str)
-        with ZipFile(archive_path, "r") as archive:
-            archive.extractall(temp_dir)
+        try:
+            _extract_archive_safely(archive_path, temp_dir)
+        except ShareExportError as exc:
+            console.print(f"[red]Failed to extract archive:[/] {exc}")
+            raise typer.Exit(code=1) from exc
         snapshot_src = temp_dir / ARCHIVE_SNAPSHOT_RELATIVE
         storage_src = temp_dir / ARCHIVE_STORAGE_DIRNAME
         if not snapshot_src.exists():
@@ -2902,6 +3090,9 @@ def archive_restore_state(
             if not typer.confirm("Proceed with restore?", default=False):
                 raise typer.Exit(code=1)
         backup_paths: list[Path] = []
+        db_backup: Optional[Path] = None
+        sidecar_backups: list[tuple[Path, Path]] = []
+        storage_backup: Optional[Path] = None
         if database_path.exists():
             db_backup = _next_backup_path(database_path, timestamp)
             shutil.move(str(database_path), str(db_backup))
@@ -2912,14 +3103,32 @@ def archive_restore_state(
                 wal_backup = _next_backup_path(wal_path, timestamp)
                 shutil.move(str(wal_path), str(wal_backup))
                 backup_paths.append(wal_backup)
+                sidecar_backups.append((wal_path, wal_backup))
         if storage_root.exists():
             storage_backup = _next_backup_path(storage_root, timestamp)
             shutil.move(str(storage_root), str(storage_backup))
             backup_paths.append(storage_backup)
-        database_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(snapshot_src, database_path)
-        storage_root.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(storage_src, storage_root, dirs_exist_ok=False)
+        try:
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(snapshot_src, database_path)
+            storage_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(storage_src, storage_root, dirs_exist_ok=False)
+        except OSError as exc:
+            rollback_errors = _rollback_archive_restore(
+                database_path=database_path,
+                storage_root=storage_root,
+                db_backup=db_backup,
+                sidecar_backups=sidecar_backups,
+                storage_backup=storage_backup,
+            )
+            console.print(f"[red]Restore failed:[/] {exc}")
+            if rollback_errors:
+                console.print("[yellow]Rollback encountered issues:[/]")
+                for error in rollback_errors:
+                    console.print(f"  • {error}")
+            else:
+                console.print("[yellow]Original database and storage were restored from backups.[/]")
+            raise typer.Exit(code=1) from exc
     console.print(f"[green]✓ Restore complete from {archive_path}.[/]")
     if backup_paths:
         console.print("[dim]Backups preserved at:[/]")
@@ -3472,11 +3681,18 @@ def list_projects(
                 rows = [(project, 0) for project in projects]
             return rows
 
-    if not json_output:
-        with console.status("Collecting project data..."):
+    try:
+        if not json_output:
+            with console.status("Collecting project data..."):
+                rows = _run_async(_collect())
+        else:
             rows = _run_async(_collect())
-    else:
-        rows = _run_async(_collect())
+    except Exception as exc:
+        if json_output:
+            console.print_json(json.dumps({"error": str(exc)}))
+        else:
+            console.print(f"[red]Failed to list projects:[/] {exc}")
+        raise typer.Exit(code=1) from exc
 
     if json_output:
         # Machine-readable JSON output
@@ -3632,7 +3848,7 @@ def amctl_env(
     """
     Print environment variables useful for build wrappers (slots, caches, artifacts).
     """
-    p = _canonical_project_path(project_path)
+    p = _resolve_repo_worktree_root(_canonical_project_path(project_path))
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     # Reuse server helper for identity
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
@@ -3661,12 +3877,22 @@ def amctl_env(
     cache_key = f"am-cache-{project_uid}-{agent_name}-{branch}"
     artifact_dir = Path(settings.storage.root).expanduser().resolve() / "projects" / slug / "artifacts" / agent_name / branch
     # Print as KEY=VALUE lines
-    console.print(f"SLUG={slug}")
-    console.print(f"PROJECT_UID={project_uid}")
-    console.print(f"BRANCH={branch}")
-    console.print(f"AGENT={agent_name}")
-    console.print(f"CACHE_KEY={cache_key}")
-    console.print(f"ARTIFACT_DIR={artifact_dir}")
+    typer.echo(f"SLUG={slug}")
+    typer.echo(f"PROJECT_UID={project_uid}")
+    typer.echo(f"BRANCH={branch}")
+    typer.echo(f"AGENT={agent_name}")
+    typer.echo(f"CACHE_KEY={cache_key}")
+    typer.echo(f"ARTIFACT_DIR={artifact_dir}")
+
+
+def _effective_build_slot_ttl_seconds(ttl_seconds: int) -> int:
+    """Normalize build-slot TTLs to the same 60-second floor enforced by the server."""
+    return max(60, int(ttl_seconds))
+
+
+def _build_slot_renew_interval_seconds(ttl_seconds: int) -> int:
+    """Renew halfway through the effective TTL so leases do not expire on the boundary."""
+    return max(1, _effective_build_slot_ttl_seconds(ttl_seconds) // 2)
 
 
 @app.command(name="am-run")
@@ -3693,7 +3919,7 @@ def am_run(
     - Renews lease in the background while the child runs.
     - Releases the slot on exit.
     """
-    p = _canonical_project_path(project_path)
+    p = _resolve_repo_worktree_root(_canonical_project_path(project_path))
     agent_name = agent or os.environ.get("AGENT_NAME") or "Unknown"
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
     ident = _resolve_ident(str(p))
@@ -3722,6 +3948,9 @@ def am_run(
     worktrees_enabled = bool(settings.worktrees_enabled)
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
     bearer = settings.http.bearer_token or ""
+    server_request_timeout_seconds = 5.0
+    effective_ttl_seconds = _effective_build_slot_ttl_seconds(ttl_seconds)
+    renew_interval_seconds = _build_slot_renew_interval_seconds(ttl_seconds)
 
     def _safe_component(value: str) -> str:
         s = value.strip()
@@ -3741,6 +3970,8 @@ def am_run(
         for f in slot_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
+                if data.get("released_ts"):
+                    continue
                 exp = data.get("expires_ts")
                 if exp:
                     parsed = _parse_iso_datetime(exp)
@@ -3767,16 +3998,24 @@ def am_run(
 
     def _write_local_renew(path: Path) -> None:
         now = datetime.now(timezone.utc)
-        new_exp = now + timedelta(seconds=max(60, ttl_seconds // 2))
         try:
             current = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             current = {}
+        if current.get("released_ts"):
+            return
+        exp = current.get("expires_ts")
+        if exp:
+            parsed = _parse_iso_datetime(exp)
+            if parsed is not None and parsed <= now:
+                return
+        new_exp = now + timedelta(seconds=effective_ttl_seconds)
         current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp.isoformat()})
         with suppress(Exception):
             path.write_text(json.dumps(current, indent=2), encoding="utf-8")
 
     lease_path: Optional[Path] = None
+    artifact_dir = Path(settings.storage.root).expanduser().resolve() / "projects" / slug / "artifacts" / agent_name / branch
     env = os.environ.copy()
     env.update({
         "AM_SLOT": slot,
@@ -3785,6 +4024,7 @@ def am_run(
         "BRANCH": branch,
         "AGENT": agent_name,
         "CACHE_KEY": f"am-cache-{project_uid}-{agent_name}-{branch}",
+        "ARTIFACT_DIR": str(artifact_dir),
     })
     renew_stop = threading.Event()
     renew_thread: Optional[threading.Thread] = None
@@ -3795,7 +4035,7 @@ def am_run(
             # Prefer server tools (authority); fallback to local FS leases
             use_server = True
             try:
-                with httpx.Client(timeout=5.0) as client:
+                with httpx.Client(timeout=server_request_timeout_seconds) as client:
                     headers = {}
                     if bearer:
                         headers["Authorization"] = f"Bearer {bearer}"
@@ -3820,7 +4060,7 @@ def am_run(
                     )
                 conflicts: list[dict[str, Any]] = []
                 try:
-                    with httpx.Client(timeout=5.0) as client:
+                    with httpx.Client(timeout=server_request_timeout_seconds) as client:
                         headers = {}
                         if bearer:
                             headers["Authorization"] = f"Bearer {bearer}"
@@ -3834,7 +4074,8 @@ def am_run(
                                     "project_key": str(p),
                                     "agent_name": agent_name,
                                     "slot": slot,
-                                    "ttl_seconds": int(ttl_seconds),
+                                    "branch": branch or None,
+                                    "ttl_seconds": effective_ttl_seconds,
                                     "exclusive": (not shared),
                                     "registration_token": resolved_registration_token,
                                 },
@@ -3854,17 +4095,16 @@ def am_run(
                             f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
                             f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
                         )
-                if conflicts and (not shared) and block_on_conflicts:
+                if conflicts and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
                     raise typer.Exit(code=1)
 
                 lease_path = _lease_path(_run_async(_ensure_slot_paths()))
 
                 def _renewer_srv() -> None:
-                    interval = max(60, ttl_seconds // 2)
-                    while not renew_stop.wait(interval):
+                    while not renew_stop.wait(renew_interval_seconds):
                         try:
-                            with httpx.Client(timeout=5.0) as client:
+                            with httpx.Client(timeout=server_request_timeout_seconds) as client:
                                 headers = {}
                                 if bearer:
                                     headers["Authorization"] = f"Bearer {bearer}"
@@ -3878,7 +4118,8 @@ def am_run(
                                             "project_key": str(p),
                                             "agent_name": agent_name,
                                             "slot": slot,
-                                            "extend_seconds": max(60, ttl_seconds // 2),
+                                            "branch": branch or None,
+                                            "extend_seconds": effective_ttl_seconds,
                                             "registration_token": resolved_registration_token,
                                         },
                                     },
@@ -3898,7 +4139,8 @@ def am_run(
                 active = _read_active(slot_dir)
                 conflicts = [
                     e for e in active
-                    if e.get("exclusive", True) and not shared and not (e.get("agent") == agent_name and e.get("branch") == branch)
+                    if not (e.get("agent") == agent_name and e.get("branch") == branch)
+                    and ((not shared) or e.get("exclusive", True))
                 ]
                 if conflicts and guard_mode == "warn":
                     console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
@@ -3907,7 +4149,7 @@ def am_run(
                             f"  - slot={c.get('slot','')} agent={c.get('agent','')} "
                             f"branch={c.get('branch','')} expires={c.get('expires_ts','')}"
                         )
-                if conflicts and (not shared) and block_on_conflicts:
+                if conflicts and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
                     raise typer.Exit(code=1)
                 lease_path = _lease_path(slot_dir)
@@ -3917,15 +4159,14 @@ def am_run(
                     "branch": branch,
                     "exclusive": (not shared),
                     "acquired_ts": datetime.now(timezone.utc).isoformat(),
-                    "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat(),
+                    "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=effective_ttl_seconds)).isoformat(),
                 }
                 with suppress(Exception):
                     lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 slot_acquired = True
 
                 def _renewer() -> None:
-                    interval = max(60, ttl_seconds // 2)
-                    while not renew_stop.wait(interval):
+                    while not renew_stop.wait(renew_interval_seconds):
                         try:
                             if lease_path:
                                 _write_local_renew(lease_path)
@@ -3939,9 +4180,12 @@ def am_run(
         rc = 127
     finally:
         if worktrees_enabled and slot_acquired:
+            renew_stop.set()
+            if renew_thread and renew_thread.is_alive():
+                renew_thread.join(timeout=server_request_timeout_seconds + 1.0)
             # Attempt server release; fallback to local lease release
             try:
-                with httpx.Client(timeout=5.0) as client:
+                with httpx.Client(timeout=server_request_timeout_seconds) as client:
                     headers = {}
                     if bearer:
                         headers["Authorization"] = f"Bearer {bearer}"
@@ -3955,6 +4199,7 @@ def am_run(
                                 "project_key": str(p),
                                 "agent_name": agent_name,
                                 "slot": slot,
+                                "branch": branch or None,
                                 "registration_token": resolved_registration_token,
                             },
                         },
@@ -3965,10 +4210,6 @@ def am_run(
                 if lease_path:
                     with suppress(Exception):
                         _write_local_release(lease_path)
-            finally:
-                renew_stop.set()
-                if renew_thread and renew_thread.is_alive():
-                    renew_thread.join(timeout=1.0)
     if rc != 0:
         raise typer.Exit(code=rc)
 
@@ -3981,30 +4222,23 @@ def projects_mark_identity(
     Write the current project_uid into a marker file (.agent-mail-project-id).
     """
     p = _canonical_project_path(project_path)
+    root = _resolve_repo_worktree_root(p)
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
-    ident = _resolve_ident(str(p))
+    ident = _resolve_ident(str(root))
     uid = ident.get("project_uid") or ""
     if not uid:
         raise typer.BadParameter("Unable to resolve project_uid for this path.")
-    # Determine repo root
-    repo = None
-    try:
-        from git import Repo as _Repo
-        repo = _Repo(str(p), search_parent_directories=True)
-        root = Path(repo.working_tree_dir or str(p))
-    except Exception:
-        root = p
-    finally:
-        if repo is not None:
-            with suppress(Exception):
-                repo.close()
     marker_path = root / ".agent-mail-project-id"
+    marker_rel = marker_path.relative_to(root).as_posix()
     marker_path.write_text(uid + "\n", encoding="utf-8")
     console.print(f"[green]Wrote[/] {marker_path} with project_uid={uid}")
     if commit:
         try:
-            subprocess.run(["git", "-C", str(root), "add", str(marker_path)], check=True)
-            subprocess.run(["git", "-C", str(root), "commit", "-m", "chore: add .agent-mail-project-id"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "--", marker_rel], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-m", "chore: add .agent-mail-project-id", "--", marker_rel],
+                check=True,
+            )
             console.print("[green]Committed marker file.[/]")
         except Exception:
             console.print("[yellow]Unable to commit marker automatically. Please commit manually.[/]")
@@ -4019,12 +4253,13 @@ def projects_discovery_init(
     Scaffold a discovery YAML file (.agent-mail.yaml) with project_uid (and optional product_uid).
     """
     p = _canonical_project_path(project_path)
+    root = _resolve_repo_worktree_root(p)
     from mcp_agent_mail.app import _resolve_project_identity as _resolve_ident
-    ident = _resolve_ident(str(p))
+    ident = _resolve_ident(str(root))
     uid = ident.get("project_uid") or ""
     if not uid:
         raise typer.BadParameter("Unable to resolve project_uid for this path.")
-    ypath = p / ".agent-mail.yaml"
+    ypath = root / ".agent-mail.yaml"
     lines = ["# Agent Mail discovery file", f"project_uid: {uid}"]
     if product:
         lines.append(f"product_uid: {product}")
@@ -4042,7 +4277,7 @@ def mail_status(
     and the slug that would be used for this path.
     """
     settings = get_settings()
-    p = _canonical_project_path(project_path)
+    p = _resolve_repo_worktree_root(_canonical_project_path(project_path))
     gate = settings.worktrees_enabled
     mode = (settings.project_identity_mode or "dir").strip().lower()
     remote_name = (settings.project_identity_remote or "origin").strip()
@@ -4051,9 +4286,9 @@ def mail_status(
     normalized_remote = ident.get("normalized_remote")
     slug_value = ident["slug"]
 
-    table = Table(title="Mail routing status", show_lines=False)
+    table = Table(title="Mail routing status", show_lines=False, expand=True)
     table.add_column("Field")
-    table.add_column("Value")
+    table.add_column("Value", overflow="fold")
     table.add_row("WORKTREES_ENABLED", "true" if gate else "false")
     table.add_row("PROJECT_IDENTITY_MODE", mode or "dir")
     table.add_row("PROJECT_IDENTITY_REMOTE", remote_name)
@@ -4061,6 +4296,8 @@ def mail_status(
     table.add_row("slug", slug_value)
     table.add_row("path", ident["human_key"])
     console.print(table)
+    typer.echo(f"slug={slug_value}")
+    typer.echo(f"path={ident['human_key']}")
 
 
 @guard_app.command("status")
@@ -5560,6 +5797,7 @@ def doctor_repair(
     console.print(f"  Data repairs: {data_count}")
     if error_count > 0:
         console.print(f"  [red]Errors: {error_count}[/red]")
+        raise typer.Exit(code=1)
 
 
 @doctor_app.command("backups")
@@ -5574,7 +5812,14 @@ def doctor_backups(
         settings = get_settings()
         return await list_backups(settings)
 
-    backups = _run_async(_run())
+    try:
+        backups = _run_async(_run())
+    except Exception as exc:
+        if json_output:
+            console.print_json(json.dumps({"error": str(exc)}))
+        else:
+            console.print(f"[red]Failed to list backups:[/] {exc}")
+        raise typer.Exit(code=1) from exc
 
     if json_output:
         console.print_json(json.dumps(backups))
@@ -5706,11 +5951,19 @@ def doctor_restore(
         raise typer.Exit(code=1) from exc
 
     if dry_run:
-        console.print("\n[bold]Would restore:[/bold]")
+        preview_errors = list(result.get("errors", []))
+        if preview_errors:
+            console.print("\n[bold red]Dry run found restore blockers:[/bold red]")
+        else:
+            console.print("\n[bold]Would restore:[/bold]")
         if result.get("would_restore_database"):
             console.print("  - Database")
         for bundle in result.get("would_restore_bundles", []):
             console.print(f"  - Bundle: {bundle}")
+        for error in preview_errors:
+            console.print(f"  [red]Error:[/red] {error}")
+        if preview_errors:
+            raise typer.Exit(code=1)
     else:
         restore_errors = list(result.get("errors", []))
         if restore_errors:

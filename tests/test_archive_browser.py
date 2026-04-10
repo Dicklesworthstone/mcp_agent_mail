@@ -293,6 +293,24 @@ async def test_archive_browser_file_nonexistent(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_archive_browser_file_missing_project_preserves_detail(isolated_env):
+    """Missing archive projects should return the specific project-not-found error."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/mail/archive/browser/ghost-project/file",
+            params={"path": "agents/BlueLake/profile.json"},
+        )
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Project archive not found"
+
+
+@pytest.mark.asyncio
 async def test_archive_read_routes_do_not_create_missing_project_archives(isolated_env):
     """Read-only archive routes must not create projects on disk for nonexistent slugs."""
     settings = _config.get_settings()
@@ -320,6 +338,26 @@ async def test_archive_read_routes_do_not_create_missing_project_archives(isolat
     assert file_resp.status_code == 404
     assert snapshot_resp.status_code == 200
     assert missing_project_dir.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_archive_browser_directory_path_traversal_returns_error_page(isolated_env):
+    """Directory browser traversal attempts should render an error page, not raise 500."""
+    settings = _config.get_settings()
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+
+    await _setup_archive_with_commits(settings)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/mail/archive/browser",
+            params={"project": "archive-test", "path": "../../../etc"},
+        )
+
+    assert resp.status_code == 200
+    assert "Invalid archive path" in resp.text
 
 
 @pytest.mark.asyncio

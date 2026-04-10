@@ -141,6 +141,20 @@ def test_cli_list_projects(isolated_env):
     assert "BlueLake" not in result.stdout
 
 
+def test_cli_list_projects_json_returns_structured_error_on_failure(monkeypatch):
+    runner = CliRunner()
+
+    async def failing_ensure_schema(_settings=None) -> None:
+        raise RuntimeError("projects exploded")
+
+    monkeypatch.setattr("mcp_agent_mail.cli.ensure_schema", failing_ensure_schema)
+
+    result = runner.invoke(app, ["list-projects", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"error": "projects exploded"}
+
+
 def test_archive_save_defaults_to_archive_preset(tmp_path, isolated_env, monkeypatch):
     runner = CliRunner()
     archive_path = tmp_path / "state.zip"
@@ -272,6 +286,20 @@ def test_doctor_check_scopes_project_specific_findings(isolated_env):
     reservations_diag = next(item for item in payload["diagnostics"] if item["name"] == "File Reservations")
     assert "1 stale lock" in locks_diag["message"].lower()
     assert "1 expired reservation" in reservations_diag["message"].lower()
+
+
+def test_doctor_backups_json_returns_structured_error_on_failure(monkeypatch):
+    runner = CliRunner()
+
+    async def failing_list_backups(_settings) -> list[dict[str, Any]]:
+        raise RuntimeError("backup listing exploded")
+
+    monkeypatch.setattr("mcp_agent_mail.storage.list_backups", failing_list_backups)
+
+    result = runner.invoke(app, ["doctor", "backups", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"error": "backup listing exploded"}
 
 
 def test_doctor_repair_scopes_project_specific_repairs(isolated_env, monkeypatch):
@@ -492,6 +520,33 @@ def test_doctor_restore_dry_run_skips_pre_restore_backup(tmp_path, monkeypatch):
     assert restore_calls == [True]
 
 
+def test_doctor_restore_dry_run_exits_nonzero_when_preview_reports_errors(tmp_path, monkeypatch):
+    runner = CliRunner()
+    backup_path = tmp_path / "restore-backup"
+    backup_path.mkdir()
+    (backup_path / "database.sqlite3").write_text("db", encoding="utf-8")
+    (backup_path / "manifest.json").write_text(
+        json.dumps({
+            "version": 1,
+            "created_at": "2026-04-10T00:00:00+00:00",
+            "reason": "dry-run-error",
+            "database_path": "database.sqlite3",
+            "project_bundles": [],
+            "storage_root": str(tmp_path / "archive"),
+            "restore_instructions": "test",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://agent:mail@localhost:5432/mcp")
+    clear_settings_cache()
+
+    result = runner.invoke(app, ["doctor", "restore", str(backup_path), "--dry-run"])
+
+    assert result.exit_code == 1
+    assert "Dry run found restore blockers" in result.stdout
+    assert "does not use a SQLite database file" in result.stdout
+
+
 def test_doctor_repair_aborts_when_backup_creation_fails(isolated_env, monkeypatch):
     runner = CliRunner()
 
@@ -560,6 +615,25 @@ def test_doctor_repair_aborts_when_backup_creation_fails(isolated_env, monkeypat
     backend_rows = asyncio.run(verify())
     assert backend_rows[0].released_ts is None
     assert backend_lock.exists() is True
+
+
+def test_doctor_repair_exits_nonzero_when_repair_reports_errors(isolated_env, monkeypatch, tmp_path):
+    runner = CliRunner()
+
+    async def fake_create_backup(*args: Any, **kwargs: Any) -> Path:
+        return tmp_path / "fake-doctor-backup"
+
+    async def failing_heal_locks(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("archive lock cleanup exploded")
+
+    monkeypatch.setattr("mcp_agent_mail.storage.create_diagnostic_backup", fake_create_backup)
+    monkeypatch.setattr("mcp_agent_mail.storage.heal_archive_locks", failing_heal_locks)
+
+    result = runner.invoke(app, ["doctor", "repair", "--yes"])
+
+    assert result.exit_code == 1
+    assert "Lock healing failed" in result.stdout
+    assert "Errors: 1" in result.stdout
 
 
 def test_doctor_restore_rejects_malformed_manifest(tmp_path):

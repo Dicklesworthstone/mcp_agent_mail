@@ -3761,6 +3761,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 tree = await get_archive_tree(archive, path)
                 return await _render("archive_browser.html", tree=tree, project=project, path=path)
+            except ValueError:
+                return await _render("error.html", message="Invalid archive path")
             finally:
                 await asyncio.to_thread(archive.repo.close)
 
@@ -3788,6 +3790,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except ValueError as err:
                 # Path validation errors
                 raise HTTPException(status_code=400, detail="Invalid file path") from err
+            except HTTPException:
+                raise
             except Exception as err:
                 raise HTTPException(status_code=404, detail="File not found") from err
 

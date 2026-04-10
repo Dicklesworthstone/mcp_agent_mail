@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from zipfile import ZipFile
 
 from typer.testing import CliRunner
 
+from mcp_agent_mail import cli as cli_module
 from mcp_agent_mail.cli import app
 
 runner = CliRunner()
@@ -50,6 +53,59 @@ def create_test_archive(archive_dir: Path, name: str = "test_archive.zip") -> Pa
         zf.writestr("metadata.json", json.dumps(metadata))
         zf.writestr("test_content.txt", "test archive content")
     return archive_path
+
+
+def test_archive_states_dir_prefers_inner_git_repo_over_outer_pyproject(isolated_env, tmp_path, monkeypatch):
+    """Archive directory resolution should anchor to the nearest git repo, not an outer pyproject."""
+    outer = tmp_path / "outer-project"
+    repo = outer / "nested-repo"
+    work = repo / "deep" / "subdir"
+    work.mkdir(parents=True, exist_ok=True)
+    (outer / "pyproject.toml").write_text("[project]\nname='outer'\n", encoding="utf-8")
+
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    monkeypatch.chdir(work)
+
+    archive_dir = cli_module._archive_states_dir(create=False)
+
+    assert archive_dir == repo.resolve() / cli_module.ARCHIVE_DIR_NAME
+
+
+def test_detect_git_head_supports_git_worktrees(isolated_env, tmp_path):
+    """_detect_git_head should resolve worktree .git files, not just .git directories."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=str(repo), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo), check=True)
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=str(repo),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    worktree = tmp_path / "repo-worktree"
+    subprocess.run(
+        ["git", "worktree", "add", str(worktree)],
+        cwd=str(repo),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    expected_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(worktree),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert cli_module._detect_git_head(worktree) == expected_head
 
 
 # ============================================================================
@@ -165,6 +221,19 @@ def test_archive_list_empty_directory(isolated_env, tmp_path, monkeypatch):
     assert "does not exist" in stdout or "No saved" in stdout
 
 
+def test_archive_list_json_output_empty_directory_returns_empty_array(isolated_env, tmp_path, monkeypatch):
+    """archive list --json should stay machine-readable when no archive directory exists yet."""
+    monkeypatch.setattr(
+        "mcp_agent_mail.cli._archive_states_dir",
+        lambda create=True: tmp_path / "archives",
+    )
+
+    result = runner.invoke(app, ["archive", "list", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []
+
+
 def test_archive_list_nonexistent_directory(isolated_env, tmp_path, monkeypatch):
     """archive list handles nonexistent archive directory."""
     nonexistent = tmp_path / "nonexistent"
@@ -176,6 +245,21 @@ def test_archive_list_nonexistent_directory(isolated_env, tmp_path, monkeypatch)
 
     result = runner.invoke(app, ["archive", "list"])
     assert result.exit_code == 0
+
+
+def test_archive_list_json_output_nonexistent_directory_returns_empty_array(isolated_env, tmp_path, monkeypatch):
+    """archive list --json should return [] for a missing archive directory."""
+    nonexistent = tmp_path / "nonexistent"
+
+    monkeypatch.setattr(
+        "mcp_agent_mail.cli._archive_states_dir",
+        lambda create=True: nonexistent,
+    )
+
+    result = runner.invoke(app, ["archive", "list", "--json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == []
 
 
 def test_archive_list_shows_archives(isolated_env, tmp_path, monkeypatch):
@@ -222,12 +306,8 @@ def test_archive_list_json_output(isolated_env, tmp_path, monkeypatch):
 
     result = runner.invoke(app, ["archive", "list", "--json"])
     assert result.exit_code == 0
-    # Should be valid JSON
-    try:
-        data = json.loads(result.stdout)
-        assert isinstance(data, list)
-    except json.JSONDecodeError:
-        pass  # May have additional output before JSON
+    data = json.loads(result.stdout)
+    assert isinstance(data, list)
 
 
 def test_archive_list_short_limit_option(isolated_env, tmp_path, monkeypatch):
@@ -318,8 +398,10 @@ def test_archive_restore_invalid_zip(isolated_env, tmp_path, monkeypatch):
     )
 
     result = runner.invoke(app, ["archive", "restore", str(invalid_zip), "--force"])
-    # Should fail with an error about invalid archive
-    assert result.exit_code != 0 or "error" in result.stdout.lower()
+    stdout = strip_ansi(result.stdout)
+    assert result.exit_code != 0
+    assert "Failed to extract archive" in stdout
+    assert "not a zip file" in stdout.lower()
 
 
 def test_archive_restore_by_filename(isolated_env, tmp_path, monkeypatch):
@@ -349,6 +431,80 @@ def test_archive_restore_by_filename(isolated_env, tmp_path, monkeypatch):
     result = runner.invoke(app, ["archive", "restore", str(archive_path), "--dry-run"])
     # Should find the archive
     assert result.exit_code == 0 or "my_backup" in result.stdout.lower() or "restore" in result.stdout.lower()
+
+
+def test_archive_restore_rolls_back_on_copy_failure(isolated_env, tmp_path, monkeypatch):
+    """archive restore should restore the original DB/storage if copyback fails mid-restore."""
+    archive_path = tmp_path / "rollback_test.zip"
+    with ZipFile(archive_path, "w") as zf:
+        metadata = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "scrub_preset": "archive",
+            "projects_requested": [],
+        }
+        zf.writestr("metadata.json", json.dumps(metadata))
+        zf.writestr("snapshot/mailbox.sqlite3", b"restored-db")
+        zf.writestr("storage_repo/README.txt", "restored-storage")
+
+    live_db = tmp_path / "live" / "mailbox.sqlite3"
+    live_db.parent.mkdir(parents=True, exist_ok=True)
+    live_db.write_bytes(b"original-db")
+
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    (storage_root / "README.txt").write_text("original-storage", encoding="utf-8")
+
+    monkeypatch.setattr(cli_module, "_resolve_archive_path", lambda _path: archive_path)
+    monkeypatch.setattr(cli_module, "resolve_sqlite_database_path", lambda: live_db)
+    monkeypatch.setattr(
+        cli_module,
+        "get_settings",
+        lambda: SimpleNamespace(storage=SimpleNamespace(root=str(storage_root))),
+    )
+
+    real_copytree = cli_module.shutil.copytree
+    failed_once = {"value": False}
+
+    def flaky_copytree(src, dst, *args, **kwargs):
+        if Path(src).name == "storage_repo" and not failed_once["value"]:
+            failed_once["value"] = True
+            raise OSError("simulated storage copy failure")
+        return real_copytree(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(cli_module.shutil, "copytree", flaky_copytree)
+
+    result = runner.invoke(app, ["archive", "restore", str(archive_path), "--force"])
+
+    stdout = strip_ansi(result.stdout)
+    assert result.exit_code != 0
+    assert "Restore failed:" in stdout
+    assert "Original database and storage were restored from backups." in stdout
+    assert live_db.read_bytes() == b"original-db"
+    assert (storage_root / "README.txt").read_text(encoding="utf-8") == "original-storage"
+
+
+def test_archive_restore_rejects_traversal_member(isolated_env, tmp_path):
+    """archive restore rejects zip members that try to escape the extraction root."""
+    archive_dir = tmp_path / "archives"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_path = archive_dir / "traversal_member.zip"
+    with ZipFile(archive_path, "w") as zf:
+        metadata = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "scrub_preset": "archive",
+            "projects_requested": [],
+        }
+        zf.writestr("metadata.json", json.dumps(metadata))
+        zf.writestr("snapshot/mailbox.sqlite3", b"sqlite db placeholder")
+        zf.writestr("storage_repo/README.txt", "storage data")
+        zf.writestr("../escape.txt", "malicious content")
+
+    result = runner.invoke(app, ["archive", "restore", str(archive_path), "--dry-run"])
+    stdout = strip_ansi(result.stdout)
+    assert result.exit_code != 0
+    assert "Invalid archive member path" in stdout
+    assert "directory traversal" in stdout
 
 
 # ============================================================================

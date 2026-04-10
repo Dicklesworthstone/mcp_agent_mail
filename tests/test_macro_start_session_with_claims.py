@@ -2,6 +2,7 @@
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from mcp_agent_mail.app import build_mcp_server
 
@@ -104,3 +105,21 @@ async def test_macro_start_session_without_file_reservations_still_works(isolate
         # Inbox should still be fetched
         assert "inbox" in data
         assert isinstance(data["inbox"], list)
+
+
+@pytest.mark.asyncio
+async def test_macro_start_session_rejects_explicit_empty_file_reservation_paths(isolated_env):
+    """Explicit empty reservation paths should be validated, not treated as omitted."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match=r"path|empty|required"):
+            await client.call_tool(
+                "macro_start_session",
+                {
+                    "human_key": "/test/project-empty-claims",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "agent_name": "BlueLake",
+                    "file_reservation_paths": [],
+                },
+            )
