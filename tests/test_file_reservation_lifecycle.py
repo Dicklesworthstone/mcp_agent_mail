@@ -26,7 +26,7 @@ Reference: mcp_agent_mail-aew
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastmcp import Client
@@ -595,6 +595,54 @@ async def test_manual_release_before_ttl(isolated_env):
         reservation = await get_file_reservation_from_db(reservation_id)
         assert reservation is not None
         assert reservation["released_ts"] is not None
+
+
+@pytest.mark.asyncio
+async def test_release_expired_reservation_is_noop(isolated_env):
+    """Manual release should ignore reservations whose TTL already elapsed."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key, agent_name = await setup_project_and_agent(
+            client, "/test/res/release_expired_noop"
+        )
+
+        result = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": ["expired/**"],
+                "ttl_seconds": 3600,
+                "exclusive": True,
+            },
+        )
+        reservation_id = result.data["granted"][0]["id"]
+
+        async with get_session() as session:
+            expired = (
+                (datetime.now(timezone.utc) - timedelta(minutes=10))
+                .replace(tzinfo=None)
+                .strftime("%Y-%m-%d %H:%M:%S.%f")
+            )
+            await session.execute(
+                text("UPDATE file_reservations SET expires_ts = :ts WHERE id = :id"),
+                {"ts": expired, "id": reservation_id},
+            )
+            await session.commit()
+
+        release_result = await client.call_tool(
+            "release_file_reservations",
+            {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "file_reservation_ids": [reservation_id],
+            },
+        )
+
+        assert release_result.data["released"] == 0
+        reservation = await get_file_reservation_from_db(reservation_id)
+        assert reservation is not None
+        assert reservation["released_ts"] is None
 
 
 @pytest.mark.asyncio

@@ -863,6 +863,81 @@ async def test_force_release_file_reservation_stale(isolated_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_force_release_file_reservation_expired_is_noop(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        holder = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+            },
+        )
+        releaser = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "GreenLake",
+            },
+        )
+        reservation = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "registration_token": holder.data["registration_token"],
+                "paths": ["src/app.py"],
+                "ttl_seconds": 3600,
+            },
+        )
+        reservation_id = reservation.data["granted"][0]["id"]
+
+        async with get_session() as session:
+            expired = (
+                (datetime.now(timezone.utc) - timedelta(minutes=10))
+                .replace(tzinfo=None)
+                .strftime("%Y-%m-%d %H:%M:%S.%f")
+            )
+            await session.execute(
+                text("UPDATE file_reservations SET expires_ts = :ts WHERE id = :id"),
+                {"ts": expired, "id": reservation_id},
+            )
+            await session.commit()
+
+        force = await client.call_tool(
+            "force_release_file_reservation",
+            {
+                "project_key": "Backend",
+                "agent_name": "GreenLake",
+                "registration_token": releaser.data["registration_token"],
+                "file_reservation_id": reservation_id,
+            },
+        )
+        assert force.data["released"] == 0
+        assert force.data["already_released"] is True
+        assert force.data["expired"] is True
+        assert force.data["released_at"] is not None
+
+        async with get_session() as session:
+            result = await session.execute(
+                text("SELECT released_ts FROM file_reservations WHERE id = :id"),
+                {"id": reservation_id},
+            )
+            released_ts = result.scalar_one()
+            assert released_ts is not None
+
+        resource = await client.read_resource("resource://file_reservations/backend?active_only=false")
+        payload = json.loads(resource[0].text)
+        released = next(item for item in payload if item["id"] == reservation_id)
+        assert released["released_ts"] is not None
+
+
+@pytest.mark.asyncio
 async def test_force_release_file_reservation_reports_notification_failure(isolated_env, monkeypatch):
     monkeypatch.setenv("FILE_RESERVATION_INACTIVITY_SECONDS", "5")
     monkeypatch.setenv("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", "1")

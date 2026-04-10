@@ -10703,6 +10703,10 @@ def build_mcp_server() -> FastMCP:
                         cast(Any, FileReservation.project_id) == project.id,
                         cast(Any, FileReservation.agent_id) == agent.id,
                         cast(Any, FileReservation.released_ts).is_(None),
+                        or_(
+                            cast(Any, FileReservation.expires_ts).is_(None),
+                            cast(Any, FileReservation.expires_ts) > naive_now,
+                        ),
                     )
                 )
                 if file_reservation_ids:
