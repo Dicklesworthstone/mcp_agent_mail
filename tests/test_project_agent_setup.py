@@ -20,6 +20,8 @@ Reference: mcp_agent_mail-mm2
 from __future__ import annotations
 
 import asyncio
+import threading
+from pathlib import Path
 
 import pytest
 from fastmcp import Client
@@ -450,6 +452,40 @@ async def test_create_agent_identity_with_name_hint(isolated_env):
 
         # Should use the hint
         assert result.data["name"] == "GreenCastle"
+
+
+@pytest.mark.asyncio
+async def test_create_agent_identity_offloads_archive_name_check(isolated_env, monkeypatch):
+    """Archive-side name availability checks should not block the event loop."""
+    main_thread = threading.main_thread()
+    path_type = type(Path("/"))
+    original_exists = path_type.exists
+    seen_archive_exists = False
+
+    def checked_exists(self: Path) -> bool:
+        nonlocal seen_archive_exists
+        if self.name == "BlueRiver" and "agents" in self.parts:
+            seen_archive_exists = True
+            assert threading.current_thread() is not main_thread
+        return original_exists(self)
+
+    monkeypatch.setattr(path_type, "exists", checked_exists)
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/test/setup/hint-offload"})
+        result = await client.call_tool(
+            "create_agent_identity",
+            {
+                "project_key": "/test/setup/hint-offload",
+                "program": "test",
+                "model": "test",
+                "name_hint": "BlueRiver",
+            },
+        )
+
+    assert result.data["name"] == "BlueRiver"
+    assert seen_archive_exists is True
 
 
 # ============================================================================

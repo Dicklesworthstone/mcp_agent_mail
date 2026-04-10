@@ -324,7 +324,7 @@ async def test_guard_gate_worktrees_enabled_false(isolated_env, tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_guard_gate_git_identity_enabled(isolated_env, tmp_path: Path):
-    """Test guard runs when GIT_IDENTITY_ENABLED=1 (alternative gate)."""
+    """Test guard enforces conflicts when only GIT_IDENTITY_ENABLED=1 is set."""
     settings = get_settings()
     archive = await ensure_archive(settings, "gate-test")
     script = render_precommit_script(archive)
@@ -337,12 +337,28 @@ async def test_guard_gate_git_identity_enabled(isolated_env, tmp_path: Path):
     _init_git_repo(repo)
     (repo / "file.txt").write_text("content", encoding="utf-8")
     _git_add(repo, "file.txt")
+    await write_file_reservation_record(
+        archive,
+        {
+            "agent": "OtherAgent",
+            "path_pattern": "file.txt",
+            "exclusive": True,
+        },
+    )
 
-    # Run with GIT_IDENTITY_ENABLED=1 (alternative gate)
-    result = _run_hook(script_path, repo, {"AGENT_NAME": "TestAgent", "GIT_IDENTITY_ENABLED": "1"})
+    # Run with GIT_IDENTITY_ENABLED=1 (alternative gate) and WORKTREES_ENABLED explicitly off.
+    result = _run_hook(
+        script_path,
+        repo,
+        {
+            "AGENT_NAME": "TestAgent",
+            "WORKTREES_ENABLED": "0",
+            "GIT_IDENTITY_ENABLED": "1",
+        },
+    )
 
-    # Should run
-    assert result.returncode == 0
+    assert result.returncode == 1
+    assert "conflict" in result.stderr.lower()
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,9 @@ from datetime import datetime, timedelta, timezone
 
 from typer.testing import CliRunner
 
+from mcp_agent_mail.app import _compute_project_slug
 from mcp_agent_mail.cli import app
+from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
 
@@ -164,6 +166,25 @@ def test_mail_status_shows_identity_mode(isolated_env, tmp_path):
     result = runner.invoke(app, ["mail", "status", str(test_dir)])
     assert result.exit_code == 0
     assert "PROJECT_IDENTITY_MODE" in result.stdout
+
+
+def test_mail_status_preserves_symlink_project_identity(isolated_env, tmp_path, monkeypatch):
+    """mail status should not collapse symlinked project paths in dir mode."""
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    monkeypatch.setenv("PROJECT_IDENTITY_MODE", "dir")
+    monkeypatch.setenv("COLUMNS", "240")
+    get_settings.cache_clear()
+
+    real_dir = tmp_path / "real-repo"
+    real_dir.mkdir()
+    symlink_dir = tmp_path / "repo-link"
+    symlink_dir.symlink_to(real_dir, target_is_directory=True)
+
+    result = runner.invoke(app, ["mail", "status", str(symlink_dir)])
+
+    assert result.exit_code == 0
+    assert _compute_project_slug(str(symlink_dir)) in result.stdout
+    assert str(symlink_dir) in result.stdout
 
 
 # ============================================================================
@@ -681,8 +702,8 @@ def test_multiple_recipients_handled(isolated_env):
     assert "Multi Recipient" in result.stdout
 
 
-def test_acks_commands_exact_agent_name(isolated_env):
-    """Agent names are matched exactly (case-sensitive)."""
+def test_acks_commands_resolve_agent_name_case_insensitively(isolated_env):
+    """Agent names should resolve case-insensitively for ack commands."""
     project, sender, receiver = asyncio.run(seed_project_with_agents())
     asyncio.run(seed_message_with_ack(project, sender, receiver, "Case Test"))
 
@@ -694,9 +715,10 @@ def test_acks_commands_exact_agent_name(isolated_env):
     assert result.exit_code == 0
     assert "Case Test" in result.stdout
 
-    # Wrong case should fail (agent names are case-sensitive)
+    # Wrong case should resolve to the same agent record.
     result = runner.invoke(
         app,
         ["acks", "pending", project.human_key, receiver.name.upper()],
     )
-    assert result.exit_code != 0  # Agent not found
+    assert result.exit_code == 0
+    assert "Case Test" in result.stdout

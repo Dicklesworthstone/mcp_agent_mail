@@ -204,6 +204,31 @@ class TestLocalhostBypass:
             )
             assert response.status_code == 401
 
+    @pytest.mark.asyncio
+    async def test_ipv4_mapped_ipv6_localhost_bypass_allows_write_tools(
+        self, isolated_env, monkeypatch, tmp_path
+    ):
+        """IPv4-mapped localhost addresses should get the same write bypass as 127.0.0.1."""
+        monkeypatch.setenv("HTTP_BEARER_TOKEN", "secret-token")
+        monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "true")
+        with contextlib.suppress(Exception):
+            _config.clear_settings_cache()
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app, client=("::ffff:127.0.0.1", 12345))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                settings.http.path,
+                json=_rpc(
+                    "tools/call",
+                    {"name": "ensure_project", "arguments": {"human_key": str(tmp_path / "localhost-project")}},
+                ),
+            )
+            assert response.status_code == 200
+
 
 # =============================================================================
 # Test: CORS Preflight Bypass

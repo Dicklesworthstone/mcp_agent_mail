@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pytest
+from fastmcp import Client
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -15,6 +16,19 @@ from rich.table import Table
 def _git(cwd: Path, *args: str) -> str:
     cp = subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True)
     return cp.stdout.strip()
+
+
+async def _call_tool(server: Any, tool_name: str, args: dict[str, Any]) -> Any:
+    async with Client(server) as client:
+        result = await client.call_tool(tool_name, args)
+    return result.data
+
+
+async def _read_json_resource(server: Any, uri: str) -> dict[str, Any]:
+    async with Client(server) as client:
+        res_list = await client.read_resource(uri)
+    assert res_list and res_list[0].text
+    return json.loads(res_list[0].text)
 
 
 def _print_tools_and_resources(console: Console, mcp: Any) -> tuple[list[str], list[str]]:
@@ -127,12 +141,7 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     console.print(Panel.fit(f"Tools (count): {len(tools_on)} • Resources (count): {len(resources_on)}", title="Surface (Gate ON)"))
 
     # Ensure a project exists for the repo so guard install can resolve it
-    async def _call_tool(tool_name: str, args: dict[str, Any]) -> Any:
-        mcp = _build_server()
-        _contents, structured = await mcp._mcp_call_tool(tool_name, args)
-        return structured
-
-    project_payload = __import__("asyncio").run(_call_tool("ensure_project", {"human_key": str(repo.resolve())}))
+    project_payload = __import__("asyncio").run(_call_tool(_build_server(), "ensure_project", {"human_key": str(repo.resolve())}))
     console.print(Panel.fit(json.dumps(project_payload, indent=2), title="ensure_project result"))
     slug = project_payload.get("slug") or project_payload.get("project", {}).get("slug") or ""
     assert slug, "slug missing from ensure_project payload"
@@ -150,7 +159,9 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
     console.print(Panel.fit(json.dumps(fr, indent=2), title=f"Reservation @ {fr_dir}/lock.json"))
 
     # Install guard via MCP tool (avoids dependency on external .env during tests)
-    install_result = __import__("asyncio").run(_call_tool("install_precommit_guard", {"project_key": slug, "code_repo_path": str(repo)}))
+    install_result = __import__("asyncio").run(
+        _call_tool(_build_server(), "install_precommit_guard", {"project_key": slug, "code_repo_path": str(repo)})
+    )
     console.print(Panel.fit(json.dumps(install_result, indent=2), title="install_precommit_guard result"))
 
     # 4) Execute guard check via CLI (pre-commit style: staged paths)
@@ -177,31 +188,30 @@ def test_worktrees_functionality_e2e(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
     asyncio = __import__("asyncio")
 
-    async def _call(tool_name: str, args: dict[str, Any]) -> Any:
-        mcp = _build_server()
-        _contents, structured = await mcp._mcp_call_tool(tool_name, args)
-        return structured
-
     try:
         asyncio.run(ensure_schema())
         unique = "_e2e_" + hex(hash(str(tmp_path)) & 0xFFFFF)[2:]
-        prod = asyncio.run(_call("ensure_product", {"product_key": f"plan-e2e-prod{unique}", "name": f"Plan E2E Product{unique}"}))
+        prod = asyncio.run(
+            _call_tool(
+                _build_server(),
+                "ensure_product",
+                {"product_key": f"plan-e2e-prod{unique}", "name": f"Plan E2E Product{unique}"},
+            )
+        )
         console.print(Panel.fit(json.dumps(prod, indent=2), title="ensure_product result"))
 
-        project = asyncio.run(_call("ensure_project", {"human_key": str(repo.resolve())}))
+        project = asyncio.run(_call_tool(_build_server(), "ensure_project", {"human_key": str(repo.resolve())}))
         slug = project.get("slug") or project["project"]["slug"]
 
-        link = asyncio.run(_call("products_link", {"product_key": prod["product_uid"], "project_key": slug}))
+        link = asyncio.run(
+            _call_tool(_build_server(), "products_link", {"product_key": prod["product_uid"], "project_key": slug})
+        )
         console.print(Panel.fit(json.dumps(link, indent=2), title="products_link result"))
 
-        mcp = _build_server()
-        res_list = __import__('asyncio').run(mcp._mcp_read_resource(f"resource://product/{prod['product_uid']}"))
-        assert res_list and getattr(res_list[0], "content", None)
-        payload = json.loads(res_list[0].content)
+        payload = __import__("asyncio").run(_read_json_resource(_build_server(), f"resource://product/{prod['product_uid']}"))
         console.print(Panel.fit(json.dumps(payload, indent=2), title="resource://product payload"))
         assert any(p.get("slug") == slug for p in payload.get("projects", [])), "Linked project missing from product view"
     except Exception as exc:
         console.print(Panel.fit(str(exc), title="Product Bus skipped (not registered)", style="yellow"))
 
     console.print(Panel.fit("E2E orchestration completed successfully", title="Done", border_style="green"))
-

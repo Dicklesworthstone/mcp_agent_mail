@@ -118,6 +118,7 @@ def _run_prepush_hook(
     stdin_payload: str,
     agent_name: str | None = "TestAgent",
     worktrees_enabled: bool = True,
+    git_identity_enabled: bool = False,
     guard_mode: str = "block",
     bypass: bool = False,
 ) -> subprocess.CompletedProcess:
@@ -128,6 +129,7 @@ def _run_prepush_hook(
 
     env = os.environ.copy()
     env["WORKTREES_ENABLED"] = "1" if worktrees_enabled else "0"
+    env["GIT_IDENTITY_ENABLED"] = "1" if git_identity_enabled else "0"
     env["AGENT_MAIL_GUARD_MODE"] = guard_mode
     if bypass:
         env["AGENT_MAIL_BYPASS"] = "1"
@@ -175,6 +177,24 @@ class TestPrepushGateAndMode:
             worktrees_enabled=False,  # Gate disabled
         )
         assert result.returncode == 0
+
+    def test_prepush_git_identity_gate_blocks_conflict(self, tmp_path: Path):
+        """GIT_IDENTITY_ENABLED=1 should enable enforcement even when WORKTREES_ENABLED=0."""
+        repo, _ = _init_repo_with_remote(tmp_path)
+        sha = _create_commit(repo, "src/file.txt", "content", "initial")
+
+        archive_root = tmp_path / "archive"
+        _write_reservation(archive_root, agent="Other", pattern="src/**", expires_ts=_future_iso())
+
+        result = _run_prepush_hook(
+            repo,
+            archive_root,
+            stdin_payload=_make_stdin_payload(repo, sha),
+            worktrees_enabled=False,
+            git_identity_enabled=True,
+        )
+        assert result.returncode == 1
+        assert "conflict" in result.stderr.lower()
 
     def test_prepush_bypass_mode_exits_zero(self, tmp_path: Path):
         """When AGENT_MAIL_BYPASS=1, hook should exit 0 without checking."""

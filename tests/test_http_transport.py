@@ -108,9 +108,9 @@ async def test_http_jwks_validation_and_resource_rate_limit(isolated_env, monkey
         r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r.status_code == 200
         # Resource rate limit 1 rpm -> second call 429
-        r1 = await client.post(settings.http.path, headers=headers, json=_rpc("resources/read", {"uri": "resource://projects"}))
+        r1 = await client.post(settings.http.path, headers=headers, json=_rpc("resources/read", {"uri": "resource://tooling/projects"}))
         assert r1.status_code in (200, 429)
-        r2 = await client.post(settings.http.path, headers=headers, json=_rpc("resources/read", {"uri": "resource://projects"}))
+        r2 = await client.post(settings.http.path, headers=headers, json=_rpc("resources/read", {"uri": "resource://tooling/projects"}))
         assert r2.status_code == 429
 
 

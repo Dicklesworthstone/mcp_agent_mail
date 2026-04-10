@@ -25,7 +25,7 @@ async def test_core_resources(isolated_env):
         cfg = await client.read_resource("resource://config/environment")
         assert cfg
         # projects
-        projs = await client.read_resource("resource://projects")
+        projs = await client.read_resource("resource://tooling/projects")
         assert projs
         # project specific
         proj = await client.read_resource("resource://project/backend")
@@ -36,5 +36,3 @@ async def test_core_resources(isolated_env):
         # inbox
         ires = await client.read_resource("resource://inbox/BlueLake?project=Backend&limit=5")
         assert ires
-
-
