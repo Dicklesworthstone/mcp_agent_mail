@@ -1711,16 +1711,64 @@ def _message_to_dict(message: Message, include_body: bool = True) -> dict[str, A
     return data
 
 
+def _format_cross_project_agent_address(project_slug: str, agent_name: str) -> str:
+    return f"project:{project_slug}#{agent_name}"
+
+
+def _sender_display_name(
+    *,
+    message_project_id: int | None,
+    sender_name: str,
+    sender_project_id: int | None,
+    sender_project_slug: str | None,
+) -> str:
+    if (
+        message_project_id is None
+        or sender_project_id is None
+        or sender_project_id == message_project_id
+        or not sender_project_slug
+    ):
+        return sender_name
+    return f"{sender_name}@{sender_project_slug}"
+
+
+def _apply_sender_identity(
+    payload: dict[str, Any],
+    *,
+    message_project_id: int | None,
+    sender_name: str,
+    sender_project_id: int | None,
+    sender_project_human_key: str | None,
+    sender_project_slug: str | None,
+) -> None:
+    payload["from"] = sender_name
+    if (
+        message_project_id is None
+        or sender_project_id is None
+        or sender_project_id == message_project_id
+    ):
+        return
+    if sender_project_human_key:
+        payload["from_project"] = sender_project_human_key
+    if sender_project_slug:
+        payload["from_project_slug"] = sender_project_slug
+        payload["from_address"] = _format_cross_project_agent_address(
+            sender_project_slug,
+            sender_name,
+        )
+
+
 def _message_frontmatter(
     message: Message,
     project: Project,
     sender: Agent,
+    sender_project: Project,
     to_agents: Sequence[Agent],
     cc_agents: Sequence[Agent],
     bcc_agents: Sequence[Agent],
     attachments: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    return {
+    data = {
         "id": message.id,
         "thread_id": message.thread_id,
         "project": project.human_key,
@@ -1735,6 +1783,15 @@ def _message_frontmatter(
         "created": _iso(message.created_ts),
         "attachments": attachments,
     }
+    _apply_sender_identity(
+        data,
+        message_project_id=project.id,
+        sender_name=sender.name,
+        sender_project_id=sender_project.id,
+        sender_project_human_key=sender_project.human_key,
+        sender_project_slug=sender_project.slug,
+    )
+    return data
 
 def _compute_project_slug(human_key: str) -> str:
     """
@@ -2306,6 +2363,16 @@ async def _get_project_by_identifier(identifier: str) -> Project:
             recoverable=True,
             data={"identifier": raw_identifier, "slug_searched": slug},
         )
+
+
+async def _get_project_by_id(project_id: int) -> Project:
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(select(Project).where(Project.id == project_id))
+        project = result.scalars().first()
+        if not project:
+            raise NoResultFound(f"Project id '{project_id}' not found.")
+        return project
 
 
 # --- Common mistake detection helpers --------------------------------------------------------
@@ -3973,12 +4040,21 @@ async def _list_inbox(
     if project.id is None or agent.id is None:
         raise ValueError("Project and agent must have ids before listing inbox.")
     sender_alias = aliased(Agent)
+    sender_project_alias = aliased(Project)
     await ensure_schema()
     async with get_session() as session:
         stmt = (
-            select(Message, MessageRecipient.kind, sender_alias.name)
+            select(
+                Message,
+                MessageRecipient.kind,
+                sender_alias.name,
+                sender_project_alias.id,
+                sender_project_alias.human_key,
+                sender_project_alias.slug,
+            )
             .join(MessageRecipient, MessageRecipient.message_id == Message.id)
             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+            .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
             .where(
                 cast(Any, Message.project_id) == project.id,
                 MessageRecipient.agent_id == agent.id,
@@ -3997,9 +4073,16 @@ async def _list_inbox(
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
-    for message, recipient_kind, sender_name in rows:
+    for message, recipient_kind, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
-        payload["from"] = sender_name
+        _apply_sender_identity(
+            payload,
+            message_project_id=message.project_id,
+            sender_name=sender_name,
+            sender_project_id=sender_project_id,
+            sender_project_human_key=sender_project_human_key,
+            sender_project_slug=sender_project_slug,
+        )
         payload["kind"] = recipient_kind
         messages.append(payload)
     return messages
@@ -4241,6 +4324,58 @@ def _summarize_messages(messages: Sequence[tuple[Message, str]]) -> dict[str, An
     return summary
 
 
+async def _get_thread_external_participants(
+    project: Project,
+    viewer: Agent,
+    thread_id: str,
+) -> dict[tuple[int, str], tuple[Project, str]]:
+    if project.id is None or viewer.id is None:
+        return {}
+    await ensure_schema()
+    sender_alias = aliased(Agent)
+    sender_project_alias = aliased(Project)
+    try:
+        seed_id = int(thread_id)
+    except (TypeError, ValueError):
+        seed_id = None
+    criteria: list[Any] = [cast(Any, Message.thread_id) == thread_id]
+    if seed_id is not None:
+        criteria.append(cast(Any, Message.id) == seed_id)
+    async with get_session() as session:
+        stmt = (
+            select(
+                sender_alias.name,
+                sender_project_alias.id,
+                sender_project_alias.human_key,
+                sender_project_alias.slug,
+            )
+            .select_from(Message)
+            .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+            .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
+            .where(
+                cast(Any, Message.project_id) == project.id,
+                or_(*criteria),
+                _message_visible_to_agent_clause(viewer.id),
+            )
+            .limit(500)
+        )
+        rows = (await session.execute(stmt)).all()
+
+    participants: dict[tuple[int, str], tuple[Project, str]] = {}
+    for sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
+        if not sender_name or sender_project_id is None or sender_project_id == project.id:
+            continue
+        participants[(int(sender_project_id), sender_name.lower())] = (
+            Project(
+                id=int(sender_project_id),
+                human_key=sender_project_human_key or sender_project_slug or "",
+                slug=sender_project_slug or "",
+            ),
+            sender_name,
+        )
+    return participants
+
+
 async def _compute_thread_summary(
     project: Project,
     thread_id: str,
@@ -4255,6 +4390,7 @@ async def _compute_thread_summary(
         raise ValueError("Project must have an id before summarizing threads.")
     await ensure_schema()
     sender_alias = aliased(Agent)
+    sender_project_alias = aliased(Project)
     try:
         message_id = int(thread_id)
     except ValueError:
@@ -4264,8 +4400,9 @@ async def _compute_thread_summary(
         criteria.append(cast(Any, Message.id) == message_id)
     async with get_session() as session:
         stmt = (
-            select(Message, sender_alias.name)
+            select(Message, sender_alias.name, sender_project_alias.id, sender_project_alias.slug)
             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+            .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
             .where(cast(Any, Message.project_id) == project.id, or_(*criteria))
             .order_by(asc(cast(Any, Message.created_ts)))
         )
@@ -4277,7 +4414,18 @@ async def _compute_thread_summary(
             stmt = stmt.limit(per_thread_limit)
         result = await session.execute(stmt)
         raw_rows = result.all()
-    rows = [(row[0], row[1]) for row in raw_rows]
+    rows = [
+        (
+            row[0],
+            _sender_display_name(
+                message_project_id=row[0].project_id,
+                sender_name=row[1],
+                sender_project_id=row[2],
+                sender_project_slug=row[3],
+            ),
+        )
+        for row in raw_rows
+    ]
     summary = _summarize_messages(rows)
     heuristic_key_points = list(summary.get("key_points", []))
 
@@ -4385,6 +4533,16 @@ async def _get_agent_by_id(project: Project, agent_id: int) -> Agent:
         agent = result.scalars().first()
         if not agent:
             raise NoResultFound(f"Agent id '{agent_id}' not found for project '{project.human_key}'.")
+        return agent
+
+
+async def _get_agent_any_project_by_id(agent_id: int) -> Agent:
+    await ensure_schema()
+    async with get_session() as session:
+        result = await session.execute(select(Agent).where(Agent.id == agent_id))
+        agent = result.scalars().first()
+        if not agent:
+            raise NoResultFound(f"Agent id '{agent_id}' not found.")
         return agent
 
 
@@ -4726,6 +4884,14 @@ def build_mcp_server() -> FastMCP:
         recipient_records.extend((agent, "bcc") for agent in bcc_agents)
 
         archive = await ensure_archive(settings, project.slug)
+        sender_project = project if sender.project_id == project.id else await _get_project_by_id(sender.project_id)
+        sender_is_local = sender_project.id == project.id
+        sender_archive_label = _sender_display_name(
+            message_project_id=project.id,
+            sender_name=sender.name,
+            sender_project_id=sender_project.id,
+            sender_project_slug=sender_project.slug,
+        )
         convert_markdown = (
             convert_images_override if convert_images_override is not None else settings.storage.convert_images
         )
@@ -4750,7 +4916,8 @@ def build_mcp_server() -> FastMCP:
                 m_dir = now_ts.strftime("%m")
                 candidate_surfaces: list[str] = []
                 candidate_surfaces.append(f"messages/{y_dir}/{m_dir}/*.md")
-                candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
+                if sender_is_local:
+                    candidate_surfaces.append(f"agents/{sender.name}/outbox/{y_dir}/{m_dir}/*.md")
                 for r in to_agents + cc_agents + bcc_agents:
                     candidate_surfaces.append(f"agents/{r.name}/inbox/{y_dir}/{m_dir}/*.md")
                 if thread_id:
@@ -4847,6 +5014,7 @@ def build_mcp_server() -> FastMCP:
                 message,
                 project,
                 sender,
+                sender_project,
                 to_agents,
                 cc_agents,
                 bcc_agents,
@@ -4856,12 +5024,19 @@ def build_mcp_server() -> FastMCP:
             payload = _message_to_dict(message)
             payload.update(
                 {
-                    "from": sender.name,
                     "to": [agent.name for agent in to_agents],
                     "cc": [agent.name for agent in cc_agents],
                     "bcc": [agent.name for agent in bcc_agents],
                     "attachments": attachments_meta,
                 }
+            )
+            _apply_sender_identity(
+                payload,
+                message_project_id=message.project_id,
+                sender_name=sender.name,
+                sender_project_id=sender_project.id,
+                sender_project_human_key=sender_project.human_key,
+                sender_project_slug=sender_project.slug,
             )
             # Enrich payload with sender's window identity if available
             _wi_uuid = getattr(settings, "window_identity_uuid", "") or ""
@@ -4893,10 +5068,11 @@ def build_mcp_server() -> FastMCP:
                 archive,
                 frontmatter,
                 processed_body,
-                sender.name,
+                sender_archive_label,
                 recipients_for_archive,
                 attachment_files,
                 commit_panel_text,
+                sender_outbox_name=sender.name if sender_is_local else None,
             )
 
             # Emit notification signals for recipients (if enabled)
@@ -4907,6 +5083,8 @@ def build_mcp_server() -> FastMCP:
                     "subject": subject,
                     "importance": importance,
                 }
+                if not sender_is_local:
+                    message_meta["from_project"] = sender_project.human_key
                 # Signal to/cc recipients (not bcc - blind copies shouldn't trigger visible signals)
                 for agent in to_agents + cc_agents:
                     with suppress(Exception):
@@ -6413,7 +6591,7 @@ def build_mcp_server() -> FastMCP:
             auto_ok_names: set[str] = set()
             if thread_id:
                 try:
-                    thread_rows: list[tuple[Message, str]]
+                    thread_rows: list[tuple[Message, str, int]]
                     sender_alias = aliased(Agent)
                     # Build criteria: thread_id match or numeric id seed
                     criteria: list[Any] = [cast(Any, Message.thread_id) == thread_id]
@@ -6424,7 +6602,7 @@ def build_mcp_server() -> FastMCP:
                         pass  # thread_id is not numeric — expected for UUID-style IDs
                     async with get_session() as s:
                         stmt = (
-                            select(Message, sender_alias.name)
+                            select(Message, sender_alias.name, sender_alias.project_id)
                             .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
                             .where(
                                 cast(Any, Message.project_id) == project.id,
@@ -6433,10 +6611,12 @@ def build_mcp_server() -> FastMCP:
                             )
                             .limit(500)
                         )
-                        thread_rows = [(row[0], row[1]) for row in (await s.execute(stmt)).all()]
+                        thread_rows = [(row[0], row[1], row[2]) for row in (await s.execute(stmt)).all()]
                         # Keep every thread-participant query inside the managed session.
-                        participants: set[str] = {n for _m, n in thread_rows}
-                        message_ids = [m.id for m, _ in thread_rows if m.id is not None]
+                        participants: set[str] = {
+                            n for _m, n, sender_project_id in thread_rows if n and sender_project_id == project.id
+                        }
+                        message_ids = [m.id for m, _n, _sender_project_id in thread_rows if m.id is not None]
                         if message_ids:
                             recipient_rows = await s.execute(
                                 select(Agent.name)
@@ -6723,6 +6903,11 @@ def build_mcp_server() -> FastMCP:
         local_cc: list[str] = []
         local_bcc: list[str] = []
         external: dict[int, dict[str, Any]] = {}
+        thread_external_participants = (
+            await _get_thread_external_participants(project, sender, thread_id)
+            if thread_id
+            else {}
+        )
 
         async with get_session() as sx:
             # Preload local agent names (normalized -> canonical stored name)
@@ -6880,6 +7065,19 @@ def build_mcp_server() -> FastMCP:
                         )
                         bucket[kind].append(target_agent.name)
                         continue
+
+                    if explicit_override and target_project_override is not None:
+                        thread_participant = thread_external_participants.get(
+                            (target_project_override.id or 0, lookup_value)
+                        )
+                        if thread_participant is not None:
+                            target_project, participant_name = thread_participant
+                            bucket = external.setdefault(
+                                target_project.id or 0,
+                                {"project": target_project, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(participant_name)
+                            continue
 
                     if explicit_override:
                         label = target_project_label or "(unknown project)"
@@ -7136,16 +7334,15 @@ def build_mcp_server() -> FastMCP:
                 topic=topic,
             )
             deliveries.append({"project": project.human_key, "payload": payload_local})
-        # External per-target project deliver (requires aliasing sender in target project)
+        # External per-target project deliver using the original sender identity.
         for _pid, group in external.items():
             p: Project = group["project"]
             try:
-                alias = await _get_or_create_agent(p, sender.name, sender.program, sender.model, sender.task_description, settings)
                 payload_ext = await _deliver_message(
                     ctx,
                     "send_message",
                     p,
-                    alias,
+                    sender,
                     group.get("to", []),
                     group.get("cc", []),
                     group.get("bcc", []),
@@ -7326,7 +7523,8 @@ def build_mcp_server() -> FastMCP:
         )
         settings_local = get_settings()
         original = await _get_visible_message(project, sender, message_id)
-        original_sender = await _get_agent_by_id(project, original.sender_id)
+        original_sender = await _get_agent_any_project_by_id(original.sender_id)
+        original_sender_project = await _get_project_by_id(original_sender.project_id)
         thread_key = original.thread_id or str(original.id)
         subject_prefix_clean = subject_prefix.strip()
         base_subject = original.subject
@@ -7334,7 +7532,12 @@ def build_mcp_server() -> FastMCP:
             reply_subject = base_subject
         else:
             reply_subject = f"{subject_prefix_clean} {base_subject}".strip()
-        to_names = to or [original_sender.name]
+        default_reply_target = (
+            original_sender.name
+            if original_sender.project_id == project.id
+            else _format_cross_project_agent_address(original_sender_project.slug, original_sender.name)
+        )
+        to_names = to or [default_reply_target]
         cc_list = cc or []
         bcc_list = bcc or []
 
@@ -7344,6 +7547,7 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
         unknown_local: set[str] = set()
         unknown_external: dict[str, set[str]] = defaultdict(set)
+        thread_external_participants = await _get_thread_external_participants(project, sender, thread_key)
 
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
@@ -7487,6 +7691,18 @@ def build_mcp_server() -> FastMCP:
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
+                        if explicit_override and target_project_override is not None:
+                            thread_participant = thread_external_participants.get(
+                                (target_project_override.id or 0, lookup_value)
+                            )
+                            if thread_participant is not None:
+                                target_project, participant_name = thread_participant
+                                bucket = external.setdefault(
+                                    target_project.id or 0,
+                                    {"project": target_project, "to": [], "cc": [], "bcc": []},
+                                )
+                                bucket[kind].append(participant_name)
+                                continue
                         if explicit_override:
                             label = target_project_label or "(unknown project)"
                             unknown_external[label].add(display_value or candidate.strip() or candidate)
@@ -7540,7 +7756,7 @@ def build_mcp_server() -> FastMCP:
                     pass
                 async with get_session() as s_contact:
                     stmt = (
-                        select(Message, sender_alias.name)
+                        select(Message, sender_alias.name, sender_alias.project_id)
                         .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
                         .where(
                             cast(Any, Message.project_id) == project.id,
@@ -7549,9 +7765,11 @@ def build_mcp_server() -> FastMCP:
                         )
                         .limit(500)
                     )
-                    thread_rows = [(row[0], row[1]) for row in (await s_contact.execute(stmt)).all()]
-                    participants: set[str] = {n for _m, n in thread_rows if n}
-                    message_ids = [m.id for m, _ in thread_rows if m.id is not None]
+                    thread_rows = [(row[0], row[1], row[2]) for row in (await s_contact.execute(stmt)).all()]
+                    participants: set[str] = {
+                        n for _m, n, sender_project_id in thread_rows if n and sender_project_id == project.id
+                    }
+                    message_ids = [m.id for m, _n, _sender_project_id in thread_rows if m.id is not None]
                     if message_ids:
                         recipient_rows = await s_contact.execute(
                             select(Agent.name)
@@ -7697,19 +7915,11 @@ def build_mcp_server() -> FastMCP:
         for _pid, group in external.items():
             target_project: Project = group["project"]
             try:
-                alias = await _get_or_create_agent(
-                    target_project,
-                    sender.name,
-                    sender.program,
-                    sender.model,
-                    sender.task_description,
-                    settings_local,
-                )
                 payload_ext = await _deliver_message(
                     ctx,
                     "reply_message",
                     target_project,
-                    alias,
+                    sender,
                     group.get("to", []),
                     group.get("cc", []),
                     group.get("bcc", []),
@@ -8240,11 +8450,19 @@ def build_mcp_server() -> FastMCP:
         if limit > 1000:
             limit = 1000
         sender_alias = aliased(Agent)
+        sender_project_alias = aliased(Project)
         await ensure_schema()
         async with get_session() as session:
             stmt = (
-                select(Message, sender_alias.name)
+                select(
+                    Message,
+                    sender_alias.name,
+                    sender_project_alias.id,
+                    sender_project_alias.human_key,
+                    sender_project_alias.slug,
+                )
                 .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, func.lower(Message.topic)) == topic_name.strip().lower(),
@@ -8260,9 +8478,16 @@ def build_mcp_server() -> FastMCP:
             result = await session.execute(stmt)
             rows = result.all()
         messages: list[dict[str, Any]] = []
-        for message, sender_name in rows:
+        for message, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
             payload = _message_to_dict(message, include_body=include_bodies)
-            payload["from"] = sender_name
+            _apply_sender_identity(
+                payload,
+                message_project_id=message.project_id,
+                sender_name=sender_name,
+                sender_project_id=sender_project_id,
+                sender_project_human_key=sender_project_human_key,
+                sender_project_slug=sender_project_slug,
+            )
             messages.append(payload)
         await ctx.info(f"Fetched {len(messages)} messages with topic '{topic_name}'.")
         return messages
@@ -9035,10 +9260,12 @@ def build_mcp_server() -> FastMCP:
                     text(
                         """
                         SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                               m.thread_id, a.name AS sender_name
+                               m.thread_id, a.name AS sender_name,
+                               sp.id AS sender_project_id, sp.human_key AS sender_project, sp.slug AS sender_project_slug
                         FROM fts_messages
                         JOIN messages m ON fts_messages.rowid = m.id
                         JOIN agents a ON m.sender_id = a.id
+                        JOIN projects sp ON a.project_id = sp.id
                         WHERE m.project_id = :project_id
                           AND (
                                 m.sender_id = :agent_id
@@ -9084,9 +9311,11 @@ def build_mcp_server() -> FastMCP:
                         text(
                             f"""
                             SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
-                                   m.thread_id, a.name AS sender_name
+                                   m.thread_id, a.name AS sender_name,
+                                   sp.id AS sender_project_id, sp.human_key AS sender_project, sp.slug AS sender_project_slug
                             FROM messages m
                             JOIN agents a ON m.sender_id = a.id
+                            JOIN projects sp ON a.project_id = sp.id
                             WHERE m.project_id = :project_id
                               AND (
                                     m.sender_id = :agent_id
@@ -9120,18 +9349,25 @@ def build_mcp_server() -> FastMCP:
                 Console().print(Panel(f"results={len(rows)}", title="tool: search_messages — done", border_style="green"))
             except Exception:
                 pass
-        items = [
-            {
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = {
                 "id": row["id"],
                 "subject": row["subject"],
                 "importance": row["importance"],
                 "ack_required": row["ack_required"],
                 "created_ts": _iso(row["created_ts"]),
                 "thread_id": row["thread_id"],
-                "from": row["sender_name"],
             }
-            for row in rows
-        ]
+            _apply_sender_identity(
+                item,
+                message_project_id=project.id,
+                sender_name=row["sender_name"],
+                sender_project_id=row["sender_project_id"],
+                sender_project_human_key=row["sender_project"],
+                sender_project_slug=row["sender_project_slug"],
+            )
+            items.append(item)
         try:
             from fastmcp.tools.tool import ToolResult
             return ToolResult(structured_content={"result": items})
@@ -9223,6 +9459,7 @@ def build_mcp_server() -> FastMCP:
         await ensure_schema()
 
         sender_alias = aliased(Agent)
+        sender_project_alias = aliased(Project)
         all_mentions: dict[str, int] = {}
         all_actions: list[str] = []
         all_points: list[str] = []
@@ -9238,8 +9475,9 @@ def build_mcp_server() -> FastMCP:
                 if seed_id is not None:
                     criteria.append(cast(Any, Message.id) == seed_id)
                 stmt = (
-                    select(Message, sender_alias.name)
+                    select(Message, sender_alias.name, sender_project_alias.id, sender_project_alias.slug)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                    .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
                     .where(
                         cast(Any, Message.project_id) == project.id,
                         or_(*criteria),
@@ -9249,7 +9487,18 @@ def build_mcp_server() -> FastMCP:
                     .limit(per_thread_limit)
                 )
                 raw_rows = (await session.execute(stmt)).all()
-                rows = [(row[0], row[1]) for row in raw_rows]
+                rows = [
+                    (
+                        row[0],
+                        _sender_display_name(
+                            message_project_id=row[0].project_id,
+                            sender_name=row[1],
+                            sender_project_id=row[2],
+                            sender_project_slug=row[3],
+                        ),
+                    )
+                    for row in raw_rows
+                ]
                 summary = _summarize_messages(rows)
                 # accumulate
                 for m in summary.get("mentions", []):
@@ -9413,10 +9662,12 @@ def build_mcp_server() -> FastMCP:
 
         # ── Fetch messages in window ──
         sender_alias = aliased(Agent)
+        sender_project_alias = aliased(Project)
         async with get_session() as session:
             stmt = (
-                select(Message, sender_alias.name)
+                select(Message, sender_alias.name, sender_project_alias.id, sender_project_alias.slug)
                 .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
                 .where(
                     cast(Any, Message.project_id) == project.id,
                     cast(Any, Message.created_ts) >= window_start,
@@ -9426,7 +9677,18 @@ def build_mcp_server() -> FastMCP:
             )
             result = await session.execute(stmt)
             raw_rows = result.all()
-        rows = [(row[0], row[1]) for row in raw_rows]
+        rows = [
+            (
+                row[0],
+                _sender_display_name(
+                    message_project_id=row[0].project_id,
+                    sender_name=row[1],
+                    sender_project_id=row[2],
+                    sender_project_slug=row[3],
+                ),
+            )
+            for row in raw_rows
+        ]
 
         if not rows:
             await ctx.info(f"No messages in the last {since_hours}h for project '{project.human_key}'.")
@@ -10772,10 +11034,12 @@ def build_mcp_server() -> FastMCP:
                             """
                             SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
                                    m.sender_id,
-                                   m.thread_id, a.name AS sender_name, m.project_id
+                                   m.thread_id, a.name AS sender_name, m.project_id,
+                                   sp.id AS sender_project_id, sp.human_key AS sender_project, sp.slug AS sender_project_slug
                             FROM fts_messages
                             JOIN messages m ON fts_messages.rowid = m.id
                             JOIN agents a ON m.sender_id = a.id
+                            JOIN projects sp ON a.project_id = sp.id
                             WHERE m.project_id IN :proj_ids AND fts_messages MATCH :query
                             ORDER BY bm25(fts_messages) ASC
                             LIMIT :limit
@@ -10804,9 +11068,11 @@ def build_mcp_server() -> FastMCP:
                                 f"""
                                 SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
                                        m.sender_id,
-                                       m.thread_id, a.name AS sender_name, m.project_id
+                                       m.thread_id, a.name AS sender_name, m.project_id,
+                                       sp.id AS sender_project_id, sp.human_key AS sender_project, sp.slug AS sender_project_slug
                                 FROM messages m
                                 JOIN agents a ON m.sender_id = a.id
+                                JOIN projects sp ON a.project_id = sp.id
                                 WHERE m.project_id IN :proj_ids AND {where_clause}
                                 ORDER BY m.created_ts DESC
                                 LIMIT :limit
@@ -10834,19 +11100,26 @@ def build_mcp_server() -> FastMCP:
                         continue
                     if int(row["sender_id"]) == project_agent_id or project_agent_id in recipients_by_message.get(int(row["id"]), set()):
                         visible_rows.append(row)
-            items = [
-                {
+            items: list[dict[str, Any]] = []
+            for row in visible_rows:
+                item = {
                     "id": row["id"],
                     "subject": row["subject"],
                     "importance": row["importance"],
                     "ack_required": row["ack_required"],
                     "created_ts": _iso(row["created_ts"]),
                     "thread_id": row["thread_id"],
-                    "from": row["sender_name"],
                     "project_id": row["project_id"],
                 }
-                for row in visible_rows
-            ]
+                _apply_sender_identity(
+                    item,
+                    message_project_id=row["project_id"],
+                    sender_name=row["sender_name"],
+                    sender_project_id=row["sender_project_id"],
+                    sender_project_human_key=row["sender_project"],
+                    sender_project_slug=row["sender_project_slug"],
+                )
+                items.append(item)
             try:
                 from fastmcp.tools.tool import ToolResult
                 return ToolResult(structured_content={"result": items})
@@ -10935,6 +11208,7 @@ def build_mcp_server() -> FastMCP:
             """
             await ensure_schema()
             sender_alias = aliased(Agent)
+            sender_project_alias = aliased(Project)
             try:
                 seed_id = int(thread_id)
             except ValueError:
@@ -10964,15 +11238,27 @@ def build_mcp_server() -> FastMCP:
 
             async with get_session() as session:
                 stmt = (
-                    select(Message, sender_alias.name)
+                    select(Message, sender_alias.name, sender_project_alias.id, sender_project_alias.slug)
                     .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                    .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
                     .where(or_(*cast(Any, criteria)), or_(*visibility_clauses))
                     .order_by(asc(cast(Any, Message.created_ts)))
                 )
                 if per_thread_limit:
                     stmt = stmt.limit(per_thread_limit)
                 raw_rows = (await session.execute(stmt)).all()
-            rows = [(row[0], row[1]) for row in raw_rows]
+            rows = [
+                (
+                    row[0],
+                    _sender_display_name(
+                        message_project_id=row[0].project_id,
+                        sender_name=row[1],
+                        sender_project_id=row[2],
+                        sender_project_slug=row[3],
+                    ),
+                )
+                for row in raw_rows
+            ]
             summary = _summarize_messages(rows)
             heuristic_key_points = list(summary.get("key_points", []))
 
@@ -11909,9 +12195,17 @@ def build_mcp_server() -> FastMCP:
             action="resource://message/{message_id}",
         )
         message = await _get_visible_message(project_obj, viewer, int(message_id))
-        sender = await _get_agent_by_id(project_obj, message.sender_id)
+        sender = await _get_agent_any_project_by_id(message.sender_id)
+        sender_project = await _get_project_by_id(sender.project_id)
         payload = _message_to_dict(message, include_body=True)
-        payload["from"] = sender.name
+        _apply_sender_identity(
+            payload,
+            message_project_id=message.project_id,
+            sender_name=sender.name,
+            sender_project_id=sender_project.id,
+            sender_project_human_key=sender_project.human_key,
+            sender_project_slug=sender_project.slug,
+        )
         return _apply_resource_output_format(
             payload,
             settings=settings,
@@ -12035,13 +12329,21 @@ def build_mcp_server() -> FastMCP:
         except ValueError:
             message_id = None
         sender_alias = aliased(Agent)
+        sender_project_alias = aliased(Project)
         criteria = [Message.thread_id == thread_id]
         if message_id is not None:
             criteria.append(Message.id == message_id)
         async with get_session() as session:
             stmt = (
-                select(Message, sender_alias.name)
+                select(
+                    Message,
+                    sender_alias.name,
+                    sender_project_alias.id,
+                    sender_project_alias.human_key,
+                    sender_project_alias.slug,
+                )
                 .join(sender_alias, cast(Any, Message.sender_id == sender_alias.id))
+                .join(sender_project_alias, cast(Any, sender_alias.project_id == sender_project_alias.id))
                 .where(
                     cast(Any, Message.project_id == project_obj.id),
                     or_(*cast(Any, criteria)),
@@ -12052,9 +12354,16 @@ def build_mcp_server() -> FastMCP:
             result = await session.execute(stmt)
             rows = result.all()
         messages = []
-        for message, sender_name in rows:
+        for message, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
             payload = _message_to_dict(message, include_body=include_bodies)
-            payload["from"] = sender_name
+            _apply_sender_identity(
+                payload,
+                message_project_id=message.project_id,
+                sender_name=sender_name,
+                sender_project_id=sender_project_id,
+                sender_project_human_key=sender_project_human_key,
+                sender_project_slug=sender_project_slug,
+            )
             messages.append(payload)
         payload = {"project": project_obj.human_key, "thread_id": thread_id, "messages": messages}
         return _apply_resource_output_format(

@@ -1368,6 +1368,7 @@ async def write_message_bundle(
     recipients: Sequence[str],
     extra_paths: Sequence[str] | None = None,
     commit_text: str | None = None,
+    sender_outbox_name: str | None = None,
 ) -> None:
     timestamp_obj: Any = message.get("created") or message.get("created_ts")
     now: datetime
@@ -1397,13 +1398,18 @@ async def write_message_bundle(
     m_dir = now.strftime("%m")
 
     canonical_dir = archive.root / "messages" / y_dir / m_dir
-    outbox_dir = archive.root / "agents" / sender / "outbox" / y_dir / m_dir
+    outbox_dir = (
+        archive.root / "agents" / sender_outbox_name / "outbox" / y_dir / m_dir
+        if sender_outbox_name
+        else None
+    )
     inbox_dirs = [archive.root / "agents" / r / "inbox" / y_dir / m_dir for r in recipients]
 
     rel_paths: list[str] = []
 
     await _to_thread(canonical_dir.mkdir, parents=True, exist_ok=True)
-    await _to_thread(outbox_dir.mkdir, parents=True, exist_ok=True)
+    if outbox_dir is not None:
+        await _to_thread(outbox_dir.mkdir, parents=True, exist_ok=True)
     for path in inbox_dirs:
         await _to_thread(path.mkdir, parents=True, exist_ok=True)
 
@@ -1424,9 +1430,10 @@ async def write_message_bundle(
     await _write_text(canonical_path, content)
     rel_paths.append(canonical_path.relative_to(archive.repo_root).as_posix())
 
-    outbox_path = outbox_dir / filename
-    await _write_text(outbox_path, content)
-    rel_paths.append(outbox_path.relative_to(archive.repo_root).as_posix())
+    if outbox_dir is not None:
+        outbox_path = outbox_dir / filename
+        await _write_text(outbox_path, content)
+        rel_paths.append(outbox_path.relative_to(archive.repo_root).as_posix())
 
     for inbox_dir in inbox_dirs:
         inbox_path = inbox_dir / filename
