@@ -3964,20 +3964,31 @@ def am_run(
         slot_dir.mkdir(parents=True, exist_ok=True)
         return slot_dir
 
+    def _is_active_lease(data: dict[str, Any], now: datetime) -> bool:
+        if data.get("released_ts"):
+            return False
+        exp = data.get("expires_ts")
+        if exp:
+            parsed = _parse_iso_datetime(exp)
+            if parsed is not None and parsed <= now:
+                return False
+        return True
+
+    def _read_existing_lease(path: Path) -> dict[str, Any] | None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
     def _read_active(slot_dir: Path) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
         results: list[dict[str, Any]] = []
         for f in slot_dir.glob("*.json"):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-                if data.get("released_ts"):
-                    continue
-                exp = data.get("expires_ts")
-                if exp:
-                    parsed = _parse_iso_datetime(exp)
-                    if parsed is not None and parsed <= now:
-                        continue
-                results.append(data)
+                if isinstance(data, dict) and _is_active_lease(data, now):
+                    results.append(data)
             except Exception:
                 continue
         return results
@@ -3998,18 +4009,12 @@ def am_run(
 
     def _write_local_renew(path: Path) -> None:
         now = datetime.now(timezone.utc)
-        try:
-            current = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            current = {}
-        if current.get("released_ts"):
+        current = _read_existing_lease(path) or {}
+        if not _is_active_lease(current, now):
             return
-        exp = current.get("expires_ts")
-        if exp:
-            parsed = _parse_iso_datetime(exp)
-            if parsed is not None and parsed <= now:
-                return
-        new_exp = now + timedelta(seconds=effective_ttl_seconds)
+        current_exp = _parse_iso_datetime(cast(str | None, current.get("expires_ts")))
+        base = max(now, current_exp) if current_exp is not None else now
+        new_exp = base + timedelta(seconds=effective_ttl_seconds)
         current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp.isoformat()})
         with suppress(Exception):
             path.write_text(json.dumps(current, indent=2), encoding="utf-8")
@@ -4153,13 +4158,18 @@ def am_run(
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
                     raise typer.Exit(code=1)
                 lease_path = _lease_path(slot_dir)
+                now = datetime.now(timezone.utc)
+                current = _read_existing_lease(lease_path)
+                active_current = current if current is not None and _is_active_lease(current, now) else None
+                requested_exp = now + timedelta(seconds=effective_ttl_seconds)
+                current_exp = _parse_iso_datetime(cast(str | None, active_current.get("expires_ts"))) if active_current else None
                 payload = {
                     "slot": slot,
                     "agent": agent_name,
                     "branch": branch,
                     "exclusive": (not shared),
-                    "acquired_ts": datetime.now(timezone.utc).isoformat(),
-                    "expires_ts": (datetime.now(timezone.utc) + timedelta(seconds=effective_ttl_seconds)).isoformat(),
+                    "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else now.isoformat(),
+                    "expires_ts": max(requested_exp, current_exp).isoformat() if current_exp is not None else requested_exp.isoformat(),
                 }
                 with suppress(Exception):
                     lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

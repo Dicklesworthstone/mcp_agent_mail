@@ -26,6 +26,7 @@ Reference: mcp_agent_mail-aew
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import pytest
 from fastmcp import Client
@@ -931,6 +932,57 @@ async def test_same_agent_no_self_conflict(isolated_env):
             # but it shouldn't block the agent
             pass
         assert "granted" in result.data or result.data.get("conflicts", []) == []
+
+
+@pytest.mark.asyncio
+async def test_same_agent_rereserve_updates_existing_active_reservation(isolated_env):
+    """Re-reserving the same path should update the active reservation instead of duplicating it."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key, agent_name = await setup_project_and_agent(
+            client, "/test/res/self_update"
+        )
+
+        first = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": ["self/**"],
+                "ttl_seconds": 300,
+                "exclusive": True,
+                "reason": "initial hold",
+            },
+        )
+        first_granted = first.data["granted"][0]
+        first_id = first_granted["id"]
+        first_expires = datetime.fromisoformat(first_granted["expires_ts"])
+
+        second = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": project_key,
+                "agent_name": agent_name,
+                "paths": ["self/**"],
+                "ttl_seconds": 60,
+                "exclusive": False,
+            },
+        )
+        second_granted = second.data["granted"][0]
+
+        assert second_granted["id"] == first_id
+        assert second_granted["reason"] == "initial hold"
+        assert second_granted["exclusive"] is False
+        assert datetime.fromisoformat(second_granted["expires_ts"]) >= first_expires
+
+        project_id = await get_project_id(project_key)
+        assert project_id is not None
+        assert await count_active_reservations(project_id) == 1
+
+        reservation = await get_file_reservation_from_db(first_id)
+        assert reservation is not None
+        assert reservation["reason"] == "initial hold"
+        assert bool(reservation["exclusive"]) is False
 
 
 # ============================================================================

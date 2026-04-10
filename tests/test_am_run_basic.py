@@ -540,6 +540,67 @@ def test_am_run_local_fallback_normalizes_short_ttl_before_running_child(tmp_pat
     )
 
 
+def test_am_run_local_fallback_does_not_shorten_active_same_holder_lease(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    monkeypatch.setenv("AGENT_MAIL_GUARD_MODE", "warn")
+    monkeypatch.setenv("AGENT_NAME", "TestAgent")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "httpx.Client.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("server unavailable")),
+    )
+
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    ident = _resolve_project_identity(str(proj))
+    lease_path = (
+        Path(get_settings().storage.root).expanduser().resolve()
+        / "projects"
+        / ident["slug"]
+        / "build_slots"
+        / "unittest-slot"
+        / "TestAgent__unknown.json"
+    )
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    original_acquired = "2026-04-10T01:00:00+00:00"
+    original_exp = "2099-04-10T02:00:00+00:00"
+    lease_path.write_text(
+        json.dumps(
+            {
+                "slot": "unittest-slot",
+                "agent": "TestAgent",
+                "branch": "unknown",
+                "exclusive": True,
+                "acquired_ts": original_acquired,
+                "expires_ts": original_exp,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    class _CompletedProcess:
+        returncode = 0
+
+    def fake_run(cmd, env=None, check=False, **kwargs):
+        payload = json.loads(lease_path.read_text(encoding="utf-8"))
+        assert payload["acquired_ts"] == original_acquired
+        assert datetime.fromisoformat(payload["expires_ts"]) >= datetime.fromisoformat(original_exp)
+        return _CompletedProcess()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    am_run(
+        slot="unittest-slot",
+        cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],
+        project_path=proj,
+        agent="TestAgent",
+        ttl_seconds=30,
+        shared=False,
+    )
+
+
 def test_am_run_local_fallback_blocks_on_existing_exclusive_conflicts_even_for_shared_request(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
