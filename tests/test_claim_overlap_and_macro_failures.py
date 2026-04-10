@@ -27,9 +27,23 @@ async def test_macro_contact_handshake_welcome_failure_nonfatal(isolated_env, mo
         await client.call_tool("ensure_project", {"human_key": "/backend"})
         await client.call_tool("register_agent", {"project_key": "Backend", "program": "p", "model": "m", "name": "RedStone"})
         await client.call_tool("register_agent", {"project_key": "Backend", "program": "p", "model": "m", "name": "WhiteCat"})
+        await client.call_tool("register_agent", {"project_key": "Backend", "program": "p", "model": "m", "name": "BlueLake"})
+        reservation = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "paths": ["agents/WhiteCat/inbox/*/*/*.md"],
+                "exclusive": True,
+                "ttl_seconds": 3600,
+            },
+        )
+        assert reservation.data["granted"]
         result = await client.call_tool(
             "macro_contact_handshake",
             {"project_key": "Backend", "requester": "RedStone", "target": "WhiteCat", "auto_accept": True, "welcome_subject": "Hi", "welcome_body": "Welcome"},
         )
         assert "request" in result.data and "response" in result.data
-
+        assert result.data.get("welcome_message") is None
+        welcome_error = result.data.get("welcome_error") or {}
+        assert welcome_error.get("type") == "FILE_RESERVATION_CONFLICT"

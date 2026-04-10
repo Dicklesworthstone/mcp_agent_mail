@@ -5201,6 +5201,41 @@ def build_mcp_server() -> FastMCP:
         message = str(exc).strip() or f"Failed to deliver message to project '{project.human_key}'."
         return _with_delivery_project({"type": "DELIVERY_FAILED", "message": message}, project)
 
+    def _contact_targets_same_identity(
+        source_project: Project,
+        source_agent: Agent,
+        target_project: Project,
+        target_agent: Agent,
+    ) -> bool:
+        if (
+            source_project.id is not None
+            and target_project.id is not None
+            and source_agent.id is not None
+            and target_agent.id is not None
+        ):
+            return source_project.id == target_project.id and source_agent.id == target_agent.id
+        return (
+            source_project.human_key == target_project.human_key
+            and source_agent.name.casefold() == target_agent.name.casefold()
+        )
+
+    def _raise_if_self_contact(
+        source_project: Project,
+        source_agent: Agent,
+        target_project: Project,
+        target_agent: Agent,
+        *,
+        action: str,
+    ) -> None:
+        if not _contact_targets_same_identity(source_project, source_agent, target_project, target_agent):
+            return
+        raise ToolExecutionError(
+            "INVALID_ARGUMENT",
+            f"{action} does not allow self-contact within the same project. Self-messaging already works without contact approval.",
+            recoverable=True,
+            data={"project_key": source_project.human_key, "agent_name": source_agent.name},
+        )
+
     def _collect_delivery_result(
         deliveries: list[dict[str, Any]],
         delivery_errors: list[dict[str, Any]],
@@ -8221,6 +8256,13 @@ def build_mcp_server() -> FastMCP:
                 )
             else:
                 raise
+        _raise_if_self_contact(
+            project,
+            a,
+            target_project,
+            b,
+            action="request_contact",
+        )
         # Warn on TTL auto-correction
         if ttl_seconds < 60:
             await ctx.info(
@@ -8229,7 +8271,9 @@ def build_mcp_server() -> FastMCP:
         now = datetime.now(timezone.utc)
         naive_now = _naive_utc(now)
         exp = naive_now + timedelta(seconds=max(60, ttl_seconds))
+        result_expires: datetime | None = exp
         should_notify = False
+        result_status = "pending"
         async with get_session() as s:
             # upsert link
             existing = await s.execute(
@@ -8243,12 +8287,25 @@ def build_mcp_server() -> FastMCP:
             link = existing.scalars().first()
             if link:
                 previous_status = link.status
-                link.status = "pending"
+                is_active_approved = previous_status == "approved" and (
+                    link.expires_ts is None or link.expires_ts > naive_now
+                )
                 link.reason = reason
                 link.updated_ts = naive_now
-                link.expires_ts = exp
+                if is_active_approved:
+                    result_status = "approved"
+                    should_notify = False
+                    if link.expires_ts is None:
+                        result_expires = None
+                    else:
+                        link.expires_ts = max(link.expires_ts, exp)
+                        result_expires = link.expires_ts
+                else:
+                    link.status = "pending"
+                    link.expires_ts = exp
+                    result_expires = exp
+                    should_notify = previous_status != "pending"
                 s.add(link)
-                should_notify = previous_status != "pending"
             else:
                 link = AgentLink(
                     a_project_id=project.id or 0,
@@ -8279,22 +8336,34 @@ def build_mcp_server() -> FastMCP:
                 link = existing.scalars().first()
                 if link is None:
                     raise
-                link.status = "pending"
                 link.reason = reason
                 link.updated_ts = naive_now
-                link.expires_ts = exp
+                is_active_approved = link.status == "approved" and (
+                    link.expires_ts is None or link.expires_ts > naive_now
+                )
+                if is_active_approved:
+                    result_status = "approved"
+                    if link.expires_ts is None:
+                        result_expires = None
+                    else:
+                        link.expires_ts = max(link.expires_ts, exp)
+                        result_expires = link.expires_ts
+                else:
+                    link.status = "pending"
+                    link.expires_ts = exp
+                    result_expires = exp
                 s.add(link)
                 await s.commit()
                 should_notify = False
 
         subject = f"Contact request from {a.name}"
         body = reason or f"{a.name} requests permission to contact {b.name}."
-        if not should_notify:
+        if result_status == "pending" and not should_notify:
             should_notify = not await _contact_request_notification_exists(target_project, a, b)
 
         notification_message: dict[str, Any] | None = None
         notification_error: dict[str, Any] | None = None
-        if should_notify:
+        if result_status == "pending" and should_notify:
             # Send an intro message with ack_required.
             notification_payload = await _deliver_message(
                 ctx,
@@ -8323,8 +8392,8 @@ def build_mcp_server() -> FastMCP:
             "from_project": project.human_key,
             "to": b.name,
             "to_project": target_project.human_key,
-            "status": "pending",
-            "expires_ts": _iso(exp),
+            "status": result_status,
+            "expires_ts": _iso(result_expires) if result_expires is not None else None,
         }
         if notification_message is not None:
             result["notification_message"] = notification_message
@@ -8363,6 +8432,13 @@ def build_mcp_server() -> FastMCP:
             to_agent,
             registration_token,
             token_param="registration_token",
+            action="respond_contact",
+        )
+        _raise_if_self_contact(
+            a_project,
+            a,
+            project,
+            b,
             action="respond_contact",
         )
         # Warn on TTL auto-correction
@@ -9156,6 +9232,13 @@ def build_mcp_server() -> FastMCP:
                     "welcome_body_provided": welcome_body is not None,
                 },
             )
+        if welcome_subject is not None and not auto_accept:
+            raise ToolExecutionError(
+                "INVALID_ARGUMENT",
+                "welcome_subject and welcome_body require auto_accept=True because the macro cannot defer a welcome until manual approval completes.",
+                recoverable=True,
+                data={"auto_accept": auto_accept},
+            )
         if not real_requester or not real_target:
             # Best-effort inference to honor "obvious intent"
             try:
@@ -9238,6 +9321,13 @@ def build_mcp_server() -> FastMCP:
                     )
                 else:
                     raise
+            _raise_if_self_contact(
+                project,
+                a,
+                project,
+                b,
+                action="macro_contact_handshake",
+            )
 
             if ttl_seconds < 60:
                 await ctx.info(
@@ -9359,8 +9449,10 @@ def build_mcp_server() -> FastMCP:
             respond_tool_result = await respond_tool.run(respond_payload)
             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
-        welcome_result = None
+        welcome_message = None
+        welcome_error: dict[str, Any] | None = None
         if welcome_subject and welcome_body:
+            welcome_project = await _get_project_by_identifier(target_project_key or project_key)
             try:
                 welcome_recipients = [real_target] if not target_project_key else [f"{real_target}@{target_project_key}"]
                 send_tool = cast(FunctionTool, cast(Any, send_message))
@@ -9377,16 +9469,25 @@ def build_mcp_server() -> FastMCP:
                         "format": "json",
                     }
                 )
-                welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
-            except ToolExecutionError as exc:
+                welcome_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
+                error_payload = _extract_delivery_error_payload(welcome_payload)
+                if error_payload is not None:
+                    welcome_error = _with_delivery_project(error_payload, welcome_project)
+                else:
+                    welcome_message = welcome_payload
+            except Exception as exc:
                 # surface but do not abort handshake
                 await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
+                welcome_error = _delivery_failure_from_exception(welcome_project, exc)
 
-        return {
+        result = {
             "request": request_result,
             "response": response_result,
-            "welcome_message": welcome_result,
+            "welcome_message": welcome_message,
         }
+        if welcome_error is not None:
+            result["welcome_error"] = welcome_error
+        return result
 
     @mcp.tool(name="search_messages")
     @_instrument_tool("search_messages", cluster=CLUSTER_SEARCH, capabilities={"search"}, project_arg="project_key")
@@ -10670,6 +10771,7 @@ def build_mcp_server() -> FastMCP:
         )
 
         notified = False
+        notification_error: dict[str, Any] | None = None
         if notify_previous and holder.name != actor.name:
             reasons_md = "\n".join(f"- {reason}" for reason in target_status.stale_reasons)
             extras: list[str] = []
@@ -10709,7 +10811,7 @@ def build_mcp_server() -> FastMCP:
                 from fastmcp.tools.tool import FunctionTool
 
                 send_tool = cast(FunctionTool, cast(Any, send_message))
-                await send_tool.run(
+                send_tool_result = await send_tool.run(
                     {
                         "ctx": ctx,
                         "project_key": project_key,
@@ -10721,11 +10823,19 @@ def build_mcp_server() -> FastMCP:
                         "format": "json",
                     }
                 )
-                notified = True
-            except Exception:
+                notification_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
+                error_payload = _extract_delivery_error_payload(notification_payload)
+                if error_payload is not None:
+                    notification_error = _with_delivery_project(error_payload, project)
+                else:
+                    notified = True
+            except Exception as exc:
                 notified = False
+                notification_error = _delivery_failure_from_exception(project, exc)
 
         summary["notified"] = notified
+        if notification_error is not None:
+            summary["notification_error"] = notification_error
         return {"released": 1, "released_at": _iso(now), "reservation": summary}
     @mcp.tool(name="renew_file_reservations")
     @_instrument_tool("renew_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
@@ -10965,6 +11075,7 @@ def build_mcp_server() -> FastMCP:
             holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
+            current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
 
             conflicts: list[dict[str, Any]] = []
             for entry in active:
@@ -10972,13 +11083,18 @@ def build_mcp_server() -> FastMCP:
                     continue
                 if exclusive or entry.get("exclusive", True):
                     conflicts.append(entry)
+            active_current = current if current is not None and _is_active_build_slot_lease(current, now) else None
+            requested_exp = now + timedelta(seconds=max(ttl_seconds, 60))
+            current_exp = None
+            if active_current is not None:
+                current_exp = _ensure_utc(_parse_iso(cast(Optional[str], active_current.get("expires_ts"))))
             payload = {
                 "slot": slot,
                 "agent": agent.name,
                 "branch": holder_branch,
                 "exclusive": exclusive,
-                "acquired_ts": _iso(now),
-                "expires_ts": _iso(now + timedelta(seconds=max(ttl_seconds, 60))),
+                "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else _iso(now),
+                "expires_ts": _iso(max(requested_exp, current_exp) if current_exp is not None else requested_exp),
             }
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
@@ -11019,7 +11135,9 @@ def build_mcp_server() -> FastMCP:
             current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
             if current is None or not _is_active_build_slot_lease(current, now):
                 return {"renewed": False, "expires_ts": None}
-            new_exp = _iso(now + timedelta(seconds=max(extend_seconds, 60)))
+            current_exp = _ensure_utc(_parse_iso(cast(Optional[str], current.get("expires_ts"))))
+            base = max(now, current_exp) if current_exp is not None else now
+            new_exp = _iso(base + timedelta(seconds=max(extend_seconds, 60)))
             current.update({"slot": slot, "agent": agent.name, "branch": holder_branch, "expires_ts": new_exp})
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
@@ -11055,7 +11173,7 @@ def build_mcp_server() -> FastMCP:
             holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
             lease_path = slot_path / f"{holder_id}.json"
             data = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
-            if data is None:
+            if data is None or not _is_active_build_slot_lease(data, now):
                 return {"released": False, "released_at": _iso(now)}
             released = False
             try:

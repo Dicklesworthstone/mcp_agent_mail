@@ -407,6 +407,164 @@ async def test_build_slot_renew_released_lease_is_noop(isolated_env, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_build_slot_release_already_released_lease_is_noop(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        first_release = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert first_release.data["released"] is False
+
+        await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        released = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert released.data["released"] is True
+
+        released_again = await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        assert released_again.data["released"] is False
+
+
+@pytest.mark.asyncio
+async def test_build_slot_renew_does_not_shorten_active_lease(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        acquired = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "ttl_seconds": 3600,
+                "registration_token": token,
+            },
+        )
+        original_exp = datetime.fromisoformat(acquired.data["granted"]["expires_ts"])
+
+        renewed = await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "extend_seconds": 60,
+                "registration_token": token,
+            },
+        )
+        assert renewed.data["renewed"] is True
+        renewed_exp = datetime.fromisoformat(renewed.data["expires_ts"])
+        assert renewed_exp >= original_exp
+
+
+@pytest.mark.asyncio
+async def test_build_slot_reacquire_same_holder_does_not_shorten_active_lease(isolated_env, monkeypatch):
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        acquired = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "ttl_seconds": 3600,
+                "registration_token": token,
+            },
+        )
+        original_exp = datetime.fromisoformat(acquired.data["granted"]["expires_ts"])
+        original_acquired = acquired.data["granted"]["acquired_ts"]
+
+        reacquired = await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "ttl_seconds": 60,
+                "registration_token": token,
+            },
+        )
+        reacquired_exp = datetime.fromisoformat(reacquired.data["granted"]["expires_ts"])
+        assert reacquired_exp >= original_exp
+        assert reacquired.data["granted"]["acquired_ts"] == original_acquired
+
+
+@pytest.mark.asyncio
 async def test_build_slot_renew_and_release_honor_explicit_branch_when_repo_branch_changes(isolated_env, monkeypatch):
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
     clear_settings_cache()
@@ -700,6 +858,103 @@ async def test_force_release_file_reservation_stale(isolated_env, monkeypatch):
             )
             messages = inbox.structured_content.get("result", [])
             assert any("Released stale lock" in msg["subject"] for msg in messages)
+    finally:
+        clear_settings_cache()
+
+
+@pytest.mark.asyncio
+async def test_force_release_file_reservation_reports_notification_failure(isolated_env, monkeypatch):
+    monkeypatch.setenv("FILE_RESERVATION_INACTIVITY_SECONDS", "5")
+    monkeypatch.setenv("FILE_RESERVATION_ACTIVITY_GRACE_SECONDS", "1")
+    clear_settings_cache()
+    try:
+        server = build_mcp_server()
+        async with Client(server) as client:
+            await client.call_tool("ensure_project", {"human_key": "/backend"})
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "BlueLake",
+                },
+            )
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "GreenLake",
+                },
+            )
+            await client.call_tool(
+                "register_agent",
+                {
+                    "project_key": "Backend",
+                    "program": "codex",
+                    "model": "gpt-5",
+                    "name": "RedStone",
+                },
+            )
+            reservation = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                    "paths": ["src/app.py"],
+                    "ttl_seconds": 3600,
+                },
+            )
+            reservation_id = reservation.data["granted"][0]["id"]
+
+            blocker = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "RedStone",
+                    "paths": ["agents/BlueLake/inbox/*/*/*.md"],
+                    "ttl_seconds": 1800,
+                    "exclusive": True,
+                },
+            )
+            assert blocker.data["granted"]
+
+            async with get_session() as session:
+                project_row = await session.execute(text("SELECT id FROM projects WHERE slug = :slug"), {"slug": "backend"})
+                project_id = project_row.scalar_one()
+                stale_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+                await session.execute(
+                    text(
+                        "UPDATE agents SET last_active_ts = :ts WHERE project_id = :pid AND lower(name) = :name"
+                    ),
+                    {"ts": stale_cutoff, "pid": project_id, "name": "bluelake"},
+                )
+                await session.commit()
+
+            force = await client.call_tool(
+                "force_release_file_reservation",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "GreenLake",
+                    "file_reservation_id": reservation_id,
+                },
+            )
+            assert force.data["released"] == 1
+            assert force.data["reservation"]["notified"] is False
+            notification_error = force.data["reservation"].get("notification_error") or {}
+            assert notification_error.get("type") == "FILE_RESERVATION_CONFLICT"
+
+            inbox = await client.call_tool(
+                "fetch_inbox",
+                {
+                    "project_key": "Backend",
+                    "agent_name": "BlueLake",
+                },
+            )
+            messages = inbox.structured_content.get("result", [])
+            assert not any("Released stale lock" in msg["subject"] for msg in messages)
     finally:
         clear_settings_cache()
 
