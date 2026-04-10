@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any, Iterable, List, Optional, Sequence, cast
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import click
 import httpx
 import typer
 import uvicorn
@@ -154,10 +155,19 @@ def _new_compact_message_table(title: str) -> Table:
     return Table(title=title, show_lines=False, pad_edge=False, collapse_padding=True)
 
 
-def _extract_jsonrpc_result(payload: Any) -> Any:
-    """Unwrap FastMCP HTTP JSON-RPC responses into the underlying tool payload."""
+def _extract_jsonrpc_result(payload: Any, *, request_name: str) -> Any:
+    """Unwrap FastMCP HTTP JSON-RPC responses or raise a CLI-facing server error."""
     if not isinstance(payload, dict):
-        return None
+        raise click.ClickException(f"{request_name}: invalid server response")
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or "server request failed")
+        detail = error.get("data")
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("detail") or detail
+        if detail not in (None, "", message):
+            message = f"{message}: {detail}"
+        raise click.ClickException(f"{request_name}: {message}")
     result = payload.get("result")
     if not isinstance(result, dict):
         return result
@@ -362,11 +372,12 @@ def products_ensure(
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
+            resp.raise_for_status()
             data = resp.json()
-            result = _extract_jsonrpc_result(data) or {}
+            result = _extract_jsonrpc_result(data, request_name="products ensure") or {}
             if result:
                 resp_data = result
-    except Exception:
+    except httpx.TransportError:
         resp_data = {}
     if not resp_data:
         # Fallback to local DB with the same strict uid policy
@@ -640,10 +651,11 @@ def products_inbox(
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
+            resp.raise_for_status()
             data = resp.json()
-            result = _extract_jsonrpc_result(data)
+            result = _extract_jsonrpc_result(data, request_name="products inbox")
             rows = result if isinstance(result, list) else []
-    except Exception:
+    except httpx.TransportError:
         rows = []
     if not rows:
         # Fallback: local DB
@@ -776,9 +788,10 @@ def products_summarize_thread(
                 },
             }
             resp = client.post(server_url, json=req, headers=headers)
+            resp.raise_for_status()
             data = resp.json()
-            result = _extract_jsonrpc_result(data) or {}
-    except Exception:
+            result = _extract_jsonrpc_result(data, request_name="products summarize-thread") or {}
+    except httpx.TransportError:
         result = {}
     if not result:
         console.print("[yellow]Server unavailable; summarization requires server tool. Try again when server is running.[/]")
@@ -3498,8 +3511,10 @@ def am_run(
                         "method": "tools/call",
                         "params": {"name": "ensure_project", "arguments": {"human_key": str(p)}},
                     }
-                    client.post(server_url, json=req, headers=headers)
-            except Exception:
+                    resp = client.post(server_url, json=req, headers=headers)
+                    resp.raise_for_status()
+                    _extract_jsonrpc_result(resp.json(), request_name="am-run ensure_project")
+            except httpx.TransportError:
                 use_server = False
 
             if use_server:
@@ -3525,10 +3540,11 @@ def am_run(
                             },
                         }
                         resp = client.post(server_url, json=req, headers=headers)
+                        resp.raise_for_status()
                         data = resp.json()
-                        result = _extract_jsonrpc_result(data) or {}
+                        result = _extract_jsonrpc_result(data, request_name="am-run acquire_build_slot") or {}
                         conflicts = list(result.get("conflicts") or [])
-                except Exception:
+                except httpx.TransportError:
                     use_server = False
 
                 if conflicts and guard_mode == "warn":
