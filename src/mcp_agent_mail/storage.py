@@ -40,11 +40,33 @@ from git.objects.tree import Tree
 from PIL import Image
 
 from .config import Settings
+from .db import get_sqlite_pre_restore_path, get_sqlite_sidecar_paths
 from .utils import validate_thread_id_format
 
 _logger = logging.getLogger(__name__)
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 _SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _sanitize_backup_reason(reason: str) -> str:
+    """Normalize a backup reason into a filesystem-safe path segment."""
+    sanitized = _SUBJECT_SLUG_RE.sub("-", reason.strip()).strip("-._")
+    return sanitized or "backup"
+
+
+def _create_unique_backup_dir(backup_dir: Path, reason: str) -> Path:
+    """Create a unique backup directory without timestamp collisions."""
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%f")
+    base_name = f"{timestamp}_{_sanitize_backup_reason(reason)}"
+    suffix = 0
+    while True:
+        candidate_name = base_name if suffix == 0 else f"{base_name}_{suffix}"
+        candidate = backup_dir / candidate_name
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            suffix += 1
 
 
 # =============================================================================
@@ -1135,6 +1157,51 @@ async def _to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
+def _expanduser_resolve_path(path: Path) -> Path:
+    return path.expanduser().resolve()
+
+
+def _resolve_path(path: Path) -> Path:
+    return path.resolve()
+
+
+def _path_exists(path: Path) -> bool:
+    return path.exists()
+
+
+def _list_rglob_paths(root: Path, pattern: str) -> list[Path]:
+    return list(root.rglob(pattern))
+
+
+def _restore_bundle_into_archive(bundle_to_restore: Path, target_root: Path) -> None:
+    """Restore a Git bundle into the archive root without deleting the source bundle first."""
+    import shutil
+    import tempfile
+
+    clear_repo_cache()
+    source_bundle = bundle_to_restore
+    try:
+        resolved_source = bundle_to_restore.resolve()
+        resolved_target = target_root.resolve()
+        if resolved_source.is_relative_to(resolved_target):
+            with tempfile.TemporaryDirectory(prefix="mcp-agent-mail-restore-") as temp_dir_str:
+                staged_bundle = Path(temp_dir_str) / bundle_to_restore.name
+                shutil.copy2(bundle_to_restore, staged_bundle)
+                _restore_bundle_into_archive(staged_bundle, target_root)
+            return
+    except Exception:
+        source_bundle = bundle_to_restore
+
+    if target_root.exists():
+        backup_archive = target_root.with_suffix(".pre-restore")
+        if backup_archive.exists():
+            shutil.rmtree(backup_archive)
+        shutil.copytree(target_root, backup_archive)
+        shutil.rmtree(target_root)
+
+    Repo.clone_from(str(source_bundle), str(target_root))
+
+
 def _ensure_str(value: str | bytes) -> str:
     """Ensure a value is a string, decoding bytes if necessary."""
     if isinstance(value, bytes):
@@ -1142,10 +1209,12 @@ def _ensure_str(value: str | bytes) -> str:
     return value
 
 
-def collect_lock_status(settings: Settings) -> dict[str, Any]:
+def collect_lock_status(settings: Settings, project_slug: str | None = None) -> dict[str, Any]:
     """Return structured metadata about active archive locks."""
 
     root = Path(settings.storage.root).expanduser().resolve()
+    if project_slug:
+        root = root / "projects" / project_slug
     locks: list[dict[str, Any]] = []
     summary = {"total": 0, "active": 0, "stale": 0, "metadata_missing": 0}
 
@@ -1227,7 +1296,7 @@ def collect_lock_status(settings: Settings) -> dict[str, Any]:
 
 
 async def ensure_archive_root(settings: Settings) -> tuple[Path, Repo]:
-    repo_root = Path(settings.storage.root).expanduser().resolve()
+    repo_root = await _to_thread(_expanduser_resolve_path, Path(settings.storage.root))
     await _to_thread(repo_root.mkdir, parents=True, exist_ok=True)
     repo = await _ensure_repo(repo_root, settings)
     return repo_root, repo
@@ -1256,7 +1325,7 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
     2. Semaphore limits concurrent repo operations
     3. Proactive cleanup runs before creating new repos when FD headroom is low
     """
-    cache_key = str(root.resolve())
+    cache_key = str(await _to_thread(_resolve_path, root))
 
     # Fast path: check cache without lock using peek() which doesn't modify LRU order
     cached = _REPO_CACHE.peek(cache_key)
@@ -1605,7 +1674,7 @@ async def process_attachments(
                     raise ValueError(
                         "Absolute attachment paths are disabled. Set ALLOW_ABSOLUTE_ATTACHMENT_PATHS=true to enable."
                     )
-                resolved = p.expanduser().resolve()
+                resolved = await _to_thread(_expanduser_resolve_path, p)
             else:
                 resolved = _resolve_archive_relative_path(archive, path)
             meta, rel_path = await _store_image(archive, resolved, embed_policy=embed_policy)
@@ -1657,7 +1726,7 @@ async def _convert_markdown_images(
                 result_parts.append(raw_path)
                 last_idx = path_end
                 continue
-            file_path = file_path.expanduser().resolve()
+            file_path = await _to_thread(_expanduser_resolve_path, file_path)
         else:
             try:
                 file_path = _resolve_archive_relative_path(archive, normalized_path)
@@ -2080,7 +2149,7 @@ async def _commit(
     working_tree = repo.working_tree_dir
     if working_tree is None:
         raise ValueError("Repository has no working tree directory")
-    repo_root = Path(working_tree).resolve()
+    repo_root = await _to_thread(_resolve_path, Path(working_tree))
 
     if use_queue:
         # Use commit queue for batching under high load
@@ -2091,20 +2160,23 @@ async def _commit(
         await _commit_direct(repo_root, settings, message, rel_paths)
 
 
-async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
+async def heal_archive_locks(settings: Settings, project_slug: str | None = None) -> dict[str, Any]:
     """Scan the archive root for stale lock artifacts and clean them."""
 
-    root = Path(settings.storage.root).expanduser().resolve()
+    root = await _to_thread(_expanduser_resolve_path, Path(settings.storage.root))
     await _to_thread(root.mkdir, parents=True, exist_ok=True)
+    if project_slug:
+        root = root / "projects" / project_slug
     summary: dict[str, Any] = {
         "locks_scanned": 0,
         "locks_removed": [],
         "metadata_removed": [],
     }
-    if not root.exists():
+    if not await _to_thread(_path_exists, root):
         return summary
 
-    for lock_path_item in sorted(root.rglob("*.lock"), key=str):
+    lock_paths = sorted(await _to_thread(_list_rglob_paths, root, "*.lock"), key=str)
+    for lock_path_item in lock_paths:
         # rglob returns Path objects at runtime; cast for type checker
         lock_path = cast(Path, lock_path_item)
         summary["locks_scanned"] += 1
@@ -2116,14 +2188,15 @@ async def heal_archive_locks(settings: Settings) -> dict[str, Any]:
         except FileNotFoundError:
             continue
 
-    for metadata_path_item in sorted(root.rglob("*.lock.owner.json"), key=str):
+    metadata_paths = sorted(await _to_thread(_list_rglob_paths, root, "*.lock.owner.json"), key=str)
+    for metadata_path_item in metadata_paths:
         # rglob returns Path objects at runtime; cast for type checker
         metadata_path = cast(Path, metadata_path_item)
         name = metadata_path.name
         if not name.endswith(".owner.json"):
             continue
         lock_candidate = metadata_path.parent / name[: -len(".owner.json")]
-        if lock_candidate.exists():
+        if await _to_thread(_path_exists, lock_candidate):
             continue
         try:
             await _to_thread(metadata_path.unlink)
@@ -2955,9 +3028,78 @@ class BackupManifest:
     restore_instructions: str
 
 
+def _parse_backup_manifest(data: Any) -> BackupManifest:
+    """Validate and normalize backup manifest payloads."""
+    if not isinstance(data, dict):
+        raise ValueError("manifest.json must contain a JSON object")
+
+    version = data.get("version")
+    if not isinstance(version, int) or version < 1:
+        raise ValueError("manifest.json must include an integer version >= 1")
+
+    created_at = data.get("created_at")
+    if not isinstance(created_at, str) or not created_at.strip():
+        raise ValueError("manifest.json must include a non-empty created_at string")
+
+    reason = data.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("manifest.json must include a non-empty reason string")
+
+    database_path = data.get("database_path")
+    if database_path is not None and not isinstance(database_path, str):
+        raise ValueError("manifest.json database_path must be a string or null")
+
+    project_bundles_raw = data.get("project_bundles")
+    if not isinstance(project_bundles_raw, list) or not all(isinstance(item, str) for item in project_bundles_raw):
+        raise ValueError("manifest.json project_bundles must be a list of strings")
+    project_bundles = [str(item) for item in project_bundles_raw]
+
+    storage_root = data.get("storage_root")
+    if not isinstance(storage_root, str) or not storage_root.strip():
+        raise ValueError("manifest.json must include a non-empty storage_root string")
+
+    restore_instructions = data.get("restore_instructions")
+    if not isinstance(restore_instructions, str) or not restore_instructions.strip():
+        raise ValueError("manifest.json must include non-empty restore_instructions")
+
+    if database_path is None and not project_bundles:
+        raise ValueError("manifest.json must include a database backup or at least one archive bundle")
+
+    return BackupManifest(
+        version=version,
+        created_at=created_at,
+        reason=reason,
+        database_path=database_path,
+        project_bundles=project_bundles,
+        storage_root=storage_root,
+        restore_instructions=restore_instructions,
+    )
+
+
+def _resolve_backup_artifact_path(backup_path: Path, manifest_ref: str) -> Path:
+    """Resolve a manifest-recorded artifact path against a backup directory."""
+    backup_root = backup_path.expanduser().resolve()
+    candidate = Path(manifest_ref).expanduser()
+    resolved = candidate.resolve() if candidate.is_absolute() else (backup_root / candidate).resolve()
+    try:
+        resolved.relative_to(backup_root)
+    except ValueError as exc:
+        raise ValueError(f"Backup artifact path escapes backup directory: {manifest_ref}") from exc
+    return resolved
+
+
+def _resolve_backup_file_artifact(backup_path: Path, manifest_ref: str) -> Path:
+    """Resolve a manifest artifact and require that it exists as a file."""
+    resolved = _resolve_backup_artifact_path(backup_path, manifest_ref)
+    if not resolved.exists():
+        raise FileNotFoundError(manifest_ref)
+    if not resolved.is_file():
+        raise IsADirectoryError(manifest_ref)
+    return resolved
+
+
 async def create_diagnostic_backup(
     settings: Settings,
-    project_slug: str | None = None,
     backup_dir: Path | None = None,
     reason: str = "doctor-repair",
 ) -> Path:
@@ -2967,13 +3109,12 @@ async def create_diagnostic_backup(
 
     Args:
         settings: Application settings
-        project_slug: Specific project to backup, or None for all projects
         backup_dir: Directory to store backup, or None for default
         reason: Reason for backup (included in manifest)
 
     Returns:
         Path to backup directory containing:
-        - {project_slug}.bundle (git bundle of project archive)
+        - archive.bundle (git bundle of project archive)
         - database.sqlite3 (copy of full database)
         - manifest.json (what was backed up, when, why, restore instructions)
     """
@@ -2984,109 +3125,105 @@ async def create_diagnostic_backup(
     # Create backup directory
     if backup_dir is None:
         backup_dir = Path(settings.storage.root) / "backups"
-    backup_dir = backup_dir.expanduser().resolve()
-
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
-    backup_path = backup_dir / f"{timestamp}_{reason}"
-    backup_path.mkdir(parents=True, exist_ok=True)
-
-    project_bundles: list[str] = []
-    database_copied: str | None = None
+    backup_dir = await _to_thread(_expanduser_resolve_path, backup_dir)
 
     # Get the archive repo
-    archive_root = Path(settings.storage.root).expanduser().resolve()
-    if not archive_root.exists():
-        raise ValueError(f"Storage root does not exist: {archive_root}")
+    archive_root = await _to_thread(_expanduser_resolve_path, Path(settings.storage.root))
 
     # Copy database
     db_path = get_database_path(settings)
-    if db_path and db_path.exists():
-        db_backup = backup_path / "database.sqlite3"
+    has_database = bool(db_path and await _to_thread(_path_exists, db_path))
+    has_archive_repo = await _to_thread(_path_exists, archive_root / ".git")
+    if not has_database and not has_archive_repo:
+        raise ValueError("No database or archive bundle available to back up")
 
-        def _copy_db() -> None:
-            # Use shutil.copy2 to preserve metadata
-            shutil.copy2(db_path, db_backup)
-            # Also copy WAL and SHM files if they exist
-            wal_path = db_path.with_suffix(".sqlite3-wal")
-            shm_path = db_path.with_suffix(".sqlite3-shm")
-            if wal_path.exists():
-                shutil.copy2(wal_path, backup_path / wal_path.name)
-            if shm_path.exists():
-                shutil.copy2(shm_path, backup_path / shm_path.name)
+    backup_path = await _to_thread(_create_unique_backup_dir, backup_dir, reason)
+    try:
+        project_bundles: list[str] = []
+        database_copied: str | None = None
 
-        await _to_thread(_copy_db)
-        database_copied = str(db_backup)
+        if db_path and has_database:
+            db_backup = backup_path / "database.sqlite3"
 
-    # Create git bundles for projects
-    repo_path = archive_root
-    if repo_path.exists() and (repo_path / ".git").exists():
+            def _copy_db() -> None:
+                # Use shutil.copy2 to preserve metadata
+                shutil.copy2(db_path, db_backup)
+                # Also copy WAL and SHM files if they exist
+                wal_path, shm_path = get_sqlite_sidecar_paths(db_path)
+                backup_wal, backup_shm = get_sqlite_sidecar_paths(db_backup)
+                if wal_path.exists():
+                    shutil.copy2(wal_path, backup_wal)
+                if shm_path.exists():
+                    shutil.copy2(shm_path, backup_shm)
 
-        def _create_bundles() -> list[str]:
-            bundles: list[str] = []
-            repo = Repo(repo_path)
-            try:
-                if project_slug:
-                    # Single project bundle
-                    bundle_path = backup_path / f"{project_slug}.bundle"
-                    try:
-                        # Create bundle of the entire repo (includes all history)
-                        repo.git.bundle("create", str(bundle_path), "--all")
-                        bundles.append(str(bundle_path))
-                    except Exception:
-                        pass  # Skip if bundle creation fails
-                else:
-                    # Bundle entire archive
+            await _to_thread(_copy_db)
+            database_copied = db_backup.relative_to(backup_path).as_posix()
+
+        # Create git bundles for projects
+        repo_path = archive_root
+        if has_archive_repo:
+
+            def _create_bundles() -> list[str]:
+                bundles: list[str] = []
+                repo = Repo(repo_path)
+                try:
                     bundle_path = backup_path / "archive.bundle"
                     try:
                         repo.git.bundle("create", str(bundle_path), "--all")
-                        bundles.append(str(bundle_path))
-                    except Exception:
-                        pass
-            finally:
-                repo.close()
+                        bundles.append(bundle_path.relative_to(backup_path).as_posix())
+                    except Exception as exc:
+                        raise RuntimeError(f"Failed to create archive bundle backup for {repo_path}") from exc
+                finally:
+                    repo.close()
 
-            return bundles
+                return bundles
 
-        project_bundles = await _to_thread(_create_bundles)
+            project_bundles = await _to_thread(_create_bundles)
 
-    # Write manifest
-    manifest = BackupManifest(
-        version=1,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        reason=reason,
-        database_path=database_copied,
-        project_bundles=project_bundles,
-        storage_root=str(archive_root),
-        restore_instructions=(
-            "To restore:\n"
-            "1. Stop any running MCP Agent Mail processes\n"
-            "2. Copy database.sqlite3 back to original location\n"
-            "3. Use 'git clone --bare <bundle> <target>' to restore archive\n"
-            "4. Restart MCP Agent Mail"
-        ),
-    )
+        if database_copied is None and not project_bundles:
+            raise ValueError("No database or archive bundle available to back up")
 
-    manifest_path = backup_path / "manifest.json"
+        # Write manifest
+        manifest = BackupManifest(
+            version=1,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            reason=reason,
+            database_path=database_copied,
+            project_bundles=project_bundles,
+            storage_root=str(archive_root),
+            restore_instructions=(
+                "To restore:\n"
+                "1. Stop any running MCP Agent Mail processes\n"
+                "2. Copy database.sqlite3 back to original location\n"
+                "3. Use 'git clone --bare <bundle> <target>' to restore archive\n"
+                "4. Restart MCP Agent Mail"
+            ),
+        )
 
-    def _write_manifest() -> None:
-        with manifest_path.open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "version": manifest.version,
-                    "created_at": manifest.created_at,
-                    "reason": manifest.reason,
-                    "database_path": manifest.database_path,
-                    "project_bundles": manifest.project_bundles,
-                    "storage_root": manifest.storage_root,
-                    "restore_instructions": manifest.restore_instructions,
-                },
-                f,
-                indent=2,
-            )
+        manifest_path = backup_path / "manifest.json"
 
-    await _to_thread(_write_manifest)
+        def _write_manifest() -> None:
+            with manifest_path.open("w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": manifest.version,
+                        "created_at": manifest.created_at,
+                        "reason": manifest.reason,
+                        "database_path": manifest.database_path,
+                        "project_bundles": manifest.project_bundles,
+                        "storage_root": manifest.storage_root,
+                        "restore_instructions": manifest.restore_instructions,
+                    },
+                    f,
+                    indent=2,
+                )
 
-    return backup_path
+        await _to_thread(_write_manifest)
+
+        return backup_path
+    except Exception:
+        await _to_thread(shutil.rmtree, backup_path, ignore_errors=True)
+        raise
 
 
 async def list_backups(settings: Settings) -> list[dict[str, Any]]:
@@ -3095,8 +3232,9 @@ async def list_backups(settings: Settings) -> list[dict[str, Any]]:
     Returns:
         List of backup info dicts with path, created_at, reason, size
     """
-    backup_dir = Path(settings.storage.root).expanduser().resolve() / "backups"
-    if not backup_dir.exists():
+    backup_dir = await _to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+    backup_dir = backup_dir / "backups"
+    if not await _to_thread(_path_exists, backup_dir):
         return []
 
     backups: list[dict[str, Any]] = []
@@ -3109,20 +3247,40 @@ async def list_backups(settings: Settings) -> list[dict[str, Any]]:
                 if manifest_path.exists():
                     try:
                         with manifest_path.open(encoding="utf-8") as f:
-                            manifest_data = json.load(f)
+                            manifest_data = _parse_backup_manifest(json.load(f))
+                        if manifest_data.database_path is not None:
+                            try:
+                                _resolve_backup_file_artifact(entry, manifest_data.database_path)
+                            except FileNotFoundError as exc:
+                                raise ValueError(
+                                    f"Backup database artifact missing: {manifest_data.database_path}"
+                                ) from exc
+                            except IsADirectoryError as exc:
+                                raise ValueError(
+                                    f"Backup database artifact is not a file: {manifest_data.database_path}"
+                                ) from exc
+                        for bundle_ref in manifest_data.project_bundles:
+                            try:
+                                _resolve_backup_file_artifact(entry, bundle_ref)
+                            except FileNotFoundError as exc:
+                                raise ValueError(f"Backup bundle artifact missing: {bundle_ref}") from exc
+                            except IsADirectoryError as exc:
+                                raise ValueError(
+                                    f"Backup bundle artifact is not a file: {bundle_ref}"
+                                ) from exc
                         # Calculate total size
                         total_size = sum(
                             p.stat().st_size for p in entry.rglob("*") if p.is_file()
                         )
                         results.append({
                             "path": str(entry),
-                            "created_at": manifest_data.get("created_at"),
-                            "reason": manifest_data.get("reason"),
+                            "created_at": manifest_data.created_at,
+                            "reason": manifest_data.reason,
                             "size_bytes": total_size,
-                            "has_database": manifest_data.get("database_path") is not None,
-                            "bundle_count": len(manifest_data.get("project_bundles", [])),
+                            "has_database": manifest_data.database_path is not None,
+                            "bundle_count": len(manifest_data.project_bundles),
                         })
-                    except (json.JSONDecodeError, OSError):
+                    except (ValueError, json.JSONDecodeError, OSError):
                         pass
         return results
 
@@ -3133,7 +3291,6 @@ async def list_backups(settings: Settings) -> list[dict[str, Any]]:
 async def restore_from_backup(
     settings: Settings,
     backup_path: Path,
-    target_project: str | None = None,
     *,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -3142,7 +3299,6 @@ async def restore_from_backup(
     Args:
         settings: Application settings
         backup_path: Path to backup directory
-        target_project: Specific project to restore, or None for all
         dry_run: If True, only report what would be restored
 
     Returns:
@@ -3153,19 +3309,19 @@ async def restore_from_backup(
     from .db import get_database_path
 
     manifest_path = backup_path / "manifest.json"
-    if not manifest_path.exists():
+    if not await _to_thread(_path_exists, manifest_path):
         raise ValueError(f"No manifest.json found in {backup_path}")
 
     def _read_manifest() -> dict[str, Any]:
         with manifest_path.open(encoding="utf-8") as f:
             return json.load(f)
 
-    manifest_data = await _to_thread(_read_manifest)
+    manifest = _parse_backup_manifest(await _to_thread(_read_manifest))
 
     results: dict[str, Any] = {
         "backup_path": str(backup_path),
-        "created_at": manifest_data.get("created_at"),
-        "reason": manifest_data.get("reason"),
+        "created_at": manifest.created_at,
+        "reason": manifest.reason,
         "dry_run": dry_run,
         "database_restored": False,
         "bundles_restored": [],
@@ -3173,28 +3329,76 @@ async def restore_from_backup(
     }
 
     if dry_run:
-        results["would_restore_database"] = manifest_data.get("database_path") is not None
-        results["would_restore_bundles"] = manifest_data.get("project_bundles", [])
+        would_restore_database = False
+        if manifest.database_path is not None:
+            try:
+                _resolve_backup_file_artifact(backup_path, manifest.database_path)
+                would_restore_database = True
+            except FileNotFoundError:
+                results["errors"].append(f"Database backup not found: {manifest.database_path}")
+            except IsADirectoryError:
+                results["errors"].append(
+                    f"Database backup artifact is not a file: {manifest.database_path}"
+                )
+        would_restore_bundles: list[str] = []
+        for bundle_ref in manifest.project_bundles:
+            try:
+                _resolve_backup_file_artifact(backup_path, bundle_ref)
+                would_restore_bundles.append(bundle_ref)
+            except FileNotFoundError:
+                results["errors"].append(f"Bundle not found: {bundle_ref}")
+            except IsADirectoryError:
+                results["errors"].append(f"Bundle artifact is not a file: {bundle_ref}")
+        results["would_restore_database"] = would_restore_database
+        results["would_restore_bundles"] = would_restore_bundles
         return results
 
     # Restore database
-    db_backup = backup_path / "database.sqlite3"
-    if db_backup.exists():
+    db_backup: Path | None = None
+    if manifest.database_path:
+        try:
+            db_backup = _resolve_backup_file_artifact(backup_path, manifest.database_path)
+        except FileNotFoundError:
+            results["errors"].append(f"Database backup not found: {manifest.database_path}")
+        except IsADirectoryError:
+            results["errors"].append(
+                f"Database backup artifact is not a file: {manifest.database_path}"
+            )
+
+    if db_backup is not None:
         db_path = get_database_path(settings)
         if db_path:
             try:
 
                 def _restore_db() -> None:
                     # Backup current DB first (safety)
+                    db_path.parent.mkdir(parents=True, exist_ok=True)
+                    wal_target, shm_target = get_sqlite_sidecar_paths(db_path)
+                    pre_restore_db = get_sqlite_pre_restore_path(db_path)
+                    pre_restore_wal, pre_restore_shm = get_sqlite_sidecar_paths(pre_restore_db)
                     if db_path.exists():
-                        shutil.copy2(db_path, db_path.with_suffix(".sqlite3.pre-restore"))
+                        shutil.copy2(db_path, pre_restore_db)
+                    else:
+                        pre_restore_db.unlink(missing_ok=True)
+                    if wal_target.exists():
+                        shutil.copy2(wal_target, pre_restore_wal)
+                    else:
+                        pre_restore_wal.unlink(missing_ok=True)
+                    if shm_target.exists():
+                        shutil.copy2(shm_target, pre_restore_shm)
+                    else:
+                        pre_restore_shm.unlink(missing_ok=True)
                     shutil.copy2(db_backup, db_path)
                     # Also restore WAL and SHM if present in backup
-                    for suffix in ["-wal", "-shm"]:
-                        backup_file = backup_path / f"database.sqlite3{suffix}"
-                        target_file = db_path.with_suffix(f".sqlite3{suffix}")
+                    backup_wal, backup_shm = get_sqlite_sidecar_paths(db_backup)
+                    for backup_file, target_file in (
+                        (backup_wal, wal_target),
+                        (backup_shm, shm_target),
+                    ):
                         if backup_file.exists():
                             shutil.copy2(backup_file, target_file)
+                        else:
+                            target_file.unlink(missing_ok=True)
 
                 await _to_thread(_restore_db)
                 results["database_restored"] = True
@@ -3202,33 +3406,21 @@ async def restore_from_backup(
                 results["errors"].append(f"Database restore failed: {e}")
 
     # Restore git bundles
-    bundles = manifest_data.get("project_bundles", [])
-    archive_root = Path(settings.storage.root).expanduser().resolve()
-
-    def _restore_bundle(bundle_to_restore: Path, target_root: Path) -> None:
-        """Restore a git bundle to target directory."""
-        # Backup current archive
-        if target_root.exists():
-            backup_archive = target_root.with_suffix(".pre-restore")
-            if backup_archive.exists():
-                shutil.rmtree(backup_archive)
-            shutil.copytree(target_root, backup_archive)
-            shutil.rmtree(target_root)
-
-        # Clone from bundle
-        Repo.clone_from(str(bundle_to_restore), str(target_root))
+    bundles = manifest.project_bundles
+    archive_root = await _to_thread(_expanduser_resolve_path, Path(settings.storage.root))
 
     for bundle_path_str in bundles:
-        bundle_path = Path(bundle_path_str)
-        if not bundle_path.exists():
-            # Try relative to backup_path
-            bundle_path = backup_path / bundle_path.name
-        if not bundle_path.exists():
+        try:
+            bundle_path = _resolve_backup_file_artifact(backup_path, bundle_path_str)
+        except FileNotFoundError:
             results["errors"].append(f"Bundle not found: {bundle_path_str}")
+            continue
+        except IsADirectoryError:
+            results["errors"].append(f"Bundle artifact is not a file: {bundle_path_str}")
             continue
 
         try:
-            await _to_thread(_restore_bundle, bundle_path, archive_root)
+            await _to_thread(_restore_bundle_into_archive, bundle_path, archive_root)
             results["bundles_restored"].append(str(bundle_path))
         except Exception as e:
             results["errors"].append(f"Bundle restore failed for {bundle_path}: {e}")
@@ -3285,7 +3477,7 @@ async def emit_notification_signal(
     _SIGNAL_DEBOUNCE[debounce_key] = now_ms
 
     # Build signal file path
-    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signals_dir = await _to_thread(_expanduser_resolve_path, Path(settings.notifications.signals_dir))
     signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
 
     # Prepare signal content
@@ -3336,7 +3528,7 @@ async def clear_notification_signal(
     if not settings.notifications.enabled:
         return False
 
-    signals_dir = Path(settings.notifications.signals_dir).expanduser().resolve()
+    signals_dir = await _to_thread(_expanduser_resolve_path, Path(settings.notifications.signals_dir))
     signal_path = signals_dir / "projects" / project_slug / "agents" / f"{agent_name}.signal"
 
     def _clear_signal() -> bool:

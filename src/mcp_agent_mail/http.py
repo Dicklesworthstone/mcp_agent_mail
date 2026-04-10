@@ -41,6 +41,7 @@ from .app import (
 from .config import Settings, get_settings
 from .db import ensure_schema, get_session
 from .storage import (
+    ProjectArchive,
     archive_write_lock,
     collect_lock_status,
     ensure_archive,
@@ -113,6 +114,150 @@ class _FastMCPHttpApp(Protocol):
 
 class _FastAPILifespan(Protocol):
     def lifespan(self, app: FastAPI) -> Any: ...
+
+
+def _expanduser_resolve_path(path: Path) -> Path:
+    return path.expanduser().resolve()
+
+
+def _path_exists(path: Path) -> bool:
+    return path.exists()
+
+
+def _open_git_repo(repo_root: Path):
+    from git import Repo as GitRepo
+
+    return GitRepo(str(repo_root))
+
+
+async def _open_existing_project_archive(settings: Settings, slug: str) -> ProjectArchive | None:
+    """Open an existing project archive for read-only routes without creating new directories."""
+    repo_root = await asyncio.to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+    if not await asyncio.to_thread(_path_exists, repo_root / ".git"):
+        return None
+    project_root = repo_root / "projects" / slug
+    if not await asyncio.to_thread(_path_exists, project_root):
+        return None
+    repo = await asyncio.to_thread(_open_git_repo, repo_root)
+    return ProjectArchive(
+        settings=settings,
+        slug=slug,
+        root=project_root,
+        repo=repo,
+        lock_path=project_root / ".archive.lock",
+        repo_root=repo_root,
+    )
+
+
+def _collect_retention_quota_report_sync(settings: Settings) -> dict[str, Any]:
+    import datetime as _dt
+    import fnmatch as _fnmatch
+
+    storage_root = _expanduser_resolve_path(Path(settings.storage.root))
+    projects_root = storage_root / "projects"
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(
+        days=int(settings.retention_max_age_days)
+    )
+    old_messages = 0
+    total_attach_bytes = 0
+    per_project_attach: dict[str, int] = {}
+    per_project_inbox_counts: dict[str, int] = {}
+    ignore_patterns = list(getattr(settings, "retention_ignore_project_patterns", []) or [])
+
+    for proj_dir in projects_root.iterdir() if projects_root.exists() else []:
+        if not proj_dir.is_dir():
+            continue
+        proj_name = proj_dir.name
+        if any(_fnmatch.fnmatch(proj_name, pat) for pat in ignore_patterns):
+            continue
+        msg_root = proj_dir / "messages"
+        if msg_root.exists():
+            for ydir in msg_root.iterdir():
+                for mdir in ydir.iterdir() if ydir.is_dir() else []:
+                    for file_path in mdir.iterdir() if mdir.is_dir() else []:
+                        if file_path.suffix.lower() != ".md":
+                            continue
+                        with contextlib.suppress(Exception):
+                            ts = _dt.datetime.fromtimestamp(file_path.stat().st_mtime, _dt.timezone.utc)
+                            if ts < cutoff:
+                                old_messages += 1
+        inbox_root = proj_dir / "agents"
+        if inbox_root.exists():
+            count_inbox = 0
+            for inbox_file in inbox_root.rglob("inbox/*/*/*.md"):
+                with contextlib.suppress(Exception):
+                    if inbox_file.is_file():
+                        count_inbox += 1
+            per_project_inbox_counts[proj_name] = count_inbox
+        att_root = proj_dir / "attachments"
+        if att_root.exists():
+            for attachment_file in att_root.rglob("*.webp"):
+                with contextlib.suppress(Exception):
+                    size_bytes = attachment_file.stat().st_size
+                    total_attach_bytes += size_bytes
+                    per_project_attach[proj_name] = per_project_attach.get(proj_name, 0) + size_bytes
+
+    return {
+        "old_messages": old_messages,
+        "retention_max_age_days": int(settings.retention_max_age_days),
+        "total_attachments_bytes": total_attach_bytes,
+        "quota_limit_bytes": int(settings.quota_attachments_limit_bytes),
+        "per_project_attach": per_project_attach,
+        "per_project_inbox_counts": per_project_inbox_counts,
+    }
+
+
+async def _collect_retention_quota_report(settings: Settings) -> dict[str, Any]:
+    return await asyncio.to_thread(_collect_retention_quota_report_sync, settings)
+
+
+def _collect_archive_guide_stats_sync(settings: Settings) -> dict[str, Any]:
+    import subprocess as _subprocess
+    from itertools import islice
+
+    storage_root = str(_expanduser_resolve_path(Path(settings.storage.root)))
+    repo_root = Path(storage_root)
+    total_commits = "0"
+    project_count = 0
+    repo_size = "0 MB"
+    last_commit_time = "Never"
+
+    if _path_exists(repo_root / ".git"):
+        repo = None
+        try:
+            repo = _open_git_repo(repo_root)
+            commit_count = sum(1 for _ in repo.iter_commits(max_count=10000))
+            total_commits = "10,000+" if commit_count == 10000 else f"{commit_count:,}"
+            last_commit = next(repo.iter_commits(max_count=1), None)
+            last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
+
+            projects_dir = repo_root / "projects"
+            if projects_dir.exists():
+                project_count = sum(1 for p in islice(projects_dir.iterdir(), 100) if p.is_dir())
+
+            try:
+                result = _subprocess.run(
+                    ["du", "-sh", str(repo_root)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0,
+                )
+                repo_size = result.stdout.split()[0] if getattr(result, "returncode", 1) == 0 else "Unknown"
+            except (_subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
+                repo_size = "Unknown"
+        except Exception:
+            pass
+        finally:
+            if repo is not None:
+                repo.close()
+
+    return {
+        "storage_root": storage_root,
+        "total_commits": total_commits,
+        "project_count": project_count,
+        "repo_size": repo_size,
+        "last_commit_time": last_commit_time,
+    }
 
 
 def _decode_jwt_header_segment(token: str) -> dict[str, object] | None:
@@ -284,13 +429,10 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path.startswith("/health/") or request.url.path == "/api/health":
             return await call_next(request)
-        # Allow localhost without Authorization when enabled
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        # Check for localhost bypass (including IPv4-mapped IPv6 addresses)
-        if self._allow_localhost and self._is_localhost(client_host) and not self._has_forwarded_headers(request):
+        if _localhost_bypass_allowed(
+            request,
+            allow_localhost=self._allow_localhost,
+        ):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
         expected_header = f"Bearer {self._token}"
@@ -298,6 +440,19 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if not hmac.compare_digest(auth_header, expected_header):
             return JSONResponse({"detail": "Unauthorized"}, status_code=status.HTTP_401_UNAUTHORIZED)
         return await call_next(request)
+
+
+def _localhost_bypass_allowed(request: Request, *, allow_localhost: bool) -> bool:
+    """Return whether this request qualifies for localhost auth bypass."""
+    if not allow_localhost:
+        return False
+    try:
+        client_host = request.client.host if request.client else ""
+    except Exception:
+        client_host = ""
+    return BearerAuthMiddleware._is_localhost(client_host) and not BearerAuthMiddleware._has_forwarded_headers(
+        request
+    )
 
 
 class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
@@ -522,26 +677,16 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
         else:
             roles = {self._default_role}
             # Elevate localhost to writer when unauthenticated localhost is allowed
-            try:
-                client_host = request.client.host if request.client else ""
-            except Exception:
-                client_host = ""
-            if (
-                bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
-                and client_host in {"127.0.0.1", "::1", "localhost"}
-                and not BearerAuthMiddleware._has_forwarded_headers(request)
+            if _localhost_bypass_allowed(
+                request,
+                allow_localhost=bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)),
             ):
                 roles.add("writer")
 
         # RBAC enforcement (skip for localhost when allowed)
-        try:
-            client_host = request.client.host if request.client else ""
-        except Exception:
-            client_host = ""
-        is_local_ok = (
-            bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False))
-            and client_host in {"127.0.0.1", "::1", "localhost"}
-            and not BearerAuthMiddleware._has_forwarded_headers(request)
+        is_local_ok = _localhost_bypass_allowed(
+            request,
+            allow_localhost=bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)),
         )
         if self._rbac_enabled and not is_local_ok and kind in {"tools", "resources"}:
             is_reader = bool(roles & self._reader_roles)
@@ -869,78 +1014,24 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 await asyncio.sleep(max(5, settings.tool_metrics_emit_interval_seconds))
 
         async def _worker_retention_quota() -> None:
-            import datetime as _dt
-            from pathlib import Path as _Path
-
             while True:
-                from contextlib import suppress as _suppress
-
-                with _suppress(Exception):
-                    storage_root = _Path(settings.storage.root).expanduser().resolve()
-                    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(
-                        days=int(settings.retention_max_age_days)
-                    )
-                    old_messages = 0
-                    total_attach_bytes = 0
-                    per_project_attach: dict[str, int] = {}
-                    per_project_inbox_counts: dict[str, int] = {}
-                    # Compile ignore patterns once per loop
-                    import fnmatch as _fnmatch
-
-                    ignore_patterns = list(getattr(settings, "retention_ignore_project_patterns", []) or [])
-                    for proj_dir in storage_root.iterdir() if storage_root.exists() else []:
-                        if not proj_dir.is_dir():
-                            continue
-                        proj_name = proj_dir.name
-                        # Skip test/demo projects in real server runs
-                        if any(_fnmatch.fnmatch(proj_name, pat) for pat in ignore_patterns):
-                            continue
-                        msg_root = proj_dir / "messages"
-                        if msg_root.exists():
-                            for ydir in msg_root.iterdir():
-                                for mdir in ydir.iterdir() if ydir.is_dir() else []:
-                                    for f in mdir.iterdir() if mdir.is_dir() else []:
-                                        if f.suffix.lower() == ".md":
-                                            with _suppress(Exception):
-                                                ts = _dt.datetime.fromtimestamp(f.stat().st_mtime, _dt.timezone.utc)
-                                                if ts < cutoff:
-                                                    old_messages += 1
-                        # Count per-agent inbox files (agents/*/inbox/YYYY/MM/*.md)
-                        inbox_root = proj_dir / "agents"
-                        if inbox_root.exists():
-                            count_inbox = 0
-                            for f in inbox_root.rglob("inbox/*/*/*.md"):
-                                with _suppress(Exception):
-                                    if f.is_file():
-                                        count_inbox += 1
-                            per_project_inbox_counts[proj_name] = count_inbox
-                        att_root = proj_dir / "attachments"
-                        if att_root.exists():
-                            for sub in att_root.rglob("*.webp"):
-                                with _suppress(Exception):
-                                    sz = sub.stat().st_size
-                                    total_attach_bytes += sz
-                                    per_project_attach[proj_name] = per_project_attach.get(proj_name, 0) + sz
+                with contextlib.suppress(Exception):
+                    report = await _collect_retention_quota_report(settings)
                     structlog.get_logger("maintenance").info(
                         "retention_quota_report",
-                        old_messages=old_messages,
-                        retention_max_age_days=int(settings.retention_max_age_days),
-                        total_attachments_bytes=total_attach_bytes,
-                        quota_limit_bytes=int(settings.quota_attachments_limit_bytes),
-                        per_project_attach=per_project_attach,
-                        per_project_inbox_counts=per_project_inbox_counts,
+                        **report,
                     )
                     # Quota alerts
                     limit_b = int(settings.quota_attachments_limit_bytes)
                     inbox_limit = int(settings.quota_inbox_limit_count)
                     if limit_b > 0:
-                        for proj, used in per_project_attach.items():
+                        for proj, used in report["per_project_attach"].items():
                             if used >= limit_b:
                                 structlog.get_logger("maintenance").warning(
                                     "quota_attachments_exceeded", project=proj, used_bytes=used, limit_bytes=limit_b
                                 )
                     if inbox_limit > 0:
-                        for proj, cnt in per_project_inbox_counts.items():
+                        for proj, cnt in report["per_project_inbox_counts"].items():
                             if cnt >= inbox_limit:
                                 structlog.get_logger("maintenance").warning(
                                     "quota_inbox_exceeded", project=proj, inbox_count=cnt, limit=inbox_limit
@@ -1335,11 +1426,10 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
             scope = dict(request.scope)
-            try:
-                client_host = request.client.host if request.client else ""
-            except Exception:
-                client_host = ""
-            if settings.http.allow_localhost_unauthenticated and client_host in {"127.0.0.1", "::1", "localhost"}:
+            if _localhost_bypass_allowed(
+                request,
+                allow_localhost=bool(settings.http.allow_localhost_unauthenticated),
+            ):
                 scope_headers = list(scope.get("headers") or [])
                 has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
                 if not has_auth and settings.http.bearer_token:
@@ -3552,67 +3642,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         async def archive_guide() -> HTMLResponse:
             """Display the archive access guide and overview."""
             settings = get_settings()
-            storage_root = str(Path(settings.storage.root).expanduser().resolve())
-
-            # Get basic stats
-            from pathlib import Path as P
-
-            from git import Repo as GitRepo
-
-            repo_root = P(storage_root)
-            if (repo_root / ".git").exists():
-                repo = None
-                try:
-                    repo = GitRepo(str(repo_root))
-                    # Use efficient commit counting with limit to prevent DoS
-                    commit_count = sum(1 for _ in repo.iter_commits(max_count=10000))
-                    total_commits = "10,000+" if commit_count == 10000 else f"{commit_count:,}"
-                    last_commit = next(repo.iter_commits(max_count=1), None)
-                    last_commit_time = last_commit.authored_datetime.strftime("%b %d, %Y") if last_commit else "Never"
-
-                    # Count projects (with limit for performance)
-                    projects_dir = repo_root / "projects"
-                    if projects_dir.exists():
-                        # Use islice to avoid loading all dirs into memory
-                        from itertools import islice
-
-                        project_count = sum(1 for p in islice(projects_dir.iterdir(), 100) if p.is_dir())
-                    else:
-                        project_count = 0
-
-                    # Estimate size with timeout (run blocking 'du' in a worker thread)
-                    import asyncio as _asyncio
-                    import subprocess as _subprocess
-                    try:
-                        def _run_du():
-                            return _subprocess.run(
-                                ["du", "-sh", str(repo_root)],
-                                capture_output=True,
-                                text=True,
-                                timeout=5.0,
-                            )
-
-                        result = await _asyncio.to_thread(_run_du)
-                        repo_size = result.stdout.split()[0] if getattr(result, "returncode", 1) == 0 else "Unknown"
-                    except (_subprocess.TimeoutExpired, FileNotFoundError, PermissionError, OSError):
-                        # du not available, took too long, or other OS error
-                        repo_size = "Unknown"
-                    except Exception:
-                        # Catch-all for unexpected errors
-                        repo_size = "Unknown"
-                except Exception:
-                    total_commits = "0"
-                    project_count = 0
-                    repo_size = "0 MB"
-                    last_commit_time = "Never"
-                finally:
-                    if repo is not None:
-                        repo.close()
-            else:
-                total_commits = "0"
-                project_count = 0
-                repo_size = "0 MB"
-                last_commit_time = "Never"
+            guide_stats = await asyncio.to_thread(_collect_archive_guide_stats_sync, settings)
 
             # Get list of projects for picker
             async with get_session() as session:
@@ -3621,11 +3651,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             return await _render(
                 "archive_guide.html",
-                storage_root=storage_root,
-                total_commits=total_commits,
-                project_count=project_count,
-                repo_size=repo_size,
-                last_commit_time=last_commit_time,
+                storage_root=guide_stats["storage_root"],
+                total_commits=guide_stats["total_commits"],
+                project_count=guide_stats["project_count"],
+                repo_size=guide_stats["repo_size"],
+                last_commit_time=guide_stats["last_commit_time"],
                 projects=projects,
             )
 
@@ -3636,36 +3666,30 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             limit = max(1, min(limit, 500))  # Between 1 and 500
 
             settings = get_settings()
-            repo_root = Path(settings.storage.root).expanduser().resolve()
-
-            from git import Repo as GitRepo
-
-            if not (repo_root / ".git").exists():
+            repo_root = await asyncio.to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+            if not await asyncio.to_thread(_path_exists, repo_root / ".git"):
                 return await _render("archive_activity.html", commits=[])
 
             repo = None
             try:
-                repo = GitRepo(str(repo_root))
+                repo = await asyncio.to_thread(_open_git_repo, repo_root)
                 commits = await get_recent_commits(repo, limit=limit)
                 return await _render("archive_activity.html", commits=commits)
             finally:
                 if repo is not None:
-                    repo.close()
+                    await asyncio.to_thread(repo.close)
 
         @fastapi_app.get("/mail/archive/commit/{sha}", response_class=HTMLResponse)
         async def archive_commit(sha: str) -> HTMLResponse:
             """Display detailed commit information with diffs."""
             settings = get_settings()
-            repo_root = Path(settings.storage.root).expanduser().resolve()
-
-            from git import Repo as GitRepo
-
-            if not (repo_root / ".git").exists():
+            repo_root = await asyncio.to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+            if not await asyncio.to_thread(_path_exists, repo_root / ".git"):
                 return await _render("error.html", message="Archive repository not found")
 
             repo = None
             try:
-                repo = GitRepo(str(repo_root))
+                repo = await asyncio.to_thread(_open_git_repo, repo_root)
                 commit = await get_commit_detail(repo, sha)
                 return await _render("archive_commit.html", commit=commit)
             except ValueError:
@@ -3676,7 +3700,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("error.html", message="Commit not found")
             finally:
                 if repo is not None:
-                    repo.close()
+                    await asyncio.to_thread(repo.close)
 
         @fastapi_app.get("/mail/archive/timeline", response_class=HTMLResponse)
         async def archive_timeline(project: str | None = None) -> HTMLResponse:
@@ -3686,11 +3710,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("error.html", message="Invalid project identifier")
 
             settings = get_settings()
-            repo_root = Path(settings.storage.root).expanduser().resolve()
-
-            from git import Repo as GitRepo
-
-            if not (repo_root / ".git").exists():
+            repo_root = await asyncio.to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+            if not await asyncio.to_thread(_path_exists, repo_root / ".git"):
                 return await _render("error.html", message="Archive repository not found")
 
             # Default to first project if not specified
@@ -3715,12 +3736,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             repo = None
             try:
-                repo = GitRepo(str(repo_root))
+                repo = await asyncio.to_thread(_open_git_repo, repo_root)
                 commits = await get_timeline_commits(repo, project, limit=100)
                 return await _render("archive_timeline.html", commits=commits, project=project, project_name=project_name)
             finally:
                 if repo is not None:
-                    repo.close()
+                    await asyncio.to_thread(repo.close)
 
         @fastapi_app.get("/mail/archive/browser", response_class=HTMLResponse)
         async def archive_browser(project: str | None = None, path: str = "") -> HTMLResponse:
@@ -3734,10 +3755,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("error.html", message="Invalid project identifier")
 
             settings = get_settings()
-            archive = await ensure_archive(settings, project)
-            tree = await get_archive_tree(archive, path)
-
-            return await _render("archive_browser.html", tree=tree, project=project, path=path)
+            archive = await _open_existing_project_archive(settings, project)
+            if archive is None:
+                return await _render("error.html", message="Project archive not found")
+            try:
+                tree = await get_archive_tree(archive, path)
+                return await _render("archive_browser.html", tree=tree, project=project, path=path)
+            finally:
+                await asyncio.to_thread(archive.repo.close)
 
         @fastapi_app.get("/mail/archive/browser/{project}/file")
         async def archive_browser_file(project: str, path: str) -> JSONResponse:
@@ -3748,8 +3773,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             try:
                 settings = get_settings()
-                archive = await ensure_archive(settings, project)
-                content = await get_file_content(archive, path)
+                archive = await _open_existing_project_archive(settings, project)
+                if archive is None:
+                    raise HTTPException(status_code=404, detail="Project archive not found")
+                try:
+                    content = await get_file_content(archive, path)
+                finally:
+                    await asyncio.to_thread(archive.repo.close)
 
                 if content is None:
                     raise HTTPException(status_code=404, detail="File not found")
@@ -3769,11 +3799,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return await _render("error.html", message="Invalid project identifier")
 
             settings = get_settings()
-            repo_root = Path(settings.storage.root).expanduser().resolve()
-
-            from git import Repo as GitRepo
-
-            if not (repo_root / ".git").exists():
+            repo_root = await asyncio.to_thread(_expanduser_resolve_path, Path(settings.storage.root))
+            if not await asyncio.to_thread(_path_exists, repo_root / ".git"):
                 return await _render("error.html", message="Archive repository not found")
 
             # Default to first project
@@ -3798,12 +3825,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
             repo = None
             try:
-                repo = GitRepo(str(repo_root))
+                repo = await asyncio.to_thread(_open_git_repo, repo_root)
                 graph = await get_agent_communication_graph(repo, project, limit=200)
                 return await _render("archive_network.html", graph=graph, project=project, project_name=project_name)
             finally:
                 if repo is not None:
-                    repo.close()
+                    await asyncio.to_thread(repo.close)
 
         @fastapi_app.get("/mail/api/projects/{project}/agents")
         async def api_project_agents(project: str) -> JSONResponse:
@@ -3859,12 +3886,22 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             try:
                 # Get project archive
                 settings = get_settings()
-                repo = await ensure_archive(settings, project)
+                repo = await _open_existing_project_archive(settings, project)
+                if repo is None:
+                    return JSONResponse({
+                        "messages": [],
+                        "snapshot_time": None,
+                        "commit_sha": None,
+                        "requested_time": timestamp,
+                        "error": "Project archive not found",
+                    })
 
-                # Get historical snapshot
-                snapshot = await get_historical_inbox_snapshot(repo, agent, timestamp, limit=200)
-
-                return JSONResponse(snapshot)
+                try:
+                    # Get historical snapshot
+                    snapshot = await get_historical_inbox_snapshot(repo, agent, timestamp, limit=200)
+                    return JSONResponse(snapshot)
+                finally:
+                    await asyncio.to_thread(repo.repo.close)
 
             except Exception as e:
                 # Log error but return empty result rather than failing
@@ -3915,9 +3952,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 return True
             return path == base_no_slash or path.startswith(base_no_slash + "/")
 
+        def _should_spa_fallback(path: str) -> bool:
+            if _is_api_path(path):
+                return False
+            return not (path == "/mail" or path.startswith("/mail/"))
+
         @fastapi_app.exception_handler(HTTPException)
         async def spa_fallback(request: Request, exc: HTTPException):
-            if exc.status_code == status.HTTP_404_NOT_FOUND and not _is_api_path(request.url.path):
+            if exc.status_code == status.HTTP_404_NOT_FOUND and _should_spa_fallback(request.url.path):
                 return FileResponse(web_root / "index.html")
             return await http_exception_handler(request, exc)
 
