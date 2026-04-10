@@ -24,7 +24,7 @@ Reference: mcp_agent_mail-njf
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 from fastmcp import Client
@@ -107,9 +107,12 @@ async def get_project_id(human_key: str) -> int | None:
 
 
 def _parse_db_datetime(value):
+    dt = value
     if isinstance(value, str):
-        return datetime.fromisoformat(value)
-    return value
+        dt = datetime.fromisoformat(value)
+    if isinstance(dt, datetime) and dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
 
 
 # ============================================================================

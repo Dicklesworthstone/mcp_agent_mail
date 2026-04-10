@@ -1,13 +1,58 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from sqlalchemy import text
 
 from mcp_agent_mail.app import build_mcp_server
-from mcp_agent_mail.db import get_db_health_status
+from mcp_agent_mail.db import get_db_health_status, get_session
+
+
+async def _expire_contact_link(
+    project_key: str,
+    from_agent: str,
+    to_agent: str,
+    *,
+    target_project_key: str | None = None,
+) -> None:
+    target_key = target_project_key or project_key
+    expired = datetime.now(UTC) - timedelta(minutes=5)
+    expired_db = expired.astimezone(UTC).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S.%f")
+    async with get_session() as session:
+        await session.execute(
+            text(
+                """
+                UPDATE agent_links
+                SET expires_ts = :expired, updated_ts = :expired
+                WHERE a_project_id = (SELECT id FROM projects WHERE human_key = :project_key)
+                  AND a_agent_id = (
+                      SELECT a.id
+                      FROM agents a
+                      JOIN projects p ON p.id = a.project_id
+                      WHERE p.human_key = :project_key AND a.name = :from_agent
+                  )
+                  AND b_project_id = (SELECT id FROM projects WHERE human_key = :target_project_key)
+                  AND b_agent_id = (
+                      SELECT a.id
+                      FROM agents a
+                      JOIN projects p ON p.id = a.project_id
+                      WHERE p.human_key = :target_project_key AND a.name = :to_agent
+                  )
+                """
+            ),
+            {
+                "expired": expired_db,
+                "project_key": project_key,
+                "from_agent": from_agent,
+                "target_project_key": target_key,
+                "to_agent": to_agent,
+            },
+        )
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -573,6 +618,153 @@ async def test_reply_message_enforces_local_contact_policy_for_new_recipient(iso
                 },
             )
         assert "Contact approval required for recipients: PurpleBear" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_expired_local_approved_contact(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/security/send-expired-local"
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        await client.call_tool(
+            "set_contact_policy",
+            {"project_key": project_key, "agent_name": "BlueLake", "policy": "contacts_only"},
+        )
+        await client.call_tool(
+            "request_contact",
+            {"project_key": project_key, "from_agent": "GreenCastle", "to_agent": "BlueLake"},
+        )
+        await client.call_tool(
+            "respond_contact",
+            {"project_key": project_key, "to_agent": "BlueLake", "from_agent": "GreenCastle", "accept": True},
+        )
+        await _expire_contact_link(project_key, "GreenCastle", "BlueLake")
+
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": project_key,
+                    "sender_name": "GreenCastle",
+                    "to": ["BlueLake"],
+                    "subject": "Stale approval",
+                    "body_md": "expired approvals must not authorize delivery",
+                    "auto_contact_if_blocked": False,
+                },
+            )
+        assert "Contact approval required for recipients: BlueLake" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_reply_message_rejects_expired_local_approved_contact(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/security/reply-expired-local"
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        await client.call_tool(
+            "register_agent",
+            {"project_key": project_key, "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        await client.call_tool(
+            "set_contact_policy",
+            {"project_key": project_key, "agent_name": "BlueLake", "policy": "contacts_only"},
+        )
+        await client.call_tool(
+            "request_contact",
+            {"project_key": project_key, "from_agent": "GreenCastle", "to_agent": "BlueLake"},
+        )
+        await client.call_tool(
+            "respond_contact",
+            {"project_key": project_key, "to_agent": "BlueLake", "from_agent": "GreenCastle", "accept": True},
+        )
+        await _expire_contact_link(project_key, "GreenCastle", "BlueLake")
+
+        seed = await client.call_tool(
+            "send_message",
+            {
+                "project_key": project_key,
+                "sender_name": "BlueLake",
+                "to": ["GreenCastle"],
+                "subject": "Seed",
+                "body_md": "start thread before reply check",
+            },
+        )
+        seed_id = (seed.data.get("deliveries") or [])[0]["payload"]["id"]
+
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "reply_message",
+                {
+                    "project_key": project_key,
+                    "message_id": seed_id,
+                    "sender_name": "GreenCastle",
+                    "body_md": "expired approvals must not authorize replies",
+                },
+            )
+        assert "Contact approval required for recipients: BlueLake" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_send_message_rejects_expired_cross_project_approved_contact(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as client:
+        backend_key = "/security/send-expired-backend"
+        ops_key = "/security/send-expired-ops"
+
+        await client.call_tool("ensure_project", {"human_key": backend_key})
+        await client.call_tool("ensure_project", {"human_key": ops_key})
+
+        sender = await client.call_tool(
+            "register_agent",
+            {"project_key": backend_key, "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        receiver = await client.call_tool(
+            "register_agent",
+            {"project_key": ops_key, "program": "codex", "model": "gpt-5", "name": "OpsBot"},
+        )
+
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": backend_key,
+                "requester": "GreenCastle",
+                "target": "OpsBot",
+                "to_project": ops_key,
+                "auto_accept": True,
+                "requester_registration_token": sender.data["registration_token"],
+                "target_registration_token": receiver.data["registration_token"],
+            },
+        )
+        await _expire_contact_link(backend_key, "GreenCastle", "OpsBot", target_project_key=ops_key)
+
+        with pytest.raises(ToolError) as exc_info:
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": backend_key,
+                    "sender_name": "GreenCastle",
+                    "sender_token": sender.data["registration_token"],
+                    "to": [f"OpsBot@{ops_key}"],
+                    "subject": "Expired external approval",
+                    "body_md": "stale external approvals must not route mail",
+                    "auto_contact_if_blocked": False,
+                },
+            )
+        assert "external recipients missing approved contact links: OpsBot @ /security/send-expired-ops" in str(
+            exc_info.value
+        )
 
 
 @pytest.mark.asyncio
