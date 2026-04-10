@@ -30,6 +30,8 @@ from starlette.types import Receive, Scope, Send
 
 from .app import (
     _expire_stale_file_reservations,
+    _format_cross_project_agent_address,
+    _sender_display_name,
     _tool_metrics_snapshot,
     build_mcp_server,
     get_project_sibling_data,
@@ -67,6 +69,39 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
         row = await session.execute(text("SELECT slug FROM projects WHERE id = :pid"), {"pid": pid})
         res = row.fetchone()
         return res[0] if res and res[0] else None
+
+
+def _http_sender_identity(
+    *,
+    message_project_id: int | None,
+    sender_name: str | None,
+    sender_project_id: int | None,
+    sender_project_human_key: str | None,
+    sender_project_slug: str | None,
+) -> tuple[str, dict[str, str]]:
+    canonical_sender = (sender_name or "").strip() or "Unknown"
+    sender_display = _sender_display_name(
+        message_project_id=message_project_id,
+        sender_name=canonical_sender,
+        sender_project_id=sender_project_id,
+        sender_project_slug=sender_project_slug,
+    )
+    metadata: dict[str, str] = {"sender_name": canonical_sender}
+    if (
+        message_project_id is None
+        or sender_project_id is None
+        or sender_project_id == message_project_id
+    ):
+        return sender_display, metadata
+    if sender_project_human_key:
+        metadata["sender_project"] = sender_project_human_key
+    if sender_project_slug:
+        metadata["sender_project_slug"] = sender_project_slug
+        metadata["sender_address"] = _format_cross_project_agent_address(
+            sender_project_slug,
+            canonical_sender,
+        )
+    return sender_display, metadata
 
 
 __all__ = ["build_http_app", "main"]
@@ -1502,7 +1537,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             m.created_ts,
                             m.importance,
                             m.thread_id,
+                            m.project_id AS message_project_id,
                             sender.name AS sender_name,
+                            sender.project_id AS sender_project_id,
+                            sp.human_key AS sender_project_name,
+                            sp.slug AS sender_project_slug,
                             p.slug AS project_slug,
                             p.human_key AS project_name,
                             COALESCE(
@@ -1520,6 +1559,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             ) AS recipients
                         FROM messages m
                         JOIN agents sender ON m.sender_id = sender.id
+                        LEFT JOIN projects sp ON sp.id = sender.project_id
                         JOIN projects p ON m.project_id = p.id
                         ORDER BY m.created_ts DESC
                         LIMIT :limit
@@ -1528,15 +1568,15 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                     rows = await session.execute(query, {"limit": safe_limit})
 
-                    for r in rows.fetchall():
-                        body = r[2] or ""
-                        raw_body_length = r[3]
+                    for r in rows.mappings().all():
+                        body = r["body_md"] or ""
+                        raw_body_length = r["body_length"]
                         body_length = int(raw_body_length) if raw_body_length is not None else len(body)
                         excerpt = body[:150].replace('#', '').replace('*', '').replace('`', '').strip()
                         if body_length > 150:
                             excerpt += "..."
 
-                        created_ts = r[4]
+                        created_ts = r["created_ts"]
                         if isinstance(created_ts, str):
                             created_dt = datetime.fromisoformat(created_ts.replace('Z', '+00:00'))
                         else:
@@ -1565,27 +1605,34 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         else:
                             created_relative = "Just now"
 
-                        messages.append(
-                            {
-                                "id": r[0],
-                                "subject": r[1] or "(No subject)",
-                                "body_md": body,
-                                "body_length": body_length,
-                                "excerpt": excerpt,
-                                "created_ts": str(r[4]),
-                                "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
-                                "created_relative": created_relative,
-                                "importance": r[5] or "normal",
-                                "thread_id": r[6],
-                                "sender": r[7],
-                                "project_slug": r[8],
-                                "project_name": r[9],
-                                "recipients": ", ".join(
-                                    part.strip() for part in (r[10] or "").split(",") if part.strip()
-                                ),
-                                "read": False,
-                            }
+                        sender_display, sender_meta = _http_sender_identity(
+                            message_project_id=r["message_project_id"],
+                            sender_name=r["sender_name"],
+                            sender_project_id=r["sender_project_id"],
+                            sender_project_human_key=r["sender_project_name"],
+                            sender_project_slug=r["sender_project_slug"],
                         )
+                        message_payload = {
+                            "id": r["id"],
+                            "subject": r["subject"] or "(No subject)",
+                            "body_md": body,
+                            "body_length": body_length,
+                            "excerpt": excerpt,
+                            "created_ts": str(r["created_ts"]),
+                            "created_full": created_dt.strftime("%B %d, %Y at %I:%M %p"),
+                            "created_relative": created_relative,
+                            "importance": r["importance"] or "normal",
+                            "thread_id": r["thread_id"],
+                            "sender": sender_display,
+                            "project_slug": r["project_slug"],
+                            "project_name": r["project_name"],
+                            "recipients": ", ".join(
+                                part.strip() for part in (r["recipients"] or "").split(",") if part.strip()
+                            ),
+                            "read": False,
+                        }
+                        message_payload.update(sender_meta)
+                        messages.append(message_payload)
 
                     if include_projects:
                         rows = await session.execute(
@@ -1985,9 +2032,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
                     weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                     fts_sql = (
-                        "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
+                        "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                        "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                        "m.created_ts, m.importance, m.thread_id, "
                         "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 18) AS body_snippet "
-                        "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
+                        "FROM fts_messages "
+                        "JOIN messages m ON m.id = fts_messages.rowid "
+                        "JOIN agents s ON s.id = m.sender_id "
+                        "LEFT JOIN projects sp ON sp.id = s.project_id "
                         "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                         + (
                             "ORDER BY m.created_ts DESC "
@@ -1998,41 +2050,82 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     try:
                         search = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q})
-                        matched_messages = [
-                            {
-                                "id": r[0],
-                                "subject": r[1],
-                                "sender": r[2],
-                                "created": str(r[3]),
-                                "importance": r[4],
-                                "thread_id": r[5],
-                                "snippet": r[6],
-                                "hits": (r[6] or "").count("<mark>"),
+                        matched_messages = []
+                        for r in search.mappings().all():
+                            sender_display, sender_meta = _http_sender_identity(
+                                message_project_id=pid,
+                                sender_name=r["sender_name"],
+                                sender_project_id=r["sender_project_id"],
+                                sender_project_human_key=r["sender_project_name"],
+                                sender_project_slug=r["sender_project_slug"],
+                            )
+                            item = {
+                                "id": r["id"],
+                                "subject": r["subject"],
+                                "sender": sender_display,
+                                "created": str(r["created_ts"]),
+                                "importance": r["importance"],
+                                "thread_id": r["thread_id"],
+                                "snippet": r["body_snippet"],
+                                "hits": (r["body_snippet"] or "").count("<mark>"),
                             }
-                            for r in search.fetchall()
-                        ]
+                            item.update(sender_meta)
+                            matched_messages.append(item)
                     except Exception:
                         # Fallback to LIKE if FTS not available
                         if like_scope == "subject":
-                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = (
+                                "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                                "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                                "m.created_ts, m.importance, m.thread_id "
+                                "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                                "LEFT JOIN projects sp ON sp.id = s.project_id "
+                                f"WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                                "ORDER BY m.created_ts DESC LIMIT 10000"
+                            )
                         elif like_scope == "body":
-                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = (
+                                "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                                "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                                "m.created_ts, m.importance, m.thread_id "
+                                "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                                "LEFT JOIN projects sp ON sp.id = s.project_id "
+                                f"WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                                "ORDER BY m.created_ts DESC LIMIT 10000"
+                            )
                         else:
-                            like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT 10000"
+                            like_sql = (
+                                "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                                "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                                "m.created_ts, m.importance, m.thread_id "
+                                "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                                "LEFT JOIN projects sp ON sp.id = s.project_id "
+                                f"WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                                f"OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') "
+                                "ORDER BY m.created_ts DESC LIMIT 10000"
+                            )
                         search = await session.execute(text(like_sql), {"pid": pid, "pat": like_pat or f"%{_like_escape(q)}%"})
-                        matched_messages = [
-                            {
-                                "id": r[0],
-                                "subject": r[1],
-                                "sender": r[2],
-                                "created": str(r[3]),
-                                "importance": r[4],
-                                "thread_id": r[5],
+                        matched_messages = []
+                        for r in search.mappings().all():
+                            sender_display, sender_meta = _http_sender_identity(
+                                message_project_id=pid,
+                                sender_name=r["sender_name"],
+                                sender_project_id=r["sender_project_id"],
+                                sender_project_human_key=r["sender_project_name"],
+                                sender_project_slug=r["sender_project_slug"],
+                            )
+                            item = {
+                                "id": r["id"],
+                                "subject": r["subject"],
+                                "sender": sender_display,
+                                "created": str(r["created_ts"]),
+                                "importance": r["importance"],
+                                "thread_id": r["thread_id"],
                                 "snippet": "",
                                 "hits": 0,
                             }
-                            for r in search.fetchall()
-                        ]
+                            item.update(sender_meta)
+                            matched_messages.append(item)
             return await _render(
                 "mail_project.html",
                 project={"id": pid, "slug": prow[1], "human_key": prow[2], "archived_at": project_archived_at},
@@ -2155,8 +2248,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         f"""
                     SELECT
                         m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
+                        m.project_id AS message_project_id,
                         p.slug, p.human_key,
                         sender.name as sender_name,
+                        sender.project_id AS sender_project_id,
+                        sp.human_key AS sender_project_name,
+                        sp.slug AS sender_project_slug,
                         COALESCE(
                             (
                                 SELECT GROUP_CONCAT(name, ', ')
@@ -2174,6 +2271,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     FROM messages m
                     JOIN projects p ON p.id = m.project_id
                     JOIN agents sender ON sender.id = m.sender_id
+                    LEFT JOIN projects sp ON sp.id = sender.project_id
                     LEFT JOIN message_recipients mr ON mr.message_id = m.id
                     LEFT JOIN agents recip ON recip.id = mr.agent_id
                     LEFT JOIN messages m2 ON (
@@ -2184,7 +2282,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
                     {where_clause}
                     GROUP BY m.id, m.subject, m.body_md, m.created_ts, m.importance, m.thread_id,
-                             p.slug, p.human_key, sender.name
+                             m.project_id, p.slug, p.human_key, sender.name, sender.project_id, sp.human_key, sp.slug
                     ORDER BY m.created_ts DESC
                     LIMIT :lim
                     """
@@ -2193,22 +2291,29 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 )
 
                 messages = []
-                for r in messages_query.fetchall():
-                    messages.append(
-                        {
-                            "id": int(r[0]),
-                            "subject": r[1],
-                            "body_md": r[2] or "",
-                            "created": str(r[3]),
-                            "importance": r[4] or "normal",
-                            "thread_id": r[5],
-                            "project_slug": r[6],
-                            "project_name": r[7],
-                            "sender": r[8],
-                            "recipients": r[9] or "",
-                            "thread_count": int(r[10] or 0),
-                        }
+                for r in messages_query.mappings().all():
+                    sender_display, sender_meta = _http_sender_identity(
+                        message_project_id=r["message_project_id"],
+                        sender_name=r["sender_name"],
+                        sender_project_id=r["sender_project_id"],
+                        sender_project_human_key=r["sender_project_name"],
+                        sender_project_slug=r["sender_project_slug"],
                     )
+                    item = {
+                        "id": int(r["id"]),
+                        "subject": r["subject"],
+                        "body_md": r["body_md"] or "",
+                        "created": str(r["created_ts"]),
+                        "importance": r["importance"] or "normal",
+                        "thread_id": r["thread_id"],
+                        "project_slug": r["slug"],
+                        "project_name": r["human_key"],
+                        "sender": sender_display,
+                        "recipients": r["recipient_names"] or "",
+                        "thread_count": int(r["thread_count"] or 0),
+                    }
+                    item.update(sender_meta)
+                    messages.append(item)
 
             return await _render(
                 "mail_unified_inbox.html",
@@ -2246,11 +2351,21 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 inbox_rows = await session.execute(
                     text(
                         """
-                    SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id
+                    SELECT
+                        m.id,
+                        m.subject,
+                        s.name AS sender_name,
+                        s.project_id AS sender_project_id,
+                        sp.human_key AS sender_project_name,
+                        sp.slug AS sender_project_slug,
+                        m.created_ts,
+                        m.importance,
+                        m.thread_id
                     FROM messages m
                     JOIN message_recipients mr ON mr.message_id = m.id
                     JOIN agents a ON a.id = mr.agent_id
                     JOIN agents s ON s.id = m.sender_id
+                    LEFT JOIN projects sp ON sp.id = s.project_id
                     WHERE m.project_id = :pid AND a.name = :name
                     ORDER BY m.created_ts DESC
                     LIMIT :lim OFFSET :off
@@ -2258,17 +2373,25 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     ),
                     {"pid": pid, "name": agent, "lim": limit, "off": offset},
                 )
-                items = [
-                    {
-                        "id": r[0],
-                        "subject": r[1],
-                        "sender": r[2],
-                        "created": str(r[3]),
-                        "importance": r[4],
-                        "thread_id": r[5],
+                items = []
+                for r in inbox_rows.mappings().all():
+                    sender_display, sender_meta = _http_sender_identity(
+                        message_project_id=pid,
+                        sender_name=r["sender_name"],
+                        sender_project_id=r["sender_project_id"],
+                        sender_project_human_key=r["sender_project_name"],
+                        sender_project_slug=r["sender_project_slug"],
+                    )
+                    item = {
+                        "id": r["id"],
+                        "subject": r["subject"],
+                        "sender": sender_display,
+                        "created": str(r["created_ts"]),
+                        "importance": r["importance"],
+                        "thread_id": r["thread_id"],
                     }
-                    for r in inbox_rows.fetchall()
-                ]
+                    item.update(sender_meta)
+                    items.append(item)
             return await _render(
                 "mail_inbox.html",
                 project={"slug": prow[1], "human_key": prow[2]},
@@ -2296,11 +2419,27 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 mrow = (
                     await session.execute(
                         text(
-                            "SELECT m.id, m.subject, m.body_md, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.id = :mid"
+                            """
+                            SELECT
+                                m.id,
+                                m.subject,
+                                m.body_md,
+                                s.name AS sender_name,
+                                s.project_id AS sender_project_id,
+                                sp.human_key AS sender_project_name,
+                                sp.slug AS sender_project_slug,
+                                m.created_ts,
+                                m.importance,
+                                m.thread_id
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            LEFT JOIN projects sp ON sp.id = s.project_id
+                            WHERE m.project_id = :pid AND m.id = :mid
+                            """
                         ),
                         {"pid": pid, "mid": mid},
                     )
-                ).fetchone()
+                ).mappings().fetchone()
                 if not mrow:
                     return await _render("error.html", message="Message not found")
                 recs = await session.execute(
@@ -2312,22 +2451,49 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 recipients = [{"name": r[0], "kind": r[1]} for r in recs.fetchall()]
                 # Find thread messages if thread_id is set
                 thread_items: list[dict] = []
-                th = mrow[6]
+                th = mrow["thread_id"]
                 if isinstance(th, str) and th.strip():
                     th_rows = await session.execute(
                         text(
-                            "SELECT m.id, m.subject, s.name, m.created_ts FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.thread_id = :th OR m.id = :id) ORDER BY m.created_ts ASC"
+                            """
+                            SELECT
+                                m.id,
+                                m.subject,
+                                s.name AS sender_name,
+                                s.project_id AS sender_project_id,
+                                sp.human_key AS sender_project_name,
+                                sp.slug AS sender_project_slug,
+                                m.created_ts
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            LEFT JOIN projects sp ON sp.id = s.project_id
+                            WHERE m.project_id = :pid AND (m.thread_id = :th OR m.id = :id)
+                            ORDER BY m.created_ts ASC
+                            """
                         ),
                         {"pid": pid, "th": th, "id": mid},
                     )
-                    thread_items = [
-                        {"id": rr[0], "subject": rr[1], "from": rr[2], "created": str(rr[3])}
-                        for rr in th_rows.fetchall()
-                    ]
+                    thread_items = []
+                    for rr in th_rows.mappings().all():
+                        sender_display, sender_meta = _http_sender_identity(
+                            message_project_id=pid,
+                            sender_name=rr["sender_name"],
+                            sender_project_id=rr["sender_project_id"],
+                            sender_project_human_key=rr["sender_project_name"],
+                            sender_project_slug=rr["sender_project_slug"],
+                        )
+                        item = {
+                            "id": rr["id"],
+                            "subject": rr["subject"],
+                            "from": sender_display,
+                            "created": str(rr["created_ts"]),
+                        }
+                        item.update(sender_meta)
+                        thread_items.append(item)
             # Convert markdown body to HTML for display (server-side render)
             body_html = (
-                markdown2.markdown(mrow[2] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"])
-                if mrow[2]
+                markdown2.markdown(mrow["body_md"] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"])
+                if mrow["body_md"]
                 else ""
             )
             if body_html:
@@ -2342,19 +2508,29 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             except Exception:
                 pass  # Commit SHA is optional
 
+            sender_display, sender_meta = _http_sender_identity(
+                message_project_id=pid,
+                sender_name=mrow["sender_name"],
+                sender_project_id=mrow["sender_project_id"],
+                sender_project_human_key=mrow["sender_project_name"],
+                sender_project_slug=mrow["sender_project_slug"],
+            )
+            message_payload = {
+                "id": mrow["id"],
+                "subject": mrow["subject"],
+                "body_md": mrow["body_md"],
+                "body_html": body_html,
+                "sender": sender_display,
+                "created": str(mrow["created_ts"]),
+                "importance": mrow["importance"],
+                "thread_id": mrow["thread_id"],
+            }
+            message_payload.update(sender_meta)
+
             return await _render(
                 "mail_message.html",
                 project={"slug": prow[1], "human_key": prow[2]},
-                message={
-                    "id": mrow[0],
-                    "subject": mrow[1],
-                    "body_md": mrow[2],
-                    "body_html": body_html,
-                    "sender": mrow[3],
-                    "created": str(mrow[4]),
-                    "importance": mrow[5],
-                    "thread_id": mrow[6],
-                },
+                message=message_payload,
                 recipients=recipients,
                 thread_items=thread_items,
                 commit_sha=commit_sha,
@@ -2752,9 +2928,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     rows = await session.execute(
                         text(
                             """
-                            SELECT m.id, m.subject, m.body_md, s.name, m.created_ts, m.importance, m.thread_id
+                            SELECT
+                                m.id,
+                                m.subject,
+                                m.body_md,
+                                s.name AS sender_name,
+                                s.project_id AS sender_project_id,
+                                sp.human_key AS sender_project_name,
+                                sp.slug AS sender_project_slug,
+                                m.created_ts,
+                                m.importance,
+                                m.thread_id
                             FROM messages m
                             JOIN agents s ON s.id = m.sender_id
+                            LEFT JOIN projects sp ON sp.id = s.project_id
                             WHERE m.project_id = :pid
                             AND (m.thread_id = :tid OR m.id = :tid_int)
                             ORDER BY m.created_ts ASC
@@ -2767,9 +2954,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     rows = await session.execute(
                         text(
                             """
-                            SELECT m.id, m.subject, m.body_md, s.name, m.created_ts, m.importance, m.thread_id
+                            SELECT
+                                m.id,
+                                m.subject,
+                                m.body_md,
+                                s.name AS sender_name,
+                                s.project_id AS sender_project_id,
+                                sp.human_key AS sender_project_name,
+                                sp.slug AS sender_project_slug,
+                                m.created_ts,
+                                m.importance,
+                                m.thread_id
                             FROM messages m
                             JOIN agents s ON s.id = m.sender_id
+                            LEFT JOIN projects sp ON sp.id = s.project_id
                             WHERE m.project_id = :pid
                             AND m.thread_id = :tid
                             ORDER BY m.created_ts ASC
@@ -2779,26 +2977,35 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     )
 
                 messages = []
-                for r in rows.fetchall():
+                for r in rows.mappings().all():
                     # Convert markdown to HTML for each message
                     body_html = ""
-                    if r[2]:  # body_md
+                    if r["body_md"]:
                         body_html = markdown2.markdown(
-                            r[2],
+                            r["body_md"],
                             extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"]
                         )
                         body_html = _html_cleaner.clean(body_html)
 
-                    messages.append({
-                        "id": r[0],
-                        "subject": r[1],
-                        "body_md": r[2],
+                    sender_display, sender_meta = _http_sender_identity(
+                        message_project_id=pid,
+                        sender_name=r["sender_name"],
+                        sender_project_id=r["sender_project_id"],
+                        sender_project_human_key=r["sender_project_name"],
+                        sender_project_slug=r["sender_project_slug"],
+                    )
+                    message = {
+                        "id": r["id"],
+                        "subject": r["subject"],
+                        "body_md": r["body_md"],
                         "body_html": body_html,
-                        "sender": r[3],
-                        "created": str(r[4]),
-                        "importance": r[5],
-                        "thread_id": r[6],
-                    })
+                        "sender": sender_display,
+                        "created": str(r["created_ts"]),
+                        "importance": r["importance"],
+                        "thread_id": r["thread_id"],
+                    }
+                    message.update(sender_meta)
+                    messages.append(message)
 
                 if not messages:
                     return await _render(
@@ -2845,9 +3052,14 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 fts_expr, like_pat, like_scope, tokens = _parse_fts_query(q, scope)
                 weights = (0.0, 3.0, 1.0) if (boost or 0) else (0.0, 1.0, 1.0)
                 fts_sql = (
-                    "SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id, "
+                    "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                    "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                    "m.created_ts, m.importance, m.thread_id, "
                     "snippet(fts_messages, 2, '<mark>', '</mark>', '…', 22) AS body_snippet "
-                    "FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid JOIN agents s ON s.id = m.sender_id "
+                    "FROM fts_messages "
+                    "JOIN messages m ON m.id = fts_messages.rowid "
+                    "JOIN agents s ON s.id = m.sender_id "
+                    "LEFT JOIN projects sp ON sp.id = s.project_id "
                     "WHERE m.project_id = :pid AND fts_messages MATCH :q "
                     + (
                         "ORDER BY m.created_ts DESC "
@@ -2858,42 +3070,83 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 )
                 try:
                     rows = await session.execute(text(fts_sql), {"pid": pid, "q": fts_expr or q, "lim": limit})
-                    results = [
-                        {
-                            "id": r[0],
-                            "subject": r[1],
-                            "from": r[2],
-                            "created": str(r[3]),
-                            "importance": r[4],
-                            "thread_id": r[5],
-                            "snippet": r[6],
-                            "hits": (r[6] or "").count("<mark>"),
+                    results = []
+                    for r in rows.mappings().all():
+                        sender_display, sender_meta = _http_sender_identity(
+                            message_project_id=pid,
+                            sender_name=r["sender_name"],
+                            sender_project_id=r["sender_project_id"],
+                            sender_project_human_key=r["sender_project_name"],
+                            sender_project_slug=r["sender_project_slug"],
+                        )
+                        item = {
+                            "id": r["id"],
+                            "subject": r["subject"],
+                            "from": sender_display,
+                            "created": str(r["created_ts"]),
+                            "importance": r["importance"],
+                            "thread_id": r["thread_id"],
+                            "snippet": r["body_snippet"],
+                            "hits": (r["body_snippet"] or "").count("<mark>"),
                         }
-                        for r in rows.fetchall()
-                    ]
+                        item.update(sender_meta)
+                        results.append(item)
                 except Exception:
                     if like_scope == "subject":
-                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = (
+                            "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                            "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                            "m.created_ts, m.importance, m.thread_id "
+                            "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                            "LEFT JOIN projects sp ON sp.id = s.project_id "
+                            f"WHERE m.project_id = :pid AND m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                            "ORDER BY m.created_ts DESC LIMIT :lim"
+                        )
                     elif like_scope == "body":
-                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = (
+                            "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                            "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                            "m.created_ts, m.importance, m.thread_id "
+                            "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                            "LEFT JOIN projects sp ON sp.id = s.project_id "
+                            f"WHERE m.project_id = :pid AND m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                            "ORDER BY m.created_ts DESC LIMIT :lim"
+                        )
                     else:
-                        like_sql = f"SELECT m.id, m.subject, s.name, m.created_ts, m.importance, m.thread_id FROM messages m JOIN agents s ON s.id = m.sender_id WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') ORDER BY m.created_ts DESC LIMIT :lim"
+                        like_sql = (
+                            "SELECT m.id, m.subject, s.name AS sender_name, s.project_id AS sender_project_id, "
+                            "sp.human_key AS sender_project_name, sp.slug AS sender_project_slug, "
+                            "m.created_ts, m.importance, m.thread_id "
+                            "FROM messages m JOIN agents s ON s.id = m.sender_id "
+                            "LEFT JOIN projects sp ON sp.id = s.project_id "
+                            f"WHERE m.project_id = :pid AND (m.subject LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}' "
+                            f"OR m.body_md LIKE :pat ESCAPE '{_LIKE_ESCAPE_CHAR}') "
+                            "ORDER BY m.created_ts DESC LIMIT :lim"
+                        )
                     rows = await session.execute(
                         text(like_sql), {"pid": pid, "pat": like_pat or f"%{_like_escape(q)}%", "lim": limit}
                     )
-                    results = [
-                        {
-                            "id": r[0],
-                            "subject": r[1],
-                            "from": r[2],
-                            "created": str(r[3]),
-                            "importance": r[4],
-                            "thread_id": r[5],
+                    results = []
+                    for r in rows.mappings().all():
+                        sender_display, sender_meta = _http_sender_identity(
+                            message_project_id=pid,
+                            sender_name=r["sender_name"],
+                            sender_project_id=r["sender_project_id"],
+                            sender_project_human_key=r["sender_project_name"],
+                            sender_project_slug=r["sender_project_slug"],
+                        )
+                        item = {
+                            "id": r["id"],
+                            "subject": r["subject"],
+                            "from": sender_display,
+                            "created": str(r["created_ts"]),
+                            "importance": r["importance"],
+                            "thread_id": r["thread_id"],
                             "snippet": "",
                             "hits": 0,
                         }
-                        for r in rows.fetchall()
-                    ]
+                        item.update(sender_meta)
+                        results.append(item)
             return await _render(
                 "mail_search.html",
                 project={"slug": prow[1], "human_key": prow[2]},

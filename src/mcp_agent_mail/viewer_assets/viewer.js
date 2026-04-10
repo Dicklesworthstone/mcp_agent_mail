@@ -888,7 +888,11 @@ function viewerController() {
           mv.body_length,
           mv.latest_snippet,
           mv.recipients,
-          mv.sender_name AS sender,
+          COALESCE(mv.sender_display, mv.sender_name) AS sender,
+          mv.sender_name,
+          mv.sender_project_slug,
+          mv.sender_project_name,
+          mv.sender_address,
           COALESCE(p.slug, 'unknown') AS project_slug,
           COALESCE(p.human_key, 'Unknown Project') AS project_name
         FROM message_overview_mv mv
@@ -1222,7 +1226,11 @@ function viewerController() {
           COALESCE(ov.latest_snippet, '') AS latest_snippet,
           COALESCE(ov.attachment_count, 0) AS attachment_count,
           COALESCE(ov.recipients, '') AS recipients,
-          COALESCE(a.name, 'Unknown') AS sender
+          COALESCE(ov.sender_display, a.name, 'Unknown') AS sender,
+          ov.sender_name,
+          ov.sender_project_slug,
+          ov.sender_project_name,
+          ov.sender_address
         FROM messages m
         LEFT JOIN agents a ON a.id = m.sender_id
         LEFT JOIN message_overview_mv ov ON ov.id = m.id

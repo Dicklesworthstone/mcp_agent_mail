@@ -1364,6 +1364,9 @@ def test_build_materialized_views(tmp_path: Path) -> None:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM message_overview_mv WHERE id = 1").fetchone()
         assert row["sender_name"] == "AgentAlice"
+        assert row["sender_display"] == "AgentAlice"
+        assert row["sender_project_slug"] is None
+        assert row["sender_address"] is None
         assert row["subject"] == "Test Message 1"
         assert row["importance"] == "high"
         assert row["attachment_count"] == 1
@@ -1411,5 +1414,148 @@ def test_build_materialized_views(tmp_path: Path) -> None:
             """
         ).fetchall()
         assert len(attach_indexes) >= 3, f"Expected at least 3 attachment indexes, got {len(attach_indexes)}"
+    finally:
+        conn.close()
+
+
+def test_build_materialized_views_preserves_external_sender_origin(tmp_path: Path) -> None:
+    snapshot = tmp_path / "cross_project_sender.sqlite3"
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                name TEXT,
+                contact_policy TEXT DEFAULT 'auto'
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                sender_id INTEGER,
+                thread_id TEXT,
+                subject TEXT,
+                body_md TEXT,
+                importance TEXT,
+                ack_required INTEGER,
+                created_ts TEXT,
+                attachments TEXT
+            );
+            CREATE TABLE message_recipients (
+                message_id INTEGER,
+                agent_id INTEGER,
+                kind TEXT,
+                read_ts TEXT,
+                ack_ts TEXT
+            );
+            """
+        )
+        conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (1, 'target', '/repo/target')")
+        conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (2, 'source', '/repo/source')")
+        conn.execute("INSERT INTO agents (id, project_id, name) VALUES (1, 1, 'BlueLake')")
+        conn.execute("INSERT INTO agents (id, project_id, name) VALUES (2, 2, 'BlueLake')")
+        conn.execute(
+            """
+            INSERT INTO messages (id, project_id, sender_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (1, 1, 2, 'cross-thread', 'Cross Project', 'Body', 'high', 0, '2025-01-01T00:00:00Z', '[]')
+            """
+        )
+        conn.execute(
+            "INSERT INTO message_recipients (message_id, agent_id, kind, read_ts, ack_ts) VALUES (1, 1, 'to', NULL, NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_build_materialized_views_supports_legacy_fts_without_sender_id(tmp_path: Path) -> None:
+    snapshot = tmp_path / "legacy_fts.sqlite3"
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT, human_key TEXT);
+            CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                name TEXT,
+                contact_policy TEXT DEFAULT 'auto'
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER,
+                thread_id TEXT,
+                subject TEXT,
+                body_md TEXT,
+                importance TEXT,
+                ack_required INTEGER,
+                created_ts TEXT,
+                attachments TEXT
+            );
+            CREATE TABLE message_recipients (
+                message_id INTEGER,
+                agent_id INTEGER,
+                kind TEXT,
+                read_ts TEXT,
+                ack_ts TEXT
+            );
+            CREATE VIRTUAL TABLE fts_messages USING fts5(subject, body_md);
+            """
+        )
+        conn.execute("INSERT INTO projects (id, slug, human_key) VALUES (1, 'legacy', '/repo/legacy')")
+        conn.execute("INSERT INTO agents (id, project_id, name) VALUES (1, 1, 'BlueLake')")
+        conn.execute(
+            """
+            INSERT INTO messages (id, project_id, thread_id, subject, body_md, importance, ack_required, created_ts, attachments)
+            VALUES (1, 1, 'legacy-thread', 'Legacy', 'Legacy body', 'normal', 0, '2025-01-01T00:00:00Z', '[]')
+            """
+        )
+        conn.execute("INSERT INTO fts_messages (subject, body_md) VALUES ('Legacy', 'Legacy body')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    build_materialized_views(snapshot)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT sender_name, sender_display, sender_project_slug, sender_address
+            FROM fts_search_overview_mv
+            WHERE id = 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["sender_name"] == ""
+        assert row["sender_display"] == ""
+        assert row["sender_project_slug"] is None
+        assert row["sender_address"] is None
+    finally:
+        conn.close()
+
+    build_materialized_views(snapshot)
+
+    conn = sqlite3.connect(snapshot)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT sender_name, sender_display, sender_project_id, sender_project_slug,
+                   sender_project_name, sender_address
+            FROM message_overview_mv
+            WHERE id = 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["sender_name"] == "BlueLake"
+        assert row["sender_display"] == "BlueLake@source"
+        assert row["sender_project_id"] == 2
+        assert row["sender_project_slug"] == "source"
+        assert row["sender_project_name"] == "/repo/source"
+        assert row["sender_address"] == "project:source#BlueLake"
     finally:
         conn.close()
