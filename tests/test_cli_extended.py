@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.db import ensure_schema, get_session
-from mcp_agent_mail.models import Agent, Project
+from mcp_agent_mail.models import Agent, Message, MessageRecipient, Product, ProductProjectLink, Project
 
 
 def _seed_backend() -> None:
@@ -21,6 +21,65 @@ def _seed_backend() -> None:
             assert p.id is not None
             session.add(Agent(project_id=p.id, name="Blue", program="x", model="y", task_description=""))
             await session.commit()
+    asyncio.run(_seed())
+
+
+def _seed_product_cross_project_sender() -> None:
+    async def _seed() -> None:
+        await ensure_schema()
+        async with get_session() as session:
+            source = Project(slug="source", human_key="Source")
+            target = Project(slug="target", human_key="Target")
+            session.add(source)
+            session.add(target)
+            await session.commit()
+            await session.refresh(source)
+            await session.refresh(target)
+            assert source.id is not None
+            assert target.id is not None
+
+            product = Product(product_uid="suite", name="Suite")
+            session.add(product)
+            await session.commit()
+            await session.refresh(product)
+            assert product.id is not None
+
+            session.add(ProductProjectLink(product_id=product.id, project_id=source.id))
+            session.add(ProductProjectLink(product_id=product.id, project_id=target.id))
+
+            source_sender = Agent(project_id=source.id, name="BlueLake", program="x", model="y", task_description="")
+            target_recipient = Agent(project_id=target.id, name="BlueLake", program="x", model="y", task_description="")
+            session.add(source_sender)
+            session.add(target_recipient)
+            await session.commit()
+            await session.refresh(source_sender)
+            await session.refresh(target_recipient)
+            assert source_sender.id is not None
+            assert target_recipient.id is not None
+
+            message = Message(
+                project_id=target.id,
+                sender_id=source_sender.id,
+                thread_id="cross-thread",
+                subject="Cross Project CLI",
+                body_md="Cross project body",
+                importance="high",
+                ack_required=False,
+            )
+            session.add(message)
+            await session.commit()
+            await session.refresh(message)
+            assert message.id is not None
+
+            session.add(
+                MessageRecipient(
+                    message_id=message.id,
+                    agent_id=target_recipient.id,
+                    kind="to",
+                )
+            )
+            await session.commit()
+
     asyncio.run(_seed())
 
 
@@ -83,4 +142,24 @@ def test_cli_list_projects_and_serve_http_overrides(isolated_env, monkeypatch):
     assert calls.get("host") == "0.0.0.0"
     assert calls.get("port") == 9999
 
+
+def test_cli_products_search_disambiguates_cross_project_sender(isolated_env):
+    _seed_product_cross_project_sender()
+    runner = CliRunner()
+    res = runner.invoke(app, ["products", "search", "Suite", "Cross"])
+    assert res.exit_code == 0
+    assert "BlueLake@source" in res.stdout
+
+
+def test_cli_products_inbox_fallback_disambiguates_cross_project_sender(isolated_env, monkeypatch):
+    _seed_product_cross_project_sender()
+    runner = CliRunner()
+
+    def fake_post(self, *args, **kwargs):
+        raise RuntimeError("server unavailable")
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    res = runner.invoke(app, ["products", "inbox", "Suite", "BlueLake", "--limit", "5"])
+    assert res.exit_code == 0
+    assert "BlueLake@source" in res.stdout
 
