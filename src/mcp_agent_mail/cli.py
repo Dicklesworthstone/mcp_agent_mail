@@ -44,7 +44,14 @@ from sqlalchemy import (
 from sqlalchemy.engine import make_url
 from sqlalchemy.sql import ColumnElement
 
-from .app import _sanitize_fts_query, _sender_display_name, build_mcp_server
+from .app import (
+    _LIKE_ESCAPE_CHAR,
+    _extract_like_terms,
+    _like_escape,
+    _sanitize_fts_query,
+    _sender_display_name,
+    build_mcp_server,
+)
 from .config import get_settings
 from .db import ensure_schema, get_session, reset_database_state
 from .guard import install_guard as install_guard_script, uninstall_guard as uninstall_guard_script
@@ -503,6 +510,7 @@ def products_search(
             proj_ids = [int(r[0]) for r in rows.fetchall()]
             if not proj_ids:
                 return []
+            rows: list[dict[str, Any]] = []
             try:
                 result = await session.execute(
                     text(
@@ -522,7 +530,6 @@ def products_search(
                     ).bindparams(bindparam("proj_ids", expanding=True)),
                     {"proj_ids": proj_ids, "query": sanitized_query, "limit": limit},
                 )
-                rows = []
                 for row in result.mappings().all():
                     item = dict(row)
                     item["sender_display"] = _cli_sender_display(
@@ -534,8 +541,45 @@ def products_search(
                     rows.append(item)
                 return rows
             except Exception:
-                # FTS query failed - return empty results
-                return []
+                fallback_terms = _extract_like_terms(query)
+                if not fallback_terms:
+                    return []
+                clauses: list[str] = []
+                params: dict[str, Any] = {"proj_ids": proj_ids, "limit": limit}
+                for idx, term in enumerate(fallback_terms):
+                    key = f"t{idx}"
+                    params[key] = f"%{_like_escape(term)}%"
+                    clauses.append(
+                        f"(m.subject LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}' OR m.body_md LIKE :{key} ESCAPE '{_LIKE_ESCAPE_CHAR}')"
+                    )
+                where_clause = " AND ".join(clauses)
+                result = await session.execute(
+                    text(
+                        f"""
+                        SELECT m.id, m.subject, m.body_md, m.importance, m.ack_required, m.created_ts,
+                               m.thread_id, m.project_id,
+                               a.name AS sender_name, a.project_id AS sender_project_id,
+                               sp.slug AS sender_project_slug
+                        FROM messages m
+                        JOIN agents a ON m.sender_id = a.id
+                        LEFT JOIN projects sp ON sp.id = a.project_id
+                        WHERE m.project_id IN :proj_ids AND {where_clause}
+                        ORDER BY m.created_ts DESC
+                        LIMIT :limit
+                        """
+                    ).bindparams(bindparam("proj_ids", expanding=True)),
+                    params,
+                )
+                for row in result.mappings().all():
+                    item = dict(row)
+                    item["sender_display"] = _cli_sender_display(
+                        message_project_id=item.get("project_id"),
+                        sender_name=item.get("sender_name"),
+                        sender_project_id=item.get("sender_project_id"),
+                        sender_project_slug=item.get("sender_project_slug"),
+                    )
+                    rows.append(item)
+                return rows
     rows = _run_async(_run())
     if not rows:
         console.print("[yellow]No results.[/]")

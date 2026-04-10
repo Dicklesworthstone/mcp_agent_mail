@@ -159,6 +159,25 @@ def test_cli_products_search_disambiguates_cross_project_sender(isolated_env):
     assert "BlueLake@source" in res.stdout
 
 
+def test_cli_products_search_falls_back_when_fts_query_fails(isolated_env, monkeypatch):
+    _seed_product_cross_project_sender()
+    runner = CliRunner()
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    original_execute = AsyncSession.execute
+
+    async def flaky_execute(self, statement, *args, **kwargs):
+        if "fts_messages" in str(statement):
+            raise RuntimeError("fts unavailable")
+        return await original_execute(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", flaky_execute)
+    res = runner.invoke(app, ["products", "search", "Suite", "Cross"])
+    assert res.exit_code == 0
+    assert "BlueLake@source" in res.stdout
+
+
 def test_cli_products_inbox_fallback_disambiguates_cross_project_sender(isolated_env, monkeypatch):
     _seed_product_cross_project_sender()
     runner = CliRunner()
