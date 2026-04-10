@@ -1819,7 +1819,7 @@ sequenceDiagram
 - Gate: `WORKTREES_ENABLED=1` or `GIT_IDENTITY_ENABLED=1` enables git-based identity features. Default off.
 - Identity modes (default `dir`): `dir`, `git-remote`, `git-toplevel`, `git-common-dir`.
 - Inspect identity for a path:
-  - Resource (MCP): `resource://identity/{/abs/path}` (available when `WORKTREES_ENABLED=1`)
+  - Resource (MCP): `resource://identity/%2Fabs%2Fpath` (absolute paths must be URL-encoded inside the resource segment)
   - CLI (diagnostics): `mcp-agent-mail mail status /abs/path`
 
 - Precedence (when gate is on):
@@ -1874,6 +1874,7 @@ Consolidate legacy per-worktree projects into a canonical one (safe, explicit, a
   - Example: `mcp-agent-mail amctl env --path . --agent AliceDev`
 - `am-run` wraps a command with those keys set:
   - Example: `mcp-agent-mail am-run frontend-build -- npm run dev`
+  - Auth: when talking to the HTTP server, `am-run` now auto-loads the local agent `registration_token` from the database when possible. You can also pass `--registration-token` or set `AGENT_MAIL_REGISTRATION_TOKEN`.
 
 - Build slots (advisory, per-project coarse locking):
   - Flags:
@@ -1902,11 +1903,13 @@ Group multiple repositories (e.g., frontend, backend, infra) under a single prod
 - Inspect product and linked projects:
   - `mcp-agent-mail products status MyProduct`
 - Product‑wide message search (FTS):
-  - `mcp-agent-mail products search MyProduct "urgent AND deploy" --limit 50`
+  - `mcp-agent-mail products search MyProduct "urgent AND deploy" --agent Alice --registration-token "$AGENT_MAIL_REGISTRATION_TOKEN" --limit 50`
 - Product‑wide inbox:
-  - `mcp-agent-mail products inbox MyProduct Alice --limit 50 --urgent-only --include-bodies --since-ts "2025-11-01T00:00:00Z"`
+  - `mcp-agent-mail products inbox MyProduct Alice --registration-token "$AGENT_MAIL_REGISTRATION_TOKEN" --limit 50 --urgent-only --include-bodies --since-ts "2025-11-01T00:00:00Z"`
 - Product‑wide thread summarization:
-  - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --per-thread-limit 100 --no-llm`
+  - `mcp-agent-mail products summarize-thread MyProduct "bd-123" --agent Alice --registration-token "$AGENT_MAIL_REGISTRATION_TOKEN" --per-thread-limit 100 --no-llm`
+- Auth note:
+  - Product-wide search, inbox, and thread summarization now require an authenticated agent identity. These commands accept `--registration-token` / `AGENT_MAIL_REGISTRATION_TOKEN` and will auto-use a single unambiguous locally stored token when that is possible.
 
 ## Containers
 
@@ -2304,7 +2307,7 @@ Output format (all tools/resources):
 Output format (resources):
 - Append `?format=toon` to any resource URI to receive `{format:"toon", data:"<TOON>", meta:{...}}`.
 - All resources declare `format` as an optional query parameter (FastMCP templates accept it).
-- For resources without path params (e.g., `resource://projects`), include `?format=json` or `?format=toon`.
+- For resources without variable path params (e.g., `resource://tooling/projects`), include `?format=json` or `?format=toon`.
 - Defaults to JSON unless `MCP_AGENT_MAIL_OUTPUT_FORMAT` or `TOON_DEFAULT_FORMAT` is set.
 
 | URI | Params | Returns | Notes |
@@ -2316,7 +2319,7 @@ Output format (resources):
 | `resource://tooling/locks{?format}` | — | `{locks[], summary}` | Active locks and owners (debug only). Categories: `archive` (per-project `.archive.lock`) and `custom` (e.g., repo `.commit.lock`). |
 | `resource://tooling/capabilities/{agent}{?project}` | listed| `{generated_at, agent, project, capabilities[]}` | Capabilities assigned to the agent (see `deploy/capabilities/agent_capabilities.json`) |
 | `resource://tooling/recent/{window_seconds}{?agent,project}` | listed | `{generated_at, window_seconds, count, entries[]}` | Recent tool usage filtered by agent/project |
-| `resource://projects{?format}` | — | `list[project]` | All projects |
+| `resource://tooling/projects{?format}` | — | `list[project]` | All projects |
 | `resource://project/{slug}` | `slug` | `{project..., agents[]}` | Project detail + agents |
 | `resource://file_reservations/{slug}{?active_only}` | `slug`, `active_only?` | `list[file reservation]` | File reservations plus staleness metadata (heuristics, last activity timestamps) |
 | `resource://message/{id}{?project,agent,agent_token}` | `id`, `project`, `agent?`, `agent_token?` | `message` | Single message with body; provide agent auth unless this MCP session already authenticated for the project |
