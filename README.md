@@ -1737,9 +1737,10 @@ Use `set_contact_policy(project_key, agent_name, policy)` to update.
 
 - `request_contact(project_key, from_agent, to_agent, reason?, ttl_seconds?, registration_token?)` creates or refreshes a pending link and sends a small ack_required "intro" message to the recipient.
 - `respond_contact(project_key, to_agent, from_agent, accept, ttl_seconds?, registration_token?)` approves or denies; approval grants messaging until expiry.
-- `list_contacts(project_key, agent_name)` surfaces current links.
+- `list_contacts(project_key, agent_name)` surfaces outbound links with target projects and audit flags for expiry/messageability.
 
 Auth note: these tools require either an agent already authenticated in the current MCP session, or the relevant `registration_token`. `send_message(..., auto_contact_if_blocked=true)` now creates pending contact requests by default; it only auto-approves when both agents are already authenticated in the same MCP session.
+`macro_contact_handshake(..., auto_accept=true)` follows the same rule for new approvals: it only auto-approves when the target agent is already authenticated in the current MCP session or when `target_registration_token` is supplied explicitly. If the link is already approved, the macro reuses that approval. Otherwise the request remains pending and the macro reports a `response_error`.
 
 ### Auto-allow heuristics (no explicit request required)
 
@@ -2284,7 +2285,7 @@ Output format (all tools/resources):
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str, sender_token?: str)` | `{thread_id, reply_to, deliveries: list, count: int, attachments?}` | Preserves/creates thread, inherits flags |
 | `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int, registration_token?: str)` | Contact link dict | Request permission to message another agent |
 | `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int, registration_token?: str)` | Contact link dict | Approve or deny a contact request |
-| `list_contacts` | `list_contacts(project_key: str, agent_name: str, registration_token?: str)` | `list[dict]` | List contact links for an agent |
+| `list_contacts` | `list_contacts(project_key: str, agent_name: str, registration_token?: str)` | `list[dict]` | List outbound contact links with target-project and expiry audit metadata |
 | `set_contact_policy` | `set_contact_policy(project_key: str, agent_name: str, policy: str, registration_token?: str)` | Agent dict | Set policy: `open`, `auto`, `contacts_only`, `block_all` |
 | `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str, registration_token?: str)` | `list[dict]` | Non-mutating inbox read |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int, registration_token?: str)` | `{message_id, read, read_at}` | Per-recipient read receipt |

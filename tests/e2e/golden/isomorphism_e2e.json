@@ -55,17 +55,23 @@
     },
     "list_contacts": [
       {
+        "allows_messaging": false,
         "expires_ts": "2025-01-01T00:15:51+00:00",
+        "is_expired": false,
         "reason": "deny-case",
         "status": "blocked",
         "to": "JadePond",
+        "to_project": "/beta",
         "updated_ts": "2025-01-01T00:15:01+00:00"
       },
       {
+        "allows_messaging": true,
         "expires_ts": "2025-01-01T00:15:52+00:00",
+        "is_expired": false,
         "reason": "e2e",
         "status": "approved",
         "to": "PurpleBear",
+        "to_project": "/beta",
         "updated_ts": "2025-01-01T00:15:02+00:00"
       }
     ],

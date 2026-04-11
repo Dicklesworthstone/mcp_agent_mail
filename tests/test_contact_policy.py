@@ -333,6 +333,144 @@ async def test_macro_contact_handshake_cross_project_welcome(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_macro_contact_handshake_auto_accept_requires_target_auth(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/backend"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "Backend", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+    async with Client(server) as requester_client:
+        res = await requester_client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": "Backend",
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "auto_accept": True,
+                "welcome_subject": "Welcome",
+                "welcome_body": "this should not send yet",
+                "requester_registration_token": green_token,
+            },
+        )
+
+        assert res.data["request"]["status"] == "pending"
+        assert not res.data["response"]
+        response_error = res.data["response_error"]
+        assert response_error["type"] == "AUTHENTICATION_REQUIRED"
+        assert response_error["token_param"] == "target_registration_token"
+        assert not res.data["welcome_message"]
+        welcome_error = res.data["welcome_error"]
+        assert welcome_error["type"] == "CONTACT_APPROVAL_REQUIRED"
+
+        contacts = await requester_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": "Backend",
+                "agent_name": "GreenCastle",
+                "registration_token": green_token,
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        pending = next(item for item in contact_items if item["to"] == "BlueLake")
+        assert pending["status"] == "pending"
+        assert not pending["allows_messaging"]
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        subjects = {item["subject"] for item in messages}
+        assert "Contact request from GreenCastle" in subjects
+        assert "Welcome" not in subjects
+
+
+@pytest.mark.asyncio
+async def test_macro_contact_handshake_reuses_existing_approval_without_target_auth(isolated_env):
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": "/backend-reuse-approved"})
+        green = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/backend-reuse-approved", "program": "codex", "model": "gpt-5", "name": "GreenCastle"},
+        )
+        blue = await bootstrap_client.call_tool(
+            "register_agent",
+            {"project_key": "/backend-reuse-approved", "program": "codex", "model": "gpt-5", "name": "BlueLake"},
+        )
+        green_token = green.data["registration_token"]
+        blue_token = blue.data["registration_token"]
+
+        await bootstrap_client.call_tool(
+            "request_contact",
+            {
+                "project_key": "/backend-reuse-approved",
+                "from_agent": "GreenCastle",
+                "to_agent": "BlueLake",
+                "registration_token": green_token,
+            },
+        )
+        await bootstrap_client.call_tool(
+            "respond_contact",
+            {
+                "project_key": "/backend-reuse-approved",
+                "to_agent": "BlueLake",
+                "from_agent": "GreenCastle",
+                "accept": True,
+                "registration_token": blue_token,
+            },
+        )
+
+    async with Client(server) as requester_client:
+        res = await requester_client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": "/backend-reuse-approved",
+                "requester": "GreenCastle",
+                "target": "BlueLake",
+                "auto_accept": True,
+                "welcome_subject": "Welcome back",
+                "welcome_body": "existing approval should be enough",
+                "requester_registration_token": green_token,
+            },
+        )
+
+        assert res.data["request"]["status"] == "approved"
+        assert res.data["response"]["status"] == "approved"
+        assert "response_error" not in res.data
+        welcome = res.data["welcome_message"] or {}
+        assert welcome.get("deliveries")
+
+    async with Client(server) as recipient_client:
+        inbox = await recipient_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/backend-reuse-approved",
+                "agent_name": "BlueLake",
+                "registration_token": blue_token,
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert any(item["subject"] == "Welcome back" for item in messages)
+
+
+@pytest.mark.asyncio
 async def test_macro_contact_handshake_registers_missing_target(isolated_env):
     backend = "/data/projects/backend"
     frontend = "/data/projects/frontend"

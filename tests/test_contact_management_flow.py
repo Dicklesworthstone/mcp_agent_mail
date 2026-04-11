@@ -195,12 +195,24 @@ def get_inbox_items(result) -> list[dict]:
 
 def get_contacts_list(result) -> list[dict]:
     """Extract contacts list from list_contacts result."""
+    if hasattr(result, "structured_content") and result.structured_content:
+        sc = result.structured_content
+        if isinstance(sc, dict) and "result" in sc and isinstance(sc["result"], list):
+            return [item for item in sc["result"] if isinstance(item, dict)]
     if hasattr(result, "data"):
         data = result.data
         if isinstance(data, dict):
             return data.get("contacts", [])
         if isinstance(data, list):
-            return data
+            items: list[dict] = []
+            for item in data:
+                if isinstance(item, dict):
+                    items.append(item)
+                elif hasattr(item, "model_dump"):
+                    items.append(item.model_dump())
+                elif hasattr(item, "__dict__") and item.__dict__:
+                    items.append(item.__dict__)
+            return items
     return []
 
 
@@ -1102,8 +1114,8 @@ async def test_list_contacts_shows_links(isolated_env):
         contact = next(item for item in contacts_a_list if item["to"] == agent_b)
         assert contact["to_project"] == project_key
         assert contact["status"] == "approved"
-        assert contact["is_expired"] is False
-        assert contact["allows_messaging"] is True
+        assert not contact["is_expired"]
+        assert contact["allows_messaging"]
 
 
 @pytest.mark.asyncio
@@ -1144,8 +1156,8 @@ async def test_list_contacts_marks_expired_approval_not_messageable(isolated_env
         contact_items = get_contacts_list(contacts)
         contact = next(item for item in contact_items if item["to"] == agent_b)
         assert contact["status"] == "approved"
-        assert contact["is_expired"] is True
-        assert contact["allows_messaging"] is False
+        assert contact["is_expired"]
+        assert not contact["allows_messaging"]
 
 
 @pytest.mark.asyncio
@@ -1192,8 +1204,8 @@ async def test_list_contacts_shows_cross_project_target(isolated_env):
         contact = next(item for item in contact_items if item["to"] == agent_b_name)
         assert contact["to_project"] == project_b
         assert contact["status"] == "pending"
-        assert contact["is_expired"] is False
-        assert contact["allows_messaging"] is False
+        assert not contact["is_expired"]
+        assert not contact["allows_messaging"]
 
 
 # ============================================================================
