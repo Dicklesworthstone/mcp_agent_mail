@@ -105,6 +105,107 @@ def _http_sender_identity(
     return sender_display, metadata
 
 
+_HTTP_MESSAGE_SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9]+")
+
+
+def _coerce_http_archive_timestamp(created_ts_raw: Any) -> datetime:
+    try:
+        if isinstance(created_ts_raw, str):
+            text_value = (
+                created_ts_raw.replace("Z", "+00:00")
+                if created_ts_raw.endswith("Z")
+                else created_ts_raw
+            )
+            dt = datetime.fromisoformat(text_value)
+        else:
+            dt = created_ts_raw
+        if not isinstance(dt, datetime):
+            raise TypeError("created timestamp must be a datetime")
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _build_http_archive_message_filename(created_ts_raw: Any, subject_raw: str, message_id: int) -> tuple[str, str, str]:
+    dt = _coerce_http_archive_timestamp(created_ts_raw)
+    y_dir = dt.strftime("%Y")
+    m_dir = dt.strftime("%m")
+    created_iso = dt.strftime("%Y-%m-%dT%H-%M-%SZ")
+    subject_slug = (
+        _HTTP_MESSAGE_SUBJECT_SLUG_RE.sub("-", subject_raw).strip("-_").lower()[:80]
+        or "message"
+    )
+    return y_dir, m_dir, f"{created_iso}__{subject_slug}__{message_id}.md"
+
+
+async def _delete_messages_from_archive(
+    *,
+    settings: Settings,
+    project_slug: str,
+    messages_to_delete: list[tuple[Any, ...]],
+    recip_map: dict[int, list[str]],
+    commit_message: str,
+) -> int:
+    archive = await ensure_archive(settings, project_slug)
+    git_paths_removed: list[str] = []
+    seen_git_paths: set[str] = set()
+
+    async with archive_write_lock(archive):
+        for mrow in messages_to_delete:
+            msg_id = int(mrow[0])
+            y_dir, m_dir, filename = _build_http_archive_message_filename(
+                mrow[1],
+                str(mrow[2] or ""),
+                msg_id,
+            )
+            sender_name = str(mrow[3] or "")
+
+            candidate_dirs = [
+                archive.root / "messages" / y_dir / m_dir,
+                archive.root / "agents" / sender_name / "outbox" / y_dir / m_dir,
+            ]
+            for recip_name in recip_map.get(msg_id, []):
+                candidate_dirs.append(
+                    archive.root / "agents" / recip_name / "inbox" / y_dir / m_dir
+                )
+
+            for cdir in candidate_dirs:
+                fpath = cdir / filename
+                rel = fpath.relative_to(archive.repo_root).as_posix()
+                try:
+                    await asyncio.to_thread(fpath.unlink)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+                if rel not in seen_git_paths:
+                    seen_git_paths.add(rel)
+                    git_paths_removed.append(rel)
+
+        if git_paths_removed:
+            actor_module = importlib.import_module("git")
+            actor_cls = actor_module.Actor
+            git_actor = actor_cls(
+                settings.storage.git_author_name,
+                settings.storage.git_author_email,
+            )
+            await asyncio.to_thread(
+                archive.repo.index.remove,
+                git_paths_removed,
+                working_tree=False,
+            )
+            await asyncio.to_thread(
+                archive.repo.index.commit,
+                commit_message,
+                author=git_actor,
+                committer=git_actor,
+            )
+
+    return len(git_paths_removed)
+
+
 __all__ = ["build_http_app", "main"]
 
 
@@ -1794,6 +1895,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         detail=f"Too many messages ({len(message_ids)}). Maximum is 500."
                     )
 
+                deleted_count = 0
+                messages_by_project: dict[str, list[tuple[Any, ...]]] = {}
+                recip_map: dict[int, list[str]] = {}
                 async with get_session() as session:
                     placeholders = ','.join([f':mid{i}' for i in range(len(message_ids))])
                     id_params: dict[str, Any] = {f"mid{i}": mid for i, mid in enumerate(message_ids)}
@@ -1812,7 +1916,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ),
                         id_params,
                     )
-                    messages_to_delete = rows.fetchall()
+                    messages_to_delete = [tuple(row) for row in rows.fetchall()]
 
                     if not messages_to_delete:
                         return JSONResponse({"success": True, "deleted_count": 0})
@@ -1829,9 +1933,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ),
                         id_params,
                     )
-                    recip_map: dict[int, list[str]] = {}
                     for rr in recip_rows.fetchall():
                         recip_map.setdefault(int(rr[0]), []).append(rr[1])
+
+                    for mrow in messages_to_delete:
+                        slug = str(mrow[4])
+                        messages_by_project.setdefault(slug, []).append(mrow)
 
                     # Delete from SQLite
                     await session.execute(
@@ -1842,107 +1949,25 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         text(f"DELETE FROM messages WHERE id IN ({placeholders})"),
                         id_params,
                     )
-                    deleted_count = int(getattr(del_result, "rowcount", 0) or 0)
-
-                    # Delete markdown files from Git archive
-                    settings = get_settings()
-                    total_git_files_removed = 0
-                    import re as _re
-
-                    _SUBJECT_SLUG_RE = _re.compile(r"[^a-zA-Z0-9]+")
-
-                    # Group messages by project for archive access
-                    by_project: dict[str, list[Any]] = {}
-                    for mrow in messages_to_delete:
-                        slug = str(mrow[4])
-                        by_project.setdefault(slug, []).append(mrow)
-
-                    for project_slug, proj_msgs in by_project.items():
-                        git_paths_removed: list[str] = []
-                        try:
-                            archive = await ensure_archive(settings, project_slug)
-                            for mrow in proj_msgs:
-                                msg_id = int(mrow[0])
-                                created_ts_raw = mrow[1]
-                                subject_raw = str(mrow[2] or "")
-                                sender_name = str(mrow[3] or "")
-
-                                try:
-                                    if isinstance(created_ts_raw, str):
-                                        dt = datetime.fromisoformat(
-                                            created_ts_raw.replace("Z", "+00:00")
-                                            if created_ts_raw.endswith("Z")
-                                            else created_ts_raw
-                                        )
-                                    else:
-                                        dt = created_ts_raw
-                                    if dt.tzinfo is None:
-                                        dt = dt.replace(tzinfo=timezone.utc)
-                                except Exception:
-                                    dt = datetime.now(timezone.utc)
-
-                                y_dir = dt.strftime("%Y")
-                                m_dir = dt.strftime("%m")
-                                created_iso = dt.astimezone(timezone.utc).strftime(
-                                    "%Y-%m-%dT%H-%M-%SZ"
-                                )
-                                subject_slug = (
-                                    _SUBJECT_SLUG_RE.sub("-", subject_raw)
-                                    .strip("-_")
-                                    .lower()[:80]
-                                    or "message"
-                                )
-                                filename = f"{created_iso}__{subject_slug}__{msg_id}.md"
-
-                                candidate_dirs = [
-                                    archive.root / "messages" / y_dir / m_dir,
-                                    archive.root / "agents" / sender_name / "outbox" / y_dir / m_dir,
-                                ]
-                                for recip_name in recip_map.get(msg_id, []):
-                                    candidate_dirs.append(
-                                        archive.root / "agents" / recip_name / "inbox" / y_dir / m_dir
-                                    )
-
-                                for cdir in candidate_dirs:
-                                    fpath = cdir / filename
-                                    if fpath.exists():
-                                        rel = fpath.relative_to(archive.repo_root).as_posix()
-                                        try:
-                                            fpath.unlink()
-                                            git_paths_removed.append(rel)
-                                        except OSError:
-                                            pass
-
-                            # Commit removals for this project's archive
-                            if git_paths_removed:
-                                try:
-                                    actor_module = importlib.import_module("git")
-                                    actor_cls = actor_module.Actor
-                                    git_actor = actor_cls(
-                                        settings.storage.git_author_name,
-                                        settings.storage.git_author_email,
-                                    )
-                                    archive.repo.index.remove(
-                                        git_paths_removed, working_tree=False
-                                    )
-                                    archive.repo.index.commit(
-                                        f"delete: {len(proj_msgs)} message(s) via web UI\n",
-                                        author=git_actor,
-                                        committer=git_actor,
-                                    )
-                                    total_git_files_removed += len(git_paths_removed)
-                                except Exception as git_exc:
-                                    logging.getLogger(__name__).warning(
-                                        "Git commit for message deletion failed: %s", git_exc
-                                    )
-                        except Exception as archive_exc:
-                            logging.getLogger(__name__).warning(
-                                "Git archive cleanup failed for project %s: %s",
-                                project_slug,
-                                archive_exc,
-                            )
-
                     await session.commit()
+
+                settings = get_settings()
+                total_git_files_removed = 0
+                for project_slug, proj_msgs in messages_by_project.items():
+                    try:
+                        total_git_files_removed += await _delete_messages_from_archive(
+                            settings=settings,
+                            project_slug=project_slug,
+                            messages_to_delete=proj_msgs,
+                            recip_map=recip_map,
+                            commit_message=f"delete: {len(proj_msgs)} message(s) via web UI\n",
+                        )
+                    except Exception as archive_exc:
+                        logging.getLogger(__name__).warning(
+                            "Git archive cleanup failed for project %s: %s",
+                            project_slug,
+                            archive_exc,
+                        )
 
                 return JSONResponse({
                     "success": True,
@@ -2798,6 +2823,9 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         detail=f"Too many messages selected ({len(message_ids)}). Maximum is 500."
                     )
 
+                deleted_count = 0
+                messages_to_delete: list[tuple[Any, ...]] = []
+                recip_map: dict[int, list[str]] = {}
                 async with get_session() as session:
                     # Resolve project
                     prow = (
@@ -2839,7 +2867,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ),
                         id_params,
                     )
-                    messages_to_delete = rows.fetchall()
+                    messages_to_delete = [tuple(row) for row in rows.fetchall()]
 
                     if not messages_to_delete:
                         return JSONResponse({"success": True, "deleted_count": 0})
@@ -2856,7 +2884,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         ),
                         {f"mid{i}": mid for i, mid in enumerate(message_ids)},
                     )
-                    recip_map: dict[int, list[str]] = {}
                     for rr in recip_rows.fetchall():
                         recip_map.setdefault(int(rr[0]), []).append(rr[1])
 
@@ -2874,108 +2901,28 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         id_params,
                     )
                     deleted_count = int(getattr(del_result, "rowcount", 0) or 0)
-
-                    # Delete markdown files from Git archive
-                    settings = get_settings()
-                    git_paths_removed: list[str] = []
-                    try:
-                        archive = await ensure_archive(settings, project_slug)
-                        import re as _re
-
-                        _SUBJECT_SLUG_RE = _re.compile(r"[^a-zA-Z0-9]+")
-
-                        for mrow in messages_to_delete:
-                            msg_id = int(mrow[0])
-                            created_ts_raw = mrow[1]
-                            subject_raw = str(mrow[2] or "")
-                            sender_name = str(mrow[3] or "")
-
-                            # Reconstruct the filename used by write_message_bundle
-                            try:
-                                if isinstance(created_ts_raw, str):
-                                    dt = datetime.fromisoformat(
-                                        created_ts_raw.replace("Z", "+00:00")
-                                        if created_ts_raw.endswith("Z")
-                                        else created_ts_raw
-                                    )
-                                else:
-                                    dt = created_ts_raw
-                                if dt.tzinfo is None:
-                                    dt = dt.replace(tzinfo=timezone.utc)
-                            except Exception:
-                                dt = datetime.now(timezone.utc)
-
-                            y_dir = dt.strftime("%Y")
-                            m_dir = dt.strftime("%m")
-                            created_iso = dt.astimezone(timezone.utc).strftime(
-                                "%Y-%m-%dT%H-%M-%SZ"
-                            )
-                            subject_slug = (
-                                _SUBJECT_SLUG_RE.sub("-", subject_raw)
-                                .strip("-_")
-                                .lower()[:80]
-                                or "message"
-                            )
-                            filename = f"{created_iso}__{subject_slug}__{msg_id}.md"
-
-                            # Paths: canonical, outbox, and each recipient inbox
-                            candidate_dirs = [
-                                archive.root / "messages" / y_dir / m_dir,
-                                archive.root / "agents" / sender_name / "outbox" / y_dir / m_dir,
-                            ]
-                            for recip_name in recip_map.get(msg_id, []):
-                                candidate_dirs.append(
-                                    archive.root / "agents" / recip_name / "inbox" / y_dir / m_dir
-                                )
-
-                            for cdir in candidate_dirs:
-                                fpath = cdir / filename
-                                if fpath.exists():
-                                    rel = fpath.relative_to(archive.repo_root).as_posix()
-                                    try:
-                                        fpath.unlink()
-                                        git_paths_removed.append(rel)
-                                    except OSError:
-                                        pass
-
-                        # Commit removals to Git
-                        if git_paths_removed:
-                            try:
-                                actor_module = importlib.import_module("git")
-                                actor_cls = actor_module.Actor
-                                git_actor = actor_cls(
-                                    settings.storage.git_author_name,
-                                    settings.storage.git_author_email,
-                                )
-                                archive.repo.index.remove(
-                                    git_paths_removed, working_tree=False
-                                )
-                                archive.repo.index.commit(
-                                    f"delete: {deleted_count} message(s) via web UI\n",
-                                    author=git_actor,
-                                    committer=git_actor,
-                                )
-                            except Exception as git_exc:
-                                # Log but don't fail the request if Git commit fails;
-                                # the files are already unlinked and DB rows deleted.
-                                import traceback
-
-                                traceback.print_exc()
-                                logging.getLogger(__name__).warning(
-                                    "Git commit for message deletion failed: %s", git_exc
-                                )
-                    except Exception as archive_exc:
-                        # Archive operations are best-effort; DB deletion already happened.
-                        logging.getLogger(__name__).warning(
-                            "Git archive cleanup failed: %s", archive_exc
-                        )
-
                     await session.commit()
+
+                settings = get_settings()
+                git_files_removed = 0
+                try:
+                    git_files_removed = await _delete_messages_from_archive(
+                        settings=settings,
+                        project_slug=project_slug,
+                        messages_to_delete=messages_to_delete,
+                        recip_map=recip_map,
+                        commit_message=f"delete: {deleted_count} message(s) via web UI\n",
+                    )
+                except Exception as archive_exc:
+                    # Archive operations are best-effort; DB deletion already happened.
+                    logging.getLogger(__name__).warning(
+                        "Git archive cleanup failed: %s", archive_exc
+                    )
 
                 return JSONResponse({
                     "success": True,
                     "deleted_count": deleted_count,
-                    "git_files_removed": len(git_paths_removed),
+                    "git_files_removed": git_files_removed,
                     "agent": agent,
                     "project": project_slug,
                 })
@@ -3409,8 +3356,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         detail=f"Message body too long ({len(body_md)} characters). Maximum is {max_user_length} characters to accommodate the overseer preamble ({preamble_length} characters)."
                     )
 
-                # Single atomic transaction for all database operations
+                # Keep database work and archive work in separate phases so
+                # the request never holds a live DB transaction while doing
+                # archive/Git I/O.
                 from datetime import datetime, timezone
+                message_id: int | None = None
+                valid_recipients: list[str] = []
+                project_slug = ""
+                project_human_key = ""
+                overseer_name = "HumanOverseer"
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
                 async with get_session() as session:
                     # Get project
                     prow = (
@@ -3428,7 +3383,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     project_human_key = prow[2]
 
                     # Get or create "HumanOverseer" agent (with race condition protection)
-                    overseer_name = "HumanOverseer"
                     overseer_row = (
                         await session.execute(
                             text("SELECT id, name FROM agents WHERE project_id = :pid AND name = :name"),
@@ -3490,10 +3444,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                     # Extract overseer_id for later use
                     overseer_id = overseer_row[0]
-                    # Insert message into database
-                    message_id = None
-                    # Use naive UTC datetime for SQLite compatibility
-                    now = datetime.now(timezone.utc).replace(tzinfo=None)
 
                     result = await session.execute(
                         text("""
@@ -3557,30 +3507,36 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             detail=f"None of the specified recipients exist in this project. Available agents can be seen at /mail/{project_slug}"
                         )
 
-                    # Write to Git archive BEFORE committing to database (for transaction consistency)
-                    from .storage import ensure_archive, write_message_bundle
-                    settings = get_settings()
-                    archive = await ensure_archive(settings, project_slug)
+                    # Update HumanOverseer activity timestamp before commit.
+                    await session.execute(
+                        text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
+                        {"ts": now, "id": overseer_id}
+                    )
 
-                    # Build message dict for Git
-                    message_dict = {
-                        "id": message_id,
-                        "thread_id": thread_id,
-                        "project": project_human_key,
-                        "project_slug": project_slug,
-                        "from": overseer_name,
-                        "to": valid_recipients,
-                        "cc": [],
-                        "bcc": [],
-                        "subject": subject,
-                        "importance": "high",
-                        "ack_required": False,
-                        "created": now.isoformat(),
-                        "attachments": []
-                    }
+                    await session.commit()
 
-                    try:
-                        # Write message bundle (canonical + outbox + inboxes) to Git
+                from .storage import ensure_archive, write_message_bundle
+
+                settings = get_settings()
+                archive = await ensure_archive(settings, project_slug)
+                message_dict = {
+                    "id": message_id,
+                    "thread_id": thread_id,
+                    "project": project_human_key,
+                    "project_slug": project_slug,
+                    "from": overseer_name,
+                    "to": valid_recipients,
+                    "cc": [],
+                    "bcc": [],
+                    "subject": subject,
+                    "importance": "high",
+                    "ack_required": False,
+                    "created": now.isoformat(),
+                    "attachments": [],
+                }
+
+                try:
+                    async with archive_write_lock(archive):
                         await write_message_bundle(
                             archive,
                             message_dict,
@@ -3591,22 +3547,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             commit_text=f"Human Overseer message: {subject}",
                             sender_outbox_name=overseer_name,
                         )
-                    except Exception as git_error:
-                        # Rollback database transaction if Git write fails
-                        await session.rollback()
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Failed to write message to Git archive: {git_error!s}"
-                        ) from git_error
-
-                    # Update HumanOverseer activity timestamp (after successful Git write, before commit)
-                    await session.execute(
-                        text("UPDATE agents SET last_active_ts = :ts WHERE id = :id"),
-                        {"ts": now, "id": overseer_id}
-                    )
-
-                    # Commit all changes atomically: agent creation/update + message + recipients
-                    await session.commit()
+                except Exception as git_error:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to write message to Git archive: {git_error!s}"
+                    ) from git_error
 
                 return JSONResponse({
                     "success": True,
