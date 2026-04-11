@@ -3,15 +3,14 @@ FROM python:3.14-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_SYSTEM_PYTHON=1 \
-    PATH="/root/.local/bin:${PATH}"
+    UV_SYSTEM_PYTHON=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+# Install uv to a shared path so it remains available after USER switch
+RUN curl -LsSf https://astral.sh/uv/install.sh | UV_UNMANAGED_INSTALL=/usr/local/bin sh
 
 WORKDIR /app
 
@@ -40,5 +39,5 @@ USER appuser
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
   CMD curl -fsS http://127.0.0.1:8765/health/liveness || exit 1
 
-# Run the HTTP server
-CMD ["uv", "run", "python", "-m", "mcp_agent_mail.cli", "serve-http"]
+# Run the HTTP server via the prebuilt venv (avoids uv overhead at startup)
+CMD ["/app/.venv/bin/python", "-m", "mcp_agent_mail.cli", "serve-http"]
