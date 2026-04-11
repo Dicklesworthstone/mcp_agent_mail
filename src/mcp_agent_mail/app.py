@@ -9525,67 +9525,92 @@ def build_mcp_server() -> FastMCP:
             request_payload["task_description"] = task_description
         request_tool_result = await request_tool.run(request_payload)
         request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
+        request_status = str(request_result.get("status") or "").lower()
 
         response_result = None
+        response_error: dict[str, Any] | None = None
         if auto_accept:
-            target_auth_token = target_registration_token
-            if target_auth_token is None:
+            if request_status == "approved":
+                response_result = request_result
+            else:
                 response_project = await _get_project_by_identifier(target_project_key or project_key)
                 response_agent = await _get_agent(response_project, real_target)
-                response_agent, target_auth_token = await _ensure_agent_registration_token(response_agent)
-            respond_tool = cast(FunctionTool, cast(Any, respond_contact))
-            respond_payload: dict[str, Any] = {
-                "ctx": ctx,
-                "project_key": target_project_key or project_key,
-                "to_agent": real_target,
-                "from_agent": real_requester,
-                "accept": True,
-                "ttl_seconds": ttl_seconds,
-                "format": "json",
-            }
-            if target_auth_token:
-                respond_payload["registration_token"] = target_auth_token
-            if target_project_key:
-                respond_payload["from_project"] = project_key
-            respond_tool_result = await respond_tool.run(respond_payload)
-            response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
+                target_auth_token = target_registration_token
+                if target_auth_token is None and not _session_is_bound_to_agent(ctx, response_project, response_agent):
+                    response_error = {
+                        "type": "AUTHENTICATION_REQUIRED",
+                        "message": (
+                            "auto_accept requires target_registration_token unless this MCP session "
+                            "has already authenticated as the target agent."
+                        ),
+                        "project_key": response_project.human_key,
+                        "agent_name": response_agent.name,
+                        "token_param": "target_registration_token",
+                    }
+                else:
+                    respond_tool = cast(FunctionTool, cast(Any, respond_contact))
+                    respond_payload: dict[str, Any] = {
+                        "ctx": ctx,
+                        "project_key": target_project_key or project_key,
+                        "to_agent": real_target,
+                        "from_agent": real_requester,
+                        "accept": True,
+                        "ttl_seconds": ttl_seconds,
+                        "format": "json",
+                    }
+                    if target_auth_token:
+                        respond_payload["registration_token"] = target_auth_token
+                    if target_project_key:
+                        respond_payload["from_project"] = project_key
+                    respond_tool_result = await respond_tool.run(respond_payload)
+                    response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
         welcome_message = None
         welcome_error: dict[str, Any] | None = None
         if welcome_subject and welcome_body:
             welcome_project = await _get_project_by_identifier(target_project_key or project_key)
-            try:
-                welcome_recipients = [real_target] if not target_project_key else [f"{real_target}@{target_project_key}"]
-                send_tool = cast(FunctionTool, cast(Any, send_message))
-                send_tool_result = await send_tool.run(
-                    {
-                        "ctx": ctx,
-                        "project_key": project_key,
-                        "sender_name": real_requester,
-                        "to": welcome_recipients,
-                        "subject": welcome_subject,
-                        "body_md": welcome_body,
-                        "thread_id": thread_id,
-                        "sender_token": requester_registration_token,
-                        "format": "json",
-                    }
-                )
-                welcome_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
-                error_payload = _extract_delivery_error_payload(welcome_payload)
-                if error_payload is not None:
-                    welcome_error = _with_delivery_project(error_payload, welcome_project)
-                else:
-                    welcome_message = welcome_payload
-            except Exception as exc:
-                # surface but do not abort handshake
-                await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
-                welcome_error = _delivery_failure_from_exception(welcome_project, exc)
+            if response_error is not None:
+                welcome_error = {
+                    "type": "CONTACT_APPROVAL_REQUIRED",
+                    "message": "welcome skipped because auto_accept did not complete; the contact request remains pending.",
+                    "project_key": welcome_project.human_key,
+                    "agent_name": real_target,
+                }
+            else:
+                try:
+                    welcome_recipients = [real_target] if not target_project_key else [f"{real_target}@{target_project_key}"]
+                    send_tool = cast(FunctionTool, cast(Any, send_message))
+                    send_tool_result = await send_tool.run(
+                        {
+                            "ctx": ctx,
+                            "project_key": project_key,
+                            "sender_name": real_requester,
+                            "to": welcome_recipients,
+                            "subject": welcome_subject,
+                            "body_md": welcome_body,
+                            "thread_id": thread_id,
+                            "sender_token": requester_registration_token,
+                            "format": "json",
+                        }
+                    )
+                    welcome_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
+                    error_payload = _extract_delivery_error_payload(welcome_payload)
+                    if error_payload is not None:
+                        welcome_error = _with_delivery_project(error_payload, welcome_project)
+                    else:
+                        welcome_message = welcome_payload
+                except Exception as exc:
+                    # surface but do not abort handshake
+                    await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
+                    welcome_error = _delivery_failure_from_exception(welcome_project, exc)
 
         result = {
             "request": request_result,
             "response": response_result,
             "welcome_message": welcome_message,
         }
+        if response_error is not None:
+            result["response_error"] = response_error
         if welcome_error is not None:
             result["welcome_error"] = welcome_error
         return result
