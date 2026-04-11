@@ -23,12 +23,14 @@ from __future__ import annotations
 import asyncio
 import random
 import string
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, cast
 
 import pytest
 from fastmcp import Client
 from sqlalchemy import text
 
+from mcp_agent_mail import app as app_module, config as _config
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import ensure_schema, get_session
 
@@ -622,6 +624,126 @@ class TestConcurrentArchiveWrites:
 
 class TestNoDeadlocks:
     """Test that concurrent operations don't cause deadlocks."""
+
+    @pytest.mark.asyncio
+    async def test_send_message_emits_notifications_after_releasing_archive_lock(
+        self,
+        isolated_env,
+        monkeypatch,
+        tmp_path,
+    ):
+        """Notification signal writes must not run inside the archive critical section."""
+        monkeypatch.setenv("NOTIFICATIONS_ENABLED", "true")
+        monkeypatch.setenv("NOTIFICATIONS_SIGNALS_DIR", str(tmp_path / "signals"))
+        _config.clear_settings_cache()
+
+        await ensure_schema()
+        project_key = f"/test/concurrent/notifications/{random_id()}"
+        server = build_mcp_server()
+
+        async with Client(server) as client:
+            await setup_project(client, project_key)
+            sender_name = await setup_agent(client, project_key, "sender")
+            recipient_name = await setup_agent(client, project_key, "recipient")
+
+            original_archive_write_lock = app_module._archive_write_lock
+            archive_lock_depth = 0
+
+            @asynccontextmanager
+            async def tracking_archive_write_lock(*args: Any, **kwargs: Any):
+                nonlocal archive_lock_depth
+                async with original_archive_write_lock(*args, **kwargs):
+                    archive_lock_depth += 1
+                    try:
+                        yield
+                    finally:
+                        archive_lock_depth -= 1
+
+            notification_calls: list[dict[str, Any]] = []
+
+            async def tracking_emit_notification_signal(*args: Any, **kwargs: Any) -> bool:
+                notification_calls.append({"held_depth": archive_lock_depth})
+                assert archive_lock_depth == 0
+                return True
+
+            monkeypatch.setattr(app_module, "_archive_write_lock", tracking_archive_write_lock)
+            monkeypatch.setattr(app_module, "emit_notification_signal", tracking_emit_notification_signal)
+
+            result = await client.call_tool(
+                "send_message",
+                {
+                    "project_key": project_key,
+                    "sender_name": sender_name,
+                    "to": [recipient_name],
+                    "subject": "Notification lock scope",
+                    "body_md": "hello",
+                },
+            )
+
+        assert result.data["count"] == 1
+        assert notification_calls
+        assert all(call["held_depth"] == 0 for call in notification_calls)
+
+    @pytest.mark.asyncio
+    async def test_file_reservation_git_probe_happens_before_archive_lock(
+        self,
+        isolated_env,
+        monkeypatch,
+    ):
+        """Git metadata collection must not run while the archive lock is held."""
+        await ensure_schema()
+        project_key = f"/test/concurrent/file-reservation-git/{random_id()}"
+        server = build_mcp_server()
+
+        async with Client(server) as client:
+            await setup_project(client, project_key)
+            agent_name = await setup_agent(client, project_key, "holder")
+
+            original_archive_write_lock = app_module._archive_write_lock
+            archive_lock_depth = 0
+
+            @asynccontextmanager
+            async def tracking_archive_write_lock(*args: Any, **kwargs: Any):
+                nonlocal archive_lock_depth
+                async with original_archive_write_lock(*args, **kwargs):
+                    archive_lock_depth += 1
+                    try:
+                        yield
+                    finally:
+                        archive_lock_depth -= 1
+
+            class _FakeBranch:
+                name = "main"
+
+            class _FakeRepo:
+                active_branch = _FakeBranch()
+                working_tree_dir = "/tmp/fake-worktree"
+
+            git_probe_states: list[int] = []
+
+            @contextmanager
+            def fake_git_repo(*args: Any, **kwargs: Any):
+                git_probe_states.append(archive_lock_depth)
+                assert archive_lock_depth == 0
+                yield _FakeRepo()
+
+            monkeypatch.setattr(app_module, "_archive_write_lock", tracking_archive_write_lock)
+            monkeypatch.setattr(app_module, "_git_repo", fake_git_repo)
+
+            result = await client.call_tool(
+                "file_reservation_paths",
+                {
+                    "project_key": project_key,
+                    "agent_name": agent_name,
+                    "paths": ["src/lock-scope.py"],
+                    "ttl_seconds": 3600,
+                    "exclusive": True,
+                    "reason": "lock scope regression",
+                },
+            )
+
+        assert result.data["granted"][0]["path_pattern"] == "src/lock-scope.py"
+        assert git_probe_states == [0]
 
     @pytest.mark.asyncio
     async def test_mixed_operations_no_deadlock(self, isolated_env):

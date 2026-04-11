@@ -33,6 +33,7 @@ async def _setup_project_and_agents(settings: _config.Settings) -> dict:
 
         # Create multiple agents with auto-generated adjective+noun names
         agents = []
+        tokens_by_name: dict[str, str] = {}
         for i in range(5):
             result = await client.call_tool(
                 "register_agent",
@@ -47,9 +48,27 @@ async def _setup_project_and_agents(settings: _config.Settings) -> dict:
             data = result.data if hasattr(result, "data") else {}
             if isinstance(data, dict) and "name" in data:
                 agents.append(data["name"])
+                token = data.get("registration_token")
+                if isinstance(token, str) and token:
+                    tokens_by_name[data["name"]] = token
 
         # Ensure we got all agents - fail fast if not
         assert len(agents) == 5, f"Expected 5 agents, got {len(agents)}: {agents}"
+        assert len(tokens_by_name) == 5, f"Expected registration tokens for all agents, got {tokens_by_name}"
+
+        # These concurrency tests exercise delivery/write paths, not contact approval.
+        # Open inboxes explicitly so fresh client sessions can message each other
+        # without auto-contact side effects obscuring the concurrency assertions.
+        for agent_name in agents:
+            await client.call_tool(
+                "set_contact_policy",
+                {
+                    "project_key": "/tmp/concurrent-test",
+                    "agent_name": agent_name,
+                    "policy": "open",
+                    "registration_token": tokens_by_name[agent_name],
+                },
+            )
 
     # Get project_id from DB for reference
     async with get_session() as session:
@@ -63,6 +82,7 @@ async def _setup_project_and_agents(settings: _config.Settings) -> dict:
         "project_id": project_id,
         "project_slug": "tmp-concurrent-test",
         "agents": agents,
+        "tokens_by_name": tokens_by_name,
     }
 
 
@@ -86,6 +106,7 @@ async def test_concurrent_message_sends(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "sender_name": sender,
+                "sender_token": data["tokens_by_name"][sender],
                 "to": [recipient],
                 "subject": subject,
                 "body_md": f"Message from {sender} to {recipient}",
@@ -125,6 +146,7 @@ async def test_concurrent_messages_to_same_thread(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "sender_name": sender,
+                "sender_token": data["tokens_by_name"][sender],
                 "to": [first_agent],
                 "subject": f"Thread Message {message_num}",
                 "body_md": f"Message {message_num} from {sender}",
@@ -163,6 +185,7 @@ async def test_concurrent_file_reservation_different_paths(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "agent_name": agent,
+                "registration_token": data["tokens_by_name"][agent],
                 "paths": [path],
                 "ttl_seconds": 3600,
                 "exclusive": True,
@@ -196,6 +219,7 @@ async def test_concurrent_file_reservation_same_path_conflict(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "agent_name": agent,
+                "registration_token": data["tokens_by_name"][agent],
                 "paths": ["shared/config.json"],
                 "ttl_seconds": 3600,
                 "exclusive": True,
@@ -229,6 +253,7 @@ async def test_concurrent_file_reservation_overlapping_globs(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "agent_name": data["agents"][0],
+                "registration_token": data["tokens_by_name"][data["agents"][0]],
                 "paths": ["src/**/*.py"],
                 "ttl_seconds": 3600,
                 "exclusive": True,
@@ -241,6 +266,7 @@ async def test_concurrent_file_reservation_overlapping_globs(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "agent_name": data["agents"][1],
+                "registration_token": data["tokens_by_name"][data["agents"][1]],
                 "paths": ["src/app.py"],
                 "ttl_seconds": 3600,
                 "exclusive": True,
@@ -273,6 +299,7 @@ async def test_concurrent_inbox_fetches(isolated_env):
                 {
                     "project_key": "/tmp/concurrent-test",
                     "sender_name": data["agents"][(i + 1) % 5],
+                    "sender_token": data["tokens_by_name"][data["agents"][(i + 1) % 5]],
                     "to": [data["agents"][0]],
                     "subject": f"Test Message {i}",
                     "body_md": f"Body {i}",
@@ -286,6 +313,7 @@ async def test_concurrent_inbox_fetches(isolated_env):
                 {
                     "project_key": "/tmp/concurrent-test",
                     "agent_name": data["agents"][0],
+                    "registration_token": data["tokens_by_name"][data["agents"][0]],
                     "limit": 100,
                 },
             )
@@ -316,6 +344,7 @@ async def test_concurrent_inbox_fetch_during_message_send(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "sender_name": data["agents"][1],
+                "sender_token": data["tokens_by_name"][data["agents"][1]],
                 "to": [data["agents"][0]],
                 "subject": f"Concurrent Send {i}",
                 "body_md": f"Body {i}",
@@ -330,6 +359,7 @@ async def test_concurrent_inbox_fetch_during_message_send(isolated_env):
             {
                 "project_key": "/tmp/concurrent-test",
                 "agent_name": data["agents"][0],
+                "registration_token": data["tokens_by_name"][data["agents"][0]],
                 "limit": 100,
             },
         )

@@ -5005,6 +5005,13 @@ def build_mcp_server() -> FastMCP:
             embed_policy = sender.attachments_policy
 
         payload: dict[str, Any] | None = None
+        notification_targets: list[str] = []
+        notification_message_meta: dict[str, Any] | None = None
+        message: Message | None = None
+        window_identity: WindowIdentity | None = None
+        _wi_uuid = getattr(settings, "window_identity_uuid", "") or ""
+        if _wi_uuid and _validate_window_uuid(_wi_uuid):
+            window_identity = await _get_window_identity(project, _wi_uuid)
 
         async with _archive_write_lock(archive):
             # Server-side file_reservations enforcement: block if conflicting active exclusive file_reservation exists
@@ -5141,13 +5148,10 @@ def build_mcp_server() -> FastMCP:
                 sender_project_human_key=sender_project.human_key,
                 sender_project_slug=sender_project.slug,
             )
-            # Enrich payload with sender's window identity if available
-            _wi_uuid = getattr(settings, "window_identity_uuid", "") or ""
-            if _wi_uuid and _validate_window_uuid(_wi_uuid):
-                _wi = await _get_window_identity(project, _wi_uuid)
-                if _wi:
-                    payload["window_id"] = _wi.window_uuid
-                    payload["window_display_name"] = _wi.display_name
+            # Enrich payload with sender's window identity if available.
+            if window_identity is not None:
+                payload["window_id"] = window_identity.window_uuid
+                payload["window_display_name"] = window_identity.display_name
             result_snapshot: dict[str, Any] = {
                 "deliveries": [
                     {
@@ -5178,26 +5182,30 @@ def build_mcp_server() -> FastMCP:
                 sender_outbox_name=sender.name if sender_is_local else None,
             )
 
-            # Emit notification signals for recipients (if enabled)
+            # Collect notification signals for post-lock emission.
             if settings.notifications.enabled:
-                message_meta = {
+                notification_message_meta = {
                     "id": message.id,
                     "from": sender.name,
                     "subject": subject,
                     "importance": importance,
                 }
                 if not sender_is_local:
-                    message_meta["from_project"] = sender_project.human_key
-                # Signal to/cc recipients (not bcc - blind copies shouldn't trigger visible signals)
-                for agent in to_agents + cc_agents:
-                    with suppress(Exception):
-                        await emit_notification_signal(
-                            settings,
-                            project.slug,
-                            agent.name,
-                            message_meta,
-                        )
+                    notification_message_meta["from_project"] = sender_project.human_key
+                # Signal to/cc recipients (not bcc - blind copies shouldn't trigger visible signals).
+                notification_targets = [agent.name for agent in to_agents + cc_agents]
 
+        if notification_message_meta is not None:
+            for target_name in notification_targets:
+                with suppress(Exception):
+                    await emit_notification_signal(
+                        settings,
+                        project.slug,
+                        target_name,
+                        notification_message_meta,
+                    )
+        if message is None:
+            raise RuntimeError("Message record was not created.")
         await ctx.info(
             f"Message {message.id} created by {sender.name} (to {', '.join(recipients_for_archive)})"
         )
@@ -10513,6 +10521,23 @@ def build_mcp_server() -> FastMCP:
         granted: list[dict[str, Any]] = []
         conflicts: list[dict[str, Any]] = []
         archive = await ensure_archive(settings, project.slug)
+        ctx_branch: Optional[str] = None
+        ctx_worktree: Optional[str] = None
+        try:
+            with _git_repo(project.human_key) as repo:
+                try:
+                    ctx_branch = repo.active_branch.name
+                except Exception:
+                    try:
+                        ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
+                    except Exception:
+                        ctx_branch = None
+                try:
+                    ctx_worktree = Path(repo.working_tree_dir or "").name or None
+                except Exception:
+                    ctx_worktree = None
+        except Exception:
+            pass
         async with _archive_write_lock(archive):
             # Use BEGIN IMMEDIATE to acquire a fresh WAL snapshot, preventing
             # stale reads that cause duplicate exclusive holders (#129) and
@@ -10532,23 +10557,6 @@ def build_mcp_server() -> FastMCP:
                 existing_reservations = [(row[0], row[1]) for row in existing_rows.all()]
 
                 payloads: list[dict[str, Any]] = []
-                ctx_branch: Optional[str] = None
-                ctx_worktree: Optional[str] = None
-                try:
-                    with _git_repo(project.human_key) as repo:
-                        try:
-                            ctx_branch = repo.active_branch.name
-                        except Exception:
-                            try:
-                                ctx_branch = repo.git.rev_parse("--abbrev-ref", "HEAD").strip()
-                            except Exception:
-                                ctx_branch = None
-                        try:
-                            ctx_worktree = Path(repo.working_tree_dir or "").name or None
-                        except Exception:
-                            ctx_worktree = None
-                except Exception:
-                    pass
                 # Build union PathSpec for fast conflict pre-filtering (O(n+m) instead of O(n*m))
                 union_spec = _build_reservation_union_spec(existing_reservations, agent.id, exclusive)
 
