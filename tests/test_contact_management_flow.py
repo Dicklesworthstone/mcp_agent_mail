@@ -1051,7 +1051,7 @@ async def test_policy_block_all_blocks_everyone(isolated_env):
 
 @pytest.mark.asyncio
 async def test_list_contacts_shows_links(isolated_env):
-    """list_contacts shows all contact links for an agent."""
+    """list_contacts exposes current audit metadata for approved links."""
     server = build_mcp_server()
     async with Client(server) as client:
         project_key = "/test/contact/list"
@@ -1097,8 +1097,103 @@ async def test_list_contacts_shows_links(isolated_env):
         # At least one of them should show the contact link
         contacts_a_list = get_contacts_list(contacts_a)
         contacts_b_list = get_contacts_list(contacts_b)
-        total_contacts = len(contacts_a_list) + len(contacts_b_list)
-        assert total_contacts > 0, "At least one agent should have contact listed"
+        assert not contacts_b_list
+
+        contact = next(item for item in contacts_a_list if item["to"] == agent_b)
+        assert contact["to_project"] == project_key
+        assert contact["status"] == "approved"
+        assert contact["is_expired"] is False
+        assert contact["allows_messaging"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_marks_expired_approval_not_messageable(isolated_env):
+    """Expired approvals should not still look messageable in list_contacts."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_key = "/test/contact/list_expired"
+        agent_a, agent_b = await setup_two_agents(client, project_key)
+
+        await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_key,
+                "from_agent": agent_a,
+                "to_agent": agent_b,
+            },
+        )
+        await client.call_tool(
+            "respond_contact",
+            {
+                "project_key": project_key,
+                "to_agent": agent_b,
+                "from_agent": agent_a,
+                "accept": True,
+            },
+        )
+
+        await _expire_contact_link(project_key, agent_a, agent_b)
+
+        contacts = await client.call_tool(
+            "list_contacts",
+            {
+                "project_key": project_key,
+                "agent_name": agent_a,
+            },
+        )
+        contact_items = get_contacts_list(contacts)
+        contact = next(item for item in contact_items if item["to"] == agent_b)
+        assert contact["status"] == "approved"
+        assert contact["is_expired"] is True
+        assert contact["allows_messaging"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_shows_cross_project_target(isolated_env):
+    """Cross-project contact listings should identify the target project."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        project_a = "/test/contact/list_cross_a"
+        project_b = "/test/contact/list_cross_b"
+
+        await client.call_tool("ensure_project", {"human_key": project_a})
+        await client.call_tool("ensure_project", {"human_key": project_b})
+
+        agent_a_result = await client.call_tool(
+            "register_agent",
+            {"project_key": project_a, "program": "test", "model": "test"},
+        )
+        agent_a_name = agent_a_result.data["name"]
+
+        agent_b_result = await client.call_tool(
+            "register_agent",
+            {"project_key": project_b, "program": "test", "model": "test"},
+        )
+        agent_b_name = agent_b_result.data["name"]
+
+        await client.call_tool(
+            "request_contact",
+            {
+                "project_key": project_a,
+                "from_agent": agent_a_name,
+                "to_agent": agent_b_name,
+                "to_project": project_b,
+            },
+        )
+
+        contacts = await client.call_tool(
+            "list_contacts",
+            {
+                "project_key": project_a,
+                "agent_name": agent_a_name,
+            },
+        )
+        contact_items = get_contacts_list(contacts)
+        contact = next(item for item in contact_items if item["to"] == agent_b_name)
+        assert contact["to_project"] == project_b
+        assert contact["status"] == "pending"
+        assert contact["is_expired"] is False
+        assert contact["allows_messaging"] is False
 
 
 # ============================================================================
