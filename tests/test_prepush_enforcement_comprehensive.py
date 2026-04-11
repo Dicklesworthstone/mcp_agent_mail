@@ -92,6 +92,7 @@ def _write_reservation(
     pattern: str,
     exclusive: bool = True,
     expires_ts: str | None = None,
+    released_ts: str | None = None,
     filename: str = "lock.json",
 ) -> Path:
     """Write a file reservation JSON to the archive."""
@@ -105,6 +106,8 @@ def _write_reservation(
     }
     if expires_ts:
         data["expires_ts"] = expires_ts
+    if released_ts:
+        data["released_ts"] = released_ts
 
     path = fr_dir / filename
     path.write_text(json.dumps(data), encoding="utf-8")
@@ -401,6 +404,27 @@ class TestPrepushExpiredReservation:
             agent="OtherAgent",
             pattern="src/**",
             expires_ts=_past_iso(),  # Expired
+        )
+
+        result = _run_prepush_hook(
+            repo,
+            archive_root,
+            stdin_payload=_make_stdin_payload(repo, sha),
+        )
+        assert result.returncode == 0
+
+    def test_prepush_released_reservation_not_conflict(self, tmp_path: Path):
+        """Released reservations should not cause conflicts even if expiry is still in the future."""
+        repo, _ = _init_repo_with_remote(tmp_path)
+        sha = _create_commit(repo, "src/main.py", "print('hello')", "add main")
+
+        archive_root = tmp_path / "archive"
+        _write_reservation(
+            archive_root,
+            agent="OtherAgent",
+            pattern="src/**",
+            expires_ts=_future_iso(),
+            released_ts=_future_iso(),
         )
 
         result = _run_prepush_hook(
