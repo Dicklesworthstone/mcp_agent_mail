@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import json
 import sys
@@ -601,6 +602,88 @@ def test_am_run_local_fallback_does_not_shorten_active_same_holder_lease(tmp_pat
     )
 
 
+def test_am_run_local_fallback_slot_io_holds_archive_lock(tmp_path: Path, monkeypatch) -> None:
+    import mcp_agent_mail.cli as cli_module
+
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    monkeypatch.setenv("AGENT_MAIL_GUARD_MODE", "warn")
+    monkeypatch.setenv("AGENT_NAME", "TestAgent")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "httpx.Client.post",
+        lambda *args, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("server unavailable")),
+    )
+    monkeypatch.setattr("mcp_agent_mail.cli._build_slot_renew_interval_seconds", lambda _: 0.01)
+
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    path_type = type(Path("/"))
+    original_glob = path_type.glob
+    original_read_text = path_type.read_text
+    original_write_text = path_type.write_text
+    original_mkdir = path_type.mkdir
+    original_archive_write_lock = cli_module.archive_write_lock
+    lock_depth = 0
+    slot_io_depths: list[int] = []
+
+    def _record_slot_io(path: Path) -> None:
+        if "build_slots" in path.parts:
+            slot_io_depths.append(lock_depth)
+
+    def checked_glob(self: Path, pattern: str, *args, **kwargs):
+        _record_slot_io(self)
+        return original_glob(self, pattern, *args, **kwargs)
+
+    def checked_read_text(self: Path, *args, **kwargs) -> str:
+        _record_slot_io(self)
+        return original_read_text(self, *args, **kwargs)
+
+    def checked_write_text(self: Path, *args, **kwargs) -> int:
+        _record_slot_io(self)
+        return original_write_text(self, *args, **kwargs)
+
+    def checked_mkdir(self: Path, *args, **kwargs):
+        _record_slot_io(self)
+        return original_mkdir(self, *args, **kwargs)
+
+    @contextlib.asynccontextmanager
+    async def tracking_archive_write_lock(*args: Any, **kwargs: Any):
+        nonlocal lock_depth
+        lock_depth += 1
+        try:
+            async with original_archive_write_lock(*args, **kwargs):
+                yield
+        finally:
+            lock_depth -= 1
+
+    class _CompletedProcess:
+        returncode = 0
+
+    def fake_run(*args, **kwargs):
+        time.sleep(0.05)
+        return _CompletedProcess()
+
+    monkeypatch.setattr(path_type, "glob", checked_glob)
+    monkeypatch.setattr(path_type, "read_text", checked_read_text)
+    monkeypatch.setattr(path_type, "write_text", checked_write_text)
+    monkeypatch.setattr(path_type, "mkdir", checked_mkdir)
+    monkeypatch.setattr(cli_module, "archive_write_lock", tracking_archive_write_lock)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    am_run(
+        slot="unittest-slot",
+        cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],
+        project_path=proj,
+        agent="TestAgent",
+        ttl_seconds=120,
+        shared=False,
+    )
+
+    assert slot_io_depths
+    assert all(depth > 0 for depth in slot_io_depths)
+
+
 def test_am_run_local_fallback_blocks_on_existing_exclusive_conflicts_even_for_shared_request(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
     monkeypatch.setenv("WORKTREES_ENABLED", "1")
@@ -787,6 +870,54 @@ def test_am_run_server_requests_include_stable_branch(tmp_path: Path, monkeypatc
     assert ("acquire_build_slot", "unknown") in seen_branches
     assert ("release_build_slot", "unknown") in seen_branches
     assert any(tool_name == "renew_build_slot" and branch == "unknown" for tool_name, branch in seen_branches)
+
+
+def test_am_run_server_release_fallback_without_local_lease_is_noop(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "archive"))
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    monkeypatch.setenv("AGENT_MAIL_GUARD_MODE", "block")
+    monkeypatch.setenv("AGENT_NAME", "TestAgent")
+    get_settings.cache_clear()
+
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    _seed_project_agent(proj, "TestAgent", "secret-token")
+    ident = _resolve_project_identity(str(proj))
+    slot_dir = (
+        Path(get_settings().storage.root).expanduser().resolve()
+        / "projects"
+        / ident["slug"]
+        / "build_slots"
+        / "unittest-slot"
+    )
+    seen_tools: list[str] = []
+
+    def fake_post(self, url, json=None, headers=None):
+        tool_name = str(((json or {}).get("params") or {}).get("name") or "")
+        if tool_name:
+            seen_tools.append(tool_name)
+        if tool_name == "release_build_slot":
+            raise httpx.ConnectError("release unavailable")
+        return _StaticJsonResponse({"jsonrpc": "2.0", "id": "ok", "result": {"structuredContent": {}}})
+
+    class _CompletedProcess:
+        returncode = 0
+
+    monkeypatch.setattr("httpx.Client.post", fake_post)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: _CompletedProcess())
+
+    am_run(
+        slot="unittest-slot",
+        cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],
+        project_path=proj,
+        agent="TestAgent",
+        ttl_seconds=120,
+        shared=False,
+    )
+
+    assert "acquire_build_slot" in seen_tools
+    assert "release_build_slot" in seen_tools
+    assert list(slot_dir.glob("*.json")) == []
 
 
 def test_amctl_env_emits_shell_safe_key_value_lines_for_long_paths(tmp_path: Path, monkeypatch) -> None:

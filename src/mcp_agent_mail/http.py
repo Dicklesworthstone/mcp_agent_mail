@@ -72,6 +72,83 @@ async def _project_slug_from_id(pid: int | None) -> str | None:
         return res[0] if res and res[0] else None
 
 
+async def _ensure_ack_escalation_holder(
+    *,
+    settings: Settings,
+    project_id: int,
+    project_slug: str | None,
+    recipient_agent_id: int,
+    recipient_name: str,
+    claim_name: str,
+    now: datetime,
+    now_naive: datetime,
+) -> tuple[int, str]:
+    """Return the holder identity for ACK escalation, creating the ops holder if needed.
+
+    When a synthetic holder must be created, the DB insert happens first and the
+    archive profile write follows only after the session has closed. This keeps
+    the ACK worker out of the DB->archive lock ordering that can deadlock mixed
+    HTTP and MCP traffic.
+    """
+    holder_agent_id = int(recipient_agent_id)
+    holder_agent_name = recipient_name
+    holder_profile_payload: dict[str, Any] | None = None
+
+    async with get_session() as s_holder:
+        hid_row = await s_holder.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+            {"pid": project_id, "name": claim_name},
+        )
+        hid = hid_row.scalar_one_or_none()
+        if isinstance(hid, int):
+            return hid, claim_name
+
+        await s_holder.execute(
+            text(
+                "INSERT OR IGNORE INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) VALUES (:pid, :name, :program, :model, :task, :ts, :ts, :attachments_policy, :contact_policy)"
+            ),
+            {
+                "pid": project_id,
+                "name": claim_name,
+                "program": "ops",
+                "model": "system",
+                "task": "ops-escalation",
+                "ts": now_naive,
+                "attachments_policy": "auto",
+                "contact_policy": "auto",
+            },
+        )
+        await s_holder.commit()
+        hid_row2 = await s_holder.execute(
+            text("SELECT id FROM agents WHERE project_id = :pid AND name = :name"),
+            {"pid": project_id, "name": claim_name},
+        )
+        hid2 = hid_row2.scalar_one_or_none()
+        if isinstance(hid2, int):
+            holder_agent_id = hid2
+            holder_agent_name = claim_name
+            if project_slug:
+                holder_profile_payload = {
+                    "id": holder_agent_id,
+                    "name": holder_agent_name,
+                    "program": "ops",
+                    "model": "system",
+                    "task_description": "ops-escalation",
+                    "inception_ts": now.isoformat(),
+                    "last_active_ts": now.isoformat(),
+                    "project_id": project_id,
+                    "attachments_policy": "auto",
+                    "contact_policy": "auto",
+                }
+
+    if holder_profile_payload is not None and project_slug:
+        archive = await ensure_archive(settings, project_slug)
+        async with archive_write_lock(archive):
+            await write_agent_profile(archive, holder_profile_payload)
+
+    return holder_agent_id, holder_agent_name
+
+
 def _http_sender_identity(
     *,
     message_project_id: int | None,
@@ -993,70 +1070,16 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                         holder_agent_name = recipient_name
                                         if settings.ack_escalation_claim_holder_name:
                                             claim_name = settings.ack_escalation_claim_holder_name
-                                            async with get_session() as s_holder:
-                                                hid_row = await s_holder.execute(
-                                                    text(
-                                                        "SELECT id FROM agents WHERE project_id = :pid AND name = :name"
-                                                    ),
-                                                    {
-                                                        "pid": project_id,
-                                                        "name": claim_name,
-                                                    },
-                                                )
-                                                hid = hid_row.scalar_one_or_none()
-                                                if isinstance(hid, int):
-                                                    holder_agent_id = hid
-                                                    holder_agent_name = claim_name
-                                                else:
-                                                    # Auto-create ops holder in DB and write profile.json
-                                                    await s_holder.execute(
-                                                        text(
-                                                            "INSERT OR IGNORE INTO agents(project_id, name, program, model, task_description, inception_ts, last_active_ts, attachments_policy, contact_policy) VALUES (:pid, :name, :program, :model, :task, :ts, :ts, :attachments_policy, :contact_policy)"
-                                                        ),
-                                                        {
-                                                            "pid": project_id,
-                                                            "name": claim_name,
-                                                            "program": "ops",
-                                                            "model": "system",
-                                                            "task": "ops-escalation",
-                                                            "ts": now_naive,
-                                                            "attachments_policy": "auto",
-                                                            "contact_policy": "auto",
-                                                        },
-                                                    )
-                                                    await s_holder.commit()
-                                                    hid_row2 = await s_holder.execute(
-                                                        text(
-                                                            "SELECT id FROM agents WHERE project_id = :pid AND name = :name"
-                                                        ),
-                                                        {
-                                                            "pid": project_id,
-                                                            "name": claim_name,
-                                                        },
-                                                    )
-                                                    hid2 = hid_row2.scalar_one_or_none()
-                                                    if isinstance(hid2, int):
-                                                        holder_agent_id = hid2
-                                                        holder_agent_name = claim_name
-                                                        # Write profile.json to archive
-                                                        if project_slug:
-                                                            archive = await ensure_archive(settings, project_slug)
-                                                            async with archive_write_lock(archive):
-                                                                await write_agent_profile(
-                                                                    archive,
-                                                                    {
-                                                                        "id": holder_agent_id,
-                                                                        "name": holder_agent_name,
-                                                                        "program": "ops",
-                                                                        "model": "system",
-                                                                        "task_description": "ops-escalation",
-                                                                        "inception_ts": now.isoformat(),
-                                                                        "last_active_ts": now.isoformat(),
-                                                                        "project_id": project_id,
-                                                                        "attachments_policy": "auto",
-                                                                        "contact_policy": "auto",
-                                                                    },
-                                                                )
+                                            holder_agent_id, holder_agent_name = await _ensure_ack_escalation_holder(
+                                                settings=settings,
+                                                project_id=int(project_id),
+                                                project_slug=project_slug,
+                                                recipient_agent_id=int(agent_id),
+                                                recipient_name=recipient_name,
+                                                claim_name=claim_name,
+                                                now=now,
+                                                now_naive=now_naive,
+                                            )
                                         async with get_session() as s2:
                                             await s2.execute(
                                                 text(

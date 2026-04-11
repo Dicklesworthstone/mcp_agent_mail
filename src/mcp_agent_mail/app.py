@@ -11253,36 +11253,38 @@ def build_mcp_server() -> FastMCP:
             )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
-            slot_path = _slot_dir(archive, slot)
-            await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
-            active = await asyncio.to_thread(_read_active_slots, slot_path, now)
-
             holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
-            holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
-            lease_path = slot_path / f"{holder_id}.json"
-            current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
-
             conflicts: list[dict[str, Any]] = []
-            for entry in active:
-                if entry.get("agent") == agent.name and entry.get("branch") == holder_branch:
-                    continue
-                if exclusive or entry.get("exclusive", True):
-                    conflicts.append(entry)
-            active_current = current if current is not None and _is_active_build_slot_lease(current, now) else None
-            requested_exp = now + timedelta(seconds=max(ttl_seconds, 60))
-            current_exp = None
-            if active_current is not None:
-                current_exp = _ensure_utc(_parse_iso(cast(Optional[str], active_current.get("expires_ts"))))
-            payload = {
-                "slot": slot,
-                "agent": agent.name,
-                "branch": holder_branch,
-                "exclusive": exclusive,
-                "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else _iso(now),
-                "expires_ts": _iso(max(requested_exp, current_exp) if current_exp is not None else requested_exp),
-            }
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
+            holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
+            async with _archive_write_lock(archive):
+                # Serialize slot lease reads and writes so concurrent holders observe
+                # the latest lease state and never parse partially written JSON.
+                slot_path = _slot_dir(archive, slot)
+                await asyncio.to_thread(slot_path.mkdir, parents=True, exist_ok=True)
+                active = await asyncio.to_thread(_read_active_slots, slot_path, now)
+                lease_path = slot_path / f"{holder_id}.json"
+                current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
+
+                for entry in active:
+                    if entry.get("agent") == agent.name and entry.get("branch") == holder_branch:
+                        continue
+                    if exclusive or entry.get("exclusive", True):
+                        conflicts.append(entry)
+                active_current = current if current is not None and _is_active_build_slot_lease(current, now) else None
+                requested_exp = now + timedelta(seconds=max(ttl_seconds, 60))
+                current_exp = None
+                if active_current is not None:
+                    current_exp = _ensure_utc(_parse_iso(cast(Optional[str], active_current.get("expires_ts"))))
+                payload = {
+                    "slot": slot,
+                    "agent": agent.name,
+                    "branch": holder_branch,
+                    "exclusive": exclusive,
+                    "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else _iso(now),
+                    "expires_ts": _iso(max(requested_exp, current_exp) if current_exp is not None else requested_exp),
+                }
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), "utf-8")
             if conflicts:
                 await ctx.info(f"Build slot conflicts for '{slot}': {len(conflicts)}")
             return {"granted": payload, "conflicts": conflicts}
@@ -11313,19 +11315,20 @@ def build_mcp_server() -> FastMCP:
             )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
-            slot_path = _slot_dir(archive, slot)
             holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
-            lease_path = slot_path / f"{holder_id}.json"
-            current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
-            if current is None or not _is_active_build_slot_lease(current, now):
-                return {"renewed": False, "expires_ts": None}
-            current_exp = _ensure_utc(_parse_iso(cast(Optional[str], current.get("expires_ts"))))
-            base = max(now, current_exp) if current_exp is not None else now
-            new_exp = _iso(base + timedelta(seconds=max(extend_seconds, 60)))
-            current.update({"slot": slot, "agent": agent.name, "branch": holder_branch, "expires_ts": new_exp})
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
+            async with _archive_write_lock(archive):
+                slot_path = _slot_dir(archive, slot)
+                lease_path = slot_path / f"{holder_id}.json"
+                current = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
+                if current is None or not _is_active_build_slot_lease(current, now):
+                    return {"renewed": False, "expires_ts": None}
+                current_exp = _ensure_utc(_parse_iso(cast(Optional[str], current.get("expires_ts"))))
+                base = max(now, current_exp) if current_exp is not None else now
+                new_exp = _iso(base + timedelta(seconds=max(extend_seconds, 60)))
+                current.update({"slot": slot, "agent": agent.name, "branch": holder_branch, "expires_ts": new_exp})
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(lease_path.write_text, json.dumps(current, indent=2), "utf-8")
             return {"renewed": True, "expires_ts": new_exp}
 
         @mcp.tool(name="release_build_slot")
@@ -11353,20 +11356,21 @@ def build_mcp_server() -> FastMCP:
             )
             archive = await ensure_archive(settings, project.slug)
             now = datetime.now(timezone.utc)
-            slot_path = _slot_dir(archive, slot)
             holder_branch = (branch or "").strip() or await asyncio.to_thread(_compute_branch, project.human_key)
             holder_id = _safe_component(f"{agent.name}__{holder_branch or 'unknown'}")
-            lease_path = slot_path / f"{holder_id}.json"
-            data = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
-            if data is None or not _is_active_build_slot_lease(data, now):
-                return {"released": False, "released_at": _iso(now)}
             released = False
-            try:
-                data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
-                await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
-                released = True
-            except Exception:
-                released = False
+            async with _archive_write_lock(archive):
+                slot_path = _slot_dir(archive, slot)
+                lease_path = slot_path / f"{holder_id}.json"
+                data = await asyncio.to_thread(_read_existing_build_slot_lease, lease_path)
+                if data is None or not _is_active_build_slot_lease(data, now):
+                    return {"released": False, "released_at": _iso(now)}
+                try:
+                    data.update({"released_ts": _iso(now), "expires_ts": _iso(now)})
+                    await asyncio.to_thread(lease_path.write_text, json.dumps(data, indent=2), "utf-8")
+                    released = True
+                except Exception:
+                    released = False
             return {"released": released, "released_at": _iso(now)}
 
     def _read_environment_resource(format: Optional[str] = None) -> dict[str, Any]:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -783,3 +784,64 @@ class TestHTTPLockScope:
         assert response.status_code == 200
         assert response.json()["deleted_count"] == 1
         assert archive_depths == [0]
+
+    @pytest.mark.asyncio
+    async def test_ack_escalation_profile_archives_after_db_session_closes(self, isolated_env, monkeypatch):
+        import mcp_agent_mail.http as http_module
+        from mcp_agent_mail.db import get_session as real_get_session
+        from mcp_agent_mail.models import Agent, Project
+
+        await ensure_schema()
+        async with real_get_session() as session:
+            project = Project(slug="http-ack-lock", human_key="/tmp/http-ack-lock")
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            assert project.id is not None
+
+            agent = Agent(
+                project_id=project.id,
+                name="BlueLake",
+                program="test",
+                model="test",
+                task_description="recipient",
+            )
+            session.add(agent)
+            await session.commit()
+            await session.refresh(agent)
+            assert agent.id is not None
+
+        session_depth = 0
+        archive_write_depths: list[int] = []
+        original_get_session = http_module.get_session
+
+        @contextlib.asynccontextmanager
+        async def tracking_get_session(*args: Any, **kwargs: Any):
+            nonlocal session_depth
+            async with original_get_session(*args, **kwargs) as session:
+                session_depth += 1
+                try:
+                    yield session
+                finally:
+                    session_depth -= 1
+
+        async def tracking_write_agent_profile(*args: Any, **kwargs: Any):
+            archive_write_depths.append(session_depth)
+
+        monkeypatch.setattr(http_module, "get_session", tracking_get_session)
+        monkeypatch.setattr(http_module, "write_agent_profile", tracking_write_agent_profile)
+        settings = _config.get_settings()
+        holder_id, holder_name = await http_module._ensure_ack_escalation_holder(
+            settings=settings,
+            project_id=int(project.id),
+            project_slug=project.slug,
+            recipient_agent_id=int(agent.id),
+            recipient_name=agent.name,
+            claim_name="RedStone",
+            now=datetime.now(timezone.utc),
+            now_naive=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+
+        assert holder_id != agent.id
+        assert holder_name == "RedStone"
+        assert archive_write_depths == [0]
