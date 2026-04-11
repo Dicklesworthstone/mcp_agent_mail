@@ -3503,6 +3503,14 @@ def _active_approved_agent_link_clause(now: datetime | None = None) -> Any:
     )
 
 
+def _agent_link_is_expired(link: AgentLink, now: datetime | None = None) -> bool:
+    """Return whether a pending/approved contact link has expired."""
+    if link.expires_ts is None or link.status not in {"approved", "pending"}:
+        return False
+    naive_now = _naive_utc(now or datetime.now(timezone.utc))
+    return link.expires_ts <= naive_now
+
+
 async def _get_agents_batch(project: Project, names: Sequence[str]) -> dict[str, Agent]:
     """Batch lookup agents by name with `_get_agent`-equivalent error reporting."""
     await ensure_schema()
@@ -8575,16 +8583,23 @@ def build_mcp_server() -> FastMCP:
             action="list_contacts",
         )
         out: list[dict[str, Any]] = []
+        now_utc = datetime.now(timezone.utc)
         async with get_session() as s:
             rows = await s.execute(
-                select(AgentLink, Agent.name)
+                select(AgentLink, Project.human_key, Agent.name)
+                .join(Project, Project.id == AgentLink.b_project_id)
                 .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
                 .where(cast(Any, AgentLink.a_project_id) == project.id, cast(Any, AgentLink.a_agent_id) == agent.id)
+                .order_by(desc(cast(Any, AgentLink.updated_ts)), desc(cast(Any, AgentLink.id)))
             )
-            for link, name in rows.all():
+            for link, target_project_key, name in rows.all():
+                is_expired = _agent_link_is_expired(link, now_utc)
                 out.append({
                     "to": name,
+                    "to_project": target_project_key,
                     "status": link.status,
+                    "is_expired": is_expired,
+                    "allows_messaging": link.status == "approved" and not is_expired,
                     "reason": link.reason,
                     "updated_ts": _iso(link.updated_ts),
                     "expires_ts": _iso(link.expires_ts) if link.expires_ts else None,
@@ -12087,7 +12102,7 @@ def build_mcp_server() -> FastMCP:
                     },
                     {
                         "name": "list_contacts",
-                        "summary": "List outbound contact links, statuses, and expirations for an agent.",
+                        "summary": "List outbound contact links with target projects and audit flags for expiry/messageability.",
                         "use_when": "Auditing who an agent may message or rotating expiring approvals.",
                         "related": ["request_contact", "respond_contact"],
                         "expected_frequency": "Periodic audits or dashboards.",
