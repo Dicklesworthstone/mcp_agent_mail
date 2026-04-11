@@ -994,10 +994,12 @@ class AsyncFileLock:
         """Remove lock and metadata when the lock is stale.
 
         A lock is considered stale if EITHER:
-        1. The owning process no longer exists, OR
+        1. Owner metadata proves the owning process no longer exists, OR
         2. The lock age exceeds the stale timeout
 
-        This ensures locks are cleaned up promptly when either condition is met.
+        Missing owner metadata by itself is not enough to declare the lock stale,
+        because there is a small window between acquiring the lock file and
+        writing the sidecar metadata.
         """
         if not self._path.exists():
             return False
@@ -1013,7 +1015,9 @@ class AsyncFileLock:
         if pid_val is not None:
             with contextlib.suppress(Exception):
                 pid_int = int(pid_val)
-        owner_alive = self._pid_alive(pid_int) if pid_int else False
+        owner_alive: bool | None = None
+        if pid_int is not None:
+            owner_alive = self._pid_alive(pid_int)
         created_ts = metadata.get("created_ts")
         age = None
         if isinstance(created_ts, (int, float)):
@@ -1022,15 +1026,10 @@ class AsyncFileLock:
             with contextlib.suppress(Exception):
                 age = now - self._path.stat().st_mtime
 
-        # Lock is stale if EITHER the owner is dead OR the age exceeds timeout
-        # Special case: if stale_timeout is 0, only check owner liveness (ignore age)
+        # Lock is stale if owner metadata proves the owner is gone OR if the
+        # lock file itself has aged beyond the configured stale timeout.
         is_stale = False
-        if not owner_alive:
-            # Owner process is dead - lock is stale regardless of age
-            is_stale = True
-        elif self._stale_timeout > 0 and isinstance(age, (int, float)) and age >= self._stale_timeout:
-            # Lock is too old - stale regardless of owner status
-            # (only if stale_timeout > 0, otherwise age check is disabled)
+        if owner_alive is False or (self._stale_timeout > 0 and isinstance(age, (int, float)) and age >= self._stale_timeout):
             is_stale = True
 
         if not is_stale:
@@ -1274,7 +1273,10 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
                 with contextlib.suppress(Exception):
                     pid_int = int(pid_val)
             info["owner_pid"] = pid_int
-            info["owner_alive"] = AsyncFileLock._pid_alive(pid_int) if pid_int else False
+            owner_alive: bool | None = None
+            if pid_int is not None:
+                owner_alive = AsyncFileLock._pid_alive(pid_int)
+            info["owner_alive"] = owner_alive
 
             created_ts = metadata.get("created_ts") if isinstance(metadata, dict) else None
             if isinstance(created_ts, (int, float)):
@@ -1282,29 +1284,26 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
                 info["age_seconds"] = max(0.0, now - float(created_ts))
             else:
                 info["created_ts"] = None
-                info["age_seconds"] = None
+                with contextlib.suppress(Exception):
+                    info["age_seconds"] = max(0.0, now - lock_path.stat().st_mtime)
+                if "age_seconds" not in info:
+                    info["age_seconds"] = None
 
             stale_threshold = AsyncFileLock(lock_path)._stale_timeout
             info["stale_timeout_seconds"] = stale_threshold
             age_val = info.get("age_seconds")
-            # Lock is stale if EITHER the owner is dead OR the age exceeds timeout
-            # Special case: if stale_timeout is 0, only check owner liveness (ignore age)
+            # Lock is stale if owner metadata proves the owner is gone OR if the
+            # lock file age exceeds the configured stale timeout.
             is_stale = False
-            if bool(metadata):
-                if not info["owner_alive"]:
-                    # Owner process is dead - lock is stale
-                    is_stale = True
-                elif stale_threshold > 0 and isinstance(age_val, (int, float)) and age_val >= stale_threshold:
-                    # Lock is too old - stale
-                    # (only if stale_timeout > 0, otherwise age check is disabled)
-                    is_stale = True
+            if owner_alive is False or (stale_threshold > 0 and isinstance(age_val, (int, float)) and age_val >= stale_threshold):
+                is_stale = True
             info["stale_suspected"] = is_stale
 
             summary["total"] += 1
 
             if is_stale:
                 summary["stale"] += 1
-            elif info["owner_alive"]:
+            elif info["owner_alive"] is True:
                 summary["active"] += 1
             if not metadata_present:
                 summary["metadata_missing"] += 1
@@ -2200,7 +2199,9 @@ async def heal_archive_locks(settings: Settings, project_slug: str | None = None
         lock_path = cast(Path, lock_path_item)
         summary["locks_scanned"] += 1
         try:
-            lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=0.0)
+            metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
+            stale_timeout = 0.0 if await _to_thread(_path_exists, metadata_path) else AsyncFileLock(lock_path)._stale_timeout
+            lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=stale_timeout)
             removed = await _to_thread(lock._cleanup_if_stale)
             if removed:
                 summary["locks_removed"].append(str(lock_path))

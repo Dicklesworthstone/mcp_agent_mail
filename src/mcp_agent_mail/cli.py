@@ -94,7 +94,7 @@ from .share import (
     sign_manifest,
     summarize_snapshot,
 )
-from .storage import ensure_archive
+from .storage import archive_write_lock, ensure_archive
 from .utils import slugify
 
 # Suppress annoying bleach CSS sanitizer warning from dependencies
@@ -3926,8 +3926,6 @@ def am_run(
     slug = ident["slug"]
     project_uid = ident["project_uid"]
     branch = ident.get("branch") or ""
-    # Always ensure archive structure exists (for tests and local runs)
-    _run_async(ensure_archive(get_settings(), slug))
     if not branch:
         repo = None
         try:
@@ -3951,6 +3949,7 @@ def am_run(
     server_request_timeout_seconds = 5.0
     effective_ttl_seconds = _effective_build_slot_ttl_seconds(ttl_seconds)
     renew_interval_seconds = _build_slot_renew_interval_seconds(ttl_seconds)
+    archive = _run_async(ensure_archive(settings, slug))
 
     def _safe_component(value: str) -> str:
         s = value.strip()
@@ -3959,9 +3958,8 @@ def am_run(
         return s or "unknown"
 
     async def _ensure_slot_paths() -> Path:
-        archive = await ensure_archive(settings, slug)
         slot_dir = archive.root / "build_slots" / _safe_component(slot)
-        slot_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(slot_dir.mkdir, parents=True, exist_ok=True)
         return slot_dir
 
     def _is_active_lease(data: dict[str, Any], now: datetime) -> bool:
@@ -3999,10 +3997,9 @@ def am_run(
 
     def _write_local_release(path: Path) -> None:
         now = datetime.now(timezone.utc)
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
+        data = _read_existing_lease(path)
+        if data is None or not _is_active_lease(data, now):
+            return
         data.update({"released_ts": now.isoformat(), "expires_ts": now.isoformat()})
         with suppress(Exception):
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -4018,6 +4015,41 @@ def am_run(
         current.update({"slot": slot, "agent": agent_name, "branch": branch, "expires_ts": new_exp.isoformat()})
         with suppress(Exception):
             path.write_text(json.dumps(current, indent=2), encoding="utf-8")
+
+    async def _acquire_local_lease_with_lock() -> tuple[list[dict[str, Any]], Path, dict[str, Any]]:
+        async with archive_write_lock(archive):
+            slot_dir = await _ensure_slot_paths()
+            active = await asyncio.to_thread(_read_active, slot_dir)
+            conflicts = [
+                entry for entry in active
+                if not (entry.get("agent") == agent_name and entry.get("branch") == branch)
+                and ((not shared) or entry.get("exclusive", True))
+            ]
+            lease_path = _lease_path(slot_dir)
+            now = datetime.now(timezone.utc)
+            current = await asyncio.to_thread(_read_existing_lease, lease_path)
+            active_current = current if current is not None and _is_active_lease(current, now) else None
+            requested_exp = now + timedelta(seconds=effective_ttl_seconds)
+            current_exp = _parse_iso_datetime(cast(str | None, active_current.get("expires_ts"))) if active_current else None
+            payload = {
+                "slot": slot,
+                "agent": agent_name,
+                "branch": branch,
+                "exclusive": (not shared),
+                "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else now.isoformat(),
+                "expires_ts": max(requested_exp, current_exp).isoformat() if current_exp is not None else requested_exp.isoformat(),
+            }
+            with suppress(Exception):
+                await asyncio.to_thread(lease_path.write_text, json.dumps(payload, indent=2), encoding="utf-8")
+            return conflicts, lease_path, payload
+
+    async def _renew_local_lease_with_lock(path: Path) -> None:
+        async with archive_write_lock(archive):
+            await asyncio.to_thread(_write_local_renew, path)
+
+    async def _release_local_lease_with_lock(path: Path) -> None:
+        async with archive_write_lock(archive):
+            await asyncio.to_thread(_write_local_release, path)
 
     lease_path: Optional[Path] = None
     artifact_dir = Path(settings.storage.root).expanduser().resolve() / "projects" / slug / "artifacts" / agent_name / branch
@@ -4133,20 +4165,14 @@ def am_run(
                                 _parse_jsonrpc_response(resp, request_name="am-run renew_build_slot")
                         except Exception:
                             if lease_path:
-                                _write_local_renew(lease_path)
+                                _run_async(_renew_local_lease_with_lock(lease_path))
                             continue
 
                 renew_thread = threading.Thread(target=_renewer_srv, name="am-run-renew", daemon=True)
                 renew_thread.start()
 
             if not use_server:
-                slot_dir = _run_async(_ensure_slot_paths())
-                active = _read_active(slot_dir)
-                conflicts = [
-                    e for e in active
-                    if not (e.get("agent") == agent_name and e.get("branch") == branch)
-                    and ((not shared) or e.get("exclusive", True))
-                ]
+                conflicts, lease_path, _payload = _run_async(_acquire_local_lease_with_lock())
                 if conflicts and guard_mode == "warn":
                     console.print("[yellow]Build slot conflicts (advisory, proceeding):[/]")
                     for c in conflicts:
@@ -4157,29 +4183,13 @@ def am_run(
                 if conflicts and block_on_conflicts:
                     console.print("[red]Build slot conflicts detected and --block-on-conflicts set; aborting.[/]")
                     raise typer.Exit(code=1)
-                lease_path = _lease_path(slot_dir)
-                now = datetime.now(timezone.utc)
-                current = _read_existing_lease(lease_path)
-                active_current = current if current is not None and _is_active_lease(current, now) else None
-                requested_exp = now + timedelta(seconds=effective_ttl_seconds)
-                current_exp = _parse_iso_datetime(cast(str | None, active_current.get("expires_ts"))) if active_current else None
-                payload = {
-                    "slot": slot,
-                    "agent": agent_name,
-                    "branch": branch,
-                    "exclusive": (not shared),
-                    "acquired_ts": cast(str, active_current.get("acquired_ts")) if active_current is not None and isinstance(active_current.get("acquired_ts"), str) else now.isoformat(),
-                    "expires_ts": max(requested_exp, current_exp).isoformat() if current_exp is not None else requested_exp.isoformat(),
-                }
-                with suppress(Exception):
-                    lease_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 slot_acquired = True
 
                 def _renewer() -> None:
                     while not renew_stop.wait(renew_interval_seconds):
                         try:
                             if lease_path:
-                                _write_local_renew(lease_path)
+                                _run_async(_renew_local_lease_with_lock(lease_path))
                         except Exception:
                             continue
                 renew_thread = threading.Thread(target=_renewer, name="am-run-renew", daemon=True)
@@ -4219,7 +4229,7 @@ def am_run(
             except Exception:
                 if lease_path:
                     with suppress(Exception):
-                        _write_local_release(lease_path)
+                        _run_async(_release_local_lease_with_lock(lease_path))
     if rc != 0:
         raise typer.Exit(code=rc)
 
@@ -4573,27 +4583,94 @@ def projects_adopt(
         # Move Git artifacts
         settings = get_settings()
         # local import to minimize top-level churn and keep ordering stable
-        from .storage import AsyncFileLock as _AsyncFileLock, ensure_archive as _ensure_archive
-        src_archive = _run_async(_ensure_archive(settings, src.slug))
-        dst_archive = _run_async(_ensure_archive(settings, dst.slug))
-        moved_relpaths: list[str] = []
-        for path_item in sorted(src_archive.root.rglob("*"), key=str):
-            # rglob returns Path objects at runtime; cast for type checker
-            path = cast(Path, path_item)
-            if not path.is_file():
-                continue
-            if path.name.endswith(".lock") or path.name.endswith(".lock.owner.json"):
-                continue
-            rel_from_root = path.relative_to(src_archive.root)
-            dest_path = dst_archive.root / rel_from_root
-            await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
-            if dest_path.exists():
-                continue
-            await asyncio.to_thread(path.replace, dest_path)
-            moved_relpaths.append(dest_path.relative_to(dst_archive.repo_root).as_posix())
-        from .storage import _commit as _archive_commit
-        async with _AsyncFileLock(dst_archive.lock_path):
-            await _archive_commit(dst_archive.repo, settings, f"adopt: move {src.slug} into {dst.slug}", moved_relpaths)
+        from git import Actor
+
+        from .storage import (
+            AsyncFileLock as _AsyncFileLock,
+            _commit as _archive_commit,
+            _commit_lock_path as _commit_lock_path,
+        )
+
+        async def _commit_archive_move(
+            *,
+            add_relpaths: Sequence[str],
+            remove_relpaths: Sequence[str],
+            message: str,
+        ) -> None:
+            combined_relpaths = [*remove_relpaths, *add_relpaths]
+            if not combined_relpaths:
+                return
+            actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
+            commit_lock_path = _commit_lock_path(dst_archive.repo_root, combined_relpaths)
+            async with _AsyncFileLock(commit_lock_path):
+                if remove_relpaths:
+                    await asyncio.to_thread(
+                        dst_archive.repo.git.rm,
+                        "--cached",
+                        "--ignore-unmatch",
+                        "--",
+                        *remove_relpaths,
+                    )
+                if add_relpaths:
+                    await asyncio.to_thread(dst_archive.repo.index.add, list(add_relpaths))
+                if await asyncio.to_thread(dst_archive.repo.is_dirty, index=True, working_tree=True):
+                    await asyncio.to_thread(
+                        dst_archive.repo.index.commit,
+                        message,
+                        author=actor,
+                        committer=actor,
+                    )
+
+        lock_order = tuple(sorted((src_archive, dst_archive), key=lambda archive: str(archive.lock_path)))
+        async with archive_write_lock(lock_order[0]), archive_write_lock(lock_order[1]):
+            move_candidates: list[tuple[Path, Path]] = []
+            collisions: list[str] = []
+            for path_item in sorted(src_archive.root.rglob("*"), key=str):
+                # rglob returns Path objects at runtime; cast for type checker
+                path = cast(Path, path_item)
+                if not path.is_file():
+                    continue
+                if path.name.endswith(".lock") or path.name.endswith(".lock.owner.json"):
+                    continue
+                rel_from_root = path.relative_to(src_archive.root)
+                dest_path = dst_archive.root / rel_from_root
+                if await asyncio.to_thread(dest_path.exists):
+                    collisions.append(rel_from_root.as_posix())
+                    continue
+                move_candidates.append((path, dest_path))
+            if collisions:
+                preview = ", ".join(collisions[:5])
+                suffix = f" (+{len(collisions) - 5} more)" if len(collisions) > 5 else ""
+                raise typer.BadParameter(f"Target archive already contains conflicting paths: {preview}{suffix}")
+
+            moved_relpaths: list[str] = []
+            removed_relpaths: list[str] = []
+            for source_path, dest_path in move_candidates:
+                await asyncio.to_thread(dest_path.parent.mkdir, parents=True, exist_ok=True)
+                await asyncio.to_thread(source_path.replace, dest_path)
+                moved_relpaths.append(dest_path.relative_to(dst_archive.repo_root).as_posix())
+                removed_relpaths.append(source_path.relative_to(src_archive.repo_root).as_posix())
+
+            await _commit_archive_move(
+                add_relpaths=moved_relpaths,
+                remove_relpaths=removed_relpaths,
+                message=f"adopt: move {src.slug} into {dst.slug}",
+            )
+
+            # Write aliases.json under target while the same archive surfaces stay locked.
+            aliases_path = dst_archive.root / "aliases.json"
+            try:
+                existing: dict[str, Any] = {}
+                if await asyncio.to_thread(aliases_path.exists):
+                    existing = json.loads(await asyncio.to_thread(aliases_path.read_text, encoding="utf-8"))
+                former = set(existing.get("former_slugs", []))
+                former.add(src.slug)
+                existing["former_slugs"] = sorted(former)
+                await asyncio.to_thread(aliases_path.write_text, json.dumps(existing, indent=2), "utf-8")
+                rel_alias = aliases_path.relative_to(dst_archive.repo_root).as_posix()
+                await _archive_commit(dst_archive.repo, settings, f"adopt: record alias for {src.slug}", [rel_alias])
+            except Exception as exc:
+                console.print(f"[yellow]Warning: failed to write aliases.json: {exc}[/]")
         # Re-key database rows (agents, messages, file_reservations)
         async with get_session() as session:
             from sqlalchemy import update as _update  # local import to avoid top-of-file churn
@@ -4601,20 +4678,6 @@ def projects_adopt(
             await session.execute(_update(Message).where(cast(ColumnElement[bool], Message.project_id == src.id)).values(project_id=dst.id))
             await session.execute(_update(FileReservation).where(cast(ColumnElement[bool], FileReservation.project_id == src.id)).values(project_id=dst.id))
             await session.commit()
-        # Write aliases.json under target
-        aliases_path = dst_archive.root / "aliases.json"
-        try:
-            existing = {}
-            if aliases_path.exists():
-                existing = json.loads(aliases_path.read_text(encoding="utf-8"))
-            former = set(existing.get("former_slugs", []))
-            former.add(src.slug)
-            existing["former_slugs"] = sorted(former)
-            await asyncio.to_thread(aliases_path.write_text, json.dumps(existing, indent=2), "utf-8")
-            rel_alias = aliases_path.relative_to(dst_archive.repo_root).as_posix()
-            await _archive_commit(dst_archive.repo, settings, f"adopt: record alias for {src.slug}", [rel_alias])
-        except Exception as exc:
-            console.print(f"[yellow]Warning: failed to write aliases.json: {exc}[/]")
 
     try:
         _run_async(_apply())

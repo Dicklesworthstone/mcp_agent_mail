@@ -3,6 +3,7 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastmcp import Client
@@ -269,6 +270,98 @@ async def test_build_slot_tools_offload_git_and_slot_file_io(isolated_env, monke
         assert released.data["released"] is True
 
     assert slot_io_events >= {"exists", "glob", "read_text"}
+
+
+@pytest.mark.asyncio
+async def test_build_slot_tools_hold_archive_lock_during_slot_io(isolated_env, monkeypatch):
+    import mcp_agent_mail.app as app_module
+
+    monkeypatch.setenv("WORKTREES_ENABLED", "1")
+    clear_settings_cache()
+    server = build_mcp_server()
+    path_type = type(Path("/"))
+    original_glob = path_type.glob
+    original_read_text = path_type.read_text
+    original_write_text = path_type.write_text
+    original_archive_write_lock = app_module._archive_write_lock
+    lock_depth = 0
+    slot_io_depths: list[int] = []
+
+    def _record_slot_io(path: Path) -> None:
+        if "build_slots" in path.parts:
+            slot_io_depths.append(lock_depth)
+
+    def checked_glob(self: Path, pattern: str, *args, **kwargs):
+        _record_slot_io(self)
+        return original_glob(self, pattern, *args, **kwargs)
+
+    def checked_read_text(self: Path, *args, **kwargs) -> str:
+        _record_slot_io(self)
+        return original_read_text(self, *args, **kwargs)
+
+    def checked_write_text(self: Path, *args, **kwargs) -> int:
+        _record_slot_io(self)
+        return original_write_text(self, *args, **kwargs)
+
+    @contextlib.asynccontextmanager
+    async def tracking_archive_write_lock(*args: Any, **kwargs: Any):
+        nonlocal lock_depth
+        lock_depth += 1
+        try:
+            async with original_archive_write_lock(*args, **kwargs):
+                yield
+        finally:
+            lock_depth -= 1
+
+    monkeypatch.setattr(path_type, "glob", checked_glob)
+    monkeypatch.setattr(path_type, "read_text", checked_read_text)
+    monkeypatch.setattr(path_type, "write_text", checked_write_text)
+    monkeypatch.setattr(app_module, "_archive_write_lock", tracking_archive_write_lock)
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/backend"})
+        agent = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": "Backend",
+                "program": "codex",
+                "model": "gpt-5",
+                "name": "BlueLake",
+                "task_description": "build slots",
+            },
+        )
+        token = agent.data["registration_token"]
+
+        await client.call_tool(
+            "acquire_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        await client.call_tool(
+            "renew_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+        await client.call_tool(
+            "release_build_slot",
+            {
+                "project_key": "Backend",
+                "agent_name": "BlueLake",
+                "slot": "frontend-build",
+                "registration_token": token,
+            },
+        )
+
+    assert slot_io_depths
+    assert all(depth > 0 for depth in slot_io_depths)
 
 
 @pytest.mark.asyncio

@@ -1,19 +1,86 @@
 import asyncio
 import json
 import sqlite3
+import subprocess
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from git.index.base import IndexFile
 from sqlalchemy import select
 from sqlalchemy.sql import ColumnElement
 from typer.testing import CliRunner
 
+from mcp_agent_mail import cli as cli_module
 from mcp_agent_mail.cli import app
 from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import ensure_schema, get_session
 from mcp_agent_mail.models import Agent, FileReservation, Project
+from mcp_agent_mail.storage import _commit as _archive_commit, ensure_archive
+
+
+def _init_projects_adopt_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo_root = tmp_path / "adopt-repo"
+    source_worktree = repo_root / "legacy-worktree"
+    target_worktree = repo_root / "canonical-worktree"
+    source_worktree.mkdir(parents=True, exist_ok=True)
+    target_worktree.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(repo_root), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=str(repo_root), check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=str(repo_root), check=True)
+    (repo_root / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=str(repo_root), check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(repo_root),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return source_worktree, target_worktree
+
+
+def _seed_projects_adopt_state(source_worktree: Path, target_worktree: Path) -> tuple[Path, Path, Path, int]:
+    async def _seed() -> tuple[Path, Path, Path, int]:
+        await ensure_schema()
+        async with get_session() as session:
+            source_project = Project(slug="legacy", human_key=str(source_worktree))
+            target_project = Project(slug="canonical", human_key=str(target_worktree))
+            session.add(source_project)
+            session.add(target_project)
+            await session.commit()
+            await session.refresh(source_project)
+            await session.refresh(target_project)
+            assert source_project.id is not None
+            assert target_project.id is not None
+            session.add(
+                Agent(
+                    project_id=source_project.id,
+                    name="BlueLake",
+                    program="codex",
+                    model="gpt-5",
+                    task_description="legacy agent",
+                )
+            )
+            await session.commit()
+
+        settings = get_settings()
+        source_archive = await ensure_archive(settings, "legacy")
+        target_archive = await ensure_archive(settings, "canonical")
+        source_artifact = source_archive.root / "messages" / "legacy-note.md"
+        source_artifact.parent.mkdir(parents=True, exist_ok=True)
+        source_artifact.write_text("legacy artifact\n", encoding="utf-8")
+        await _archive_commit(
+            source_archive.repo,
+            settings,
+            "seed: legacy artifact",
+            [source_artifact.relative_to(source_archive.repo_root).as_posix()],
+        )
+        return source_archive.root, target_archive.root, source_archive.repo_root, target_project.id
+
+    return asyncio.run(_seed())
 
 
 def test_cli_lint(monkeypatch):
@@ -40,6 +107,91 @@ def test_cli_typecheck(monkeypatch):
     result = runner.invoke(app, ["typecheck"])
     assert result.exit_code == 0
     assert captured == [["uvx", "ty", "check"]]
+
+
+def test_projects_adopt_apply_moves_archive_state_and_keeps_archive_git_clean(isolated_env, tmp_path):
+    runner = CliRunner()
+    source_worktree, target_worktree = _init_projects_adopt_repo(tmp_path)
+    source_root, target_root, archive_repo_root, target_project_id = _seed_projects_adopt_state(source_worktree, target_worktree)
+
+    result = runner.invoke(app, ["projects", "adopt", "legacy", "canonical", "--apply"])
+
+    assert result.exit_code == 0
+    assert "Adoption apply completed." in result.stdout
+    assert not (source_root / "messages" / "legacy-note.md").exists()
+    assert (target_root / "messages" / "legacy-note.md").exists()
+    aliases = json.loads((target_root / "aliases.json").read_text(encoding="utf-8"))
+    assert aliases["former_slugs"] == ["legacy"]
+
+    async def _verify() -> int:
+        async with get_session() as session:
+            agent = (
+                await session.execute(
+                    select(Agent).where(cast(ColumnElement[bool], Agent.name == "BlueLake"))
+                )
+            ).scalars().one()
+            return agent.project_id
+
+    assert asyncio.run(_verify()) == target_project_id
+
+    archive_status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=str(archive_repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert archive_status == ""
+
+    source_ls = subprocess.run(
+        ["git", "ls-files", "--", "projects/legacy/messages/legacy-note.md"],
+        cwd=str(archive_repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    target_ls = subprocess.run(
+        ["git", "ls-files", "--", "projects/canonical/messages/legacy-note.md"],
+        cwd=str(archive_repo_root),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert source_ls == ""
+    assert target_ls == "projects/canonical/messages/legacy-note.md"
+
+
+def test_projects_adopt_move_commit_holds_both_archive_locks(isolated_env, tmp_path, monkeypatch):
+    runner = CliRunner()
+    source_worktree, target_worktree = _init_projects_adopt_repo(tmp_path)
+    _seed_projects_adopt_state(source_worktree, target_worktree)
+
+    active_locks: set[str] = set()
+    observed_lock_sets: list[set[str]] = []
+    original_archive_write_lock = cli_module.archive_write_lock
+    original_index_commit = IndexFile.commit
+
+    @asynccontextmanager
+    async def tracking_archive_write_lock(archive, *args, **kwargs):
+        async with original_archive_write_lock(archive, *args, **kwargs):
+            active_locks.add(archive.slug)
+            try:
+                yield
+            finally:
+                active_locks.remove(archive.slug)
+
+    def tracking_index_commit(self, message, *args, **kwargs):
+        if message == "adopt: move legacy into canonical":
+            observed_lock_sets.append(set(active_locks))
+        return original_index_commit(self, message, *args, **kwargs)
+
+    monkeypatch.setattr("mcp_agent_mail.cli.archive_write_lock", tracking_archive_write_lock)
+    monkeypatch.setattr(IndexFile, "commit", tracking_index_commit)
+
+    result = runner.invoke(app, ["projects", "adopt", "legacy", "canonical", "--apply"])
+
+    assert result.exit_code == 0
+    assert observed_lock_sets == [{"legacy", "canonical"}]
 
 
 def test_cli_serve_http_uses_settings(isolated_env, monkeypatch):
