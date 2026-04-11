@@ -519,3 +519,267 @@ class TestRequestLogging:
 
         # Logging should have occurred (may use structlog or stdlib)
         # This is a smoke test that the request completes
+
+
+# =============================================================================
+# Test: HTTP Lock Scope
+# =============================================================================
+
+
+class TestHTTPLockScope:
+    """Regression tests for DB/archive lock ordering in HTTP routes."""
+
+    @pytest.mark.asyncio
+    async def test_overseer_send_archives_after_db_session_closes(self, isolated_env, monkeypatch):
+        import mcp_agent_mail.http as http_module
+        import mcp_agent_mail.storage as storage_module
+        from mcp_agent_mail.db import get_session as real_get_session
+        from mcp_agent_mail.models import Agent, Project
+
+        await ensure_schema()
+        async with real_get_session() as session:
+            project = Project(slug="http-overseer-lock", human_key="/tmp/http-overseer-lock")
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            assert project.id is not None
+
+            recipient = Agent(
+                project_id=project.id,
+                name="BlueLake",
+                program="test",
+                model="test",
+                task_description="recipient",
+            )
+            session.add(recipient)
+            await session.commit()
+
+        session_depth = 0
+        archive_write_depths: list[int] = []
+        original_write_message_bundle = storage_module.write_message_bundle
+        original_get_session = http_module.get_session
+
+        @contextlib.asynccontextmanager
+        async def tracking_get_session(*args: Any, **kwargs: Any):
+            nonlocal session_depth
+            async with original_get_session(*args, **kwargs) as session:
+                session_depth += 1
+                try:
+                    yield session
+                finally:
+                    session_depth -= 1
+
+        async def tracking_write_message_bundle(*args: Any, **kwargs: Any):
+            archive_write_depths.append(session_depth)
+            return await original_write_message_bundle(*args, **kwargs)
+
+        monkeypatch.setattr(http_module, "get_session", tracking_get_session)
+        monkeypatch.setattr(storage_module, "write_message_bundle", tracking_write_message_bundle)
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/mail/{project.slug}/overseer/send",
+                json={
+                    "recipients": ["BlueLake"],
+                    "subject": "Lock Scope",
+                    "body_md": "Check DB/archive ordering.",
+                },
+            )
+
+        assert response.status_code == 200
+        assert archive_write_depths == [0]
+
+    @pytest.mark.asyncio
+    async def test_delete_messages_archives_after_db_session_closes(self, isolated_env, monkeypatch):
+        import mcp_agent_mail.http as http_module
+        from mcp_agent_mail.db import get_session as real_get_session
+        from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
+
+        await ensure_schema()
+        async with real_get_session() as session:
+            project = Project(slug="http-delete-lock", human_key="/tmp/http-delete-lock")
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            assert project.id is not None
+
+            sender = Agent(
+                project_id=project.id,
+                name="GreenCastle",
+                program="test",
+                model="test",
+                task_description="sender",
+            )
+            recipient = Agent(
+                project_id=project.id,
+                name="BlueLake",
+                program="test",
+                model="test",
+                task_description="recipient",
+            )
+            session.add(sender)
+            session.add(recipient)
+            await session.commit()
+            await session.refresh(sender)
+            await session.refresh(recipient)
+            assert sender.id is not None
+            assert recipient.id is not None
+
+            message = Message(
+                project_id=project.id,
+                sender_id=sender.id,
+                subject="Delete Me",
+                body_md="body",
+                importance="normal",
+                ack_required=False,
+            )
+            session.add(message)
+            await session.commit()
+            await session.refresh(message)
+            assert message.id is not None
+
+            session.add(
+                MessageRecipient(
+                    message_id=message.id,
+                    agent_id=recipient.id,
+                    kind="to",
+                )
+            )
+            await session.commit()
+
+        session_depth = 0
+        archive_depths: list[int] = []
+        original_get_session = http_module.get_session
+        original_ensure_archive = http_module.ensure_archive
+
+        @contextlib.asynccontextmanager
+        async def tracking_get_session(*args: Any, **kwargs: Any):
+            nonlocal session_depth
+            async with original_get_session(*args, **kwargs) as session:
+                session_depth += 1
+                try:
+                    yield session
+                finally:
+                    session_depth -= 1
+
+        async def tracking_ensure_archive(*args: Any, **kwargs: Any):
+            archive_depths.append(session_depth)
+            return await original_ensure_archive(*args, **kwargs)
+
+        monkeypatch.setattr(http_module, "get_session", tracking_get_session)
+        monkeypatch.setattr(http_module, "ensure_archive", tracking_ensure_archive)
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/mail/api/delete-messages",
+                json={"message_ids": [message.id]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["deleted_count"] == 1
+        assert archive_depths == [0]
+
+    @pytest.mark.asyncio
+    async def test_inbox_delete_archives_after_db_session_closes(self, isolated_env, monkeypatch):
+        import mcp_agent_mail.http as http_module
+        from mcp_agent_mail.db import get_session as real_get_session
+        from mcp_agent_mail.models import Agent, Message, MessageRecipient, Project
+
+        await ensure_schema()
+        async with real_get_session() as session:
+            project = Project(slug="http-inbox-delete-lock", human_key="/tmp/http-inbox-delete-lock")
+            session.add(project)
+            await session.commit()
+            await session.refresh(project)
+            assert project.id is not None
+
+            sender = Agent(
+                project_id=project.id,
+                name="GreenCastle",
+                program="test",
+                model="test",
+                task_description="sender",
+            )
+            recipient = Agent(
+                project_id=project.id,
+                name="BlueLake",
+                program="test",
+                model="test",
+                task_description="recipient",
+            )
+            session.add(sender)
+            session.add(recipient)
+            await session.commit()
+            await session.refresh(sender)
+            await session.refresh(recipient)
+            assert sender.id is not None
+            assert recipient.id is not None
+
+            message = Message(
+                project_id=project.id,
+                sender_id=sender.id,
+                subject="Delete In Inbox",
+                body_md="body",
+                importance="normal",
+                ack_required=False,
+            )
+            session.add(message)
+            await session.commit()
+            await session.refresh(message)
+            assert message.id is not None
+
+            session.add(
+                MessageRecipient(
+                    message_id=message.id,
+                    agent_id=recipient.id,
+                    kind="to",
+                )
+            )
+            await session.commit()
+
+        session_depth = 0
+        archive_depths: list[int] = []
+        original_get_session = http_module.get_session
+        original_ensure_archive = http_module.ensure_archive
+
+        @contextlib.asynccontextmanager
+        async def tracking_get_session(*args: Any, **kwargs: Any):
+            nonlocal session_depth
+            async with original_get_session(*args, **kwargs) as session:
+                session_depth += 1
+                try:
+                    yield session
+                finally:
+                    session_depth -= 1
+
+        async def tracking_ensure_archive(*args: Any, **kwargs: Any):
+            archive_depths.append(session_depth)
+            return await original_ensure_archive(*args, **kwargs)
+
+        monkeypatch.setattr(http_module, "get_session", tracking_get_session)
+        monkeypatch.setattr(http_module, "ensure_archive", tracking_ensure_archive)
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/mail/{project.slug}/inbox/{recipient.name}/delete-messages",
+                json={"message_ids": [message.id]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["deleted_count"] == 1
+        assert archive_depths == [0]

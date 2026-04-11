@@ -1949,6 +1949,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         text(f"DELETE FROM messages WHERE id IN ({placeholders})"),
                         id_params,
                     )
+                    deleted_count = int(getattr(del_result, "rowcount", 0) or 0)
                     await session.commit()
 
                 settings = get_settings()
@@ -3429,8 +3430,6 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                                 "ts": datetime.now(timezone.utc).replace(tzinfo=None),
                             },
                         )
-                        # Don't commit yet - wait until message is successfully created and written to Git
-
                         # Fetch the agent (whether we just created it or another request did)
                         overseer_row = (
                             await session.execute(

@@ -238,6 +238,37 @@ async def test_precommit_ignores_expired_reservation(isolated_env, tmp_path: Pat
     assert proc.returncode == 0, f"Should ignore expired reservation, stderr: {proc.stderr}"
 
 
+@pytest.mark.asyncio
+async def test_precommit_ignores_released_reservation(isolated_env, tmp_path: Path):
+    """Pre-commit should ignore reservations that already have released_ts set."""
+    settings = get_settings()
+    archive = await ensure_archive(settings, "enforcement-test-released")
+    script_text = render_precommit_script(archive)
+    script_path = tmp_path / "precommit.py"
+    script_path.write_text(script_text, encoding="utf-8")
+
+    released_ts = datetime.now(timezone.utc).isoformat()
+    future_ts = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    await write_file_reservation_record(
+        archive,
+        {
+            "agent": "OtherAgent",
+            "path_pattern": "src/app.py",
+            "exclusive": True,
+            "released_ts": released_ts,
+            "expires_ts": future_ts,
+        },
+    )
+
+    code_repo = tmp_path / "code"
+    code_repo.mkdir(parents=True, exist_ok=True)
+    init_git_repo(code_repo)
+    stage_file(code_repo, "src/app.py")
+
+    proc = run_precommit_script(script_path, code_repo, agent_name="TestAgent")
+    assert proc.returncode == 0, f"Should ignore released reservation, stderr: {proc.stderr}"
+
+
 # ============================================================================
 # Test: Bypass Mode
 # ============================================================================
