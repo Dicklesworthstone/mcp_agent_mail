@@ -52,19 +52,9 @@ _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
 log_ok "Detected MCP HTTP endpoint: ${_URL}"
 
 # Determine or generate bearer token
-_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
-if [[ -z "${_TOKEN}" && -f .env ]]; then
-  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
-fi
+_TOKEN="$(resolve_integration_bearer_token "${ROOT_DIR}")"
 if [[ -z "${_TOKEN}" ]]; then
-  if command -v openssl >/dev/null 2>&1; then
-    _TOKEN=$(openssl rand -hex 32)
-  else
-    _TOKEN=$(uv run python - <<'PY'
-import secrets; print(secrets.token_hex(32))
-PY
-)
-  fi
+  _TOKEN="$(generate_bearer_token)"
   log_ok "Generated bearer token."
 fi
 
@@ -95,30 +85,7 @@ set_secure_file "$OUT_JSON" || true
 log_step "Creating run helper script"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
-write_atomic "$RUN_HELPER" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
-  if [[ -f .env ]]; then
-    HTTP_BEARER_TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
-  fi
-fi
-if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
-  if command -v uv >/dev/null 2>&1; then
-    HTTP_BEARER_TOKEN=$(uv run python - <<'PY'
-import secrets; print(secrets.token_hex(32))
-PY
-)
-  else
-    HTTP_BEARER_TOKEN="$(date +%s)_$(hostname)"
-  fi
-fi
-export HTTP_BEARER_TOKEN
-
-uv run python -m mcp_agent_mail.cli serve-http "$@"
-SH
-set_secure_exec "$RUN_HELPER" || true
+write_run_helper_script "$RUN_HELPER"
 
 # Readiness check (bounded)
 log_step "Attempt readiness check (bounded)"
@@ -168,5 +135,4 @@ else
   _print "  - Header: (optional on localhost if server allows)"
 fi
 _print "Then start the server with: ${RUN_HELPER}"
-
 

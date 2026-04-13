@@ -46,19 +46,9 @@ if [[ -z "${_HTTP_HOST}" || -z "${_HTTP_PORT}" || -z "${_HTTP_PATH}" ]]; then
 fi
 
 _URL="http://${_HTTP_HOST}:${_HTTP_PORT}${_HTTP_PATH}"
-_TOKEN="${INTEGRATION_BEARER_TOKEN:-}"
-if [[ -z "${_TOKEN}" && -f .env ]]; then
-  _TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
-fi
+_TOKEN="$(resolve_integration_bearer_token "${ROOT_DIR}")"
 if [[ -z "${_TOKEN}" ]]; then
-  if command -v openssl >/dev/null 2>&1; then
-    _TOKEN=$(openssl rand -hex 32)
-  else
-    _TOKEN=$(uv run python - <<'PY'
-import secrets; print(secrets.token_hex(32))
-PY
-)
-  fi
+  _TOKEN="$(generate_bearer_token)"
   log_ok "Generated bearer token."
 fi
 
@@ -109,30 +99,7 @@ set_secure_file "$OUT_JSON"
 log_step "Creating run helper script"
 mkdir -p scripts
 RUN_HELPER="scripts/run_server_with_token.sh"
-write_atomic "$RUN_HELPER" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
-  if [[ -f .env ]]; then
-    HTTP_BEARER_TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' .env | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
-  fi
-fi
-if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
-  if command -v uv >/dev/null 2>&1; then
-    HTTP_BEARER_TOKEN=$(uv run python - <<'PY'
-import secrets; print(secrets.token_hex(32))
-PY
-)
-  else
-    HTTP_BEARER_TOKEN="$(date +%s)_$(hostname)"
-  fi
-fi
-export HTTP_BEARER_TOKEN
-
-uv run python -m mcp_agent_mail.cli serve-http "$@"
-SH
-set_secure_exec "$RUN_HELPER"
+write_run_helper_script "$RUN_HELPER"
 
 echo "Wrote ${OUT_JSON}. Some Gemini CLIs may not yet support MCP; keep for reference."
 echo "Server start: $RUN_HELPER"
@@ -147,12 +114,15 @@ if [[ -f "$HOME_GEMINI_JSON" ]]; then
 fi
 
 # Gemini CLI uses "httpUrl" for Streamable HTTP transport
+if [[ -n "${_TOKEN}" ]]; then
+  _HOME_MCP_SERVER_JSON='"mcp-agent-mail": {"httpUrl": "'"${_URL}"'", "headers": {"Authorization": "Bearer '"${_TOKEN}"'"}}'
+else
+  _HOME_MCP_SERVER_JSON='"mcp-agent-mail": {"httpUrl": "'"${_URL}"'"}'
+fi
 write_atomic "$HOME_GEMINI_JSON" <<JSON
 {
   "mcpServers": {
-    "mcp-agent-mail": {
-      "httpUrl": "${_URL}"
-    }$(if [[ -n "${_MORPH_API_KEY}" ]]; then cat <<JSONFRAG
+    ${_HOME_MCP_SERVER_JSON}$(if [[ -n "${_MORPH_API_KEY}" ]]; then cat <<JSONFRAG
 ,
     "morph-mcp": {
       "command": "npx",

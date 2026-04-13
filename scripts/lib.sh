@@ -69,6 +69,74 @@ require_cmd() {
   command -v "$cmd" >/dev/null 2>&1 || { log_err "Missing dependency: $cmd"; exit 1; }
 }
 
+# Read a simple KEY=value pair from an env file.
+read_env_file_value() {
+  local file="$1"
+  local key="$2"
+  [[ -f "$file" ]] || return 1
+  grep -E "^${key}=" "$file" | tail -n 1 | sed -E "s/^${key}=//"
+}
+
+# Generate a bearer token for local integrations.
+generate_bearer_token() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+  elif command -v python >/dev/null 2>&1; then
+    python - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+  elif command -v uv >/dev/null 2>&1; then
+    uv run python - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+  else
+    date +%s
+  fi
+}
+
+# Resolve the active bearer token for client integrations.
+resolve_integration_bearer_token() {
+  local root_dir="${1:-$PWD}"
+  local token="${INTEGRATION_BEARER_TOKEN:-${HTTP_BEARER_TOKEN:-}}"
+  local runtime_token_file="/run/credentials/mcp-agent-mail.service/agent-mail-token"
+
+  if [[ -n "$token" ]]; then
+    printf '%s\n' "$token"
+    return 0
+  fi
+
+  if [[ -r "$runtime_token_file" ]]; then
+    token="$(tr -d '\r\n' < "$runtime_token_file")"
+    if [[ -n "$token" ]]; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+  fi
+
+  local -a candidate_files=()
+  if [[ -n "$root_dir" ]]; then
+    candidate_files+=("${root_dir}/.env")
+  fi
+  if [[ -n "${MCP_AGENT_MAIL_ENV_FILE:-}" ]]; then
+    candidate_files+=("${MCP_AGENT_MAIL_ENV_FILE}")
+  fi
+  candidate_files+=("${HOME}/.config/mcp-agent-mail/config.env")
+
+  local file=""
+  for file in "${candidate_files[@]}"; do
+    [[ -f "$file" ]] || continue
+    token="$(read_env_file_value "$file" "HTTP_BEARER_TOKEN" || true)"
+    if [[ -n "$token" ]]; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+  done
+
+  printf '\n'
+}
+
 # Atomic write: read content from stdin and atomically move to target
 write_atomic() {
   local target="$1"; shift || true
@@ -366,6 +434,45 @@ run_cmd() {
     return 0
   fi
   "$@"
+}
+
+# Write the standard local run helper used by integration scripts.
+write_run_helper_script() {
+  local target="$1"
+  write_atomic "$target" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${ROOT_DIR}/scripts/lib.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${ROOT_DIR}/scripts/lib.sh"
+fi
+
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]] && declare -F resolve_integration_bearer_token >/dev/null 2>&1; then
+  HTTP_BEARER_TOKEN="$(resolve_integration_bearer_token "${ROOT_DIR}")"
+fi
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
+  if declare -F generate_bearer_token >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN="$(generate_bearer_token)"
+  elif command -v openssl >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+  elif command -v uv >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN="$(uv run python - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)"
+  else
+    HTTP_BEARER_TOKEN="$(date +%s)"
+  fi
+fi
+export HTTP_BEARER_TOKEN
+
+cd "${ROOT_DIR}"
+uv run python -m mcp_agent_mail.cli serve-http "$@"
+SH
+  set_secure_exec "$target" || true
 }
 
 # Backup a file to backup_config_files/ with timestamp before .bak extension
@@ -706,4 +813,3 @@ kill_port_processes() {
     fi
   fi
 }
-
