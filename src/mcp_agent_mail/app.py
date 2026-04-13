@@ -4783,6 +4783,16 @@ def build_mcp_server() -> FastMCP:
                 data={"agent_name": agent.name, "project_key": project.human_key, "action": action},
             )
         if not provided_token:
+            # Fallback: auto-rebind via window identity when session reconnects.
+            # If MCP_AGENT_MAIL_WINDOW_ID is set and maps to this agent in this
+            # project, treat it as proof of identity and bind the session.
+            _wi_settings = get_settings()
+            _wi_uuid = getattr(_wi_settings, "window_identity_uuid", "") or ""
+            if _wi_uuid and _validate_window_uuid(_wi_uuid):
+                _wi = await _get_window_identity(project, _wi_uuid)
+                if _wi and _wi.display_name == agent.name:
+                    _bind_session_agent(ctx, project, agent)
+                    return agent
             raise ToolExecutionError(
                 "AUTHENTICATION_REQUIRED",
                 (
@@ -7760,12 +7770,38 @@ def build_mcp_server() -> FastMCP:
             reply_subject = base_subject
         else:
             reply_subject = f"{subject_prefix_clean} {base_subject}".strip()
-        default_reply_target = (
-            original_sender.name
-            if original_sender.project_id == project.id
-            else _format_cross_project_agent_address(original_sender_project.slug, original_sender.name)
-        )
-        to_names = [default_reply_target] if to is None else to
+        # When replying to your own outbound message, default `to` to the
+        # original recipients instead of yourself (avoids self-reply loop).
+        if to is None and original.sender_id == sender.id:
+            async with get_session() as _rsl_sx:
+                _rsl_result = await _rsl_sx.execute(
+                    _sa_select(Agent.name, Agent.project_id, MessageRecipient.kind)
+                    .join(Agent, MessageRecipient.agent_id == Agent.id)
+                    .where(
+                        cast(Any, MessageRecipient.message_id) == original.id,
+                        cast(Any, MessageRecipient.kind) == "to",
+                    )
+                )
+                _rsl_rows = _rsl_result.all()
+            if _rsl_rows:
+                _rsl_targets: list[str] = []
+                for _rsl_name, _rsl_proj_id, _ in _rsl_rows:
+                    if _rsl_proj_id == project.id:
+                        _rsl_targets.append(_rsl_name)
+                    else:
+                        _rsl_proj = await _get_project_by_id(_rsl_proj_id)
+                        _rsl_targets.append(_format_cross_project_agent_address(_rsl_proj.slug, _rsl_name))
+                to_names = _rsl_targets
+            else:
+                # Fallback: no "to" recipients found (shouldn't happen), use original sender
+                to_names = [original_sender.name]
+        else:
+            default_reply_target = (
+                original_sender.name
+                if original_sender.project_id == project.id
+                else _format_cross_project_agent_address(original_sender_project.slug, original_sender.name)
+            )
+            to_names = [default_reply_target] if to is None else to
         cc_list = cc or []
         bcc_list = bcc or []
 
