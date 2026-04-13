@@ -4544,6 +4544,12 @@ def build_mcp_server() -> FastMCP:
                         )
                     )
                     original_to_names = [str(row[0]) for row in rows.fetchall() if row and row[0]]
+                if not original_to_names:
+                    await ctx.info(
+                        "[warn] reply_message: replying to own outbound with no "
+                        "recorded recipients; defaulting `to` to self. Supply an "
+                        "explicit `to` list to avoid a self-loop."
+                    )
                 to_names = original_to_names or [original_sender.name]
             else:
                 to_names = [original_sender.name]
@@ -5490,8 +5496,10 @@ def build_mcp_server() -> FastMCP:
             respond_tool_result = await respond_tool.run(respond_payload)
             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
-        welcome_result = None
+        welcome_result: Optional[dict[str, Any]] = None
+        welcome_attempted = False
         if welcome_subject and welcome_body:
+            welcome_attempted = True
             # Cross-project handshakes route welcome via explicit to_project
             # so the send lands in the target's project, not a sender-local
             # shadow. Bug discovered 2026-04-12 during Geordi@geordi audit.
@@ -5510,13 +5518,19 @@ def build_mcp_server() -> FastMCP:
                 send_tool_result = await send_tool.run(send_payload)
                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
             except ToolExecutionError as exc:
-                # surface but do not abort handshake
+                # surface but do not abort handshake — callers need to
+                # distinguish "welcome failed" from "welcome not requested"
                 await ctx.debug(f"macro_contact_handshake failed to send welcome: {exc}")
+                welcome_result = {
+                    "error": {"type": getattr(exc, "code", "TOOL_ERROR"), "message": str(exc)},
+                    "attempted": True,
+                }
 
         return {
             "request": request_result,
             "response": response_result,
             "welcome_message": welcome_result,
+            "welcome_attempted": welcome_attempted,
         }
 
     @mcp.tool(name="search_messages")
