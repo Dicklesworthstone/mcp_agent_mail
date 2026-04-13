@@ -3500,9 +3500,20 @@ def build_mcp_server() -> FastMCP:
         ack_required: bool = False,
         thread_id: Optional[str] = None,
         auto_contact_if_blocked: bool = False,
+        to_project: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Send a Markdown message to one or more recipients and persist canonical and mailbox copies to Git.
+
+        Cross-project addressing
+        ------------------------
+        Use the `to_project` parameter to explicitly route recipients to a
+        different project. Each bare recipient name in `to`/`cc`/`bcc` is
+        treated as `<name>@<to_project>`. Recipients that already carry an
+        explicit `name@project` suffix or `project:slug#name` prefix are left
+        alone. This is the safe default for cross-project sends — without it,
+        bare names resolve to any matching local agent (which may be a shadow
+        auto-registration) before falling back to approved cross-project links.
 
         Discovery
         ---------
@@ -3665,6 +3676,29 @@ def build_mcp_server() -> FastMCP:
                 recoverable=True,
                 data={"argument": "bcc"},
             )
+
+        # Explicit cross-project addressing via `to_project` param:
+        # rewrite bare names to the `name@project` form that the router
+        # already understands. Names carrying explicit `@` or `project:` are
+        # left alone so callers can mix addressing styles in one send.
+        # Added 2026-04-12 during Geordi@geordi audit — see PR fix/cross-project-routing-and-reply-self-loop.
+        if to_project:
+            tp = to_project.strip()
+            if tp:
+                def _xproj(n: str) -> str:
+                    if not isinstance(n, str):
+                        return n
+                    s = n.strip()
+                    if not s:
+                        return n
+                    if s.startswith("project:") or "@" in s:
+                        return n
+                    return f"{s}@{tp}"
+                to = [_xproj(n) for n in to]
+                if cc is not None:
+                    cc = [_xproj(n) for n in cc]
+                if bcc is not None:
+                    bcc = [_xproj(n) for n in bcc]
 
         # Self-send detection: warn if sender is sending to themselves
         sender_lower = sender_name.lower().strip()
@@ -4484,7 +4518,37 @@ def build_mcp_server() -> FastMCP:
             reply_subject = base_subject
         else:
             reply_subject = f"{subject_prefix_clean} {base_subject}".strip()
-        to_names = to or [original_sender.name]
+        # If no `to` is given, default to the original sender — unless the
+        # caller is replying to their own outbound, in which case default
+        # to the original recipients (otherwise the reply loops back to
+        # self). Bug discovered 2026-04-12 during Geordi@geordi audit.
+        if to is None:
+            # Replying to one's own outbound: default `to` to the original
+            # recipients. Cross-project sends create an aliased sender agent
+            # in the target project (different DB id), so compare by name
+            # as well as by id. Bug discovered 2026-04-12.
+            is_own_outbound = (
+                original.sender_id == sender.id
+                or (original_sender.name or "").strip().lower()
+                == (sender.name or "").strip().lower()
+            )
+            if is_own_outbound:
+                from .models import MessageRecipient as _MR
+                async with get_session() as s_origto:
+                    rows = await s_origto.execute(
+                        cast(Any, select(Agent.name))  # type: ignore[call-overload]
+                        .join(_MR, cast(Any, _MR.agent_id) == Agent.id)
+                        .where(
+                            cast(Any, _MR.message_id) == original.id,
+                            cast(Any, _MR.kind) == "to",
+                        )
+                    )
+                    original_to_names = [str(row[0]) for row in rows.fetchall() if row and row[0]]
+                to_names = original_to_names or [original_sender.name]
+            else:
+                to_names = [original_sender.name]
+        else:
+            to_names = to
         cc_list = cc or []
         bcc_list = bcc or []
 
@@ -5427,17 +5491,23 @@ def build_mcp_server() -> FastMCP:
             response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
 
         welcome_result = None
-        if welcome_subject and welcome_body and not target_project_key:
+        if welcome_subject and welcome_body:
+            # Cross-project handshakes route welcome via explicit to_project
+            # so the send lands in the target's project, not a sender-local
+            # shadow. Bug discovered 2026-04-12 during Geordi@geordi audit.
             try:
                 send_tool = cast(FunctionTool, cast(Any, send_message))
-                send_tool_result = await send_tool.run({
+                send_payload: dict[str, Any] = {
                     "project_key": project_key,
                     "sender_name": real_requester,
                     "to": [real_target],
                     "subject": welcome_subject,
                     "body_md": welcome_body,
                     "thread_id": thread_id,
-                })
+                }
+                if target_project_key:
+                    send_payload["to_project"] = target_project_key
+                send_tool_result = await send_tool.run(send_payload)
                 welcome_result = cast(dict[str, Any], send_tool_result.structured_content or {})
             except ToolExecutionError as exc:
                 # surface but do not abort handshake
