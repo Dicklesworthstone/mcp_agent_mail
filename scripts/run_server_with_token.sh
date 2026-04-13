@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AM_RUST_BIN="/Users/jemanuel/.local/bin/am"
-AM_RUST_ENV_FILE_DEFAULT="/Users/jemanuel/.config/mcp-agent-mail/config.env"
+AM_RUST_BIN="${HOME}/.local/bin/am"
+AM_RUST_ENV_FILE_DEFAULT="${HOME}/.config/mcp-agent-mail/config.env"
 AM_RUST_ENV_FILE="${AM_RUST_ENV_FILE:-$AM_RUST_ENV_FILE_DEFAULT}"
 if [ ! -f "$AM_RUST_ENV_FILE" ] && [ -f "${HOME}/.config/mcp-agent-mail/config.env" ]; then
   AM_RUST_ENV_FILE="${HOME}/.config/mcp-agent-mail/config.env"
