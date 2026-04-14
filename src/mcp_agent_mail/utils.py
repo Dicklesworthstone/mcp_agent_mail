@@ -210,6 +210,32 @@ def validate_agent_name_format(name: str) -> bool:
     return name.lower() in _VALID_AGENT_NAMES
 
 
+_EXPLICIT_ID_SEPARATOR_RE = re.compile(r"[._-]")
+
+
+def validate_explicit_agent_id(name: str) -> bool:
+    """Validate that a caller-supplied identity is safe for use as an agent name.
+
+    Explicit IDs allow stable, human-chosen identities like ``cc-0``,
+    ``alpha-one``, or ``worker_42`` — useful for swarm workflows where agents
+    are relaunched onto the same identity.  The format mirrors thread IDs:
+    ASCII alphanumerics plus ``._-``, starting with an alphanumeric, max 128
+    characters.
+
+    To distinguish explicit IDs from adjective+noun names, the ID must
+    contain at least one separator character (``-``, ``_``, or ``.``).
+    Purely alphanumeric strings go through the adjective+noun validation
+    path instead.
+    """
+    if not name:
+        return False
+    if not _THREAD_ID_RE.fullmatch(name):
+        return False
+    # Require at least one separator so purely-alphanumeric strings like
+    # "BackendHarmonizer" still go through adjective+noun validation.
+    return _EXPLICIT_ID_SEPARATOR_RE.search(name) is not None
+
+
 def sanitize_agent_name(value: str) -> Optional[str]:
     """Normalize user-provided agent name; return None if nothing remains."""
     cleaned = _AGENT_NAME_RE.sub("", value.strip())

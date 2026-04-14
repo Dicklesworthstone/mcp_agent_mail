@@ -707,3 +707,67 @@ kill_port_processes() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Explicit identity helpers (#140)
+# ---------------------------------------------------------------------------
+
+# Return the caller-requested agent name override, if set.
+# Agents can export AGENT_NAME=alpha-one before bootstrapping to claim
+# a stable identity across relaunches.
+requested_agent_name_override() {
+  local name="${AGENT_NAME:-}"
+  if [[ -z "$name" ]]; then
+    echo ""
+    return
+  fi
+  # Validate against the safe-ID pattern (mirrors _THREAD_ID_RE in utils.py)
+  if [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+    echo "$name"
+  else
+    log_warn "AGENT_NAME='$name' does not match safe-ID pattern; ignoring"
+    echo ""
+  fi
+}
+
+# Build the JSON arguments fragment for register_agent, optionally including
+# an explicit name when AGENT_NAME is set.
+# Usage: _ARGS=$(build_register_agent_arguments_json "$human_key" "program" "model" "task" "$name_override")
+build_register_agent_arguments_json() {
+  local human_key="$1" program="$2" model="$3" task="$4" agent_name="${5:-}"
+  local program_esc model_esc task_esc
+  program_esc=$(json_escape_string "$program") || return 1
+  model_esc=$(json_escape_string "$model") || return 1
+  task_esc=$(json_escape_string "$task") || return 1
+  local args="\"project_key\":${human_key},\"program\":${program_esc},\"model\":${model_esc},\"task_description\":${task_esc}"
+  if [[ -n "$agent_name" ]]; then
+    local name_esc
+    name_esc=$(json_escape_string "$agent_name") || return 1
+    args="${args},\"name\":${name_esc}"
+  fi
+  echo "$args"
+}
+
+# Extract the registered agent name from a JSON-RPC response.
+extract_registered_agent_name() {
+  local response="$1"
+  if [[ -z "$response" ]]; then
+    echo ""
+    return
+  fi
+  local name=""
+  if command -v jq >/dev/null 2>&1; then
+    name=$(echo "$response" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || echo "")
+  else
+    name=$(echo "$response" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"])["name"] if c else "")' 2>/dev/null || echo "")
+  fi
+  echo "$name"
+}
+
+# Write the agent identity to a discoverable file so shell tooling can find it.
+persist_agent_identity_file() {
+  local root_dir="$1" agent_name="$2" target_dir="${3:-$1}"
+  local identity_dir="${target_dir}/.agent-mail"
+  mkdir -p "$identity_dir" 2>/dev/null || true
+  echo "$agent_name" > "${identity_dir}/identity"
+}
+

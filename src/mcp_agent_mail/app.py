@@ -89,6 +89,7 @@ from .utils import (
     sanitize_agent_name,
     slugify,
     validate_agent_name_format,
+    validate_explicit_agent_id,
     validate_thread_id_format,
 )
 
@@ -3099,31 +3100,38 @@ async def _generate_unique_agent_name(
 
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
     if name_hint:
-        sanitized = sanitize_agent_name(name_hint)
+        _is_reserved = _looks_like_program_name(name_hint) or _looks_like_model_name(name_hint)
         if mode == "always_auto":
-            sanitized = None
-        if sanitized:
-            # When coercing, if the provided hint is not in the valid adjective+noun set,
-            # silently fall back to auto-generation instead of erroring.
-            if validate_agent_name_format(sanitized):
-                if not await available(sanitized):
-                    # In strict mode, indicate conflict; in coerce, fall back to generation
-                    if mode == "strict":
-                        raise ValueError(f"Agent name '{sanitized}' is already in use.")
+            pass  # skip all caller-supplied names, fall through to auto-gen
+        elif validate_explicit_agent_id(name_hint) and not _is_reserved:
+            # Caller supplied a valid explicit identity (e.g. "alpha-one",
+            # "cc-0", "worker_42").  Honor it in strict/coerce modes (#140).
+            if not await available(name_hint):
+                if mode == "strict":
+                    raise ValueError(f"Agent identity '{name_hint}' is already in use.")
+                # coerce: fall through to auto-gen
+            else:
+                return name_hint
+        else:
+            # Not a valid explicit ID — try legacy adjective+noun path
+            sanitized = sanitize_agent_name(name_hint)
+            if sanitized:
+                if validate_agent_name_format(sanitized):
+                    if not await available(sanitized):
+                        if mode == "strict":
+                            raise ValueError(f"Agent name '{sanitized}' is already in use.")
+                    else:
+                        return sanitized
                 else:
-                    return sanitized
+                    if mode == "strict":
+                        raise ValueError(
+                            f"Invalid agent name format: '{sanitized}'. "
+                            f"Use an explicit identity (e.g., 'alpha-one', 'cc-0') "
+                            f"or omit the name to auto-generate an adjective+noun name."
+                        )
             else:
                 if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name_hint' parameter to auto-generate a valid name."
-                    )
-        else:
-            # No alphanumerics remain; only strict mode should error
-            if mode == "strict":
-                raise ValueError("Name hint must contain alphanumeric characters.")
+                    raise ValueError("Name hint must contain alphanumeric characters.")
 
     for _ in range(1024):
         candidate = sanitize_agent_name(generate_agent_name())
@@ -3181,14 +3189,21 @@ async def _get_or_create_agent(
     if mode == "always_auto" and not window_uuid:
         desired_name = await _generate_unique_agent_name(project, settings, None)
     elif name is not None and mode != "always_auto":
-        # Priority 1: Explicit name provided
-        sanitized = sanitize_agent_name(name)
-        if not sanitized:
-            if mode == "strict":
-                raise ValueError("Agent name must contain alphanumeric characters.")
-            desired_name = await _generate_unique_agent_name(project, settings, None)
+        # Priority 1: Explicit name/identity provided
+        _is_reserved = _looks_like_program_name(name) or _looks_like_model_name(name)
+        if validate_explicit_agent_id(name) and not _is_reserved:
+            # Caller supplied a valid explicit identity (e.g. "alpha-one",
+            # "cc-0", "worker_42") — honor it directly (#140).
+            desired_name = name
+            explicit_name_used = True
         else:
-            if validate_agent_name_format(sanitized):
+            # Legacy adjective+noun path
+            sanitized = sanitize_agent_name(name)
+            if not sanitized:
+                if mode == "strict":
+                    raise ValueError("Agent name must contain alphanumeric characters.")
+                desired_name = await _generate_unique_agent_name(project, settings, None)
+            elif validate_agent_name_format(sanitized):
                 desired_name = sanitized
                 explicit_name_used = True
             else:
@@ -3199,16 +3214,15 @@ async def _get_or_create_agent(
                             mistake[0],
                             mistake[1],
                             recoverable=True,
-                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
+                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone", "alpha-one", "cc-0"]},
                         )
                     raise ToolExecutionError(
                         "INVALID_AGENT_NAME",
                         f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name.",
+                        f"Use an explicit identity (e.g., 'alpha-one', 'cc-0') "
+                        f"or omit the 'name' parameter to auto-generate a valid name.",
                         recoverable=True,
-                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
+                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone", "alpha-one", "cc-0"]},
                     )
                 desired_name = await _generate_unique_agent_name(project, settings, None)
     elif window_uuid:
@@ -5499,14 +5513,18 @@ def build_mcp_server() -> FastMCP:
           refreshes `last_active_ts`.
         - A `profile.json` file is written under `agents/<Name>/` in the project archive.
 
-        CRITICAL: Agent Naming Rules
-        -----------------------------
-        - Agent names MUST be randomly generated adjective+noun combinations
-        - Examples: "GreenLake", "BlueDog", "RedStone", "PurpleBear"
-        - Names should be unique, easy to remember, and NOT descriptive
-        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
-        - The whole point: names should be memorable identifiers, not role descriptions
-        - Best practice: Omit the `name` parameter to auto-generate a valid name
+        Agent Identity
+        ---------------
+        Two naming modes are supported:
+        1. **Explicit identity** — pass a stable ID like ``alpha-one``, ``cc-0``,
+           or ``worker_42``.  Must match ``[A-Za-z0-9][A-Za-z0-9._-]{0,127}``.
+           Useful for swarm workflows where agents are relaunched onto the same
+           identity.
+        2. **Auto-generated** — omit ``name`` to get a random adjective+noun
+           identity like ``GreenLake`` or ``BlueDog`` (RECOMMENDED for ad-hoc use).
+
+        Invalid examples: "BackendHarmonizer", "DatabaseMigrator" (descriptive
+        role names are rejected in strict mode).
 
         Parameters
         ----------
@@ -5517,7 +5535,8 @@ def build_mcp_server() -> FastMCP:
         model : str
             The underlying model (e.g., "gpt5-codex", "opus-4.1").
         name : Optional[str]
-            MUST be a valid adjective+noun combination if provided (e.g., "BlueLake").
+            A valid explicit identity (e.g., "alpha-one", "cc-0") or adjective+noun
+            combination (e.g., "BlueLake").
             If omitted, a random valid name is auto-generated (RECOMMENDED).
             Names are unique per project; passing the same name updates the profile.
         task_description : str
