@@ -246,9 +246,8 @@ class Settings:
     retention_ignore_project_patterns: list[str]
     # Agent identity naming policy
     # Values: "strict" | "coerce" | "always_auto"
-    # - strict: reject invalid provided names (current hard-fail behavior)
-    # - coerce: ignore invalid provided names and auto-generate a valid one (default)
-    # - always_auto: ignore any provided name and always auto-generate
+    # - strict/coerce: honor valid explicit identities; reject invalid/reserved ones
+    # - always_auto: ignore any provided name and always auto-generate an adjective+noun identity
     agent_name_enforcement_mode: str
     # Messaging ergonomics
     # When true, attempt to register missing local recipients during send_message

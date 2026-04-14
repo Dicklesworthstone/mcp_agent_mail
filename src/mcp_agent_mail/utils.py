@@ -163,6 +163,7 @@ NOUNS: Iterable[str] = (
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _AGENT_NAME_RE = re.compile(r"[^A-Za-z0-9]+")
+_EXPLICIT_AGENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 # Pre-built frozenset of all valid agent names (lowercase) for O(1) validation lookup.
@@ -208,6 +209,20 @@ def validate_agent_name_format(name: str) -> bool:
 
     # O(1) lookup using pre-built frozenset (vs O(n*m) iteration)
     return name.lower() in _VALID_AGENT_NAMES
+
+
+def normalize_explicit_agent_name(value: str) -> Optional[str]:
+    """Normalize a caller-supplied explicit agent identity without rewriting it."""
+    candidate = (value or "").strip()
+    return candidate or None
+
+
+def validate_explicit_agent_name_format(name: str) -> bool:
+    """Validate a caller-supplied explicit agent identity."""
+    candidate = normalize_explicit_agent_name(name)
+    if candidate is None:
+        return False
+    return _EXPLICIT_AGENT_NAME_RE.fullmatch(candidate) is not None
 
 
 def sanitize_agent_name(value: str) -> Optional[str]:

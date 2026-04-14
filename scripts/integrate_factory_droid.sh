@@ -166,21 +166,23 @@ else
     log_warn "Failed to ensure project"
   fi
 
-  # register_agent - DON'T pass a name, let server auto-generate adjective+noun name
-  # Capture response to extract the generated name
+  _REQUESTED_AGENT=$(requested_agent_name_override)
+  if [[ -n "${_REQUESTED_AGENT}" ]]; then
+    log_ok "Requesting explicit agent identity: ${_REQUESTED_AGENT}"
+  fi
+  _REGISTER_ARGS=$(build_register_agent_arguments_json "${_HUMAN_KEY_ESCAPED}" "factory-droid" "factory" "setup" "${_REQUESTED_AGENT}") || {
+    log_err "Failed to build register_agent arguments"
+    exit 1
+  }
   _REGISTER_RESPONSE=$(curl -sS --connect-timeout 2 --max-time 5 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"factory-droid\",\"model\":\"factory\",\"task_description\":\"setup\"}}}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{${_REGISTER_ARGS}}}}" \
       "${_URL}" 2>/dev/null || echo "")
 
   if [[ -n "${_REGISTER_RESPONSE}" ]]; then
-    # Extract agent name from JSON response using jq or Python
-    if command -v jq >/dev/null 2>&1; then
-      _AGENT=$(echo "${_REGISTER_RESPONSE}" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || echo "")
-    else
-      _AGENT=$(echo "${_REGISTER_RESPONSE}" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"])["name"] if c else "")' 2>/dev/null || echo "")
-    fi
+    _AGENT=$(extract_registered_agent_name "${_REGISTER_RESPONSE}")
     if [[ -n "${_AGENT}" ]]; then
       log_ok "Registered agent: ${_AGENT}"
+      persist_agent_identity_file "${ROOT_DIR}" "${_AGENT}" "${TARGET_DIR}"
     else
       log_warn "Could not parse agent name from response"
     fi

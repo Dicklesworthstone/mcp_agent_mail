@@ -5,8 +5,7 @@ These tests verify that the mistake detection helpers correctly identify:
 2. Model names mistakenly used as agent names
 3. Email addresses mistakenly used as agent names
 4. Broadcast attempts
-5. Descriptive role names
-6. Suspicious file reservation patterns
+5. Suspicious file reservation patterns
 """
 from __future__ import annotations
 
@@ -170,12 +169,13 @@ class TestDetectAgentNameMistake:
         assert result[0] == "BROADCAST_ATTEMPT"
         assert "broadcast" in result[1].lower()
 
-    def test_detects_descriptive_name(self):
-        """Should detect descriptive role names with helpful message."""
-        result = _detect_agent_name_mistake("BackendHarmonizer")
-        assert result is not None
-        assert result[0] == "DESCRIPTIVE_NAME"
-        assert "descriptive" in result[1].lower()
+    def test_descriptive_names_are_no_longer_treated_as_mistakes(self):
+        """Descriptive names should not be rejected by the mistake detector."""
+        assert _detect_agent_name_mistake("BackendHarmonizer") is None
+
+    def test_unix_usernames_are_no_longer_treated_as_mistakes(self):
+        """Unix-style usernames should not be rejected by the mistake detector."""
+        assert _detect_agent_name_mistake("david") is None
 
     def test_valid_agent_name_returns_none(self):
         """Valid agent names should return None (no mistake detected)."""

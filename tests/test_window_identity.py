@@ -357,7 +357,7 @@ async def test_list_window_identities(isolated_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_rename_window(isolated_env, monkeypatch):
-    """rename_window should update the display name."""
+    """rename_window should update the display name using the explicit-ID rules."""
     window_uuid = str(uuid.uuid4())
     monkeypatch.setenv("MCP_AGENT_MAIL_WINDOW_ID", window_uuid)
 
@@ -382,11 +382,11 @@ async def test_rename_window(isolated_env, monkeypatch):
             {
                 "project_key": "/test/window",
                 "window_uuid": window_uuid,
-                "new_display_name": "SilverFox",
+                "new_display_name": "cc-0",
             },
         )
 
-        assert result.data["display_name"] == "SilverFox"
+        assert result.data["display_name"] == "cc-0"
         assert result.data["old_display_name"] == old_name
 
 

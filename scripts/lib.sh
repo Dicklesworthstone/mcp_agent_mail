@@ -165,6 +165,72 @@ json_escape_string() {
   echo "$result"
 }
 
+requested_agent_name_override() {
+  if [[ -n "${AGENT_NAME:-}" ]]; then
+    printf '%s\n' "${AGENT_NAME}"
+  fi
+}
+
+build_register_agent_arguments_json() {
+  local project_key_json="$1"
+  local program="$2"
+  local model="$3"
+  local task_description="$4"
+  local requested_name="${5:-}"
+  local program_json model_json task_json name_json
+
+  program_json=$(json_escape_string "$program") || return 1
+  model_json=$(json_escape_string "$model") || return 1
+  task_json=$(json_escape_string "$task_description") || return 1
+
+  if [[ -n "$requested_name" ]]; then
+    name_json=$(json_escape_string "$requested_name") || return 1
+    printf '"project_key":%s,"program":%s,"model":%s,"name":%s,"task_description":%s' \
+      "$project_key_json" "$program_json" "$model_json" "$name_json" "$task_json"
+    return 0
+  fi
+
+  printf '"project_key":%s,"program":%s,"model":%s,"task_description":%s' \
+    "$project_key_json" "$program_json" "$model_json" "$task_json"
+}
+
+extract_registered_agent_name() {
+  local response="$1"
+  local name=""
+
+  if [[ -z "$response" ]]; then
+    return 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    name=$(printf '%s' "$response" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)
+  else
+    name=$(printf '%s' "$response" | uv run python -c 'import json,sys; payload=json.load(sys.stdin); content=payload.get("result", {}).get("content", []); print(json.loads(content[0]["text"])["name"] if content else "")' 2>/dev/null || true)
+  fi
+
+  printf '%s\n' "$name"
+}
+
+persist_agent_identity_file() {
+  local root_dir="$1"
+  local agent_name="$2"
+  local project_dir="$3"
+  local identity_script="${root_dir}/scripts/identity-write.sh"
+
+  if [[ -z "$agent_name" || "$agent_name" == "YOUR_AGENT_NAME" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$identity_script" ]]; then
+    log_warn "identity-write.sh not found or not executable; skipping pane identity sync."
+    return 0
+  fi
+  if "$identity_script" "$agent_name" "$project_dir" >/dev/null 2>&1; then
+    log_ok "Synced pane identity file for ${agent_name}"
+  else
+    log_warn "Failed to sync pane identity file for ${agent_name}"
+  fi
+}
+
 # Merge MCP server config into existing settings JSON
 # Usage: json_merge_mcp_server <existing_json> <server_name> <server_config_json>
 # Returns: merged JSON preserving all existing keys
@@ -706,4 +772,3 @@ kill_port_processes() {
     fi
   fi
 }
-

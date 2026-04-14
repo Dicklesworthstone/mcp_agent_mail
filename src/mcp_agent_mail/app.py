@@ -86,9 +86,10 @@ from .storage import (
 )
 from .utils import (
     generate_agent_name,
+    normalize_explicit_agent_name,
     sanitize_agent_name,
     slugify,
-    validate_agent_name_format,
+    validate_explicit_agent_name_format,
     validate_thread_id_format,
 )
 
@@ -2543,22 +2544,6 @@ def _detect_agent_name_mistake(value: str) -> tuple[str, str] | None:
             f"'{value}' looks like a broadcast attempt. Agent Mail doesn't support broadcasting to all agents. "
             f"List specific recipient agent names in the 'to' parameter."
         )
-    if _looks_like_descriptive_name(value):
-        return (
-            "DESCRIPTIVE_NAME",
-            f"'{value}' looks like a descriptive role name. Agent names must be randomly generated "
-            f"adjective+noun combinations like 'WhiteMountain' or 'BrownCreek', NOT descriptive of the agent's task. "
-            f"Omit the 'name' parameter to auto-generate a valid name."
-        )
-    if _looks_like_unix_username(value):
-        return (
-            "UNIX_USERNAME_AS_AGENT",
-            f"'{value}' looks like a Unix username (possibly from $USER environment variable). "
-            f"Agent names must be adjective+noun combinations like 'BlueLake' or 'GreenCastle'. "
-            f"When you called register_agent, the system likely auto-generated a valid name for you. "
-            f"To find your actual agent name, check the response from register_agent or use "
-            f"resource://agents/{{project_key}} to list all registered agents in this project."
-        )
     return None
 
 
@@ -3087,7 +3072,6 @@ def _validate_window_uuid(value: str) -> bool:
 async def _generate_unique_agent_name(
     project: Project,
     settings: Settings,
-    name_hint: Optional[str] = None,
 ) -> str:
     archive = await ensure_archive(settings, project.slug)
 
@@ -3097,39 +3081,87 @@ async def _generate_unique_agent_name(
         candidate_path = archive.root / "agents" / candidate
         return not await asyncio.to_thread(candidate_path.exists)
 
-    mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
-    if name_hint:
-        sanitized = sanitize_agent_name(name_hint)
-        if mode == "always_auto":
-            sanitized = None
-        if sanitized:
-            # When coercing, if the provided hint is not in the valid adjective+noun set,
-            # silently fall back to auto-generation instead of erroring.
-            if validate_agent_name_format(sanitized):
-                if not await available(sanitized):
-                    # In strict mode, indicate conflict; in coerce, fall back to generation
-                    if mode == "strict":
-                        raise ValueError(f"Agent name '{sanitized}' is already in use.")
-                else:
-                    return sanitized
-            else:
-                if mode == "strict":
-                    raise ValueError(
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name_hint' parameter to auto-generate a valid name."
-                    )
-        else:
-            # No alphanumerics remain; only strict mode should error
-            if mode == "strict":
-                raise ValueError("Name hint must contain alphanumeric characters.")
-
     for _ in range(1024):
         candidate = sanitize_agent_name(generate_agent_name())
         if candidate and await available(candidate):
             return candidate
     raise RuntimeError("Unable to generate a unique agent name.")
+
+
+async def _agent_name_available(
+    project: Project,
+    settings: Settings,
+    candidate: str,
+) -> bool:
+    archive = await ensure_archive(settings, project.slug)
+    if await _agent_name_exists(project, candidate):
+        return False
+    candidate_path = archive.root / "agents" / candidate
+    return not await asyncio.to_thread(candidate_path.exists)
+
+
+def _invalid_explicit_agent_name_message(label: str, value: str) -> str:
+    return (
+        f"Invalid {label}: '{value}'. "
+        "Explicit agent identities must start with an ASCII letter or digit and may contain only "
+        "ASCII letters, digits, '.', '_' and '-'."
+    )
+
+
+def _raise_invalid_explicit_agent_name(value: str, *, label: str, error_type: str = "INVALID_AGENT_NAME") -> None:
+    mistake = _detect_agent_name_mistake(value)
+    if mistake is not None:
+        raise ToolExecutionError(
+            mistake[0],
+            mistake[1],
+            recoverable=True,
+            data={
+                "provided_name": value,
+                "parameter": label,
+                "allowed_pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+            },
+        )
+    raise ToolExecutionError(
+        error_type,
+        _invalid_explicit_agent_name_message(label, value),
+        recoverable=True,
+        data={
+            "provided_name": value,
+            "parameter": label,
+            "allowed_pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+        },
+    )
+
+
+async def _resolve_explicit_agent_name(
+    project: Project,
+    settings: Settings,
+    requested_name: str,
+    *,
+    label: str,
+    require_available: bool = False,
+) -> str:
+    candidate = normalize_explicit_agent_name(requested_name)
+    if candidate is None:
+        raise ToolExecutionError(
+            "INVALID_AGENT_NAME",
+            f"{label.capitalize()} cannot be empty.",
+            recoverable=True,
+            data={"provided_name": requested_name, "parameter": label},
+        )
+    if not validate_explicit_agent_name_format(candidate):
+        _raise_invalid_explicit_agent_name(candidate, label=label)
+    mistake = _detect_agent_name_mistake(candidate)
+    if mistake is not None:
+        _raise_invalid_explicit_agent_name(candidate, label=label)
+    if require_available and not await _agent_name_available(project, settings, candidate):
+        raise ToolExecutionError(
+            "AGENT_NAME_IN_USE",
+            f"Agent identity '{candidate}' is already in use in project '{project.human_key}'.",
+            recoverable=True,
+            data={"provided_name": candidate, "parameter": label, "project": project.slug},
+        )
+    return candidate
 
 
 async def _create_agent_record(
@@ -3179,43 +3211,21 @@ async def _get_or_create_agent(
     # 4. No window ID, no explicit name -> auto-generate (current behavior)
 
     if mode == "always_auto" and not window_uuid:
-        desired_name = await _generate_unique_agent_name(project, settings, None)
+        desired_name = await _generate_unique_agent_name(project, settings)
     elif name is not None and mode != "always_auto":
         # Priority 1: Explicit name provided
-        sanitized = sanitize_agent_name(name)
-        if not sanitized:
-            if mode == "strict":
-                raise ValueError("Agent name must contain alphanumeric characters.")
-            desired_name = await _generate_unique_agent_name(project, settings, None)
-        else:
-            if validate_agent_name_format(sanitized):
-                desired_name = sanitized
-                explicit_name_used = True
-            else:
-                if mode == "strict":
-                    mistake = _detect_agent_name_mistake(sanitized)
-                    if mistake:
-                        raise ToolExecutionError(
-                            mistake[0],
-                            mistake[1],
-                            recoverable=True,
-                            data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
-                        )
-                    raise ToolExecutionError(
-                        "INVALID_AGENT_NAME",
-                        f"Invalid agent name format: '{sanitized}'. "
-                        f"Agent names MUST be randomly generated adjective+noun combinations "
-                        f"(e.g., 'GreenLake', 'BlueDog'), NOT descriptive names. "
-                        f"Omit the 'name' parameter to auto-generate a valid name.",
-                        recoverable=True,
-                        data={"provided_name": sanitized, "valid_examples": ["BlueLake", "GreenCastle", "RedStone"]},
-                    )
-                desired_name = await _generate_unique_agent_name(project, settings, None)
+        desired_name = await _resolve_explicit_agent_name(
+            project,
+            settings,
+            name,
+            label="name",
+        )
+        explicit_name_used = True
     elif window_uuid:
         # Priority 2/3: Window identity resolution
         if not _validate_window_uuid(window_uuid):
             logger.warning("MCP_AGENT_MAIL_WINDOW_ID is not a valid UUID: %s", window_uuid)
-            desired_name = await _generate_unique_agent_name(project, settings, None)
+            desired_name = await _generate_unique_agent_name(project, settings)
         else:
             window_identity = await _get_window_identity(project, window_uuid)
             if window_identity:
@@ -3225,13 +3235,13 @@ async def _get_or_create_agent(
                 await _touch_window_identity(window_identity, ttl_days)
             else:
                 # Priority 3: new window identity -> generate name and create identity
-                desired_name = await _generate_unique_agent_name(project, settings, None)
+                desired_name = await _generate_unique_agent_name(project, settings)
                 window_identity = await _create_window_identity(
                     project, window_uuid, desired_name, ttl_days,
                 )
     else:
         # Priority 4: no name, no window ID -> auto-generate
-        desired_name = await _generate_unique_agent_name(project, settings, None)
+        desired_name = await _generate_unique_agent_name(project, settings)
     await ensure_schema()
     newly_created = False
     async with get_session() as session:
@@ -3294,7 +3304,7 @@ async def _get_or_create_agent(
                     break
 
                 # Auto-generated name collision under concurrency: pick a new name and retry.
-                desired_name = await _generate_unique_agent_name(project, settings, None)
+                desired_name = await _generate_unique_agent_name(project, settings)
                 continue
         else:
             raise RuntimeError("Failed to create a unique agent after multiple retries.")
@@ -5499,15 +5509,6 @@ def build_mcp_server() -> FastMCP:
           refreshes `last_active_ts`.
         - A `profile.json` file is written under `agents/<Name>/` in the project archive.
 
-        CRITICAL: Agent Naming Rules
-        -----------------------------
-        - Agent names MUST be randomly generated adjective+noun combinations
-        - Examples: "GreenLake", "BlueDog", "RedStone", "PurpleBear"
-        - Names should be unique, easy to remember, and NOT descriptive
-        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
-        - The whole point: names should be memorable identifiers, not role descriptions
-        - Best practice: Omit the `name` parameter to auto-generate a valid name
-
         Parameters
         ----------
         project_key : str
@@ -5517,9 +5518,11 @@ def build_mcp_server() -> FastMCP:
         model : str
             The underlying model (e.g., "gpt5-codex", "opus-4.1").
         name : Optional[str]
-            MUST be a valid adjective+noun combination if provided (e.g., "BlueLake").
-            If omitted, a random valid name is auto-generated (RECOMMENDED).
-            Names are unique per project; passing the same name updates the profile.
+            Optional explicit identity to register exactly as provided (e.g., "cc-0", "BlueLake").
+            Explicit identities must start with an ASCII letter or digit and may contain only
+            ASCII letters, digits, '.', '_' and '-'. If omitted, a random adjective+noun name
+            is auto-generated. Names are unique per project; passing the same name updates
+            the profile.
         task_description : str
             Short description of current focus (shows up in directory listings).
 
@@ -5540,13 +5543,13 @@ def build_mcp_server() -> FastMCP:
         Register with explicit valid name:
         ```json
         {"jsonrpc":"2.0","id":"4","method":"tools/call","params":{"name":"register_agent","arguments":{
-          "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1","name":"BlueLake","task_description":"Navbar redesign"
+          "project_key":"/data/projects/backend","program":"claude-code","model":"opus-4.1","name":"cc-0","task_description":"Navbar redesign"
         }}}
         ```
 
         Pitfalls
         --------
-        - Names MUST match the adjective+noun format or an error will be raised
+        - Explicit identities must match the safe-ID format described above or an error will be raised
         - Names are case-insensitive unique. If you see "already in use", pick another or omit `name`.
         - Use the same `project_key` consistently across cooperating agents.
         """
@@ -5567,8 +5570,11 @@ def build_mcp_server() -> FastMCP:
         ap = (attachments_policy or "auto").lower()
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
-        if name:
-            existing_agent = await _find_agent_optional(project, name)
+        requested_name = name
+        if name and getattr(settings, "agent_name_enforcement_mode", "coerce").lower() != "always_auto":
+            requested_name = normalize_explicit_agent_name(name) or name
+        if requested_name:
+            existing_agent = await _find_agent_optional(project, requested_name)
             if existing_agent is not None:
                 await _authenticate_agent(
                     ctx,
@@ -5578,7 +5584,7 @@ def build_mcp_server() -> FastMCP:
                     token_param="registration_token",
                     action="register_agent for an existing identity",
                 )
-        agent = await _get_or_create_agent(project, name, program, model, task_description, settings)
+        agent = await _get_or_create_agent(project, requested_name, program, model, task_description, settings)
         # Persist attachment policy if changed
         if getattr(agent, "attachments_policy", None) != ap:
             async with get_session() as session:
@@ -6245,16 +6251,8 @@ def build_mcp_server() -> FastMCP:
         How this differs from `register_agent`
         --------------------------------------
         - Always creates a new identity with a fresh unique name (never updates an existing one).
-        - `name_hint`, if provided, MUST be a valid adjective+noun combination and must be available,
-          otherwise an error is raised. Without a hint, a random adjective+noun name is generated.
-
-        CRITICAL: Agent Naming Rules
-        -----------------------------
-        - Agent names MUST be randomly generated adjective+noun combinations
-        - Examples: "GreenCastle", "BlueLake", "RedStone", "PurpleBear"
-        - Names should be unique, easy to remember, and NOT descriptive
-        - INVALID examples: "BackendHarmonizer", "DatabaseMigrator", "UIRefactorer"
-        - Best practice: Omit `name_hint` to auto-generate a valid name (RECOMMENDED)
+        - `name_hint`, if provided, MUST be an available explicit identity matching the same
+          safe-ID rules as `register_agent`. Without a hint, a random adjective+noun name is generated.
 
         When to use
         -----------
@@ -6278,14 +6276,23 @@ def build_mcp_server() -> FastMCP:
         With valid name hint:
         ```json
         {"jsonrpc":"2.0","id":"c1","method":"tools/call","params":{"name":"create_agent_identity","arguments":{
-          "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"GreenCastle",
+          "project_key":"/data/projects/backend","program":"codex-cli","model":"gpt5-codex","name_hint":"cc-0",
           "task_description":"DB migration spike"
         }}}
         ```
         """
         _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
-        unique_name = await _generate_unique_agent_name(project, settings, name_hint)
+        if name_hint is not None and getattr(settings, "agent_name_enforcement_mode", "coerce").lower() != "always_auto":
+            unique_name = await _resolve_explicit_agent_name(
+                project,
+                settings,
+                name_hint,
+                label="name_hint",
+                require_available=True,
+            )
+        else:
+            unique_name = await _generate_unique_agent_name(project, settings)
         ap = (attachments_policy or "auto").lower()
         if ap not in {"auto", "inline", "file"}:
             ap = "auto"
@@ -6397,7 +6404,8 @@ def build_mcp_server() -> FastMCP:
         window_uuid : str
             The UUID of the window identity to rename.
         new_display_name : str
-            New display name (must be a valid adjective+noun agent name).
+            New display name for the window identity. Must match the explicit agent
+            identity safe-ID format.
 
         Returns
         -------
@@ -6410,14 +6418,13 @@ def build_mcp_server() -> FastMCP:
                 f"Invalid window UUID format: '{window_uuid}'.",
                 recoverable=True,
             )
-        sanitized = sanitize_agent_name(new_display_name)
-        if not sanitized or not validate_agent_name_format(sanitized):
-            raise ToolExecutionError(
-                "INVALID_DISPLAY_NAME",
-                f"Display name must be a valid adjective+noun combination (e.g., 'BlueLake'). Got: '{new_display_name}'.",
-                recoverable=True,
-            )
         project = await _get_project_by_identifier(project_key)
+        sanitized = await _resolve_explicit_agent_name(
+            project,
+            settings,
+            new_display_name,
+            label="display name",
+        )
         await ensure_schema()
         now = _naive_utc()
         async with get_session() as session:
@@ -7775,7 +7782,7 @@ def build_mcp_server() -> FastMCP:
         if to is None and original.sender_id == sender.id:
             async with get_session() as _rsl_sx:
                 _rsl_result = await _rsl_sx.execute(
-                    _sa_select(Agent.name, Agent.project_id, MessageRecipient.kind)
+                    select(Agent.name, Agent.project_id, MessageRecipient.kind)
                     .join(Agent, MessageRecipient.agent_id == Agent.id)
                     .where(
                         cast(Any, MessageRecipient.message_id) == original.id,
@@ -8311,7 +8318,7 @@ def build_mcp_server() -> FastMCP:
             is_not_found = isinstance(exc, NoResultFound) or (
                 isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
             )
-            if is_not_found and register_if_missing and validate_agent_name_format(target_name):
+            if is_not_found and register_if_missing and validate_explicit_agent_name_format(target_name):
                 # Create the missing target identity using provided metadata (best effort)
                 b = await _get_or_create_agent(
                     target_project,
@@ -9431,7 +9438,7 @@ def build_mcp_server() -> FastMCP:
                 is_not_found = isinstance(exc, NoResultFound) or (
                     isinstance(exc, ToolExecutionError) and exc.error_type == "NOT_FOUND"
                 )
-                if is_not_found and register_if_missing and validate_agent_name_format(real_target):
+                if is_not_found and register_if_missing and validate_explicit_agent_name_format(real_target):
                     settings = get_settings()
                     b = await _get_or_create_agent(
                         project,

@@ -194,7 +194,10 @@ else
   if [[ -n "${_TOKEN}" ]]; then _AUTH_ARGS+=("-H" "Authorization: Bearer ${_TOKEN}"); fi
 
   _HUMAN_KEY_ESCAPED=$(json_escape_string "${TARGET_DIR}") || { log_err "Failed to escape project path"; exit 1; }
-  _AGENT_ESCAPED=$(json_escape_string "${USER:-opencode}") || { log_err "Failed to escape agent name"; exit 1; }
+  _REQUESTED_AGENT=$(requested_agent_name_override)
+  if [[ -n "${_REQUESTED_AGENT}" ]]; then
+    log_ok "Requesting explicit agent identity: ${_REQUESTED_AGENT}"
+  fi
 
   if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
       -d "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"tools/call\",\"params\":{\"name\":\"ensure_project\",\"arguments\":{\"human_key\":${_HUMAN_KEY_ESCAPED}}}}" \
@@ -204,10 +207,17 @@ else
     log_warn "Failed to ensure project (server may be starting)"
   fi
 
-  if curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
-      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{\"project_key\":${_HUMAN_KEY_ESCAPED},\"program\":\"opencode\",\"model\":\"default\",\"name\":${_AGENT_ESCAPED},\"task_description\":\"setup\"}}}" \
-      "${_URL}" >/dev/null 2>&1; then
-    log_ok "Registered agent on server"
+  _REGISTER_ARGS=$(build_register_agent_arguments_json "${_HUMAN_KEY_ESCAPED}" "opencode" "default" "setup" "${_REQUESTED_AGENT}") || {
+    log_err "Failed to build register_agent arguments"
+    exit 1
+  }
+  _REGISTER_RESPONSE=$(curl -fsS --connect-timeout 1 --max-time 2 --retry 0 -H "Content-Type: application/json" "${_AUTH_ARGS[@]}" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{${_REGISTER_ARGS}}}}" \
+      "${_URL}" 2>/dev/null || echo "")
+  _REGISTERED_AGENT=$(extract_registered_agent_name "${_REGISTER_RESPONSE}")
+  if [[ -n "${_REGISTERED_AGENT}" ]]; then
+    log_ok "Registered agent on server: ${_REGISTERED_AGENT}"
+    persist_agent_identity_file "${ROOT_DIR}" "${_REGISTERED_AGENT}" "${TARGET_DIR}"
   else
     log_warn "Failed to register agent (server may be starting)"
   fi
@@ -223,5 +233,4 @@ _print "The MCP tools will be available to the AI agent alongside built-in tools
 _print ""
 _print "Start the server with: ${RUN_HELPER}"
 _print "Then launch OpenCode in this directory."
-
 

@@ -434,7 +434,7 @@ async def test_create_agent_identity_always_creates_new(isolated_env):
 
 @pytest.mark.asyncio
 async def test_create_agent_identity_with_name_hint(isolated_env):
-    """create_agent_identity respects valid name_hint."""
+    """create_agent_identity respects valid explicit identity hints."""
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/test/setup/hint"})
@@ -446,12 +446,12 @@ async def test_create_agent_identity_with_name_hint(isolated_env):
                 "project_key": "/test/setup/hint",
                 "program": "test",
                 "model": "test",
-                "name_hint": "GreenCastle",
+                "name_hint": "cc-0",
             },
         )
 
         # Should use the hint
-        assert result.data["name"] == "GreenCastle"
+        assert result.data["name"] == "cc-0"
 
 
 @pytest.mark.asyncio

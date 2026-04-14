@@ -179,4 +179,4 @@ The file-based identity contract documented here serves a different purpose: it 
 - File-based: for shell-level identity discovery (hooks, integration scripts, cron jobs).
 - DB-based: for server-level identity persistence (MCP tool calls, session continuity).
 
-A future enhancement could have `register_agent` in the server also call `identity-write.sh` to keep both systems in sync.
+Current integration scripts already write this file after a successful bootstrap registration so shell-side tooling can track either auto-generated adjective+noun names or explicit identities such as `cc-0`.

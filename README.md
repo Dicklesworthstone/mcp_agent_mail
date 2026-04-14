@@ -20,7 +20,7 @@ Modern projects often run multiple coding agents at once (backend, frontend, scr
 
 This project provides a lightweight, interoperable layer so agents can:
 
-- Register a temporary-but-persistent identity (e.g., GreenCastle)
+- Register a temporary-but-persistent identity (e.g., `cc-0` or `GreenCastle`)
 - Send/receive GitHub-Flavored Markdown messages with images
 - Search, summarize, and thread conversations
 - Declare advisory file reservations (leases) on files/globs to signal intent
@@ -1696,7 +1696,8 @@ sequenceDiagram
 ### Semantics & invariants
 
 - Identity
-  - Names are memorable adjective+noun and unique per project; `name_hint` is sanitized (alnum) and used if available
+  - Explicit identities are unique per project and must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`
+  - If `name`/`name_hint` is omitted, the server auto-generates a unique adjective+noun identity
   - `whois` returns the stored profile; `list_agents` can filter by recent activity
   - `last_active_ts` is bumped on relevant interactions (messages, inbox checks, etc.)
 - Threads
@@ -2116,7 +2117,7 @@ Common variables you may set:
 | `QUOTA_ATTACHMENTS_LIMIT_BYTES` | `0` | Max attachment storage per project (0=unlimited) |
 | `QUOTA_INBOX_LIMIT_COUNT` | `0` | Max inbox messages per agent (0=unlimited) |
 | `RETENTION_IGNORE_PROJECT_PATTERNS` | `demo,test*,testproj*,testproject,backendproj*,frontendproj*` | CSV of project patterns to ignore in retention/quota reports |
-| `AGENT_NAME_ENFORCEMENT_MODE` | `coerce` | Agent naming policy: `strict` (reject invalid adjective+noun names), `coerce` (auto-generate if invalid), `always_auto` (always auto-generate) |
+| `AGENT_NAME_ENFORCEMENT_MODE` | `coerce` | Identity policy: `strict`/`coerce` both honor valid explicit identities and reject invalid or reserved ones; `always_auto` always ignores caller-supplied names and auto-generates an adjective+noun identity |
 
 ## Development quick start
 

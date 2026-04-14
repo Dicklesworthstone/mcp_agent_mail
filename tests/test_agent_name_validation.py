@@ -19,8 +19,10 @@ from mcp_agent_mail.utils import (
     ADJECTIVES,
     NOUNS,
     generate_agent_name,
+    normalize_explicit_agent_name,
     sanitize_agent_name,
     validate_agent_name_format,
+    validate_explicit_agent_name_format,
 )
 
 # ============================================================================
@@ -211,6 +213,48 @@ class TestSanitizeAgentName:
 
 
 # ============================================================================
+# Unit Tests: explicit agent identity validation
+# ============================================================================
+
+
+class TestExplicitAgentIdentityValidation:
+    """Test validation helpers for caller-supplied explicit identities."""
+
+    def test_normalize_explicit_agent_name_strips_outer_whitespace(self):
+        assert normalize_explicit_agent_name("  cc-0  ") == "cc-0"
+        assert normalize_explicit_agent_name("\tBlueLake\n") == "BlueLake"
+
+    def test_validate_explicit_agent_name_format_accepts_safe_ids(self):
+        valid_names = [
+            "cc-0",
+            "codex-main",
+            "alice_reviewer",
+            "BlueLake",
+            "agent.v2",
+            "A",
+        ]
+        for name in valid_names:
+            assert validate_explicit_agent_name_format(name), f"'{name}' should be valid"
+
+    def test_validate_explicit_agent_name_format_rejects_invalid_ids(self):
+        invalid_names = [
+            "",
+            "   ",
+            ".hidden",
+            "-agent",
+            "_agent",
+            "agent/name",
+            r"agent\name",
+            "agent name",
+            "agent@name",
+            "*" ,
+            "a" * 129,
+        ]
+        for name in invalid_names:
+            assert not validate_explicit_agent_name_format(name), f"'{name}' should be invalid"
+
+
+# ============================================================================
 # Integration Tests: Agent Registration with Valid Names
 # ============================================================================
 
@@ -249,11 +293,11 @@ async def test_register_agent_with_explicit_valid_name(isolated_env):
                 "project_key": "/test/names",
                 "program": "test-program",
                 "model": "test-model",
-                "name": "BlueMountain",
+                "name": "cc-0",
             },
         )
 
-        assert result.data["name"] == "BlueMountain"
+        assert result.data["name"] == "cc-0"
 
 
 @pytest.mark.asyncio
@@ -289,115 +333,46 @@ async def test_register_agent_case_insensitive_uniqueness(isolated_env):
         assert result2.data["id"] == result1.data["id"]
 
 
-# ============================================================================
-# Integration Tests: Agent Registration with Invalid Names (Coerce Mode - Default)
-# ============================================================================
-
-
 @pytest.mark.asyncio
-async def test_register_agent_coerces_invalid_descriptive_name(isolated_env):
-    """In coerce mode (default), invalid names auto-generate valid ones."""
+async def test_register_agent_rejects_invalid_explicit_name(isolated_env):
+    """register_agent should reject explicit identities with invalid characters."""
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/test/coerce"})
-
-        # In coerce mode, invalid name should trigger auto-generation
-        result = await client.call_tool(
-            "register_agent",
-            {
-                "project_key": "/test/coerce",
-                "program": "test",
-                "model": "test",
-                "name": "BackendHarmonizer",  # Invalid descriptive name
-            },
-        )
-
-        # Should get a valid auto-generated name, not the invalid one
-        agent_name = result.data["name"]
-        assert agent_name != "BackendHarmonizer", "Should not accept invalid name"
-        assert validate_agent_name_format(agent_name), f"Auto-generated '{agent_name}' should be valid"
-
-
-@pytest.mark.asyncio
-async def test_register_agent_coerces_program_name_as_agent(isolated_env):
-    """In coerce mode, program names as agent names get auto-generated."""
-    server = build_mcp_server()
-    async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/test/coerce"})
-
-        result = await client.call_tool(
-            "register_agent",
-            {
-                "project_key": "/test/coerce",
-                "program": "claude-code",
-                "model": "opus",
-                "name": "claude-code",  # Using program name as agent name
-            },
-        )
-
-        agent_name = result.data["name"]
-        assert agent_name != "claude-code", "Should not accept program name as agent name"
-        assert validate_agent_name_format(agent_name), f"Auto-generated '{agent_name}' should be valid"
-
-
-# ============================================================================
-# Integration Tests: Agent Registration with Invalid Names (Strict Mode)
-# ============================================================================
-
-
-@pytest.mark.asyncio
-async def test_register_agent_strict_rejects_invalid_descriptive_name(isolated_env, monkeypatch):
-    """In strict mode, register_agent should reject descriptive names."""
-    monkeypatch.setenv("AGENT_NAME_ENFORCEMENT_MODE", "strict")
-    # Clear cached settings to pick up the new env var
-    from mcp_agent_mail.config import clear_settings_cache
-
-    clear_settings_cache()
-
-    server = build_mcp_server()
-    async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/test/strict"})
+        await client.call_tool("ensure_project", {"human_key": "/test/invalid-name"})
 
         with pytest.raises(Exception) as exc_info:
             await client.call_tool(
                 "register_agent",
                 {
-                    "project_key": "/test/strict",
+                    "project_key": "/test/invalid-name",
                     "program": "test",
                     "model": "test",
-                    "name": "BackendHarmonizer",
+                    "name": "agent/name",
                 },
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert "descriptive" in error_msg or "adjective" in error_msg or "invalid" in error_msg
+        assert "invalid" in str(exc_info.value).lower()
 
 
 @pytest.mark.asyncio
-async def test_register_agent_strict_rejects_program_name_as_agent(isolated_env, monkeypatch):
-    """In strict mode, register_agent should reject program names as agent names."""
-    monkeypatch.setenv("AGENT_NAME_ENFORCEMENT_MODE", "strict")
-    from mcp_agent_mail.config import clear_settings_cache
-
-    clear_settings_cache()
-
+async def test_register_agent_rejects_program_name_as_explicit_identity(isolated_env):
+    """register_agent should reject obvious program names as explicit identities."""
     server = build_mcp_server()
     async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/test/strict"})
+        await client.call_tool("ensure_project", {"human_key": "/test/program-name"})
 
         with pytest.raises(Exception) as exc_info:
             await client.call_tool(
                 "register_agent",
                 {
-                    "project_key": "/test/strict",
+                    "project_key": "/test/program-name",
                     "program": "claude-code",
                     "model": "opus",
                     "name": "claude-code",
                 },
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert "program" in error_msg or "adjective" in error_msg or "invalid" in error_msg
+        assert "program name" in str(exc_info.value).lower()
 
 
 # ============================================================================
@@ -431,7 +406,7 @@ async def test_create_agent_identity_generates_unique_names(isolated_env):
 
 @pytest.mark.asyncio
 async def test_create_agent_identity_with_valid_hint(isolated_env):
-    """create_agent_identity should accept valid name hints."""
+    """create_agent_identity should accept explicit safe IDs as name hints."""
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/test/hint"})
@@ -442,61 +417,32 @@ async def test_create_agent_identity_with_valid_hint(isolated_env):
                 "project_key": "/test/hint",
                 "program": "test",
                 "model": "test",
-                "name_hint": "SilentCave",
+                "name_hint": "cc-0",
             },
         )
 
-        assert result.data["name"] == "SilentCave"
+        assert result.data["name"] == "cc-0"
 
 
 @pytest.mark.asyncio
-async def test_create_agent_identity_coerces_invalid_hint(isolated_env):
-    """In coerce mode, create_agent_identity auto-generates for invalid hints."""
+async def test_create_agent_identity_rejects_invalid_hint(isolated_env):
+    """create_agent_identity should reject invalid explicit identity hints."""
     server = build_mcp_server()
     async with Client(server) as client:
         await client.call_tool("ensure_project", {"human_key": "/test/hint"})
-
-        # In coerce mode, invalid hint should trigger auto-generation
-        result = await client.call_tool(
-            "create_agent_identity",
-            {
-                "project_key": "/test/hint",
-                "program": "test",
-                "model": "test",
-                "name_hint": "InvalidDescriptiveName",
-            },
-        )
-
-        agent_name = result.data["name"]
-        assert agent_name != "InvalidDescriptiveName", "Should not accept invalid hint"
-        assert validate_agent_name_format(agent_name), f"Auto-generated '{agent_name}' should be valid"
-
-
-@pytest.mark.asyncio
-async def test_create_agent_identity_strict_rejects_invalid_hint(isolated_env, monkeypatch):
-    """In strict mode, create_agent_identity should reject invalid name hints."""
-    monkeypatch.setenv("AGENT_NAME_ENFORCEMENT_MODE", "strict")
-    from mcp_agent_mail.config import clear_settings_cache
-
-    clear_settings_cache()
-
-    server = build_mcp_server()
-    async with Client(server) as client:
-        await client.call_tool("ensure_project", {"human_key": "/test/strict-hint"})
 
         with pytest.raises(Exception) as exc_info:
             await client.call_tool(
                 "create_agent_identity",
                 {
-                    "project_key": "/test/strict-hint",
+                    "project_key": "/test/hint",
                     "program": "test",
                     "model": "test",
-                    "name_hint": "InvalidDescriptiveName",
+                    "name_hint": "agent/name",
                 },
             )
 
-        error_msg = str(exc_info.value).lower()
-        assert "adjective" in error_msg or "invalid" in error_msg or "format" in error_msg
+        assert "invalid" in str(exc_info.value).lower()
 
 
 # ============================================================================
