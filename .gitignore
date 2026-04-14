@@ -270,3 +270,6 @@ test_screenshot.png
 
 # Literal tilde directory (created by agent mail git mailbox init)
 ~/
+
+# SQLite activity lock files
+*.activity.lock
