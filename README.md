@@ -1933,6 +1933,7 @@ Group multiple repositories (e.g., frontend, backend, infra) under a single prod
   - The server reads config from `.env` via python-decouple. You can mount it read-only into the container at `/app/.env`.
   - Default bind host is `0.0.0.0` in the container; port `8765` is exposed.
   - Persistent archive lives under `/data/mailbox` (mapped to the `agent_mail_data` volume by default).
+  - **Bind-mount uid mismatches:** if you bind-mount a host directory (instead of a named volume) into `/data/mailbox`, the files on the host are typically owned by uid 1000 rather than the container's `appuser` (uid 10001). Git would normally refuse to operate on such a "dubious ownership" directory, which surfaces as the non-obvious error `Unknown parameter: --cached` on diff/status. The image now whitelists `/data/mailbox` (and, as a catch-all inside the container only, `*`) via `git config --global --add safe.directory`. If you rebuild from a fork that omits that step, either re-add the safe.directory lines or `chown -R 10001:10001` the host path (see issue #143).
 
 Notes
 - A unique `product_uid` is stored for each product; you can reference a product by uid or name.
