@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, Final, TypeVar, cast
 
 from sqlalchemy.exc import OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -525,12 +525,59 @@ def install_query_hooks(engine: AsyncEngine) -> None:
     _QUERY_HOOKS_INSTALLED = True
 
 
+class UnsupportedDatabaseBackendError(RuntimeError):
+    """Raised at startup when DATABASE_URL points at an unsupported backend.
+
+    As of this version, mcp-agent-mail only supports SQLite as the backing
+    store. Large portions of the application (FTS5 full-text search, many
+    SQLite-specific PRAGMAs, ``ALTER TABLE ADD COLUMN`` idempotency) assume
+    SQLite. PostgreSQL / MySQL / etc. will silently mis-behave or fail at
+    schema init with cryptic errors (see issue #142 for the historical
+    ``CREATE VIRTUAL TABLE`` failure).
+
+    We fail fast with a clear, actionable error instead.
+    """
+
+
+_SUPPORTED_BACKENDS: Final = frozenset({"sqlite"})
+
+
+def _assert_supported_backend(database_url: str) -> None:
+    """Reject DATABASE_URLs that target backends we don't actually support.
+
+    Accepts empty / unparseable URLs silently — those will produce their own
+    errors downstream in :func:`_build_engine`. Only raises for URLs that
+    parse cleanly but point at a known non-SQLite backend (e.g.
+    ``postgresql+asyncpg://...``).
+    """
+    if not database_url:
+        return
+    try:
+        from sqlalchemy.engine import make_url
+
+        backend = make_url(database_url).get_backend_name().lower()
+    except Exception:
+        return
+    if backend in _SUPPORTED_BACKENDS:
+        return
+    raise UnsupportedDatabaseBackendError(
+        "DATABASE_URL points at an unsupported backend "
+        f"({backend!r}). mcp-agent-mail currently only supports SQLite "
+        "(e.g. 'sqlite+aiosqlite:////data/mailbox/storage.sqlite3'). "
+        "PostgreSQL / MySQL / etc. are not yet implemented — core features "
+        "(full-text search via FTS5, schema migrations, PRAGMA-based tuning) "
+        "assume SQLite. Track support in "
+        "https://github.com/Dicklesworthstone/mcp_agent_mail/issues/142."
+    )
+
+
 def init_engine(settings: Settings | None = None) -> None:
     """Initialise global engine and session factory once."""
     global _engine, _session_factory
     if _engine is not None and _session_factory is not None:
         return
     resolved_settings = settings or get_settings()
+    _assert_supported_backend(resolved_settings.database.url)
     engine = _build_engine(resolved_settings.database)
     install_query_hooks(engine)
     _engine = engine
@@ -753,7 +800,33 @@ def dispose_engine_blocking(engine: AsyncEngine, timeout_seconds: float = 5.0) -
         raise dispose_error
 
 
+def _is_sqlite_connection(connection: Any) -> bool:
+    """Best-effort check that a SQLAlchemy sync Connection is backed by SQLite.
+
+    Used to gate SQLite-only DDL (FTS5 virtual tables, SQLite-idiom ALTERs)
+    so the schema initializer still works for other backends that may be
+    added in the future. As of this version, non-SQLite backends are not
+    supported at runtime (see ``_assert_supported_backend``).
+    """
+    try:
+        dialect = getattr(getattr(connection, "engine", None), "dialect", None)
+        name = getattr(dialect, "name", "") or ""
+        return name.lower() == "sqlite"
+    except Exception:
+        return False
+
+
 def _setup_fts(connection: Any) -> None:
+    # FTS5 + the ``ALTER TABLE`` idioms below are SQLite-only. Skip them
+    # entirely on other backends so schema init does not blow up with
+    # ``CREATE VIRTUAL TABLE`` against Postgres et al. Runtime search paths
+    # also short-circuit to LIKE fallbacks when FTS is unavailable.
+    if not _is_sqlite_connection(connection):
+        _logger.info(
+            "db.fts.skipped_non_sqlite",
+            extra={"dialect": getattr(getattr(connection, "engine", None).dialect, "name", "unknown")},
+        )
+        return
     connection.exec_driver_sql(
         "CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(message_id UNINDEXED, subject, body)"
     )

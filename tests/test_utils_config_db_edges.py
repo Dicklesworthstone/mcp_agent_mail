@@ -3,8 +3,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import (
+    UnsupportedDatabaseBackendError,
+    _assert_supported_backend,
     ensure_schema,
     get_engine,
     get_sqlite_pre_restore_path,
@@ -57,6 +61,57 @@ def test_db_engine_reset_and_reinit(isolated_env):
     _ = get_engine()
     # Ensure schema executes without error
     asyncio.run(ensure_schema())
+
+
+def test_assert_supported_backend_accepts_sqlite_variants():
+    """SQLite URLs (all supported aiosqlite/pysqlite variants) must not raise."""
+    for url in (
+        "sqlite+aiosqlite:///:memory:",
+        "sqlite+aiosqlite:////tmp/x.sqlite3",
+        "sqlite:///:memory:",
+    ):
+        _assert_supported_backend(url)  # should not raise
+
+
+def test_assert_supported_backend_rejects_postgres():
+    """Regression for #142 — we fail fast instead of blowing up at CREATE VIRTUAL TABLE."""
+    with pytest.raises(UnsupportedDatabaseBackendError) as excinfo:
+        _assert_supported_backend(
+            "postgresql+asyncpg://mcp:pw@example.invalid:5432/mail"
+        )
+    msg = str(excinfo.value)
+    assert "SQLite" in msg
+    assert "142" in msg  # points users at the tracking issue
+    assert "postgresql" in msg.lower()
+
+
+def test_assert_supported_backend_rejects_mysql():
+    with pytest.raises(UnsupportedDatabaseBackendError):
+        _assert_supported_backend("mysql+aiomysql://u:p@h/db")
+
+
+def test_assert_supported_backend_tolerates_empty_url():
+    # Empty / garbage URLs are left to surface their own errors downstream.
+    _assert_supported_backend("")
+    _assert_supported_backend("this is not a url")
+
+
+def test_init_engine_rejects_postgres_fast(monkeypatch, tmp_path):
+    """Regression for #142: init_engine must fail fast on Postgres.
+
+    Without this check, schema init proceeds and crashes deep inside
+    ``CREATE VIRTUAL TABLE ... USING fts5`` with a cryptic SQL error.
+    """
+    from mcp_agent_mail.db import init_engine
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+asyncpg://mcp:pw@example.invalid:5432/mail",
+    )
+    clear_settings_cache()
+    reset_database_state()
+    with pytest.raises(UnsupportedDatabaseBackendError):
+        init_engine()
 
 
 def test_sqlite_sidecar_paths_preserve_database_filename():
