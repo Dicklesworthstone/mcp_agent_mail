@@ -36,6 +36,22 @@ RUN adduser --disabled-password --gecos "" --uid 10001 appuser && \
     mkdir -p /data/mailbox && chown -R appuser:appuser /data /app
 USER appuser
 
+# Mark the mounted mailbox directory as a git safe.directory so git does not
+# refuse to operate when the host volume is owned by a different uid than
+# appuser (uid 10001) — a common Docker-on-Linux scenario. Without this, git
+# treats /data/mailbox (and every per-project repo created underneath it) as
+# "dubious ownership" and falls back to a compat mode that fails with
+# "Unknown parameter: --cached" on diff/status operations.
+#
+# git safe.directory entries must be absolute paths (no glob patterns other
+# than the special catch-all '*'). Since per-project repos live at
+# /data/mailbox/<slug>, we need the catch-all to cover the container's
+# dynamically-created subdirectories. This is safe here because the user has
+# explicitly mounted the volume into this dedicated container.
+# See: https://github.com/Dicklesworthstone/mcp_agent_mail/issues/143
+RUN git config --global --add safe.directory /data/mailbox && \
+    git config --global --add safe.directory '*'
+
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
   CMD curl -fsS http://127.0.0.1:8765/health/liveness || exit 1
