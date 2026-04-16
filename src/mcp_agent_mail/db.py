@@ -822,9 +822,11 @@ def _setup_fts(connection: Any) -> None:
     # ``CREATE VIRTUAL TABLE`` against Postgres et al. Runtime search paths
     # also short-circuit to LIKE fallbacks when FTS is unavailable.
     if not _is_sqlite_connection(connection):
+        engine = getattr(connection, "engine", None)
+        dialect_name = getattr(getattr(engine, "dialect", None), "name", "unknown")
         _logger.info(
             "db.fts.skipped_non_sqlite",
-            extra={"dialect": getattr(getattr(connection, "engine", None).dialect, "name", "unknown")},
+            extra={"dialect": dialect_name},
         )
         return
     connection.exec_driver_sql(

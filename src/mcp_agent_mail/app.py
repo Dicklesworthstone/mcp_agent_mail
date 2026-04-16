@@ -7794,7 +7794,10 @@ def build_mcp_server() -> FastMCP:
         if to is None and original.sender_id == sender.id:
             async with get_session() as _rsl_sx:
                 _rsl_result = await _rsl_sx.execute(
-                    _sa_select(Agent.name, Agent.project_id, MessageRecipient.kind)
+                    # Use the local ``select`` wrapper (not ``_sa_select``) so ty
+                    # doesn't trip over SQLAlchemy's multi-entity overloads on
+                    # SQLModel-mapped columns. See the wrapper definition above.
+                    select(Agent.name, Agent.project_id, MessageRecipient.kind)
                     .join(Agent, MessageRecipient.agent_id == Agent.id)
                     .where(
                         cast(Any, MessageRecipient.message_id) == original.id,
