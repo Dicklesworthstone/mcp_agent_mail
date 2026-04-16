@@ -6,16 +6,19 @@ Format: entries are organized by version in reverse chronological order. Each ve
 
 ---
 
-## [v0.3.1] - 2026-04-16
+## [v0.3.2] - 2026-04-16
 
 ### Bug Fixes
 
 - **PostgreSQL fail-fast** -- reject non-SQLite `DATABASE_URL` values at startup with a clear, actionable error instead of crashing on `CREATE VIRTUAL TABLE` deep inside schema init. Gates FTS5 DDL behind a dialect check so SQLite-only migrations stay SQLite-only (#142).
 - **Docker uid mismatches** -- mark `/data/mailbox` (and the catch-all `*` inside the container) as a git `safe.directory` after the `USER appuser` switch so bind-mounted host volumes owned by a different uid no longer trigger the non-obvious `Unknown parameter: --cached` failure. Document the gotcha in the README Docker notes (#143).
+- **Type check** -- swap `_sa_select` for the local `select` wrapper in the reply-self-loop path and guard the new `_setup_fts` dialect lookup against `None`, restoring `ty` clean on CI.
 
-## [Unreleased] (v0.3.1...main)
+> Note: v0.3.1 was tagged but its Release workflow failed on two pre-existing ty diagnostics; v0.3.2 supersedes it with the same three fixes plus the type-check cleanup.
 
-131 commits since v0.3.0, spanning 2026-01-07 through 2026-03-21. No release tag yet.
+## [Unreleased] (v0.3.2...main)
+
+132 commits since v0.3.0, spanning 2026-01-07 through 2026-03-21. No release tag yet.
 
 ### Agent Identity and Lifecycle
 
