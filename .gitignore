@@ -273,3 +273,6 @@ test_screenshot.png
 
 # SQLite activity lock files
 *.activity.lock
+
+# OpenCode config (user-local; contains bearer tokens)
+/opencode.json
