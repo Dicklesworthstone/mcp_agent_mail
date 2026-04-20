@@ -8,15 +8,24 @@ from mcp_agent_mail import config as _config
 
 
 def test_main_module_dispatch(monkeypatch):
-    # Ensure calling __main__.main() renders help via Typer without consuming pytest argv
-    # Ensure pytest argv isn't passed through
+    # __main__.main() dispatches straight to the Typer app on the current argv
+    # (GH#146: it previously force-rewrote argv to ['--help'], hiding every
+    # subcommand). With argv = ['<prog>', '--help'] Typer prints help and exits
+    # with code 0, which surfaces as SystemExit(0) — that *is* the correct CLI
+    # contract; we just pin the exit code so future regressions don't silently
+    # swap it for a crash.
     import sys as _sys
+
+    import pytest
 
     import mcp_agent_mail.__main__ as entry
     from mcp_agent_mail.cli import app as real_app
-    monkeypatch.setattr(_sys, "argv", ["mcp-agent-mail", "--help"])  # safe
+
+    monkeypatch.setattr(_sys, "argv", ["mcp-agent-mail", "--help"])
     monkeypatch.setattr(entry, "app", real_app)
-    entry.main()  # should not raise
+    with pytest.raises(SystemExit) as exc_info:
+        entry.main()
+    assert exc_info.value.code == 0
 
 
 def test_http_module_main_invokes_uvicorn(isolated_env, monkeypatch):
