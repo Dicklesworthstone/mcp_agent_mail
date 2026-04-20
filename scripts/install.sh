@@ -15,7 +15,10 @@ set -euo pipefail
 REPO_URL="https://github.com/Dicklesworthstone/mcp_agent_mail"
 REPO_NAME="mcp_agent_mail"
 BRANCH="main"
-DEFAULT_CLONE_DIR="$PWD/${REPO_NAME}"
+# Default clone location follows XDG Base Directory spec so that
+# `curl | bash` from inside an unrelated project does not drop an
+# untracked sibling directory into that project (see GH#145).
+DEFAULT_CLONE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/${REPO_NAME}"
 CLONE_DIR=""
 YES=0
 NO_START=0
@@ -36,7 +39,7 @@ usage() {
 MCP Agent Mail installer
 
 Options:
-  --dir DIR              Clone/use repo at DIR (default: ./mcp_agent_mail)
+  --dir DIR              Clone/use repo at DIR (default: \${XDG_DATA_HOME:-\$HOME/.local/share}/mcp_agent_mail)
   --branch NAME          Git branch to clone (default: main)
   --port PORT            HTTP server port (default: 8765); sets HTTP_PORT in .env
   --skip-beads           Do not install the Beads Rust (br) CLI automatically
@@ -672,10 +675,11 @@ ensure_python_and_venv() {
 
 sync_deps() {
   info "Syncing dependencies with uv"
+  # uv auto-detects ${REPO_DIR}/.venv without needing activation, which is
+  # both simpler and avoids the POSIX-only `.venv/bin/activate` path
+  # (Windows layout is `.venv/Scripts/activate`). See GH#144.
   (
     cd "${REPO_DIR}"
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
     uv sync
   )
   ok "Dependencies installed"
@@ -766,8 +770,8 @@ run_integration_and_start() {
   info "Running auto-detect integration and starting server"
   (
     cd "${REPO_DIR}"
-    # shellcheck disable=SC1091
-    source .venv/bin/activate
+    # Child script uses `uv run python` which auto-detects the venv, so
+    # we skip `source .venv/bin/activate` (Unix-only path, see GH#144).
     export INTEGRATION_BEARER_TOKEN="${INTEGRATION_TOKEN}"
     args=()
     if [[ "${YES}" -eq 1 ]]; then args+=("--yes"); fi
@@ -1004,9 +1008,8 @@ main() {
   ok "All set!"
   echo "Next runs (open a new terminal or run 'source ~/.zshrc' / 'source ~/.bashrc'):"
   echo "  am                                    # quick alias to start the server"
-  echo "  # or manually:"
+  echo "  # or manually (uv auto-detects .venv, no activate needed):"
   echo "  cd \"${REPO_DIR}\""
-  echo "  source .venv/bin/activate"
   echo "  uv run python -m mcp_agent_mail.cli"
 }
 
