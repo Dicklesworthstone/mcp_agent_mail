@@ -339,6 +339,105 @@ async def test_hard_delete_agent_removes_archive_tree(isolated_env, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_hard_delete_agent_legacy_null_token_via_adjacent_agent(isolated_env):
+    """hard_delete_agent on a tokenless legacy agent must succeed when an
+    adjacent authenticated agent in the same project authorizes the call.
+
+    Regression for #147: without this path the only escape was direct SQL.
+    """
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/legacy/cleanup"})
+
+        # Create two agents in the project.
+        legacy_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "/legacy/cleanup", "program": "legacy", "model": "legacy"},
+        )
+        legacy_name = legacy_result.data["name"]
+
+        peer_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "/legacy/cleanup", "program": "peer", "model": "peer"},
+        )
+        peer_token = peer_result.data["registration_token"]
+
+        # Simulate legacy state: NULL-out the first agent's registration_token.
+        async with get_session() as session:
+            result_rows = await session.execute(
+                select(Agent).where(Agent.name == legacy_name)
+            )
+            legacy_agent = result_rows.scalars().one()
+            legacy_agent.registration_token = None
+            session.add(legacy_agent)
+            await session.commit()
+
+        # Bind the session to the peer agent (any authenticated call does this).
+        await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/legacy/cleanup",
+                "agent_name": peer_result.data["name"],
+                "registration_token": peer_token,
+            },
+        )
+
+        # Now hard_delete the tokenless legacy agent — no token provided.
+        result = await client.call_tool(
+            "hard_delete_agent",
+            {
+                "project_key": "/legacy/cleanup",
+                "agent_name": legacy_name,
+                "confirmation": "I UNDERSTAND",
+            },
+        )
+        assert result.data["status"] == "hard_deleted"
+
+
+@pytest.mark.asyncio
+async def test_hard_delete_agent_null_token_without_peer_rejected(isolated_env):
+    """Tokenless target must still be rejected when no adjacent agent is
+    authenticated in the MCP session — the NULL-token bypass is not
+    a free-for-all.
+
+    We use two separate Client sessions: one to create the lone agent,
+    another (fresh, unauthenticated) to attempt the delete.
+    """
+    server = build_mcp_server()
+
+    # Session 1: create the agent.
+    async with Client(server) as setup_client:
+        await setup_client.call_tool("ensure_project", {"human_key": "/legacy/nopeer"})
+        lone_result = await setup_client.call_tool(
+            "register_agent",
+            {"project_key": "/legacy/nopeer", "program": "lone", "model": "lone"},
+        )
+        lone_name = lone_result.data["name"]
+
+    # Null out its token out-of-band.
+    async with get_session() as session:
+        result_rows = await session.execute(
+            select(Agent).where(Agent.name == lone_name)
+        )
+        lone = result_rows.scalars().one()
+        lone.registration_token = None
+        session.add(lone)
+        await session.commit()
+
+    # Session 2: fresh client, no session binding, no peer authenticated.
+    async with Client(server) as attack_client:
+        with pytest.raises(ToolError, match="does not have a registration token"):
+            await attack_client.call_tool(
+                "hard_delete_agent",
+                {
+                    "project_key": "/legacy/nopeer",
+                    "agent_name": lone_name,
+                    "confirmation": "I UNDERSTAND",
+                },
+            )
+
+
+@pytest.mark.asyncio
 async def test_send_message_empty_subject(isolated_env):
     """send_message should handle empty subject gracefully or reject."""
     server = build_mcp_server()

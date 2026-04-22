@@ -3265,6 +3265,18 @@ def hard_delete_agent(
         Optional[str],
         typer.Option("--token", "-t", help="Registration token for token-protected agents."),
     ] = None,
+    legacy_cleanup: Annotated[
+        bool,
+        typer.Option(
+            "--legacy-cleanup",
+            help=(
+                "Bypass the registration_token check for agents whose token is NULL "
+                "(pre-token legacy rows that accumulated before tokens were mandatory). "
+                "Only honored when the target agent's registration_token is genuinely empty; "
+                "token-bearing agents still require --token."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Permanently delete an agent and ALL associated data (messages, files, database records).
 
@@ -3289,11 +3301,17 @@ def hard_delete_agent(
         agent = await _get_agent_record(proj, agent_name)
 
         if not agent.registration_token:
-            raise ValueError(
-                "Agent has no registration_token, so hard delete cannot be authenticated. "
-                "Re-register or mint a token locally before retrying."
+            if not legacy_cleanup:
+                raise ValueError(
+                    "Agent has no registration_token, so hard delete cannot be authenticated. "
+                    "Re-register or mint a token locally before retrying, or re-run with "
+                    "--legacy-cleanup to delete this tokenless legacy row without a token."
+                )
+            console.print(
+                f"[yellow]--legacy-cleanup: deleting tokenless legacy agent "
+                f"'{agent_name}' in project '{project}' without token check.[/]"
             )
-        if not _hmac.compare_digest(registration_token or "", agent.registration_token):
+        elif not _hmac.compare_digest(registration_token or "", agent.registration_token):
             raise ValueError("Invalid registration_token — only the agent's owner can hard-delete it")
 
         agent_id = agent.id

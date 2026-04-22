@@ -4787,11 +4787,27 @@ def build_mcp_server() -> FastMCP:
 
         stored_token = (agent.registration_token or "").strip()
         if not stored_token:
+            # Adjacent-agent auth for legacy tokenless agents: retire_agent
+            # and hard_delete_agent can be authorized by any other authenticated
+            # agent in the same project. This unsticks cleanup of pre-token
+            # agents without requiring direct SQL surgery. All other actions
+            # continue to require the target's own token.
+            if action in ("retire_agent", "hard_delete_agent"):
+                peer = await _resolve_session_agent_for_project(ctx, project)
+                if peer is not None and peer.id != agent.id:
+                    await ctx.info(
+                        f"{action}: authorizing cleanup of tokenless legacy agent "
+                        f"'{agent.name}' via adjacent agent '{peer.name}' in project "
+                        f"'{project.human_key}'."
+                    )
+                    return agent
             raise ToolExecutionError(
                 "AUTHENTICATION_REQUIRED",
                 (
                     f"Agent '{agent.name}' does not have a registration token, so {action} cannot be authenticated. "
-                    "Re-register or mint a token locally before retrying."
+                    "Re-register or mint a token locally before retrying, or run this call from an MCP session "
+                    "already authenticated as another agent in the same project (adjacent-agent auth is permitted "
+                    "for retire_agent and hard_delete_agent on tokenless legacy agents)."
                 ),
                 recoverable=True,
                 data={"agent_name": agent.name, "project_key": project.human_key, "action": action},
