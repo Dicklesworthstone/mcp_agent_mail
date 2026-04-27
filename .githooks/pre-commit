@@ -14,8 +14,16 @@ set -euo pipefail
 red()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 yel()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 
-# Skip merge commits and rebases
-if [[ -f .git/MERGE_HEAD || -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+# Resolve the actual gitdir. In a regular checkout this is `<repo>/.git`,
+# but in a `git worktree`, `.git` is a *file* containing
+# "gitdir: <path>" — a literal `[[ -f .git/MERGE_HEAD ]]` would always
+# fail there because `.git/MERGE_HEAD` doesn't exist as a path under a
+# file. `git rev-parse --git-dir` resolves both forms.
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo .git)
+
+# Skip merge commits and rebases — these don't represent "did the user
+# mean to add this" decisions; the index is being assembled by git itself.
+if [[ -f "$GIT_DIR/MERGE_HEAD" || -d "$GIT_DIR/rebase-merge" || -d "$GIT_DIR/rebase-apply" ]]; then
     exit 0
 fi
 
@@ -62,10 +70,12 @@ done
 
 # 2. Content-based heuristics on small staged files (<=64 KB).
 #    Catches tokens that don't have suspicious filenames.
+#    Both the size check and the blob read use the *index* state so we're
+#    inspecting exactly what would be committed, not whatever the working
+#    tree happens to contain (those can diverge after `git add`).
 for path in "${staged[@]}"; do
-    [[ -f "$path" ]] || continue
-    size=$(wc -c <"$path")
-    [[ "$size" -le 65536 ]] || continue
+    size=$(git cat-file -s ":$path" 2>/dev/null || echo 0)
+    [[ "$size" -gt 0 && "$size" -le 65536 ]] || continue
 
     blob=$(git show ":$path" 2>/dev/null || true)
     [[ -n "$blob" ]] || continue
