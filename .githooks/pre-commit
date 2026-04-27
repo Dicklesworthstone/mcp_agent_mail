@@ -47,8 +47,8 @@ for path in "${staged[@]}"; do
             violations+=("$path  (matches SSH private-key filename)")
             ;;
         # Project-specific signing keys — Ed25519 seeds named signing-<hex>
-        signing-*)
-            # Allow only paired .pub files
+        # Allow paired .pub files and revoked-signing-*.pub historical markers.
+        signing-*|revoked-signing-*)
             if [[ "$base" != *.pub ]]; then
                 violations+=("$path  (matches signing-* private-key naming convention)")
             fi

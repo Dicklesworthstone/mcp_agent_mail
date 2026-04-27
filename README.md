@@ -906,7 +906,7 @@ The wizard provides a fully automated end-to-end deployment experience:
    - Supports multiple selection modes: `all`, single number (`1`), lists (`1,3,5`), or ranges (`1-3`, `2-5,8`)
    - Remembers your previous selection for quick re-export
 7. **Redaction configuration**: Choose between `standard` (scrub secrets like API keys/tokens, keep agent names) or `strict` (redact all message bodies)
-8. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or reuse of existing keys
+8. **Cryptographic signing**: Optional Ed25519 signing with automatic key generation or reuse of existing keys. Generated keys are written to `~/.mcp-agent-mail/signing-keys/` (mode 0700, never to the cwd) so they cannot be accidentally `git add -f`'d into a repository
 9. **Pre-flight validation**: Checks that GitHub repo names are available before starting the export
 10. **Deployment summary**: Shows what will be deployed (project count, bundle size, target, signing status) and asks for confirmation
 11. **Export and preview**: Exports the bundle and launches an interactive preview server with automatic port detection (tries 9000-9100)

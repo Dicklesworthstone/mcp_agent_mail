@@ -45,6 +45,11 @@ SESSION_STATE_FILE = SESSION_DIR / "session.json"
 SESSION_BUNDLE_DIR = SESSION_DIR / "bundle"
 SESSION_VERSION = 1
 
+# Per-user storage for generated signing keys. Keys MUST never land inside a
+# git repository — see _safe_signing_key_dir() and the project history for the
+# leak (commit d1342ce) that motivated moving them out of cwd.
+SIGNING_KEY_DIR = CONFIG_DIR / "signing-keys"
+
 
 def find_available_port(start: int = 9000, end: int = 9100) -> int:
     """Find an available port in the given range (inclusive)."""
@@ -559,16 +564,64 @@ def select_deployment_target() -> dict[str, Any]:
     }
 
 
+def _is_inside_git_repo(path: Path) -> bool:
+    """Walk up from ``path`` looking for a .git directory or file.
+
+    Used as a defense-in-depth check before writing a private key — a key
+    written inside a git working tree can be `git add -f`'d past .gitignore
+    (which is exactly how signing-77c6e768.key leaked in commit d1342ce).
+    """
+    candidate = path.resolve()
+    for ancestor in (candidate, *candidate.parents):
+        if (ancestor / ".git").exists():
+            return True
+    return False
+
+
+def _safe_signing_key_dir() -> Path:
+    """Return a per-user directory for generated signing keys.
+
+    Refuses to use the directory if it sits inside a git repo (which should
+    never happen for ``~/.mcp-agent-mail/signing-keys`` but is checked for
+    completeness in case ``$HOME`` itself is git-managed by some dotfile
+    setup).
+    """
+    SIGNING_KEY_DIR.mkdir(parents=True, exist_ok=True)
+    with suppress(OSError, NotImplementedError):
+        SIGNING_KEY_DIR.chmod(0o700)
+    if _is_inside_git_repo(SIGNING_KEY_DIR):
+        raise RuntimeError(
+            f"Refusing to write signing key under {SIGNING_KEY_DIR}: it lives "
+            "inside a git repository, which makes accidental commits possible. "
+            "Move the directory or HOME outside any git tree."
+        )
+    return SIGNING_KEY_DIR
+
+
 def generate_signing_key() -> Path:
-    """Generate Ed25519 signing key in current directory."""
-    # Save to current directory (not /tmp) so it persists
-    key_path = Path.cwd() / f"signing-{secrets.token_hex(4)}.key"
+    """Generate an Ed25519 signing key under the per-user config directory.
+
+    Earlier versions of this function wrote to ``Path.cwd()``; if the wizard
+    was invoked from inside a git repo, the key landed in the repo root with
+    the predictable ``signing-XXXXXXXX.key`` filename, where it could be
+    force-added past .gitignore. That happened (commit d1342ce of
+    mcp_agent_mail) and the resulting Ed25519 private key sat in public
+    history until git-filter-repo cleanup. The fix: always write to
+    ``~/.mcp-agent-mail/signing-keys/`` (a directory that is, by
+    construction, not inside any git repo).
+    """
+    safe_dir = _safe_signing_key_dir()
+    key_path = safe_dir / f"signing-{secrets.token_hex(4)}.key"
     key_path.write_bytes(secrets.token_bytes(32))
     # Set secure permissions (best-effort on Windows where this may not apply)
     with suppress(OSError, NotImplementedError):
         key_path.chmod(0o600)
     console.print(f"[yellow]⚠ Private signing key saved to:[/] {key_path}")
-    console.print("[yellow]⚠ Back up this file securely - you'll need it to update the bundle[/]")
+    console.print(
+        "[yellow]⚠ Back up this file securely - you'll need it to update the bundle.[/]\n"
+        "[dim]Note: keys are written to ~/.mcp-agent-mail/signing-keys/ (never the cwd) "
+        "to keep them out of any git repository.[/]"
+    )
     return key_path
 
 
