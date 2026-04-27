@@ -227,6 +227,24 @@ out/
 signing-*.key
 signing-*.pub
 
+# Generic private-key / secret patterns — belt-and-suspenders.
+# A real Ed25519 signing key was committed once via `git add -f` despite
+# signing-*.key being above; .githooks/pre-commit blocks the same mistake at
+# the index level, and these patterns block at the working-tree level.
+*.key
+!*.pub.key
+*.priv
+*.pem
+*.pfx
+*.p12
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+secrets.*
+*-secret
+*-secret.*
+
 # IDE settings
 .vscode/
 .idea/

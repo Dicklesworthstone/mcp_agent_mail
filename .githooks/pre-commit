@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Pre-commit guard against accidental secret commits.
+#
+# Activate per-clone with:
+#     git config core.hooksPath .githooks
+#
+# Why this exists: signing-77c6e768.key was committed in a feature commit
+# despite .gitignore having signing-*.key — someone used `git add -f`. This
+# hook is a second layer that refuses the commit at the index level so even
+# `git add -f` can't sneak a private key in.
+
+set -euo pipefail
+
+red()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+yel()  { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+
+# Skip merge commits and rebases
+if [[ -f .git/MERGE_HEAD || -d .git/rebase-merge || -d .git/rebase-apply ]]; then
+    exit 0
+fi
+
+# Files staged for this commit (added/modified/copied/renamed; excludes deletions)
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [[ ${#staged[@]} -eq 0 ]]; then
+    exit 0
+fi
+
+violations=()
+
+# 1. Filename-based blocklist — common private-key/secret naming conventions.
+#    The patterns below are intentionally conservative: any tracked .pub file
+#    is fine, but a .key (or .priv, or signing-XYZ without an explicit .pub
+#    suffix) is rejected at commit time.
+for path in "${staged[@]}"; do
+    base=$(basename -- "$path")
+    case "$base" in
+        # Private key file extensions
+        *.key|*.priv|*.pem|*.pfx|*.p12)
+            # Allow .pub.key (some tools name pubs with .pub.key)
+            if [[ "$base" != *.pub.key ]]; then
+                violations+=("$path  (matches private-key filename pattern)")
+            fi
+            ;;
+        # SSH private keys (no extension)
+        id_rsa|id_dsa|id_ecdsa|id_ed25519)
+            violations+=("$path  (matches SSH private-key filename)")
+            ;;
+        # Project-specific signing keys — Ed25519 seeds named signing-<hex>
+        signing-*)
+            # Allow only paired .pub files
+            if [[ "$base" != *.pub ]]; then
+                violations+=("$path  (matches signing-* private-key naming convention)")
+            fi
+            ;;
+        # Common secret bundles
+        secrets.*|*-secret|*-secret.*|*.secret|*.secret.*)
+            violations+=("$path  (matches secret-bundle filename pattern)")
+            ;;
+    esac
+done
+
+# 2. Content-based heuristics on small staged files (<=64 KB).
+#    Catches tokens that don't have suspicious filenames.
+for path in "${staged[@]}"; do
+    [[ -f "$path" ]] || continue
+    size=$(wc -c <"$path")
+    [[ "$size" -le 65536 ]] || continue
+
+    blob=$(git show ":$path" 2>/dev/null || true)
+    [[ -n "$blob" ]] || continue
+
+    # Common provider token shapes (kept conservative to avoid noise)
+    if grep -E -q '\b(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|ghs_[A-Za-z0-9]{30,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{20,})\b' <<<"$blob"; then
+        violations+=("$path  (contains provider-token-shaped string)")
+    fi
+
+    # PEM private-key headers
+    if grep -E -q -- '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED |)PRIVATE KEY' <<<"$blob"; then
+        violations+=("$path  (contains PEM private key header)")
+    fi
+done
+
+if [[ ${#violations[@]} -gt 0 ]]; then
+    red "✗ Pre-commit blocked: likely secret file(s) staged."
+    for v in "${violations[@]}"; do
+        red "    - $v"
+    done
+    yel "If a finding is a false positive, run:"
+    yel "    git commit --no-verify"
+    yel "But review the file first — the last leak was a real Ed25519 key."
+    exit 1
+fi
+
+exit 0

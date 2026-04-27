@@ -111,6 +111,17 @@ Macros vs granular tools
   - `mcp-agent-mail guard status .`
   - `mcp-agent-mail guard install <project_key> . --prepush`
   - Guards exit early when `WORKTREES_ENABLED=0` or `AGENT_MAIL_BYPASS=1`.
+- Install the secrets pre-commit guard (one-time per clone):
+  - `git config core.hooksPath .githooks`
+  - `.githooks/pre-commit` rejects staged files that look like private keys
+    (`*.key`, `*.priv`, `*.pem`, `id_rsa`, `signing-*` without `.pub`, etc.)
+    and blob bodies that contain provider-token shapes
+    (`sk-...`, `ghp_...`, `AKIA...`, PEM `-----BEGIN ... PRIVATE KEY-----`, etc.)
+  - This is a second layer over `.gitignore`: the gitignore stops innocent
+    `git add`, the hook stops `git add -f`. Both layers are needed because
+    a real Ed25519 signing key was once committed despite `signing-*.key`
+    being in `.gitignore`.
+  - Bypass for genuine false positives: `git commit --no-verify`.
 - Composition details:
   - Installer writes a Python chain-runner to `.git/hooks/pre-commit` and `.git/hooks/pre-push` that executes `hooks.d/<hook>/*` and then `<hook>.orig` if present.
   - Agent Mail guard is installed as `hooks.d/pre-commit/50-agent-mail.py` and `hooks.d/pre-push/50-agent-mail.py`.
