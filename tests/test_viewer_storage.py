@@ -7,7 +7,7 @@ This test suite documents requirements for testing the viewer's offline storage 
 4. SharedArrayBuffer availability
 5. Warm vs cold load performance
 
-Reference: PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 262
+Reference: docs/planning/PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 262
 
 Note: Comprehensive cross-browser testing requires browser automation (Playwright/Puppeteer)
 as OPFS and SharedArrayBuffer APIs are not available in Node.js or Python runtimes.

@@ -6,7 +6,7 @@ This test suite validates performance characteristics of the share export pipeli
 3. Bundle size measurements
 4. Database compressibility
 
-Reference: PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 261
+Reference: docs/planning/PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 261
 """
 
 from __future__ import annotations

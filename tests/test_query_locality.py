@@ -6,7 +6,7 @@ This test suite validates that queries used in the static viewer:
 3. Have appropriate covering indexes to avoid extra lookups
 4. Maintain good data locality measured via dbstat
 
-Reference: PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 262
+Reference: docs/planning/PLAN_TO_ENABLE_EASY_AND_SECURE_SHARING_OF_AGENT_MAILBOX.md line 262
 """
 
 from __future__ import annotations

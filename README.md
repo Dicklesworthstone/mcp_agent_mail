@@ -8,7 +8,7 @@ A mail-like coordination layer for coding agents, exposed as an HTTP-only FastMC
 
 Think of it as asynchronous email + directory + change-intent signaling for your agents, backed by Git (for human-auditable artifacts) and SQLite (for indexing and queries).
 
-Status: Under active development. The design is captured in detail in `project_idea_and_guide.md` (start with the original prompt at the top of that file).
+Status: Under active development. The design is captured in detail in `docs/planning/project_idea_and_guide.md` (start with the original prompt at the top of that file).
 
 ## Why this exists
 
@@ -30,7 +30,7 @@ It's designed for: FastMCP clients and CLI tools (Claude Code, Codex, Gemini CLI
 
 ## From Idea Spark to Shipping Swarm
 
-If a blank repo feels daunting, follow the field-tested workflow we documented in `project_idea_and_guide.md` (“Appendix: From Blank Repo to Coordinated Swarm”):
+If a blank repo feels daunting, follow the field-tested workflow we documented in `docs/planning/project_idea_and_guide.md` (“Appendix: From Blank Repo to Coordinated Swarm”):
 
 - **Ideate fast:** Write a scrappy email-style blurb about the problem, desired UX, and any must-have stack picks (≈15 minutes).
 - **Promote it to a plan:** Feed that blurb to GPT-5 Pro (and optionally Grok4 Heavy / Opus 4.1) until you get a granular Markdown plan, then iterate on the plan file while it’s still cheap to change. The Markdown Web Browser sample plan shows the level of detail to aim for.
@@ -2441,7 +2441,7 @@ sudo systemctl status mcp-agent-mail
 
 Optional (non-journald log rotation): install `deploy/logrotate/mcp-agent-mail` into `/etc/logrotate.d/` and write logs to `/var/log/mcp-agent-mail/*.log` via your process manager or app config.
 
-See `deploy/gunicorn.conf.py` for a starter configuration. For project direction and planned areas, read `project_idea_and_guide.md`.
+See `deploy/gunicorn.conf.py` for a starter configuration. For project direction and planned areas, read `docs/planning/project_idea_and_guide.md`.
 
 ## CLI Commands
 
