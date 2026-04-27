@@ -635,16 +635,35 @@ def generate_signing_key() -> Path:
         except FileExistsError as exc:
             last_error = exc
             continue
+        # Use os.write rather than os.fdopen so the fd's lifecycle is
+        # explicit — `with os.fdopen(...)` would close fd on success but
+        # leak it if os.fdopen itself raises (memory pressure during
+        # stream construction). The os.close in `finally` is unconditional.
+        # The write loop is paranoia — for a 32-byte write to a freshly
+        # created regular file with no concurrent writers it is one
+        # syscall, but EINTR or partial-write semantics are theoretically
+        # possible on some platforms.
         try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(secrets.token_bytes(32))
+            data = secrets.token_bytes(32)
+            written = 0
+            while written < len(data):
+                chunk = os.write(fd, data[written:])
+                if chunk == 0:
+                    raise OSError(
+                        "os.write returned 0 while writing signing key — "
+                        "disk full, fd unwriteable, or filesystem rejected the write"
+                    )
+                written += chunk
         except BaseException:
-            # The fd was opened but writing failed; remove the empty file
-            # so we don't leave an orphan zero-byte key behind that future
-            # collision-checks would trip over.
+            # Writing failed; remove the empty file so we don't leave an
+            # orphan zero-byte key behind that future collision checks
+            # would trip over. The fd is still closed in the finally block.
             with suppress(OSError):
                 candidate.unlink()
             raise
+        finally:
+            with suppress(OSError):
+                os.close(fd)
         # Belt-and-suspenders: re-chmod in case the umask interacted oddly
         # on a platform where mode= in os.open is advisory (notably some
         # network filesystems). Best-effort on Windows.
