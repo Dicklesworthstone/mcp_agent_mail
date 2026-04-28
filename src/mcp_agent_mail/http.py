@@ -36,6 +36,7 @@ from .app import (
     build_mcp_server,
     get_project_sibling_data,
     refresh_project_sibling_suggestions,
+    sweep_stale_agents,
     update_project_sibling_status,
 )
 from .config import Settings, get_settings
@@ -1235,6 +1236,29 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     pass
                 await asyncio.sleep(30)
 
+        async def _worker_auto_retire_stale_agents() -> None:
+            log = structlog.get_logger("maintenance.auto_retire")
+            interval = max(60, int(settings.auto_retire_stale_agents_interval_seconds))
+            threshold = max(60, int(settings.auto_retire_stale_agents_threshold_seconds))
+            while True:
+                with contextlib.suppress(Exception):
+                    retired = await sweep_stale_agents(threshold_seconds=threshold)
+                    if retired:
+                        log.info(
+                            "auto_retired_stale_agents",
+                            count=len(retired),
+                            threshold_seconds=threshold,
+                            agents=[
+                                {
+                                    "agent": entry["agent_name"],
+                                    "project": entry["project_key"],
+                                    "last_active_ts": entry["last_active_ts"],
+                                }
+                                for entry in retired
+                            ],
+                        )
+                await asyncio.sleep(interval)
+
         tasks = []
         # FD health monitor always runs - it's critical for preventing EMFILE cascades
         tasks.append(asyncio.create_task(_worker_fd_health()))
@@ -1246,6 +1270,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             tasks.append(asyncio.create_task(_worker_tool_metrics()))
         if settings.retention_report_enabled or settings.quota_enabled:
             tasks.append(asyncio.create_task(_worker_retention_quota()))
+        if settings.auto_retire_stale_agents_enabled:
+            tasks.append(asyncio.create_task(_worker_auto_retire_stale_agents()))
         fastapi_app.state._background_tasks = tasks
 
     async def _shutdown() -> None:  # pragma: no cover - service lifecycle

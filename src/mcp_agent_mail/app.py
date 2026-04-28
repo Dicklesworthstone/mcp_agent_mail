@@ -3901,6 +3901,67 @@ async def _collect_file_reservation_statuses(
     return statuses
 
 
+async def sweep_stale_agents(
+    *,
+    threshold_seconds: int,
+    project_id: Optional[int] = None,
+    now: Optional[datetime] = None,
+) -> list[dict[str, Any]]:
+    """Mark agents inactive for `threshold_seconds` as retired.
+
+    A "long-running multi-agent project" can accumulate dozens of
+    'active' agents whose sessions ended without an explicit
+    `retire_agent` call. After ~30+ such accumulators, every new
+    `send_message` with `broadcast=true` triggers `contact_approval`
+    for the dead agents and silently fails delivery (issue #149).
+
+    This sweep retires those agents (`retired_at = now`) so the
+    contact-wall stops piling up. It is conservative:
+
+    - Skips agents that are already retired.
+    - Skips agents whose `last_active_ts` is within the threshold.
+    - Optionally scopes to a single project_id.
+
+    Returns one dict per retired agent, with project/agent identifiers
+    plus the `last_active_ts` that triggered retirement, so the caller
+    (background worker, CLI, or test) can log the action.
+    """
+    await ensure_schema()
+    threshold = max(60, int(threshold_seconds))
+    current = now or datetime.now(timezone.utc)
+    cutoff_naive = _naive_utc(current) - timedelta(seconds=threshold)
+    naive_now = _naive_utc(current)
+
+    retired: list[dict[str, Any]] = []
+    async with get_session() as session:
+        stmt = select(Agent, Project).join(Project, cast(Any, Agent.project_id) == Project.id).where(
+            cast(Any, Agent.retired_at).is_(None),
+            cast(Any, Agent.last_active_ts) < cutoff_naive,
+        )
+        if project_id is not None:
+            stmt = stmt.where(cast(Any, Agent.project_id) == project_id)
+        result = await session.execute(stmt)
+        candidates: list[tuple[Agent, Project]] = [
+            cast(tuple[Agent, Project], row) for row in result.all()
+        ]
+        if not candidates:
+            return retired
+        for agent, project in candidates:
+            agent.retired_at = naive_now
+            session.add(agent)
+            retired.append(
+                {
+                    "agent_id": agent.id,
+                    "agent_name": agent.name,
+                    "project_id": project.id,
+                    "project_key": project.human_key,
+                    "last_active_ts": _iso(agent.last_active_ts),
+                }
+            )
+        await session.commit()
+    return retired
+
+
 async def _expire_stale_file_reservations(
     project_id: int,
     *,

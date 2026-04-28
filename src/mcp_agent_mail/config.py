@@ -265,6 +265,16 @@ class Settings:
     # access; this controls how long an inactive HTTP/stdio session is
     # remembered. Default 24h.
     session_binding_ttl_seconds: int
+    # Auto-retire agents whose `last_active_ts` is older than the
+    # threshold. Long-running multi-agent projects accumulate stale
+    # agents whose sessions ended without an explicit retire_agent call;
+    # after ~30+ of these, broadcast send_message starts hitting
+    # contact-approval walls because every new agent has to be approved
+    # by all the dead ones. Default: enabled, sweep hourly, 24h
+    # inactivity threshold.
+    auto_retire_stale_agents_enabled: bool
+    auto_retire_stale_agents_interval_seconds: int
+    auto_retire_stale_agents_threshold_seconds: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -485,6 +495,18 @@ def _build_settings() -> Settings:
         window_identity_ttl_days=_int(decouple_config("MCP_AGENT_MAIL_WINDOW_TTL_DAYS", default="30"), default=30),
         session_binding_ttl_seconds=_int(
             decouple_config("MCP_AGENT_MAIL_SESSION_BINDING_TTL_SECONDS", default="86400"),
+            default=86400,
+        ),
+        auto_retire_stale_agents_enabled=_bool(
+            decouple_config("AUTO_RETIRE_STALE_AGENTS_ENABLED", default="true"),
+            default=True,
+        ),
+        auto_retire_stale_agents_interval_seconds=_int(
+            decouple_config("AUTO_RETIRE_STALE_AGENTS_INTERVAL_SECONDS", default="3600"),
+            default=3600,
+        ),
+        auto_retire_stale_agents_threshold_seconds=_int(
+            decouple_config("AUTO_RETIRE_STALE_AGENTS_THRESHOLD_SECONDS", default="86400"),
             default=86400,
         ),
     )
