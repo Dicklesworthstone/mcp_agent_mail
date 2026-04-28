@@ -260,6 +260,11 @@ class Settings:
     window_identity_uuid: str
     # Days of inactivity before a window identity expires (default 30)
     window_identity_ttl_days: int
+    # Max age (seconds) of an MCP-session-keyed binding entry before it is
+    # GC'd from the in-memory binding tables. Bindings are pruned lazily on
+    # access; this controls how long an inactive HTTP/stdio session is
+    # remembered. Default 24h.
+    session_binding_ttl_seconds: int
 
 
 def _bool(value: str, *, default: bool) -> bool:
@@ -478,6 +483,10 @@ def _build_settings() -> Settings:
         messaging_auto_handshake_on_block=_bool(decouple_config("MESSAGING_AUTO_HANDSHAKE_ON_BLOCK", default="true"), default=True),
         window_identity_uuid=decouple_config("MCP_AGENT_MAIL_WINDOW_ID", default="").strip(),
         window_identity_ttl_days=_int(decouple_config("MCP_AGENT_MAIL_WINDOW_TTL_DAYS", default="30"), default=30),
+        session_binding_ttl_seconds=_int(
+            decouple_config("MCP_AGENT_MAIL_SESSION_BINDING_TTL_SECONDS", default="86400"),
+            default=86400,
+        ),
     )
 
 

@@ -20,7 +20,6 @@ import shutil
 import stat
 import subprocess
 import time
-import weakref
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager, suppress
@@ -4708,8 +4707,27 @@ def build_mcp_server() -> FastMCP:
     )
 
     mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
-    session_agent_bindings: weakref.WeakKeyDictionary[Any, set[tuple[int, int]]] = weakref.WeakKeyDictionary()
-    session_current_agents: weakref.WeakKeyDictionary[Any, dict[int, int]] = weakref.WeakKeyDictionary()
+
+    # Session bindings are keyed by `ctx.session_id` (the FastMCP-assigned
+    # ID derived from the `mcp-session-id` header for HTTP transport, or a
+    # generated UUID stored on the in-memory session for stdio). Earlier
+    # revisions keyed by `ctx.session` directly via `WeakKeyDictionary`,
+    # which works for stdio (one persistent session object per process)
+    # but breaks under `serve-http`: each request gets a fresh session
+    # object, the WeakKeyDictionary entry is GC'd as soon as the request
+    # returns, and the next call sees no bindings — so adjacent-agent
+    # auth always fell back to the AUTHENTICATION_REQUIRED error
+    # described in issue #148.
+    #
+    # Switch to `dict[str, ...]` keyed by the stable session ID, with a
+    # last-access timestamp and an expiry sweep on each lookup so an
+    # unbounded HTTP server can't accumulate session bindings forever.
+    session_binding_ttl_seconds: float = max(
+        60.0, float(getattr(settings, "session_binding_ttl_seconds", 24 * 3600))
+    )
+    session_agent_bindings: dict[str, set[tuple[int, int]]] = {}
+    session_current_agents: dict[str, dict[int, int]] = {}
+    session_binding_last_access: dict[str, float] = {}
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -4723,20 +4741,56 @@ def build_mcp_server() -> FastMCP:
             raise ValueError("Project and agent must have ids before binding MCP sessions.")
         return project.id, agent.id
 
+    def _session_binding_key(ctx: Context) -> str:
+        # `ctx.session_id` is a stable identifier across requests for both
+        # HTTP (mcp-session-id header) and stdio (uuid stored on the
+        # in-memory session). Falls through to a generated UUID if the
+        # transport doesn't surface one — that case yields an isolated
+        # binding scope for that one request, which is the safe default.
+        try:
+            session_id = ctx.session_id
+        except Exception:
+            session_id = ""
+        if not session_id:
+            from uuid import uuid4 as _session_uuid4
+
+            return f"orphan:{_session_uuid4()}"
+        return session_id
+
+    def _prune_expired_session_bindings(now: float) -> None:
+        if not session_binding_last_access:
+            return
+        expired = [
+            key
+            for key, last in session_binding_last_access.items()
+            if now - last > session_binding_ttl_seconds
+        ]
+        for key in expired:
+            session_binding_last_access.pop(key, None)
+            session_agent_bindings.pop(key, None)
+            session_current_agents.pop(key, None)
+
+    def _touch_session_binding(key: str) -> None:
+        now = time.monotonic()
+        _prune_expired_session_bindings(now)
+        session_binding_last_access[key] = now
+
     def _session_bindings_for(ctx: Context) -> set[tuple[int, int]]:
-        session = ctx.session
-        bindings = session_agent_bindings.get(session)
+        key = _session_binding_key(ctx)
+        _touch_session_binding(key)
+        bindings = session_agent_bindings.get(key)
         if bindings is None:
             bindings = set()
-            session_agent_bindings[session] = bindings
+            session_agent_bindings[key] = bindings
         return bindings
 
     def _session_current_agents_for(ctx: Context) -> dict[int, int]:
-        session = ctx.session
-        current_agents = session_current_agents.get(session)
+        key = _session_binding_key(ctx)
+        _touch_session_binding(key)
+        current_agents = session_current_agents.get(key)
         if current_agents is None:
             current_agents = {}
-            session_current_agents[session] = current_agents
+            session_current_agents[key] = current_agents
         return current_agents
 
     def _bind_session_agent(ctx: Context, project: Project, agent: Agent) -> None:
