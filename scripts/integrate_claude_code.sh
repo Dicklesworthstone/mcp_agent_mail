@@ -152,11 +152,18 @@ if [[ ${_SERVER_AVAILABLE} -eq 1 ]]; then
       -d "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"register_agent\",\"arguments\":{${_REGISTER_ARGS}}}}" \
       "${_URL}" 2>/dev/null || echo "")
 
+  _REG_TOKEN=""
   if [[ -n "${_REGISTER_RESPONSE}" ]]; then
     _AGENT=$(extract_registered_agent_name "${_REGISTER_RESPONSE}")
+    _REG_TOKEN=$(extract_registered_registration_token "${_REGISTER_RESPONSE}")
     if [[ -n "${_AGENT}" ]]; then
       log_ok "Registered agent: ${_AGENT}"
       persist_agent_identity_file "${ROOT_DIR}" "${_AGENT}" "${TARGET_DIR}"
+      if [[ -z "${_REG_TOKEN}" ]]; then
+        log_warn "Could not parse registration_token from response — fetch_inbox calls"
+        log_warn "from the inbox hook will fail. Re-run integrate_claude_code.sh after"
+        log_warn "verifying the server returns registration_token in register_agent."
+      fi
     else
       log_warn "Could not parse agent name from response"
     fi
@@ -173,10 +180,18 @@ if [[ -z "${_AGENT}" ]]; then
   log_warn "After starting the server, reconfigure with: ./scripts/integrate_claude_code.sh"
 fi
 
+# Default registration token to empty if we never set it (e.g. server unreachable)
+_REG_TOKEN="${_REG_TOKEN:-}"
+
 log_step "Writing MCP server config and hooks (merge, not overwrite)"
 
-# Build the inbox check command with environment variables
-INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_INTERVAL='120' '${INBOX_HOOK}'"
+# Build the inbox check command with environment variables.
+# - AGENT_MAIL_REGISTRATION_TOKEN provides the per-agent auth needed by fetch_inbox
+#   (the bearer token alone is insufficient — see scripts/hooks/check_inbox.sh comments)
+# - AGENT_MAIL_HOOK_FORMAT=json emits a Claude Code hookSpecificOutput envelope so
+#   inbox state surfaces as a system reminder in the agent's reasoning context,
+#   not just as terminal stdout the agent never sees
+INBOX_CHECK_CMD="AGENT_MAIL_PROJECT='${TARGET_DIR}' AGENT_MAIL_AGENT='${_AGENT}' AGENT_MAIL_URL='${_URL}' AGENT_MAIL_TOKEN='${_TOKEN}' AGENT_MAIL_REGISTRATION_TOKEN='${_REG_TOKEN}' AGENT_MAIL_INTERVAL='120' AGENT_MAIL_HOOK_FORMAT='json' '${INBOX_HOOK}'"
 
 # ============================================================================
 # settings.json: HOOKS ONLY (no secrets, git-tracked)
