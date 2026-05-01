@@ -763,6 +763,29 @@ extract_registered_agent_name() {
   echo "$name"
 }
 
+# Extract the per-agent registration_token from a register_agent response.
+# Sibling to extract_registered_agent_name above; needed by hook installers
+# (e.g. integrate_claude_code.sh) so PostToolUse(Bash) inbox-check hooks can
+# authenticate fetch_inbox calls with per-agent auth — direct curl POSTs from
+# hooks bypass any persistent MCP-session state, so the bearer token alone is
+# insufficient for fetch_inbox (server returns "fetch_inbox requires
+# registration_token for agent X, unless this MCP session has already
+# authenticated as that agent").
+extract_registered_registration_token() {
+  local response="$1"
+  if [[ -z "$response" ]]; then
+    echo ""
+    return
+  fi
+  local token=""
+  if command -v jq >/dev/null 2>&1; then
+    token=$(echo "$response" | jq -r '.result.content[0].text // empty' 2>/dev/null | jq -r '.registration_token // empty' 2>/dev/null || echo "")
+  else
+    token=$(echo "$response" | uv run python -c 'import sys,json; r=json.load(sys.stdin); c=r.get("result",{}).get("content",[]); print(json.loads(c[0]["text"]).get("registration_token","") if c else "")' 2>/dev/null || echo "")
+  fi
+  echo "$token"
+}
+
 # Write the agent identity to a discoverable file so shell tooling can find it.
 persist_agent_identity_file() {
   local root_dir="$1" agent_name="$2" target_dir="${3:-$1}"
