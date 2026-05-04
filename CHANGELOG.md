@@ -30,6 +30,7 @@ Format: entries are organized by version in reverse chronological order. Each ve
 
 ### Messaging and Coordination
 
+- **`unread_only` filter on `fetch_inbox` and `fetch_topic`** -- new boolean parameter that restricts results to messages this recipient has not yet explicitly marked read via `mark_message_read` or `acknowledge_message`. Default `false` preserves existing behavior. Filter is per-recipient (one recipient marking a message read does not hide it from another recipient), ANDs with `topic`/`since_ts`/`urgent_only`, and cuts token burn at scale for polling agents in multi-agent deployments.
 - **Broadcast and topic threads** -- all-agent visibility messaging with topic-based threading for coordination ([b4ad9fc](https://github.com/Dicklesworthstone/mcp_agent_mail/commit/b4ad9fc82070efd59f315807a83ca56ea345c616))
 - **On-demand project-wide message summarization** -- generate summaries across an entire project's message history ([ee53048](https://github.com/Dicklesworthstone/mcp_agent_mail/commit/ee5304819ef6316acaa17a1d721dd026841d1fc5))
 - **Contact enforcement optimization** -- batch queries for contact policy checks, SPA support ([8b6e67c](https://github.com/Dicklesworthstone/mcp_agent_mail/commit/8b6e67c574725e8304b44b11820287b25717547f))

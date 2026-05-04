@@ -1662,7 +1662,7 @@ sequenceDiagram
 
 3) Check inbox
 
-- `fetch_inbox(project_key, agent_name, since_ts?, urgent_only?, include_bodies?, limit?)` returns recent messages, preserving thread_id where available.
+- `fetch_inbox(project_key, agent_name, since_ts?, urgent_only?, unread_only?, include_bodies?, limit?)` returns recent messages, preserving thread_id where available. Pass `unread_only=true` to skip messages this recipient has already explicitly marked read.
 - `acknowledge_message(project_key, agent_name, message_id)` marks acknowledgements.
 
 4) Avoid conflicts with file reservations (leases)
@@ -2289,7 +2289,7 @@ Output format (all tools/resources):
 | `respond_contact` | `respond_contact(project_key: str, to_agent: str, from_agent: str, accept: bool, from_project?: str, ttl_seconds?: int, registration_token?: str)` | Contact link dict | Approve or deny a contact request |
 | `list_contacts` | `list_contacts(project_key: str, agent_name: str, registration_token?: str)` | `list[dict]` | List outbound contact links with target-project and expiry audit metadata |
 | `set_contact_policy` | `set_contact_policy(project_key: str, agent_name: str, policy: str, registration_token?: str)` | Agent dict | Set policy: `open`, `auto`, `contacts_only`, `block_all` |
-| `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str, registration_token?: str)` | `list[dict]` | Non-mutating inbox read |
+| `fetch_inbox` | `fetch_inbox(project_key: str, agent_name: str, limit?: int, urgent_only?: bool, include_bodies?: bool, since_ts?: str, topic?: str, unread_only?: bool, registration_token?: str)` | `list[dict]` | Non-mutating inbox read. `unread_only=true` filters to messages where this recipient's `read_ts` is NULL. |
 | `mark_message_read` | `mark_message_read(project_key: str, agent_name: str, message_id: int, registration_token?: str)` | `{message_id, read, read_at}` | Per-recipient read receipt |
 | `acknowledge_message` | `acknowledge_message(project_key: str, agent_name: str, message_id: int, registration_token?: str)` | `{message_id, acknowledged, acknowledged_at, read_at}` | Sets ack and read |
 | `macro_start_session` | `macro_start_session(human_key: str, program: str, model: str, task_description?: str, agent_name?: str, registration_token?: str, file_reservation_paths?: list[str], file_reservation_reason?: str, file_reservation_ttl_seconds?: int, inbox_limit?: int)` | `{project, agent, file_reservations, inbox}` | Orchestrates ensure→register→optional file reservation→inbox fetch |

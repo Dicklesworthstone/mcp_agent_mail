@@ -4213,6 +4213,7 @@ async def _list_inbox(
     include_bodies: bool,
     since_ts: Optional[str],
     topic: Optional[str] = None,
+    unread_only: bool = False,
 ) -> list[dict[str, Any]]:
     if project.id is None or agent.id is None:
         raise ValueError("Project and agent must have ids before listing inbox.")
@@ -4247,6 +4248,8 @@ async def _list_inbox(
                 stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
         if topic:
             stmt = stmt.where(cast(Any, func.lower(Message.topic)) == topic.lower())
+        if unread_only:
+            stmt = stmt.where(cast(Any, MessageRecipient.read_ts).is_(None))
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
@@ -9020,6 +9023,7 @@ def build_mcp_server() -> FastMCP:
         include_bodies: bool = False,
         since_ts: Optional[str] = None,
         topic: Optional[str] = None,
+        unread_only: bool = False,
         registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
@@ -9033,6 +9037,9 @@ def build_mcp_server() -> FastMCP:
         - `limit`: max number of messages (default 20)
         - `include_bodies`: include full Markdown bodies in the payloads
         - `topic`: filter to messages with this topic tag
+        - `unread_only`: when True, return only messages this recipient has not yet
+          explicitly marked read via `mark_message_read` or `acknowledge_message`.
+          Note: a bare `fetch_inbox` call does NOT mark messages read.
 
         Usage patterns
         --------------
@@ -9089,11 +9096,23 @@ def build_mcp_server() -> FastMCP:
                 token_param="registration_token",
                 action="fetch_inbox",
             )
-            items = await _list_inbox(project, agent, limit, urgent_only, include_bodies, since_ts, topic=topic)
+            items = await _list_inbox(
+                project,
+                agent,
+                limit,
+                urgent_only,
+                include_bodies,
+                since_ts,
+                topic=topic,
+                unread_only=unread_only,
+            )
             if settings.notifications.enabled:
                 with suppress(Exception):
                     await clear_notification_signal(settings, project.slug, agent.name)
-            await ctx.info(f"Fetched {len(items)} messages for '{agent.name}'. urgent_only={urgent_only}")
+            await ctx.info(
+                f"Fetched {len(items)} messages for '{agent.name}'. "
+                f"urgent_only={urgent_only} unread_only={unread_only}"
+            )
             return items
         except Exception as exc:
             _rich_error_panel("fetch_inbox", {"error": str(exc)})
@@ -9114,6 +9133,7 @@ def build_mcp_server() -> FastMCP:
         include_bodies: bool = True,
         since_ts: Optional[str] = None,
         agent_name: Optional[str] = None,
+        unread_only: bool = False,
         registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> list[dict[str, Any]]:
@@ -9132,6 +9152,13 @@ def build_mcp_server() -> FastMCP:
             Include full Markdown bodies in the payloads (default true).
         since_ts : Optional[str]
             ISO-8601 timestamp; only messages newer than this are returned.
+        unread_only : bool
+            When True, restrict to messages where the viewer is a recipient AND
+            has not yet explicitly marked the message read via `mark_message_read`
+            or `acknowledge_message`. Messages the viewer sent but is not a
+            recipient of are excluded under this flag because "unread" only has
+            meaning for a recipient row. A bare `fetch_topic` call does NOT mark
+            messages read.
 
         Returns
         -------
@@ -9185,6 +9212,22 @@ def build_mcp_server() -> FastMCP:
                 since_dt = _parse_iso(since_ts)
                 if since_dt:
                     stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
+            if unread_only:
+                # Scope to messages where the viewer has a recipient row that
+                # has not been explicitly marked read. This narrows beyond
+                # `_message_visible_to_agent_clause`, which also surfaces
+                # messages visible via thread / sender / broadcast even when
+                # the viewer has no MessageRecipient row. We alias here because
+                # the visibility clause already references MessageRecipient in
+                # an EXISTS subquery, and the unaliased outer join would
+                # auto-correlate against it.
+                viewer_recipient = aliased(MessageRecipient)
+                stmt = stmt.join(
+                    viewer_recipient, viewer_recipient.message_id == Message.id
+                ).where(
+                    viewer_recipient.agent_id == (viewer.id or 0),
+                    cast(Any, viewer_recipient.read_ts).is_(None),
+                )
             result = await session.execute(stmt)
             rows = result.all()
         messages: list[dict[str, Any]] = []
