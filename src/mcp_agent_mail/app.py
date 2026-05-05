@@ -1650,7 +1650,24 @@ def _render_commit_panel(
     result_payload: dict[str, Any],
     created_iso: Optional[str],
 ) -> str | None:
-    """Create the Rich panel text used for Git commit messages."""
+    """
+    Optionally render a verbose Rich panel for the git commit message body.
+
+    Disabled by default since v2.13.1: the rendered panel includes ASCII-art
+    box-drawing characters that pollute `git log --oneline` and `git log`
+    output, making the audit log unreadable. The default
+    `_build_send_message_commit_message` path in `storage.py` produces a clean
+    `mail: <sender> -> <recipients> | <subject>` subject + structured body.
+
+    To re-enable verbose panels in commit messages (matches pre-v2.13.1
+    behavior), set `MCP_AGENT_MAIL_VERBOSE_COMMIT_MESSAGES=1` in the
+    environment. Console rich-logger output (TOOLS_LOG_ENABLED) is unaffected
+    and continues to display panels at the configured level.
+
+    See: https://github.com/Dicklesworthstone/mcp_agent_mail/issues/156
+    """
+    if os.environ.get("MCP_AGENT_MAIL_VERBOSE_COMMIT_MESSAGES", "").lower() not in ("1", "true", "yes"):
+        return None
     try:
         panel_ctx = rich_logger.ToolCallContext(
             tool_name=tool_name,
