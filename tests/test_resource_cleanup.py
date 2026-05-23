@@ -259,3 +259,108 @@ async def test_file_reservation_release_works(isolated_env, tmp_path: Path):
             {"project_key": str(workspace), "agent_name": "BlueDog"},
         )
         assert res2.data.get("released", 0) > 0
+
+
+@pytest.mark.asyncio
+async def test_file_reservation_paths_warns_on_code_paths(isolated_env, tmp_path: Path):
+    """bd-unqoc: code-repo paths must surface an 'enforcement_off_for_code_paths'
+    warning in the file_reservation_paths response so wrappers (e.g. the ntm
+    CLI) can tell the caller that server-side exclusivity is advisory only
+    for code paths (mail-archive paths are enforced server-side; code paths
+    rely on the pre-commit guard)."""
+    from mcp_agent_mail.app import build_mcp_server
+
+    server = build_mcp_server()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    proc = await asyncio.create_subprocess_exec("git", "init", cwd=str(workspace))
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "config", "user.email", "test@example.com", cwd=str(workspace)
+    )
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "config", "user.name", "Test User", cwd=str(workspace)
+    )
+    await proc.wait()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": str(workspace)})
+        reg = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": str(workspace),
+                "program": "test-cli",
+                "model": "test-model",
+                "name": "WarnPath",
+            },
+        )
+        # Test harness may assign a different name (random allocation on
+        # name conflict); use whatever name was actually registered.
+        agent_name = (reg.data or {}).get("name") or "WarnPath"
+        result = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": str(workspace),
+                "agent_name": agent_name,
+                "paths": ["src/foo.py"],
+                "ttl_seconds": 3600,
+            },
+        )
+        warnings_list = result.data.get("warnings") or []
+        assert any(
+            isinstance(w, str) and w.startswith("enforcement_off_for_code_paths")
+            for w in warnings_list
+        ), f"warnings missing enforcement_off_for_code_paths: {warnings_list!r}"
+
+
+@pytest.mark.asyncio
+async def test_file_reservation_paths_no_warning_for_archive_paths(
+    isolated_env, tmp_path: Path
+):
+    """bd-unqoc: archive paths (agents/, messages/, attachments/, ...) are
+    enforced server-side, so the warnings array MUST be empty when every
+    reserved path is an archive path."""
+    from mcp_agent_mail.app import build_mcp_server
+
+    server = build_mcp_server()
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    proc = await asyncio.create_subprocess_exec("git", "init", cwd=str(workspace))
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "config", "user.email", "test@example.com", cwd=str(workspace)
+    )
+    await proc.wait()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "config", "user.name", "Test User", cwd=str(workspace)
+    )
+    await proc.wait()
+
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": str(workspace)})
+        reg = await client.call_tool(
+            "register_agent",
+            {
+                "project_key": str(workspace),
+                "program": "test-cli",
+                "model": "test-model",
+                "name": "ArchivePath",
+            },
+        )
+        agent_name = (reg.data or {}).get("name") or "ArchivePath"
+        result = await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": str(workspace),
+                "agent_name": agent_name,
+                # All archive-prefix paths — agents/, messages/, attachments/
+                "paths": ["agents/x.json", "messages/y.json", "attachments/z.bin"],
+                "ttl_seconds": 3600,
+            },
+        )
+        warnings_list = result.data.get("warnings") or []
+        assert not any(
+            isinstance(w, str) and w.startswith("enforcement_off_for_code_paths")
+            for w in warnings_list
+        ), f"archive-only paths should not warn: {warnings_list!r}"

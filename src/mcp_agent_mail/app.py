@@ -11014,7 +11014,25 @@ def build_mcp_server() -> FastMCP:
             if payloads:
                 await write_file_reservation_records(archive, payloads)
         await ctx.info(f"Issued {len(granted)} file_reservations for '{agent.name}'. Conflicts: {len(conflicts)}")
-        return {"granted": granted, "conflicts": conflicts}
+        # Surface per-call enforcement mode so wrappers (e.g. ntm's CLI) can
+        # warn callers that code-repo paths are advisory-only. Server-side
+        # enforcement only covers mail-archive paths (see docstring); code
+        # repo paths are protected by the pre-commit guard, not the server.
+        # Without an explicit signal in the JSON response, downstream tools
+        # have no programmatic way to detect the advisory-only mode beyond
+        # parsing the docstring.
+        warnings_list: list[str] = []
+        advisory_only_paths = [p for p in paths if not _looks_like_archive_path(p)]
+        if advisory_only_paths:
+            warnings_list.append(
+                "enforcement_off_for_code_paths: "
+                f"{len(advisory_only_paths)} of {len(paths)} reserved paths are "
+                "code-repo paths; server-side exclusivity is advisory only. "
+                "Conflict reporting is best-effort and the pre-commit guard is the "
+                "authoritative gate. See the file_reservation_paths docstring for "
+                "the full enforcement policy."
+            )
+        return {"granted": granted, "conflicts": conflicts, "warnings": warnings_list}
 
     @mcp.tool(name="release_file_reservations")
     @_instrument_tool("release_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
