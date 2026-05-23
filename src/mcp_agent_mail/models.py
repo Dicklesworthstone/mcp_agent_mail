@@ -119,7 +119,7 @@ class FileReservation(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: int = Field(foreign_key="projects.id", index=True)
-    agent_id: int = Field(foreign_key="agents.id", index=True)
+    agent_id: Optional[int] = Field(default=None, foreign_key="agents.id", index=True)
     path_pattern: str = Field(max_length=512)
     exclusive: bool = Field(default=True)
     reason: str = Field(default="", max_length=512)

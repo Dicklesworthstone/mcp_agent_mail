@@ -21,13 +21,17 @@ Reference: mcp_agent_mail-hqk
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
 import pytest
 from fastmcp import Client
+from sqlalchemy import select, update
 
 from mcp_agent_mail.app import build_mcp_server
+from mcp_agent_mail.db import get_session
+from mcp_agent_mail.models import Agent, FileReservation, Project
 
 # ============================================================================
 # Helper: Parse JSON from resource blocks
@@ -703,6 +707,49 @@ async def test_file_reservations_resource_returns_reservations(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_file_reservation_paths_refreshes_holder_activity_before_resource_listing(isolated_env):
+    """A newly issued reservation should not be auto-released because the holder was previously inactive."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/fileactivity"})
+
+        agent_result = await client.call_tool(
+            "register_agent",
+            {"project_key": "FileActivity", "program": "test", "model": "test"},
+        )
+        agent_name = agent_result.data["name"]
+        old_activity = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+
+        async with get_session() as session:
+            await session.execute(
+                update(Agent)
+                .where(Agent.name == agent_name)
+                .values(last_active_ts=old_activity)
+            )
+            await session.commit()
+
+        await client.call_tool(
+            "file_reservation_paths",
+            {
+                "project_key": "FileActivity",
+                "agent_name": agent_name,
+                "paths": ["fresh.py"],
+                "exclusive": True,
+                "reason": "fresh reservation",
+            },
+        )
+
+        blocks = await client.read_resource("resource://file_reservations/fileactivity")
+        data = parse_resource_json(blocks)
+
+        assert data is not None
+        reservation = next((item for item in data if item["path_pattern"] == "fresh.py"), None)
+        assert reservation is not None, "Fresh reservation should stay active after listing"
+        assert reservation["agent"] == agent_name
+        assert reservation["stale"] is False
+
+
+@pytest.mark.asyncio
 async def test_file_reservations_resource_active_only(isolated_env):
     """File reservations resource with active_only=true filters released."""
     server = build_mcp_server()
@@ -844,6 +891,41 @@ async def test_file_reservations_resource_includes_metadata(isolated_env):
         assert "created_ts" in reservation, "Should have created_ts"
         assert "expires_ts" in reservation, "Should have expires_ts"
         assert "stale" in reservation, "Should have stale flag"
+
+
+@pytest.mark.asyncio
+async def test_file_reservations_resource_surfaces_null_agent_reservation(isolated_env):
+    """Orphaned file reservations must not disappear from the resource listing."""
+    server = build_mcp_server()
+    async with Client(server) as client:
+        await client.call_tool("ensure_project", {"human_key": "/fileorphan"})
+
+        async with get_session() as session:
+            project = (
+                await session.execute(select(Project).where(Project.slug == "fileorphan"))
+            ).scalar_one()
+            assert project.id is not None
+            reservation = FileReservation(
+                project_id=project.id,
+                agent_id=None,
+                path_pattern="orphaned.py",
+                exclusive=True,
+                reason="orphan fixture",
+                expires_ts=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1),
+            )
+            session.add(reservation)
+            await session.commit()
+
+        blocks = await client.read_resource("resource://file_reservations/fileorphan")
+        data = parse_resource_json(blocks)
+
+        assert data is not None
+        orphan = next((item for item in data if item["path_pattern"] == "orphaned.py"), None)
+        assert orphan is not None, "Orphaned reservation should be visible"
+        assert orphan["agent"] is None
+        assert orphan["agent_id"] is None
+        assert orphan["stale"] is True
+        assert "agent_missing" in orphan["stale_reasons"]
 
 
 # ============================================================================

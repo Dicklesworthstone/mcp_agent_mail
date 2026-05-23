@@ -1214,7 +1214,7 @@ def _require_project_resource_param(project: Optional[str], *, resource_name: st
 @dataclass(slots=True)
 class FileReservationStatus:
     reservation: FileReservation
-    agent: Agent
+    agent: Agent | None
     stale: bool
     stale_reasons: list[str]
     last_agent_activity: Optional[datetime]
@@ -3751,7 +3751,7 @@ async def _collect_file_reservation_statuses(
     async with get_session() as session:
         stmt = (
             select(FileReservation, Agent)
-            .join(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
+            .outerjoin(Agent, cast(Any, FileReservation.agent_id) == Agent.id)
             .where(FileReservation.project_id == project.id)
             .order_by(asc(FileReservation.created_ts))
         )
@@ -3761,7 +3761,7 @@ async def _collect_file_reservation_statuses(
         rows = result.all()
         if not rows:
             return []
-        agent_ids = [agent.id for _, agent in rows if agent.id is not None]
+        agent_ids = [agent.id for _, agent in rows if agent is not None and agent.id is not None]
         send_map: dict[int, Optional[datetime]] = {}
         ack_map: dict[int, Optional[datetime]] = {}
         read_map: dict[int, Optional[datetime]] = {}
@@ -3804,10 +3804,13 @@ async def _collect_file_reservation_statuses(
     statuses: list[FileReservationStatus] = []
     try:
         for reservation, agent in rows:
-            agent_id = agent.id or -1
-            agent_last_active = _ensure_utc(agent.last_active_ts)
-            last_mail = _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
-
+            agent_id = agent.id if agent is not None else None
+            agent_last_active = _ensure_utc(agent.last_active_ts) if agent is not None else None
+            last_mail = (
+                _max_datetime(send_map.get(agent_id), ack_map.get(agent_id), read_map.get(agent_id))
+                if agent_id is not None
+                else None
+            )
             matches: list[Path] = []
             fs_activity: Optional[datetime] = None
             git_activity: Optional[datetime] = None
@@ -3827,18 +3830,23 @@ async def _collect_file_reservation_statuses(
 
             stale = bool(
                 reservation.released_ts is None
-                and agent_inactive
-                and not (recent_mail or recent_fs or recent_git)
+                and (agent is None or (agent_inactive and not (recent_mail or recent_fs or recent_git)))
             )
             reasons: list[str] = []
-            if agent_inactive:
+            if agent is None:
+                if reservation.agent_id is None:
+                    reasons.append("agent_missing")
+                else:
+                    reasons.append("agent_unresolved")
+            elif agent_inactive:
                 reasons.append(f"agent_inactive>{inactivity_seconds}s")
             else:
                 reasons.append("agent_recently_active")
-            if recent_mail:
-                reasons.append("mail_activity_recent")
-            else:
-                reasons.append(f"no_recent_mail_activity>{activity_grace}s")
+            if agent is not None:
+                if recent_mail:
+                    reasons.append("mail_activity_recent")
+                else:
+                    reasons.append(f"no_recent_mail_activity>{activity_grace}s")
             if matches:
                 if recent_fs:
                     reasons.append("filesystem_activity_recent")
@@ -3975,7 +3983,11 @@ async def _expire_stale_file_reservations(
             )
             await session.commit()
     statuses = await _collect_file_reservation_statuses(project, include_released=False, now=now)
-    stale_statuses = [status for status in statuses if status.stale and status.reservation.id is not None]
+    stale_statuses = [
+        status
+        for status in statuses
+        if status.agent is not None and status.stale and status.reservation.id is not None
+    ]
     stale_ids = [cast(int, status.reservation.id) for status in stale_statuses]
     if stale_ids:
         async with get_immediate_session() as session:
@@ -4007,6 +4019,8 @@ async def _expire_stale_file_reservations(
         released_pairs.append((reservation, agent))
     for status in stale_statuses:
         if status.reservation.id is None:
+            continue
+        if status.agent is None:
             continue
         if status.reservation.id in seen_ids:
             continue
@@ -10866,10 +10880,21 @@ def build_mcp_server() -> FastMCP:
         )
         if project.id is None:
             raise ValueError("Project must have an id before reserving file paths.")
+        if agent.id is None:
+            raise ValueError("Agent must have an id before reserving file paths.")
+        agent_touch_ts = _naive_utc()
+        async with get_session() as session:
+            await session.execute(
+                update(Agent)
+                .where(cast(Any, Agent.id) == agent.id)
+                .values(last_active_ts=agent_touch_ts)
+            )
+            await session.commit()
+        agent.last_active_ts = agent_touch_ts
         stale_auto_releases = await _expire_stale_file_reservations(project.id)
         if stale_auto_releases:
             summary = ", ".join(
-                f"{status.agent.name}:{status.reservation.path_pattern}"
+                f"{status.agent.name if status.agent is not None else '<unresolved>'}:{status.reservation.path_pattern}"
                 for status in stale_auto_releases[:5]
             )
             extra = f" ({summary})" if summary else ""
@@ -11464,7 +11489,7 @@ def build_mcp_server() -> FastMCP:
         stale_auto_releases = await _expire_stale_file_reservations(project.id)
         if stale_auto_releases:
             summary = ", ".join(
-                f"{status.agent.name}:{status.reservation.path_pattern}"
+                f"{status.agent.name if status.agent is not None else '<unresolved>'}:{status.reservation.path_pattern}"
                 for status in stale_auto_releases[:5]
             )
             extra = f" ({summary})" if summary else ""
@@ -13126,7 +13151,8 @@ def build_mcp_server() -> FastMCP:
             payload.append(
                 {
                     "id": reservation.id,
-                    "agent": status.agent.name,
+                    "agent": status.agent.name if status.agent is not None else None,
+                    "agent_id": reservation.agent_id,
                     "path_pattern": reservation.path_pattern,
                     "exclusive": reservation.exclusive,
                     "reason": reservation.reason,
