@@ -6,6 +6,8 @@ import contextlib
 import json
 import os
 import sqlite3
+import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +21,7 @@ from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import get_sqlite_pre_restore_path, get_sqlite_sidecar_paths
 from mcp_agent_mail.storage import (
     AsyncFileLock,
+    cleanup_leaked_lockfile_fds,
     create_diagnostic_backup,
     ensure_archive,
     list_backups,
@@ -838,3 +841,63 @@ async def test_commit_queue_batch_ignores_cancelled_waiter(isolated_env, monkeyp
     assert second_request.future.exception() is None
     assert committed_messages == ["batch: 2 commits\n\n- first\n- second"]
     assert queue.stats["commits"] == 1
+
+
+def test_cleanup_leaked_lockfile_fds_closes_deleted_lock_fd() -> None:
+    """Regression test for the macOS half of issue #116.
+
+    Before the fix ``cleanup_leaked_lockfile_fds()`` early-returned 0 on
+    macOS because it only checked ``/proc/self/fd``; the lockfile
+    leak from sustained multi-agent traffic would accumulate until the
+    process hit ``RLIMIT_NOFILE``. The fix dispatches on ``sys.platform``
+    (``/dev/fd`` on Darwin, ``/proc/self/fd`` on Linux) and uses
+    ``os.fstat(fd).st_nlink == 0`` as the cross-platform "deleted" signal.
+    """
+    # Simulate the leak: open a .lock file, unlink it (path goes away but
+    # fd stays open). This is the exact shape ``AsyncFileLock`` leaves
+    # behind when release() raises or is cancelled mid-flight.
+    fd, path = tempfile.mkstemp(suffix=".lock")
+    try:
+        os.unlink(path)
+        # Sanity-check the leak setup: fd is open but the file is gone.
+        assert os.fstat(fd).st_nlink == 0
+
+        closed = cleanup_leaked_lockfile_fds()
+
+        # On a system without /dev/fd or /proc/self/fd we just expect 0
+        # (function early-returns); the rest of the assertion is for the
+        # platforms we actually run on.
+        fd_dir = Path("/dev/fd") if sys.platform == "darwin" else Path("/proc/self/fd")
+        if fd_dir.exists():
+            assert closed >= 1, (
+                f"expected at least 1 leaked lock fd closed; got {closed}"
+            )
+            # The fd must now be closed (any further syscall on it returns
+            # EBADF).
+            with pytest.raises(OSError):
+                os.fstat(fd)
+            fd = -1  # do not double-close in the finally
+    finally:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def test_cleanup_leaked_lockfile_fds_skips_live_lock_fds(tmp_path: Path) -> None:
+    """The cleanup must not close FDs that are still pointing at on-disk
+    lockfiles — only the deleted-but-still-open ones.
+    """
+    lock_path = tmp_path / "active.lock"
+    lock_path.touch()
+    fd = os.open(lock_path, os.O_RDONLY)
+    try:
+        assert os.fstat(fd).st_nlink == 1  # file is still on disk
+        cleanup_leaked_lockfile_fds()
+        # The live fd must still be usable after cleanup.
+        st = os.fstat(fd)
+        assert st.st_nlink == 1
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            lock_path.unlink()

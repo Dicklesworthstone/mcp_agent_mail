@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -46,6 +47,12 @@ from .utils import validate_thread_id_format
 _logger = logging.getLogger(__name__)
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 _SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+# macOS fcntl command for resolving an open fd to its path. ``/dev/fd``
+# entries on Darwin are character devices (fdesc fs), NOT symlinks —
+# ``os.readlink`` raises EINVAL. ``fcntl(fd, F_GETPATH, buf)`` is the
+# portable path lookup; value is stable and comes from ``<sys/fcntl.h>``.
+_F_GETPATH = 50
 
 
 def _sanitize_backup_reason(reason: str) -> str:
@@ -416,11 +423,24 @@ def get_lock_telemetry() -> dict[str, int]:
 
 
 def cleanup_leaked_lockfile_fds() -> int:
-    """Scan /proc/self/fd for open FDs pointing to deleted .lock files and close them.
+    """Scan the process's open FDs for ones pointing to deleted ``.lock``
+    files and close them.
 
     Returns the number of leaked FDs that were closed.
+
+    Cross-platform implementation: uses ``/dev/fd`` on macOS (fdesc fs —
+    entries are character devices, not symlinks, so path lookup goes
+    through ``fcntl(F_GETPATH)``) and ``/proc/self/fd`` on Linux. The
+    "deleted file" signal is ``os.fstat(fd).st_nlink == 0`` on both
+    platforms — the Linux-only ``" (deleted)"`` readlink suffix is no
+    longer required.
+
+    Without this dispatch the cleanup is a silent no-op on macOS, which
+    lets the lockfile-FD leak from issue #116 accumulate until the
+    process hits its ``RLIMIT_NOFILE`` and every subsequent
+    ``send_message``/``reply_message`` call fails with EMFILE.
     """
-    fd_dir = Path("/proc/self/fd")
+    fd_dir = Path("/dev/fd") if sys.platform == "darwin" else Path("/proc/self/fd")
     if not fd_dir.exists():
         return 0
     closed = 0
@@ -430,21 +450,26 @@ def cleanup_leaked_lockfile_fds() -> int:
                 fd_num = int(entry.name)
             except ValueError:
                 continue
+            path = _resolve_fd_path(fd_num, entry)
+            if not path or ".lock" not in path:
+                continue
+            # Cross-platform "deleted" signal: a still-open FD whose
+            # underlying inode has zero remaining links. This subsumes the
+            # Linux-only " (deleted)" readlink suffix.
             try:
-                target = str(entry.readlink())
+                if os.fstat(fd_num).st_nlink != 0:
+                    continue
             except OSError:
                 continue
-            # Deleted lock files show up as "/path/to/.lock (deleted)"
-            if target.endswith("(deleted)") and ".lock" in target:
-                try:
-                    os.close(fd_num)
-                    closed += 1
-                    _logger.warning(
-                        "lockfile_fd.leaked_closed",
-                        extra={"fd": fd_num, "target": target},
-                    )
-                except OSError:
-                    pass
+            try:
+                os.close(fd_num)
+                closed += 1
+                _logger.warning(
+                    "lockfile_fd.leaked_closed",
+                    extra={"fd": fd_num, "target": path},
+                )
+            except OSError:
+                pass
     except OSError:
         pass
     if closed:
@@ -452,6 +477,22 @@ def cleanup_leaked_lockfile_fds() -> int:
         with _LOCK_INSTANCES_GUARD:
             _LOCK_FD_LEAKED_TOTAL += closed
     return closed
+
+
+def _resolve_fd_path(fd_num: int, dev_fd_entry: Path) -> str | None:
+    """Resolve an open file descriptor to its filesystem path.
+
+    On macOS uses ``fcntl(F_GETPATH)``; on Linux reads the
+    ``/proc/self/fd/N`` symlink. Returns ``None`` if the fd isn't
+    backed by a regular file or the lookup fails.
+    """
+    try:
+        if sys.platform == "darwin":
+            raw = fcntl.fcntl(fd_num, _F_GETPATH, b"\x00" * 1024)
+            return raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+        return os.readlink(str(dev_fd_entry))
+    except OSError:
+        return None
 
 
 class _LRURepoCache:
