@@ -230,6 +230,46 @@ class TestLocalhostBypass:
             assert response.status_code == 200
 
 
+class TestTailscaleBypass:
+    """Test Tailscale authentication bypass behavior."""
+
+    @pytest.mark.asyncio
+    async def test_tailscale_bypass_enabled(self, isolated_env, monkeypatch):
+        """With Tailscale bypass enabled, no auth is required for Tailscale clients."""
+        monkeypatch.setenv("HTTP_BEARER_TOKEN", "secret-token")
+        monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+        monkeypatch.setenv("HTTP_ALLOW_TAILSCALE_UNAUTHENTICATED", "true")
+        with contextlib.suppress(Exception):
+            _config.clear_settings_cache()
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app, client=("100.84.193.107", 12345))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/mail")
+            assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_lan_client_still_requires_auth(self, isolated_env, monkeypatch):
+        """A non-Tailscale remote client still requires bearer auth."""
+        monkeypatch.setenv("HTTP_BEARER_TOKEN", "secret-token")
+        monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+        monkeypatch.setenv("HTTP_ALLOW_TAILSCALE_UNAUTHENTICATED", "true")
+        with contextlib.suppress(Exception):
+            _config.clear_settings_cache()
+
+        settings = _config.get_settings()
+        server = build_mcp_server()
+        app = build_http_app(settings, server)
+
+        transport = ASGITransport(app=app, client=("192.168.1.10", 12345))
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/mail")
+            assert response.status_code == 401
+
+
 # =============================================================================
 # Test: CORS Preflight Bypass
 # =============================================================================

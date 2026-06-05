@@ -73,6 +73,7 @@ class HttpSettings:
     rbac_readonly_tools: list[str]
     # Dev convenience
     allow_localhost_unauthenticated: bool
+    allow_tailscale_unauthenticated: bool
 
 
 @dataclass(slots=True, frozen=True)
@@ -324,7 +325,7 @@ def _build_settings() -> Settings:
         return items
 
     http_settings = HttpSettings(
-        host=decouple_config("HTTP_HOST", default="127.0.0.1"),
+        host=decouple_config("HTTP_HOST", default="0.0.0.0"),
         port=_int(decouple_config("HTTP_PORT", default="8765"), default=8765),
         path=decouple_config("HTTP_PATH", default="/api/"),
         bearer_token=decouple_config("HTTP_BEARER_TOKEN", default="") or None,
@@ -356,6 +357,7 @@ def _build_settings() -> Settings:
             default="health_check,fetch_inbox,whois,search_messages,summarize_thread",
         ),
         allow_localhost_unauthenticated=_bool(decouple_config("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", default="true"), default=True),
+        allow_tailscale_unauthenticated=_bool(decouple_config("HTTP_ALLOW_TAILSCALE_UNAUTHENTICATED", default="true"), default=True),
     )
 
     database_settings = DatabaseSettings(

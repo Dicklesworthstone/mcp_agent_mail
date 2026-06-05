@@ -8,6 +8,7 @@ import base64
 import contextlib
 import hmac
 import importlib
+import ipaddress
 import json
 import logging
 import re
@@ -577,11 +578,21 @@ def _configure_logging(settings: Settings) -> None:
     _LOGGING_CONFIGURED = True
 
 
+TAILSCALE_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI, token: str, allow_localhost: bool = False) -> None:
+    def __init__(
+        self,
+        app: FastAPI,
+        token: str,
+        allow_localhost: bool = False,
+        allow_tailscale: bool = False,
+    ) -> None:
         super().__init__(app)
         self._token = token
         self._allow_localhost = allow_localhost
+        self._allow_tailscale = allow_tailscale
 
     @staticmethod
     def _is_localhost(host: str) -> bool:
@@ -593,6 +604,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return True
         # IPv4-mapped IPv6 address (::ffff:127.0.0.1)
         return bool(host.lower().startswith("::ffff:") and host[7:] == "127.0.0.1")
+
+    @staticmethod
+    def _is_tailscale(host: str) -> bool:
+        """Check if host is in Tailscale's 100.64.0.0/10 address range."""
+        if not host:
+            return False
+        try:
+            return ipaddress.ip_address(host) in TAILSCALE_NETWORK
+        except ValueError:
+            return False
 
     @staticmethod
     def _has_forwarded_headers(request: Request) -> bool:
@@ -608,9 +629,10 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if request.url.path.startswith("/health/") or request.url.path == "/api/health":
             return await call_next(request)
-        if _localhost_bypass_allowed(
+        if _unauthenticated_bypass_allowed(
             request,
             allow_localhost=self._allow_localhost,
+            allow_tailscale=self._allow_tailscale,
         ):
             return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
@@ -631,6 +653,35 @@ def _localhost_bypass_allowed(request: Request, *, allow_localhost: bool) -> boo
         client_host = ""
     return BearerAuthMiddleware._is_localhost(client_host) and not BearerAuthMiddleware._has_forwarded_headers(
         request
+    )
+
+
+def _tailscale_bypass_allowed(request: Request, *, allow_tailscale: bool) -> bool:
+    """Return whether this request qualifies for Tailscale auth bypass."""
+    if not allow_tailscale:
+        return False
+    try:
+        client_host = request.client.host if request.client else ""
+    except Exception:
+        client_host = ""
+    return BearerAuthMiddleware._is_tailscale(client_host) and not BearerAuthMiddleware._has_forwarded_headers(
+        request
+    )
+
+
+def _unauthenticated_bypass_allowed(
+    request: Request,
+    *,
+    allow_localhost: bool,
+    allow_tailscale: bool,
+) -> bool:
+    """Return whether this request may skip bearer auth."""
+    return _localhost_bypass_allowed(
+        request,
+        allow_localhost=allow_localhost,
+    ) or _tailscale_bypass_allowed(
+        request,
+        allow_tailscale=allow_tailscale,
     )
 
 
@@ -855,19 +906,21 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
                 roles = {self._default_role}
         else:
             roles = {self._default_role}
-            # Elevate localhost to writer when unauthenticated localhost is allowed
-            if _localhost_bypass_allowed(
+            # Elevate trusted unauthenticated local/Tailscale clients to writer.
+            if _unauthenticated_bypass_allowed(
                 request,
                 allow_localhost=bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)),
+                allow_tailscale=bool(getattr(self.settings.http, "allow_tailscale_unauthenticated", False)),
             ):
                 roles.add("writer")
 
-        # RBAC enforcement (skip for localhost when allowed)
-        is_local_ok = _localhost_bypass_allowed(
+        # RBAC enforcement (skip for trusted unauthenticated clients when allowed)
+        is_trusted_unauthenticated = _unauthenticated_bypass_allowed(
             request,
             allow_localhost=bool(getattr(self.settings.http, "allow_localhost_unauthenticated", False)),
+            allow_tailscale=bool(getattr(self.settings.http, "allow_tailscale_unauthenticated", False)),
         )
-        if self._rbac_enabled and not is_local_ok and kind in {"tools", "resources"}:
+        if self._rbac_enabled and not is_trusted_unauthenticated and kind in {"tools", "resources"}:
             is_reader = bool(roles & self._reader_roles)
             is_writer = bool(roles & self._writer_roles) or (not roles)
             if kind == "resources":
@@ -1367,6 +1420,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             BearerAuthMiddleware,
             token=settings.http.bearer_token,
             allow_localhost=bool(getattr(settings.http, "allow_localhost_unauthenticated", False)),
+            allow_tailscale=bool(getattr(settings.http, "allow_tailscale_unauthenticated", False)),
         )
 
     # Optional CORS
@@ -1574,11 +1628,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     except Exception:
                         response_body = {}
 
-            # If localhost and allow_localhost_unauthenticated, synthesize Authorization header automatically
+            # If trusted unauthenticated access is enabled, synthesize Authorization automatically.
             scope = dict(request.scope)
-            if _localhost_bypass_allowed(
+            if _unauthenticated_bypass_allowed(
                 request,
                 allow_localhost=bool(settings.http.allow_localhost_unauthenticated),
+                allow_tailscale=bool(getattr(settings.http, "allow_tailscale_unauthenticated", False)),
             ):
                 scope_headers = list(scope.get("headers") or [])
                 has_auth = any(k.lower() == b"authorization" for k, _ in scope_headers)
