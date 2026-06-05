@@ -1,74 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-AM_RUST_BIN="${HOME}/.local/bin/am"
-AM_RUST_ENV_FILE_DEFAULT="${HOME}/.config/mcp-agent-mail/config.env"
-AM_RUST_ENV_FILE="${AM_RUST_ENV_FILE:-$AM_RUST_ENV_FILE_DEFAULT}"
-if [ ! -f "$AM_RUST_ENV_FILE" ] && [ -f "${HOME}/.config/mcp-agent-mail/config.env" ]; then
-  AM_RUST_ENV_FILE="${HOME}/.config/mcp-agent-mail/config.env"
-fi
-if [ ! -f "$AM_RUST_ENV_FILE" ] && [ -f "${HOME}/.config/mcp-agent-mail/.env" ]; then
-  AM_RUST_ENV_FILE="${HOME}/.config/mcp-agent-mail/.env"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${ROOT_DIR}/scripts/lib.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${ROOT_DIR}/scripts/lib.sh"
 fi
 
-trim_ascii_whitespace() {
-  local value="${1:-}"
-  value="${value#\"${value%%[![:space:]]*}\"}"
-  value="${value%\"${value##*[![:space:]]}\"}"
-  printf '%s\n' "$value"
-}
-
-load_env_key() {
-  local key="$1"
-  [ -f "$AM_RUST_ENV_FILE" ] || return 0
-
-  local raw
-  raw=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$AM_RUST_ENV_FILE" 2>/dev/null | tail -1 | sed -E "s/^[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*//" || true)
-  [ -n "$raw" ] || return 0
-
-  raw=$(trim_ascii_whitespace "$raw")
-  local parsed="" quote="" prev="" char=""
-  local raw_len=${#raw}
-  local i=0
-  while [ "$i" -lt "$raw_len" ]; do
-    char="${raw:$i:1}"
-    if [ -n "$quote" ]; then
-      parsed="${parsed}${char}"
-      if [ "$char" = "$quote" ]; then
-        quote=""
-      fi
-    else
-      if [ "$char" = '"' ] || [ "$char" = "'" ]; then
-        quote="$char"
-        parsed="${parsed}${char}"
-      elif [ "$char" = "#" ]; then
-        if [ -z "$prev" ] || [[ "$prev" =~ [[:space:]] ]]; then
-          break
-        fi
-        parsed="${parsed}${char}"
-      else
-        parsed="${parsed}${char}"
-      fi
-    fi
-    prev="$char"
-    i=$((i + 1))
-  done
-
-  raw=$(trim_ascii_whitespace "$parsed")
-  raw="${raw%\"}"
-  raw="${raw#\"}"
-  raw="${raw%\'}"
-  raw="${raw#\'}"
-  export "${key}=${raw}"
-}
-
-for key in DATABASE_URL STORAGE_ROOT HTTP_HOST HTTP_PORT HTTP_PATH HTTP_BEARER_TOKEN TUI_ENABLED LLM_ENABLED LLM_DEFAULT_MODEL WORKTREES_ENABLED; do
-  load_env_key "$key"
-done
-
-if [ ! -x "$AM_RUST_BIN" ]; then
-  echo "mcp-agent-mail Rust CLI not found at $AM_RUST_BIN" >&2
-  exit 1
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]] && declare -F resolve_integration_bearer_token >/dev/null 2>&1; then
+  HTTP_BEARER_TOKEN="$(resolve_integration_bearer_token "${ROOT_DIR}")"
 fi
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
+  if [[ -f "${ROOT_DIR}/.env" ]]; then
+    HTTP_BEARER_TOKEN=$(grep -E '^HTTP_BEARER_TOKEN=' "${ROOT_DIR}/.env" 2>/dev/null | tail -n 1 | sed -E 's/^HTTP_BEARER_TOKEN=//') || true
+  fi
+fi
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]] && declare -F generate_bearer_token >/dev/null 2>&1; then
+  HTTP_BEARER_TOKEN="$(generate_bearer_token)"
+fi
+if [[ -z "${HTTP_BEARER_TOKEN:-}" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN="$(openssl rand -hex 32)"
+  elif command -v uv >/dev/null 2>&1; then
+    HTTP_BEARER_TOKEN="$(uv run python -c 'import secrets;print(secrets.token_hex(32))')"
+  else
+    HTTP_BEARER_TOKEN="$(date +%s)_$(hostname 2>/dev/null || echo host)"
+  fi
+fi
+export HTTP_BEARER_TOKEN
 
-exec "$AM_RUST_BIN" "$@"
+uv run python -m mcp_agent_mail.cli serve-http "$@"
