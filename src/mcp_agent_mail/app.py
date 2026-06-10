@@ -74,7 +74,7 @@ from .storage import (
     archive_write_lock,
     clear_notification_signal,
     clear_repo_cache,
-    collect_lock_status,
+    collect_lock_status_async,
     emit_notification_signal,
     ensure_archive,
     heal_archive_locks,
@@ -2729,23 +2729,26 @@ def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
 
 
 @asynccontextmanager
-async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
+async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 10.0) -> AsyncIterator[None]:
     try:
         async with archive_write_lock(archive, timeout_seconds=timeout_seconds):
             yield
     except TimeoutError as exc:
+        lock_status = await collect_lock_status_async(get_settings(), project_slug=archive.slug)
         raise ToolExecutionError(
             "ARCHIVE_LOCK_TIMEOUT",
             (
                 f"Archive lock busy for project '{archive.slug}' at '{archive.lock_path}'. "
                 f"Timed out after {timeout_seconds:.1f}s. "
-                "Inspect running agents or call collect_lock_status to clear stale locks."
+                "Inspect running agents or run `am doctor check --json` before repair."
             ),
             recoverable=True,
             data={
                 "project_slug": archive.slug,
                 "lock_path": str(archive.lock_path),
                 "timeout_seconds": timeout_seconds,
+                "reason_code": "archive_lock_timeout",
+                "lock_status": lock_status,
             },
         ) from exc
 
@@ -4994,9 +4997,9 @@ def build_mcp_server() -> FastMCP:
         if isinstance(cached, str):
             return cached
         orphan_key = f"orphan:{uuid.uuid4()}"
-        # ctx refuses attribute assignment; multi-lookup consistency
-        # degrades to "best effort" but a single lookup still works.
-        with suppress(Exception):
+        with contextlib.suppress(Exception):
+            # ctx refuses attribute assignment; multi-lookup consistency
+            # degrades to "best effort" but a single lookup still works.
             ctx._mcp_agent_mail_orphan_key = orphan_key  # type: ignore[attr-defined]
         return orphan_key
 
@@ -13124,11 +13127,11 @@ def build_mcp_server() -> FastMCP:
     def tooling_metrics_resource(format: Optional[str] = None) -> dict[str, Any]:
         return _read_tooling_metrics_resource(format)
 
-    def _read_tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
+    async def _read_tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
         """Return lock metadata from the shared archive storage."""
 
         settings_local = get_settings()
-        payload = collect_lock_status(settings_local)
+        payload = await collect_lock_status_async(settings_local)
         return _apply_resource_output_format(
             payload,
             settings=settings,
@@ -13137,12 +13140,12 @@ def build_mcp_server() -> FastMCP:
         )
 
     @mcp.resource("resource://tooling/locks", mime_type="application/json")
-    def tooling_locks_resource_exact() -> dict[str, Any]:
-        return _read_tooling_locks_resource()
+    async def tooling_locks_resource_exact() -> dict[str, Any]:
+        return await _read_tooling_locks_resource()
 
     @mcp.resource("resource://tooling/locks{?format}", mime_type="application/json")
-    def tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
-        return _read_tooling_locks_resource(format)
+    async def tooling_locks_resource(format: Optional[str] = None) -> dict[str, Any]:
+        return await _read_tooling_locks_resource(format)
 
     @mcp.resource("resource://tooling/capabilities/{agent}{?project,format}", mime_type="application/json")
     def tooling_capabilities_resource(

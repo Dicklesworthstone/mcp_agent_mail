@@ -5474,23 +5474,49 @@ def doctor_check(
 
         lock_status = collect_lock_status(settings, project_slug=project_slug)
         stale_locks = [
-            cast(str, lock.get("path"))
+            lock
             for lock in lock_status.get("locks", [])
-            if lock.get("stale_suspected") and isinstance(lock.get("path"), str)
+            if isinstance(lock, dict)
+            and lock.get("stale_suspected")
+            and isinstance(lock.get("path"), str)
+        ]
+        stale_details = [
+            json.dumps(
+                {
+                    "path": lock.get("path"),
+                    "category": lock.get("category"),
+                    "reason_code": lock.get("reason_code"),
+                    "owner_pid": lock.get("owner_pid"),
+                    "owner_alive": lock.get("owner_alive"),
+                    "age_seconds": lock.get("age_seconds"),
+                    "safe_remediation": lock.get("safe_remediation"),
+                },
+                sort_keys=True,
+            )
+            for lock in stale_locks
         ]
         if stale_locks:
             results.append(DiagnosticResult(
                 name="Locks",
                 status="warning",
                 message=f"{len(stale_locks)} stale lock(s) found",
-                details=[str(lock) for lock in stale_locks],
+                details=stale_details,
                 repair_available=True,
+            ))
+        elif lock_status.get("summary", {}).get("scan_timed_out") or lock_status.get("summary", {}).get("scan_truncated"):
+            results.append(DiagnosticResult(
+                name="Locks",
+                status="warning",
+                message="Lock inventory scan did not complete within bounds",
+                details=[json.dumps(lock_status.get("scan", {}), sort_keys=True)],
+                repair_available=False,
             ))
         else:
             results.append(DiagnosticResult(
                 name="Locks",
                 status="ok",
                 message="No stale locks found",
+                details=[json.dumps(lock_status.get("scan", {}), sort_keys=True)],
             ))
 
         # Check 2: Database integrity
@@ -5745,7 +5771,7 @@ def doctor_repair(
     """
 
     async def _run() -> dict[str, Any]:
-        from .storage import create_diagnostic_backup, heal_archive_locks
+        from .storage import collect_lock_status, create_diagnostic_backup, heal_archive_locks
 
         settings = get_settings()
         await ensure_schema()
@@ -5778,8 +5804,27 @@ def doctor_repair(
 
         # 2a: Heal stale locks
         if dry_run:
-            console.print("  [dim]Would heal stale locks[/dim]")
-            repair_results["safe_repairs"].append({"action": "heal_locks", "dry_run": True})
+            lock_status = collect_lock_status(settings, project_slug=project_slug)
+            stale_locks = [
+                lock
+                for lock in lock_status.get("locks", [])
+                if isinstance(lock, dict) and lock.get("stale_suspected")
+            ]
+            reason_codes = sorted(
+                {
+                    str(lock.get("reason_code"))
+                    for lock in stale_locks
+                    if lock.get("reason_code")
+                }
+            )
+            console.print(f"  [dim]Would heal {len(stale_locks)} stale lock(s)[/dim]")
+            repair_results["safe_repairs"].append({
+                "action": "heal_locks",
+                "count": len(stale_locks),
+                "reason_codes": reason_codes,
+                "scan": lock_status.get("scan", {}),
+                "dry_run": True,
+            })
         else:
             try:
                 lock_result = await heal_archive_locks(settings, project_slug=project_slug)
@@ -5788,7 +5833,12 @@ def doctor_repair(
                     console.print(f"  [green]Healed {healed} stale lock(s)[/green]")
                 else:
                     console.print("  [dim]No stale locks to heal[/dim]")
-                repair_results["safe_repairs"].append({"action": "heal_locks", "healed": healed})
+                repair_results["safe_repairs"].append({
+                    "action": "heal_locks",
+                    "healed": healed,
+                    "reason_codes": lock_result.get("reason_codes", []),
+                    "scan": lock_result.get("scan", {}),
+                })
             except Exception as e:
                 repair_results["errors"].append(f"Lock healing failed: {e}")
                 console.print(f"  [red]Lock healing failed:[/red] {e}")

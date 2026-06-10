@@ -24,6 +24,7 @@ from mcp_agent_mail.storage import (
     AsyncFileLock,
     archive_write_lock,
     collect_lock_status,
+    collect_lock_status_async,
     ensure_archive,
     ensure_archive_root,
     heal_archive_locks,
@@ -370,6 +371,65 @@ class TestLockHealing:
         assert entry["stale_suspected"] is True
         assert payload["summary"]["metadata_missing"] == 1
         assert payload["summary"]["stale"] == 1
+        assert entry["reason_code"] == "lock_missing_metadata_age_exceeded"
+        assert payload["scan"]["reason_code"] == "lock_inventory_ok"
+
+    @pytest.mark.asyncio
+    async def test_heal_archive_locks_cleans_aged_live_owner_lock(self, isolated_env):
+        """A wedged live owner with an aged lock is repairable and machine-classified."""
+        settings = get_settings()
+        storage_root = Path(settings.storage.root).expanduser().resolve()
+        project_dir = storage_root / "projects" / "wedged-live-owner"
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        lock_path = project_dir / ".archive.lock"
+        metadata_path = project_dir / ".archive.lock.owner.json"
+        lock_path.touch()
+        stale_time = time.time() - 400
+        os.utime(lock_path, (stale_time, stale_time))
+        metadata_path.write_text(
+            f'{{"pid": {os.getpid()}, "created_ts": {stale_time}}}',
+            encoding="utf-8",
+        )
+
+        payload = collect_lock_status(settings, project_slug="wedged-live-owner")
+        entry = next(item for item in payload["locks"] if item["path"] == str(lock_path))
+
+        assert entry["owner_alive"] is True
+        assert entry["stale_suspected"] is True
+        assert entry["reason_code"] == "lock_owner_alive_age_exceeded"
+        assert "restart the wedged owner" in entry["safe_remediation"]
+
+        result = await heal_archive_locks(settings, project_slug="wedged-live-owner")
+
+        assert str(lock_path) in result.get("locks_removed", [])
+        assert result.get("healed") == 1
+        assert not lock_path.exists()
+        assert not metadata_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_collect_lock_status_async_reports_commit_lock_reason(self, isolated_env):
+        """Async callers get bounded lock inventory without blocking the event loop."""
+        settings = get_settings()
+        storage_root = Path(settings.storage.root).expanduser().resolve()
+        project_dir = storage_root / "projects" / "commit-lock"
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+        lock_path = project_dir / ".commit.lock"
+        metadata_path = project_dir / ".commit.lock.owner.json"
+        lock_path.touch()
+        metadata_path.write_text(
+            f'{{"pid": {os.getpid()}, "created_ts": {time.time()}}}',
+            encoding="utf-8",
+        )
+
+        payload = await collect_lock_status_async(settings, project_slug="commit-lock")
+        entry = next(item for item in payload["locks"] if item["path"] == str(lock_path))
+
+        assert entry["category"] == "commit"
+        assert entry["reason_code"] == "lock_owner_alive"
+        assert payload["summary"]["scan_timed_out"] is False
+        assert payload["scan"]["locks_discovered"] >= 1
 
     @pytest.mark.asyncio
     async def test_heal_archive_locks_handles_missing_root(self, isolated_env, monkeypatch):

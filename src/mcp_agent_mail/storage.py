@@ -1281,6 +1281,122 @@ def _list_rglob_paths(root: Path, pattern: str) -> list[Path]:
     return list(root.rglob(pattern))
 
 
+_LOCK_STATUS_SCAN_TIMEOUT_SECONDS = 3.0
+_LOCK_STATUS_SCAN_MAX_ENTRIES = 20_000
+_LOCK_STATUS_SCAN_MAX_LOCKS = 2_000
+
+
+def _lock_category(lock_path: Path) -> str:
+    if lock_path.name == ".archive.lock":
+        return "archive"
+    if lock_path.name == ".commit.lock":
+        return "commit"
+    return "custom"
+
+
+def _lock_reason_code(
+    *,
+    metadata_present: bool,
+    metadata_error: bool,
+    owner_alive: bool | None,
+    age_seconds: Any,
+    stale_timeout_seconds: float,
+    stale_suspected: bool,
+) -> str:
+    if stale_suspected:
+        if owner_alive is False:
+            return "lock_owner_dead"
+        if isinstance(age_seconds, (int, float)) and age_seconds >= stale_timeout_seconds:
+            if owner_alive is True:
+                return "lock_owner_alive_age_exceeded"
+            if not metadata_present:
+                return "lock_missing_metadata_age_exceeded"
+            return "lock_age_exceeded"
+        return "lock_stale"
+    if metadata_error:
+        return "lock_metadata_unreadable"
+    if owner_alive is True:
+        return "lock_owner_alive"
+    if owner_alive is False:
+        return "lock_owner_dead_not_stale"
+    if not metadata_present:
+        return "lock_metadata_missing"
+    return "lock_owner_unknown"
+
+
+def _lock_safe_remediation(reason_code: str) -> str:
+    if reason_code == "lock_owner_alive_age_exceeded":
+        return (
+            "Owner process is still alive but the lock aged past the stale threshold; "
+            "restart the wedged owner if health probes fail, then run `am doctor repair`."
+        )
+    if reason_code in {"lock_owner_dead", "lock_missing_metadata_age_exceeded", "lock_age_exceeded", "lock_stale"}:
+        return "Run `am doctor repair` to remove stale lock artifacts after the diagnostic backup."
+    if reason_code == "lock_metadata_unreadable":
+        return "Inspect the sidecar metadata; `am doctor repair` can clear it when the lock is stale."
+    return "No automatic repair is recommended while the lock is fresh or owner state is unknown."
+
+
+def _scan_lock_paths(
+    root: Path,
+    *,
+    timeout_seconds: float = _LOCK_STATUS_SCAN_TIMEOUT_SECONDS,
+    max_entries: int = _LOCK_STATUS_SCAN_MAX_ENTRIES,
+    max_locks: int = _LOCK_STATUS_SCAN_MAX_LOCKS,
+) -> tuple[list[Path], dict[str, Any]]:
+    started = time.monotonic()
+    deadline = started + max(0.1, timeout_seconds)
+    stack = [root]
+    locks: list[Path] = []
+    entries_scanned = 0
+    dirs_scanned = 0
+    timed_out = False
+    truncated = False
+
+    while stack:
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
+        current = stack.pop()
+        dirs_scanned += 1
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    entries_scanned += 1
+                    if entries_scanned >= max_entries:
+                        truncated = True
+                        break
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                        elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".lock"):
+                            locks.append(Path(entry.path))
+                            if len(locks) >= max_locks:
+                                truncated = True
+                                break
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        if truncated:
+            break
+
+    locks.sort(key=lambda p: str(p))
+    return locks, {
+        "root": str(root),
+        "duration_seconds": round(time.monotonic() - started, 4),
+        "entries_scanned": entries_scanned,
+        "dirs_scanned": dirs_scanned,
+        "locks_discovered": len(locks),
+        "timed_out": timed_out,
+        "truncated": truncated,
+        "max_entries": max_entries,
+        "max_locks": max_locks,
+        "timeout_seconds": timeout_seconds,
+        "reason_code": "lock_inventory_scan_incomplete" if timed_out or truncated else "lock_inventory_ok",
+    }
+
+
 def _restore_bundle_into_archive(bundle_to_restore: Path, target_root: Path) -> None:
     """Restore a Git bundle into the archive root without deleting the source bundle first."""
     import shutil
@@ -1317,7 +1433,14 @@ def _ensure_str(value: str | bytes) -> str:
     return value
 
 
-def collect_lock_status(settings: Settings, project_slug: str | None = None) -> dict[str, Any]:
+def collect_lock_status(
+    settings: Settings,
+    project_slug: str | None = None,
+    *,
+    timeout_seconds: float = _LOCK_STATUS_SCAN_TIMEOUT_SECONDS,
+    max_entries: int = _LOCK_STATUS_SCAN_MAX_ENTRIES,
+    max_locks: int = _LOCK_STATUS_SCAN_MAX_LOCKS,
+) -> dict[str, Any]:
     """Return structured metadata about active archive locks."""
 
     root = Path(settings.storage.root).expanduser().resolve()
@@ -1325,15 +1448,35 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
         root = root / "projects" / project_slug
     locks: list[dict[str, Any]] = []
     summary = {"total": 0, "active": 0, "stale": 0, "metadata_missing": 0}
+    scan: dict[str, Any] = {
+        "root": str(root),
+        "duration_seconds": 0.0,
+        "entries_scanned": 0,
+        "dirs_scanned": 0,
+        "locks_discovered": 0,
+        "timed_out": False,
+        "truncated": False,
+        "max_entries": max_entries,
+        "max_locks": max_locks,
+        "timeout_seconds": timeout_seconds,
+        "reason_code": "lock_inventory_missing_root",
+    }
 
     if root.exists():
         now = time.time()
-        for lock_path in sorted(root.rglob("*.lock"), key=lambda p: str(p)):
+        lock_paths, scan = _scan_lock_paths(
+            root,
+            timeout_seconds=timeout_seconds,
+            max_entries=max_entries,
+            max_locks=max_locks,
+        )
+        for lock_path in lock_paths:
             metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
             if not lock_path.exists():
                 continue
             metadata_present = metadata_path.exists()
-            if lock_path.name != ".archive.lock" and not metadata_present:
+            category = _lock_category(lock_path)
+            if category == "custom" and not metadata_present:
                 continue
 
             info: dict[str, Any] = {
@@ -1341,7 +1484,7 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
                 "metadata_path": str(metadata_path) if metadata_present else None,
                 "status": "held",
                 "metadata_present": metadata_present,
-                "category": "archive" if lock_path.name == ".archive.lock" else "custom",
+                "category": category,
             }
 
             with contextlib.suppress(Exception):
@@ -1350,12 +1493,15 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
                 info["modified_ts"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
 
             metadata: dict[str, Any] = {}
+            metadata_error = False
             if metadata_present:
                 try:
                     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 except Exception:
+                    metadata_error = True
                     metadata = {}
             info["metadata"] = metadata
+            info["metadata_error"] = metadata_error
 
             pid_val = metadata.get("pid")
             pid_int: int | None = None
@@ -1388,6 +1534,16 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
             if owner_alive is False or (stale_threshold > 0 and isinstance(age_val, (int, float)) and age_val >= stale_threshold):
                 is_stale = True
             info["stale_suspected"] = is_stale
+            reason_code = _lock_reason_code(
+                metadata_present=metadata_present,
+                metadata_error=metadata_error,
+                owner_alive=owner_alive,
+                age_seconds=age_val,
+                stale_timeout_seconds=stale_threshold,
+                stale_suspected=is_stale,
+            )
+            info["reason_code"] = reason_code
+            info["safe_remediation"] = _lock_safe_remediation(reason_code)
 
             summary["total"] += 1
 
@@ -1400,7 +1556,30 @@ def collect_lock_status(settings: Settings, project_slug: str | None = None) -> 
 
             locks.append(info)
 
-    return {"locks": locks, "summary": summary}
+    summary["scan_truncated"] = bool(scan.get("truncated"))
+    summary["scan_timed_out"] = bool(scan.get("timed_out"))
+    summary["reason_code"] = scan.get("reason_code", "lock_inventory_unknown")
+    return {"locks": locks, "summary": summary, "scan": scan}
+
+
+async def collect_lock_status_async(
+    settings: Settings,
+    project_slug: str | None = None,
+    *,
+    timeout_seconds: float = _LOCK_STATUS_SCAN_TIMEOUT_SECONDS,
+    max_entries: int = _LOCK_STATUS_SCAN_MAX_ENTRIES,
+    max_locks: int = _LOCK_STATUS_SCAN_MAX_LOCKS,
+) -> dict[str, Any]:
+    """Collect lock metadata off the event loop with an internally bounded scan."""
+
+    return await _to_thread(
+        collect_lock_status,
+        settings,
+        project_slug,
+        timeout_seconds=timeout_seconds,
+        max_entries=max_entries,
+        max_locks=max_locks,
+    )
 
 
 async def ensure_archive_root(settings: Settings) -> tuple[Path, Repo]:
@@ -2309,11 +2488,14 @@ async def heal_archive_locks(settings: Settings, project_slug: str | None = None
         "locks_scanned": 0,
         "locks_removed": [],
         "metadata_removed": [],
+        "reason_codes": [],
+        "healed": 0,
     }
     if not await _to_thread(_path_exists, root):
         return summary
 
-    lock_paths = sorted(await _to_thread(_list_rglob_paths, root, "*.lock"), key=str)
+    lock_paths, scan = await _to_thread(_scan_lock_paths, root)
+    summary["scan"] = scan
     for lock_path_item in lock_paths:
         # rglob returns Path objects at runtime; cast for type checker
         lock_path = cast(Path, lock_path_item)
@@ -2331,10 +2513,16 @@ async def heal_archive_locks(settings: Settings, project_slug: str | None = None
             # to heal"). Sharing one staleness definition keeps check and repair
             # in agreement: a lock is healed if its owner is provably gone OR its
             # age exceeds the threshold.
-            lock = AsyncFileLock(lock_path, timeout_seconds=0.0)
+            metadata_path = lock_path.parent / f"{lock_path.name}.owner.json"
+            stale_timeout = AsyncFileLock(lock_path)._stale_timeout
+            lock = AsyncFileLock(lock_path, timeout_seconds=0.0, stale_timeout_seconds=stale_timeout)
             removed = await _to_thread(lock._cleanup_if_stale)
             if removed:
                 summary["locks_removed"].append(str(lock_path))
+                if await _to_thread(_path_exists, metadata_path):
+                    summary["reason_codes"].append("lock_stale_removed_with_metadata")
+                else:
+                    summary["reason_codes"].append("lock_stale_removed")
         except FileNotFoundError:
             continue
 
@@ -2356,6 +2544,7 @@ async def heal_archive_locks(settings: Settings, project_slug: str | None = None
         except PermissionError:
             continue
 
+    summary["healed"] = len(summary["locks_removed"]) + len(summary["metadata_removed"])
     return summary
 
 

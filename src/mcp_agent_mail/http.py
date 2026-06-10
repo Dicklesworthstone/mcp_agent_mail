@@ -44,7 +44,7 @@ from .db import ensure_schema, get_session
 from .storage import (
     ProjectArchive,
     archive_write_lock,
-    collect_lock_status,
+    collect_lock_status_async,
     ensure_archive,
     get_agent_communication_graph,
     get_archive_tree,
@@ -1913,7 +1913,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             """Return metadata about active archive locks for observability."""
 
             settings_local = get_settings()
-            payload = collect_lock_status(settings_local)
+            payload = await collect_lock_status_async(settings_local)
             return JSONResponse(payload)
 
         async def _build_unified_inbox_payload(
