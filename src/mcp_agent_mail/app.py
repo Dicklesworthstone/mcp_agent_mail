@@ -1319,18 +1319,46 @@ def _latest_filesystem_activity(paths: Sequence[Path]) -> Optional[datetime]:
     return max(mtimes)
 
 
-def _latest_git_activity(repo: Optional[Repo], matches: Sequence[Path]) -> Optional[datetime]:
+def _latest_git_activity(
+    repo: Optional[Repo],
+    matches: Sequence[Path],
+    pattern: Optional[str] = None,
+) -> Optional[datetime]:
     if repo is None:
         return None
     repo_root = Path(repo.working_tree_dir or "").resolve()
-    commit_times: list[datetime] = []
-    for match in matches:
+
+    # The result is the max commit time over per-path latest commits, which
+    # equals the latest commit touching ANY matched path — so a single rev
+    # walk with one pathspec is equivalent to walking per file. A per-file
+    # iter_commits here once ran 56k sequential git walks on the event loop
+    # for a `frontend/**` reservation, starving the HTTP server.
+    if pattern and not _is_virtual_namespace(pattern):
+        normalized = _normalize_pattern(pattern)
+        if normalized:
+            pathspec = f":(glob){normalized}" if _contains_glob(normalized) else normalized
+            try:
+                commit = next(repo.iter_commits(paths=[pathspec], max_count=1))
+                return datetime.fromtimestamp(commit.committed_date, tz=timezone.utc)
+            except StopIteration:
+                return None
+            except Exception:
+                pass  # fall through to per-path walk on odd pathspecs
+
+    # Fallback: chunked pathspec walks over the resolved matches (capped so a
+    # pathological match set cannot stall the loop).
+    rel_paths: list[str] = []
+    for match in matches[:2000]:
         try:
-            rel_path = match.resolve().relative_to(repo_root)
+            rel_paths.append(str(match.resolve().relative_to(repo_root)))
         except Exception:
             continue
+    commit_times: list[datetime] = []
+    chunk_size = 500
+    for i in range(0, len(rel_paths), chunk_size):
+        chunk = rel_paths[i : i + chunk_size]
         try:
-            commit = next(repo.iter_commits(paths=str(rel_path), max_count=1))
+            commit = next(repo.iter_commits(paths=chunk, max_count=1))
         except StopIteration:
             continue
         except Exception:
@@ -3980,7 +4008,7 @@ async def _collect_file_reservation_statuses(
                 matches = _collect_matching_paths(workspace, reservation.path_pattern)
                 if matches:
                     fs_activity = _latest_filesystem_activity(matches)
-                    git_activity = _latest_git_activity(repo, matches)
+                    git_activity = _latest_git_activity(repo, matches, pattern=reservation.path_pattern)
 
             agent_inactive = (
                 agent_last_active is None or (moment - agent_last_active).total_seconds() > inactivity_seconds
