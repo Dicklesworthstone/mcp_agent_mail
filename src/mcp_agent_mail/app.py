@@ -1306,17 +1306,26 @@ def _collect_matching_paths(base: Path, pattern: str) -> list[Path]:
     return [candidate]
 
 
-def _latest_filesystem_activity(paths: Sequence[Path]) -> Optional[datetime]:
-    mtimes: list[datetime] = []
+def _latest_filesystem_activity(
+    paths: Sequence[Path],
+    recent_threshold: Optional[datetime] = None,
+) -> Optional[datetime]:
+    # When the caller only needs "any activity since recent_threshold" (the
+    # staleness sweeper), stop at the first qualifying mtime instead of
+    # stat()ing every match — broad globs like frontend/** can match tens of
+    # thousands of files per tick.
+    latest: Optional[datetime] = None
     for path in paths:
         try:
             stat = path.stat()
         except OSError:
             continue
-        mtimes.append(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
-    if not mtimes:
-        return None
-    return max(mtimes)
+        mtime = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        if latest is None or mtime > latest:
+            latest = mtime
+        if recent_threshold is not None and mtime >= recent_threshold:
+            return latest
+    return latest
 
 
 def _latest_git_activity(
@@ -4007,7 +4016,10 @@ async def _collect_file_reservation_statuses(
             if workspace is not None:
                 matches = _collect_matching_paths(workspace, reservation.path_pattern)
                 if matches:
-                    fs_activity = _latest_filesystem_activity(matches)
+                    fs_activity = _latest_filesystem_activity(
+                        matches,
+                        recent_threshold=moment - timedelta(seconds=activity_grace),
+                    )
                     git_activity = _latest_git_activity(repo, matches, pattern=reservation.path_pattern)
 
             agent_inactive = (
