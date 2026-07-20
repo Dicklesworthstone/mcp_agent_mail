@@ -4121,6 +4121,8 @@ async def sweep_stale_agents(
     *,
     threshold_seconds: int,
     project_id: Optional[int] = None,
+    exclude_agent_id: Optional[int] = None,
+    require_no_active_reservations: bool = False,
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     """Mark agents inactive for `threshold_seconds` as retired.
@@ -4137,6 +4139,9 @@ async def sweep_stale_agents(
     - Skips agents that are already retired.
     - Skips agents whose `last_active_ts` is within the threshold.
     - Optionally scopes to a single project_id.
+    - Optionally excludes one agent (used by the on-demand tool so callers
+      cannot retire their own authenticated identity).
+    - Optionally skips agents with unexpired file reservations.
 
     Returns one dict per retired agent, with project/agent identifiers
     plus the `last_active_ts` that triggered retirement, so the caller
@@ -4149,13 +4154,30 @@ async def sweep_stale_agents(
     naive_now = _naive_utc(current)
 
     retired: list[dict[str, Any]] = []
-    async with get_session() as session:
+    # BEGIN IMMEDIATE serializes the optional active-reservation check with
+    # retirement. Without it, a reservation could be created after the check
+    # but before the agent is retired, violating the caller's safety gate.
+    async with get_immediate_session() as session:
         stmt = select(Agent, Project).join(Project, cast(Any, Agent.project_id) == Project.id).where(
             cast(Any, Agent.retired_at).is_(None),
             cast(Any, Agent.last_active_ts) < cutoff_naive,
         )
         if project_id is not None:
             stmt = stmt.where(cast(Any, Agent.project_id) == project_id)
+        if exclude_agent_id is not None:
+            stmt = stmt.where(cast(Any, Agent.id) != exclude_agent_id)
+        if require_no_active_reservations:
+            active_reservation = (
+                select(FileReservation.id)
+                .where(
+                    cast(Any, FileReservation.agent_id) == Agent.id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                    cast(Any, FileReservation.expires_ts) > naive_now,
+                )
+                .correlate(Agent)
+            )
+            stmt = stmt.where(~exists(active_reservation))
+        stmt = stmt.order_by(cast(Any, Project.id), cast(Any, Agent.id))
         result = await session.execute(stmt)
         candidates: list[tuple[Agent, Project]] = [
             cast(tuple[Agent, Project], row) for row in result.all()
@@ -4194,7 +4216,7 @@ async def _expire_stale_file_reservations(
     if project is None:
         return []
 
-    expired_pairs: list[tuple[FileReservation, Agent]] = []
+    expired_pairs: list[tuple[FileReservation, Optional[Agent]]] = []
     # Release any entries whose TTL has already elapsed.
     # Use BEGIN IMMEDIATE so the release is immediately visible to
     # subsequent reserve calls on other connections (#130).
@@ -6112,6 +6134,61 @@ def build_mcp_server() -> FastMCP:
             "status": "retired",
             "agent_name": agent_name,
             "project_key": project_key,
+        }
+
+    @mcp.tool(
+        name="sweep_stale_agents",
+        description=(
+            "Retire abandoned agents in the caller's project using the server's conservative inactivity heuristic. "
+            "The caller is never retired, the threshold has a 60-second floor, and active file reservations block "
+            "retirement by default."
+        ),
+    )
+    @_instrument_tool(
+        "sweep_stale_agents",
+        cluster=CLUSTER_IDENTITY,
+        capabilities={"identity", "file_reservations"},
+        agent_arg="agent_name",
+        project_arg="project_key",
+    )
+    async def sweep_stale_agents_tool(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        threshold_seconds: int = 86400,
+        require_no_active_reservations: bool = True,
+        registration_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Retire stale project agents on demand without target-token custody."""
+        project = await _get_project_by_identifier(project_key)
+        actor = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="sweep_stale_agents",
+        )
+        if project.id is None or actor.id is None:
+            raise ValueError("Project and caller must have ids before sweeping stale agents.")
+
+        effective_threshold = max(60, int(threshold_seconds))
+        retired = await sweep_stale_agents(
+            threshold_seconds=effective_threshold,
+            project_id=project.id,
+            exclude_agent_id=actor.id,
+            require_no_active_reservations=require_no_active_reservations,
+        )
+        retired_names = [entry["agent_name"] for entry in retired]
+        await ctx.info(f"Retired {len(retired_names)} stale agent(s) in project '{project.human_key}'.")
+        return {
+            "project_key": project.human_key,
+            "requested_by": actor.name,
+            "threshold_seconds": effective_threshold,
+            "require_no_active_reservations": require_no_active_reservations,
+            "retired": retired_names,
+            "retired_agents": retired,
+            "count": len(retired_names),
         }
 
     @mcp.tool(
