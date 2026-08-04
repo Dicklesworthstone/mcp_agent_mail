@@ -1717,12 +1717,17 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     stateless_app = _HeaderFixupMCPApp(mcp_http_app)
     stateful_app = _HeaderFixupMCPApp(mcp_stateful_http_app)
 
-    # Path -> app mapping (issue #250): '/mcp' is ALWAYS the stateful,
-    # session-issuing endpoint; '/api' and any other configured base stay
-    # stateless for handshake-skipping one-shot clients.
+    # Path -> app mapping (issue #250): the '/mcp' compat alias is the
+    # stateful, Mcp-Session-Id-issuing endpoint; '/api' and the configured
+    # base stay stateless for handshake-skipping one-shot clients (e.g. ntm).
+    # The CONFIGURED base always keeps the legacy stateless behavior, even if
+    # an operator points it at '/mcp' — an explicit HTTP_PATH is a promise to
+    # existing clients of that deployment, so we never change its semantics.
     def _app_for_mount(path: str) -> _HeaderFixupMCPApp:
         normalized = path.rstrip("/") or "/"
-        return stateful_app if normalized == "/mcp" else stateless_app
+        if normalized == "/mcp" and base_no_slash != "/mcp":
+            return stateful_app
+        return stateless_app
 
     mount_paths = [base_no_slash, base_with_slash]
     for compat_base in ("/api", "/mcp"):

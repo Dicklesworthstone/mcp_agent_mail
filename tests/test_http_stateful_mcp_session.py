@@ -43,6 +43,10 @@ def _tools_call_payload(name: str) -> dict:
 def http_app(monkeypatch):
     monkeypatch.setenv("HTTP_BEARER_TOKEN", "token250")
     monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+    # The default deployment shape: base '/api' (stateless), '/mcp' compat
+    # alias stateful. (The repo-wide conftest pins HTTP_PATH=/mcp/, which is
+    # the explicit-legacy-base case where '/mcp' stays stateless.)
+    monkeypatch.setenv("HTTP_PATH", "/api/")
     with contextlib.suppress(Exception):
         _config.clear_settings_cache()
     settings = _config.get_settings()
@@ -100,6 +104,31 @@ async def test_api_mount_stays_stateless_for_one_shot_clients(http_app):
         # No initialize, no session header — straight to a tool call.
         r = await client.post(
             "/api/",
+            headers=AUTH,
+            json=_tools_call_payload("health_check"),
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("result", {}).get("structuredContent", {}).get("status") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_explicit_mcp_base_keeps_legacy_stateless_semantics(monkeypatch):
+    """An operator who explicitly configures HTTP_PATH=/mcp/ has promised
+    existing clients handshake-free semantics there — the #250 change must not
+    alter the configured base's behavior."""
+    monkeypatch.setenv("HTTP_BEARER_TOKEN", "token250")
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+    monkeypatch.setenv("HTTP_PATH", "/mcp/")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+    settings = _config.get_settings()
+    app = build_http_app(settings, build_mcp_server())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/mcp/",
             headers=AUTH,
             json=_tools_call_payload("health_check"),
         )
