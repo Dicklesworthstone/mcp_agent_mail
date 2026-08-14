@@ -4468,6 +4468,7 @@ async def _list_inbox(
             select(
                 Message,
                 MessageRecipient.kind,
+                MessageRecipient.read_ts,
                 sender_alias.name,
                 sender_project_alias.id,
                 sender_project_alias.human_key,
@@ -4502,7 +4503,7 @@ async def _list_inbox(
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
-    for message, recipient_kind, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
+    for message, recipient_kind, recipient_read_ts, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
         _apply_sender_identity(
             payload,
@@ -4513,6 +4514,10 @@ async def _list_inbox(
             sender_project_slug=sender_project_slug,
         )
         payload["kind"] = recipient_kind
+        # Issue #254: the default inbox view deliberately includes read mail
+        # (fetching never consumes the inbox), so expose the per-recipient
+        # read state on each row to keep read vs unread distinguishable.
+        payload["read_at"] = _iso(recipient_read_ts) if recipient_read_ts else None
         messages.append(payload)
     return messages
 
@@ -5022,6 +5027,48 @@ async def _update_recipient_timestamp(
         return existing[0]
 
 
+# Minimum age (seconds) of an agent's stored `last_active_ts` before an
+# authenticated call refreshes it again. Keeps hot polling loops (e.g. a
+# fetch_inbox poll every few seconds) from turning every tool call into an
+# extra write, while still keeping the timestamp fresh enough for activity
+# filters that operate at day granularity.
+_ACTIVITY_TOUCH_THROTTLE_SECONDS = 60
+
+
+async def _touch_agent_activity(agent: Agent) -> None:
+    """Refresh ``last_active_ts`` for an agent-initiated, authenticated call.
+
+    Issue #255: mail-only agents (long-lived orchestrator identities that
+    mostly send, fetch, and acknowledge mail) must not go stale in discovery
+    while they are actively communicating. Sending already bumps the sender in
+    `_create_message`; this helper covers every other authenticated operation
+    (fetch_inbox, mark_message_read, acknowledge_message, ...) from the shared
+    authentication path, so "activity" means any authenticated tool call, not
+    just tool calls that happen to write a message row.
+
+    Throttled: skips the write when the stored timestamp is already fresher
+    than `_ACTIVITY_TOUCH_THROTTLE_SECONDS`. Best-effort: failures never break
+    the calling tool.
+    """
+    if agent.id is None:
+        return
+    now = _naive_utc()
+    last = agent.last_active_ts
+    if last is not None:
+        with suppress(TypeError):
+            if (now - last).total_seconds() < _ACTIVITY_TOUCH_THROTTLE_SECONDS:
+                return
+    with suppress(Exception):
+        async with get_session() as session:
+            await session.execute(
+                update(Agent)
+                .where(cast(Any, Agent.id) == agent.id)
+                .values(last_active_ts=now)
+            )
+            await session.commit()
+        agent.last_active_ts = now
+
+
 def build_mcp_server() -> FastMCP:
     """Create and configure the FastMCP server instance."""
     settings: Settings = get_settings()
@@ -5175,6 +5222,9 @@ def build_mcp_server() -> FastMCP:
         agent = await _get_agent(project, agent_name)
         if _session_is_bound_to_agent(ctx, project, agent):
             _bind_session_agent(ctx, project, agent)
+            # Issue #255: any authenticated, self-initiated call counts as
+            # activity so mail-only agents stay visible to activity filters.
+            await _touch_agent_activity(agent)
             return agent
 
         stored_token = (agent.registration_token or "").strip()
@@ -5214,6 +5264,7 @@ def build_mcp_server() -> FastMCP:
                 _wi = await _get_window_identity(project, _wi_uuid)
                 if _wi and _wi.display_name == agent.name:
                     _bind_session_agent(ctx, project, agent)
+                    await _touch_agent_activity(agent)
                     return agent
             raise ToolExecutionError(
                 "AUTHENTICATION_REQUIRED",
@@ -5233,6 +5284,7 @@ def build_mcp_server() -> FastMCP:
             )
 
         _bind_session_agent(ctx, project, agent)
+        await _touch_agent_activity(agent)
         return agent
 
     async def _resolve_authenticated_agent(
@@ -5256,6 +5308,7 @@ def build_mcp_server() -> FastMCP:
 
         agent = await _resolve_session_agent_for_project(ctx, project)
         if agent is not None:
+            await _touch_agent_activity(agent)
             return agent
 
         raise ToolExecutionError(
@@ -9446,7 +9499,9 @@ def build_mcp_server() -> FastMCP:
         Returns
         -------
         list[dict]
-            Each message includes: { id, subject, from, created_ts, importance, ack_required, kind, [body_md] }
+            Each message includes: { id, subject, from, created_ts, importance, ack_required, kind, read_at, [body_md] }
+            `read_at` is this recipient's read timestamp (null while unread), so the
+            default view — which includes already-read mail — stays distinguishable.
 
         Example
         -------
@@ -13521,6 +13576,10 @@ def build_mcp_server() -> FastMCP:
         - Agent names are NOT the same as your program name or user name.
         - Use the returned names when calling tools like whois(), request_contact(), send_message().
         - Agents in different projects cannot see each other - project isolation is enforced.
+        - `last_active_ts` refreshes on ANY authenticated tool call the agent makes
+          (send/reply, fetch_inbox, mark_message_read, acknowledge_message, ...), so
+          mail-only agents (e.g. orchestrator identities) remain visible to
+          activity-based filtering while they are actively communicating (#255).
         """
         key_value, query_params = _split_slug_and_query(project_key)
         format_value = format or query_params.get("format")
