@@ -27,7 +27,11 @@ def _render_chain_runner_script(hook_name: str) -> str:
     Behavior:
     - Runs executables in hooks.d/<hook_name>/* in lexical order.
     - For pre-push, reads STDIN once and forwards it to each child hook.
-    - If a <hook_name>.orig exists and is executable, it is invoked last.
+    - If husky's resolver (`h`) sits next to this runner, invoke it last
+      with argv0=<hook_name> so basename($0) still finds the tracked hook.
+      Do not exec a renamed <hook_name>.orig through husky — that makes
+      basename($0) look up a non-existent tracked file and exit 0.
+    - Else if a <hook_name>.orig exists and is executable, it is invoked last.
     - Exits non-zero on the first non-zero child exit code.
     """
     lines: list[str] = [
@@ -42,6 +46,8 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "HOOK_DIR = Path(__file__).parent",
         f"RUN_DIR = HOOK_DIR / 'hooks.d' / '{hook_name}'",
         f"ORIG = HOOK_DIR / '{hook_name}.orig'",
+        "HUSKY_H = HOOK_DIR / 'h'",
+        f"HOOK_ARGV0 = str(HOOK_DIR / '{hook_name}')",
         "",
         "def _is_exec(p: Path) -> bool:",
         "    try:",
@@ -71,6 +77,15 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "        return subprocess.run(['python', str(path), *ARGV], input=stdin_bytes, check=False).returncode",
         "    return subprocess.run([str(path), *ARGV], input=stdin_bytes, check=False).returncode",
         "",
+        "def _run_husky_h(*, stdin_bytes=None):",
+        "    # Source husky h with $0 = <hooksDir>/<hook_name> so basename($0) is",
+        "    # the hook name (not '*.orig') and dirname(dirname($0)) is the husky root.",
+        "    return subprocess.run(",
+        "        ['/bin/sh', '-c', 'h=\"$1\"; shift; . \"$h\"', HOOK_ARGV0, str(HUSKY_H), *ARGV],",
+        "        input=stdin_bytes,",
+        "        check=False,",
+        "    ).returncode",
+        "",
     ]
     if hook_name == "pre-push":
         lines += [
@@ -81,8 +96,12 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "    if rc != 0:",
             "        sys.exit(rc)",
             "",
-            "# Run the preserved original hook last (POSIX: only if it is executable).",
-            "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
+            "# Prefer husky h (argv0=hook name) over exec'ing a renamed .orig.",
+            "if HUSKY_H.exists():",
+            "    rc = _run_husky_h(stdin_bytes=stdin_bytes)",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "elif ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
             "    rc = _run_child(ORIG, stdin_bytes=stdin_bytes)",
             "    if rc != 0:",
             "        sys.exit(rc)",
@@ -95,8 +114,12 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "    if rc != 0:",
             "        sys.exit(rc)",
             "",
-            "# Run the preserved original hook last (POSIX: only if it is executable).",
-            "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
+            "# Prefer husky h (argv0=hook name) over exec'ing a renamed .orig.",
+            "if HUSKY_H.exists():",
+            "    rc = _run_husky_h()",
+            "    if rc != 0:",
+            "        sys.exit(rc)",
+            "elif ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
             "    rc = _run_child(ORIG)",
             "    if rc != 0:",
             "        sys.exit(rc)",

@@ -198,6 +198,59 @@ async def test_guard_install_relative_hookspath(isolated_env, tmp_path: Path):
 
 
 # =============================================================================
+# Husky hooksPath + basename($0) (tracked-hook must still run)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_install_guard_husky_hookspath_runs_tracked_hook(isolated_env, tmp_path: Path):
+    """install_guard on a husky repo must still run the tracked .husky/pre-commit.
+
+    husky's .husky/_/h resolves the tracked hook via basename($0). Exec'ing a
+    renamed pre-commit.orig through h looks up .husky/pre-commit.orig and
+    silently exits 0 — the tracked hook never runs.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    husky = repo / ".husky"
+    husky_us = husky / "_"
+    husky_us.mkdir(parents=True)
+
+    # Minimal husky resolver (matches .husky/_/h: basename $0 → parent dir)
+    h = husky_us / "h"
+    h.write_text(
+        "#!/usr/bin/env sh\n"
+        'n=$(basename "$0")\n'
+        's=$(dirname "$(dirname "$0")")/$n\n'
+        '[ ! -f "$s" ] && exit 0\n'
+        'sh -e "$s" "$@"\n',
+        encoding="utf-8",
+    )
+    h.chmod(0o755)
+
+    stub = husky_us / "pre-commit"
+    stub.write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    tracked = husky / "pre-commit"
+    tracked.write_text("#!/usr/bin/env sh\necho HUSKY_TRACKED_HOOK_RAN\n", encoding="utf-8")
+    tracked.chmod(0o755)
+
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-orig-test", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "HUSKY_TRACKED_HOOK_RAN" in result.stdout, (
+        f"tracked husky hook did not run; exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+# =============================================================================
 # Hook Preservation Tests
 # =============================================================================
 
