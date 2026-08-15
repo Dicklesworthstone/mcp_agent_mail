@@ -2101,6 +2101,7 @@ Common variables you may set:
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
 | `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
+| `CROSS_PROJECT_CONTACT_ENFORCEMENT_ENABLED` | `true` | Require approved contact links for cross-project messaging |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for in-session auto-approved contact links and the "recent contact" recency window (1 day) |
 | `CONTACT_PENDING_TTL_SECONDS` | `604800` | TTL for the *pending* contact-request fallback created by `send_message(auto_contact_if_blocked=True)` when in-session auto-approval is not possible — i.e. how long an async human approver has to respond (7 days) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |

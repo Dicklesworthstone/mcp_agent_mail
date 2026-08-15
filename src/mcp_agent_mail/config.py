@@ -215,6 +215,9 @@ class Settings:
     ack_escalation_claim_holder_name: str
     # Contacts/links
     contact_enforcement_enabled: bool
+    # Cross-project routing normally requires an approved AgentLink. Deployments
+    # with a single trusted owner can opt out while retaining the secure default.
+    cross_project_contact_enforcement_enabled: bool
     # TTL for in-session auto-approved contact links and the
     # "recent contact" recency window used by messaging policy.
     # Short by design (default 24h) — auto-approval is a session-scoped
@@ -567,6 +570,9 @@ def _build_settings() -> Settings:
         log_level=decouple_config("LOG_LEVEL", default="INFO"),
         log_include_trace=_b("LOG_INCLUDE_TRACE", default=False),
         contact_enforcement_enabled=_b("CONTACT_ENFORCEMENT_ENABLED", default=True),
+        cross_project_contact_enforcement_enabled=_b(
+            "CROSS_PROJECT_CONTACT_ENFORCEMENT_ENABLED", default=True
+        ),
         contact_auto_ttl_seconds=_i("CONTACT_AUTO_TTL_SECONDS", default=86400),
         contact_pending_ttl_seconds=_i("CONTACT_PENDING_TTL_SECONDS", default=604800),
         contact_auto_retry_enabled=_b("CONTACT_AUTO_RETRY_ENABLED", default=True),

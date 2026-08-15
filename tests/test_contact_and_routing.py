@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 
 import pytest
 from fastmcp import Client
 
+from mcp_agent_mail import config as _config
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import get_settings
 from mcp_agent_mail.db import ensure_schema, get_db_health_status, get_session
@@ -147,6 +149,70 @@ async def test_external_cross_project_routing(isolated_env):
         storage_root = Path(get_settings().storage.root).expanduser().resolve()
         ops_dir = storage_root / "projects" / "ops" / "messages"
         assert any(ops_dir.rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_cross_project_routing_without_approved_link_when_disabled(isolated_env, monkeypatch):
+    monkeypatch.setenv("CROSS_PROJECT_CONTACT_ENFORCEMENT_ENABLED", "false")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+
+    await ensure_schema()
+    async with get_session() as s:
+        backend = Project(slug="backend", human_key="Backend")
+        frontend = Project(slug="frontend", human_key="Frontend")
+        s.add_all([backend, frontend])
+        await s.commit()
+        await s.refresh(backend)
+        await s.refresh(frontend)
+        assert backend.id is not None and frontend.id is not None
+        sender = Agent(
+            project_id=backend.id,
+            name="Sender",
+            program="codex",
+            model="gpt-5",
+            task_description="",
+            registration_token="sender-token",
+        )
+        recipient = Agent(
+            project_id=frontend.id,
+            name="Recipient",
+            program="codex",
+            model="gpt-5",
+            task_description="",
+            registration_token="recipient-token",
+        )
+        s.add_all([sender, recipient])
+        await s.commit()
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        sent = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "Sender",
+                "sender_token": "sender-token",
+                "to": ["project:Frontend#Recipient"],
+                "subject": "Cross",
+                "body_md": "hello",
+            },
+        )
+        deliveries = sent.data.get("deliveries") or []
+        assert any(delivery.get("project") == "Frontend" for delivery in deliveries)
+        message_id = deliveries[0]["payload"]["id"]
+
+        reply = await client.call_tool(
+            "reply_message",
+            {
+                "project_key": "Frontend",
+                "message_id": message_id,
+                "sender_name": "Recipient",
+                "sender_token": "recipient-token",
+                "body_md": "ack",
+            },
+        )
+        assert any(delivery.get("project") == "Backend" for delivery in reply.data.get("deliveries") or [])
 
 
 @pytest.mark.asyncio

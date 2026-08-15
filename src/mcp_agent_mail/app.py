@@ -7990,6 +7990,23 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.cross_project_contact_enforcement_enabled
+                    ):
+                        target_agent = await _find_agent_optional(target_project_override, canonical)
+                        if target_agent is not None:
+                            pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
+                            if pol == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(target_agent.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
@@ -8662,6 +8679,23 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.cross_project_contact_enforcement_enabled
+                    ):
+                        target_agent = await _find_agent_optional(target_project_override, canonical)
+                        if target_agent is not None:
+                            recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
+                            if recipient_policy == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(target_agent.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
