@@ -7995,7 +7995,9 @@ def build_mcp_server() -> FastMCP:
                         and target_project_override is not None
                         and not settings_local.cross_project_contact_enforcement_enabled
                     ):
-                        target_agent = await _find_agent_optional(target_project_override, canonical)
+                        target_agent = await _find_agent_optional(target_project_override, display_value)
+                        if target_agent is None and canonical != display_value:
+                            target_agent = await _find_agent_optional(target_project_override, canonical)
                         if target_agent is not None:
                             pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
                             if pol == "block_all":
@@ -8684,7 +8686,9 @@ def build_mcp_server() -> FastMCP:
                         and target_project_override is not None
                         and not settings_local.cross_project_contact_enforcement_enabled
                     ):
-                        target_agent = await _find_agent_optional(target_project_override, canonical)
+                        target_agent = await _find_agent_optional(target_project_override, display_value)
+                        if target_agent is None and canonical != display_value:
+                            target_agent = await _find_agent_optional(target_project_override, canonical)
                         if target_agent is not None:
                             recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
                             if recipient_policy == "block_all":

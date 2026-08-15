@@ -168,7 +168,7 @@ async def test_cross_project_routing_without_approved_link_when_disabled(isolate
         assert backend.id is not None and frontend.id is not None
         sender = Agent(
             project_id=backend.id,
-            name="Sender",
+            name="cross-trust-sender",
             program="codex",
             model="gpt-5",
             task_description="",
@@ -176,7 +176,7 @@ async def test_cross_project_routing_without_approved_link_when_disabled(isolate
         )
         recipient = Agent(
             project_id=frontend.id,
-            name="Recipient",
+            name="cross-trust-receiver",
             program="codex",
             model="gpt-5",
             task_description="",
@@ -191,9 +191,9 @@ async def test_cross_project_routing_without_approved_link_when_disabled(isolate
             "send_message",
             {
                 "project_key": "Backend",
-                "sender_name": "Sender",
+                "sender_name": "cross-trust-sender",
                 "sender_token": "sender-token",
-                "to": ["project:Frontend#Recipient"],
+                "to": ["project:Frontend#cross-trust-receiver"],
                 "subject": "Cross",
                 "body_md": "hello",
             },
@@ -207,7 +207,7 @@ async def test_cross_project_routing_without_approved_link_when_disabled(isolate
             {
                 "project_key": "Frontend",
                 "message_id": message_id,
-                "sender_name": "Recipient",
+                "sender_name": "cross-trust-receiver",
                 "sender_token": "recipient-token",
                 "body_md": "ack",
             },
