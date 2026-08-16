@@ -3637,6 +3637,24 @@ async def _find_agent_optional(project: Project, name: str | None) -> Agent | No
         return result.scalars().first()
 
 
+async def _resolve_cross_project_recipient_unenforced(
+    target_project: Project,
+    display_value: str,
+    canonical: str,
+) -> Agent | None:
+    """Resolve an explicitly addressed cross-project recipient by name alone.
+
+    Only used when CONTACT_ENFORCEMENT_ENABLED=false: with contact enforcement
+    globally disabled, an explicit ``project:X#name`` (or ``name@project``)
+    recipient should not additionally require an approved AgentLink. Callers
+    must still honor the recipient's ``block_all`` contact policy.
+    """
+    agent = await _find_agent_optional(target_project, display_value)
+    if agent is None and canonical and canonical != display_value:
+        agent = await _find_agent_optional(target_project, canonical)
+    return agent
+
+
 async def _ensure_agent_registration_token(
     agent: Agent,
     *,
@@ -7990,6 +8008,28 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.contact_enforcement_enabled
+                    ):
+                        # Contact enforcement is globally disabled: an explicit
+                        # cross-project recipient does not additionally need an
+                        # approved AgentLink. block_all is still honored.
+                        direct_target = await _resolve_cross_project_recipient_unenforced(
+                            target_project_override, display_value, canonical
+                        )
+                        if direct_target is not None:
+                            pol = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
+                            if pol == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(direct_target.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
@@ -8662,6 +8702,28 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.contact_enforcement_enabled
+                    ):
+                        # Contact enforcement is globally disabled: an explicit
+                        # cross-project recipient does not additionally need an
+                        # approved AgentLink. block_all is still honored.
+                        direct_target = await _resolve_cross_project_recipient_unenforced(
+                            target_project_override, display_value, canonical
+                        )
+                        if direct_target is not None:
+                            recipient_policy = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
+                            if recipient_policy == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(direct_target.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(

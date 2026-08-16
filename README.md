@@ -2100,7 +2100,7 @@ Common variables you may set:
 | `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation file reservations |
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
-| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
+| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging. When `false`, explicitly addressed cross-project recipients (`project:X#name` / `name@project`) also no longer require an approved contact link; `block_all` is still honored |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for in-session auto-approved contact links and the "recent contact" recency window (1 day) |
 | `CONTACT_PENDING_TTL_SECONDS` | `604800` | TTL for the *pending* contact-request fallback created by `send_message(auto_contact_if_blocked=True)` when in-session auto-approval is not possible — i.e. how long an async human approver has to respond (7 days) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |

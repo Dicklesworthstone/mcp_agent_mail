@@ -397,7 +397,7 @@ uv run python -m mcp_agent_mail.cli config set-port 9000
 | `HTTP_PORT` | `8765` | Server port |
 | `HTTP_BEARER_TOKEN` | — | Static bearer token for auth |
 | `LLM_ENABLED` | `true` | Enable LLM for summaries/discovery |
-| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy |
+| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy (when `false`, explicit cross-project sends skip the approved-link requirement; `block_all` still honored) |
 
 ## Docker
 
