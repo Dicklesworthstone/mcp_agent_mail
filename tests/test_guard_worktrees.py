@@ -198,6 +198,96 @@ async def test_guard_install_relative_hookspath(isolated_env, tmp_path: Path):
 
 
 # =============================================================================
+# Husky v9 hooksPath Tests (tracked hook must survive the .orig rename)
+# =============================================================================
+
+
+def _write_husky_v9_layout(repo: Path, tracked_body: str) -> tuple[Path, Path]:
+    """Create a minimal husky v9 layout: .husky/_/{h,pre-commit} + tracked hook.
+
+    Mirrors husky v9's real resolver: ``h`` derives the tracked hook name from
+    basename($0) and runs ``.husky/<name>`` if present, else exits 0.
+    """
+    husky_dir = repo / ".husky"
+    runtime_dir = husky_dir / "_"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    resolver = runtime_dir / "h"
+    resolver.write_text(
+        "#!/usr/bin/env sh\n"
+        'hook_name="${0##*/}"\n'
+        'tracked="${0%/*/*}/$hook_name"\n'
+        '[ ! -f "$tracked" ] && exit 0\n'
+        'sh -e "$tracked" "$@"\n'
+        "exit $?\n",
+        encoding="utf-8",
+    )
+    resolver.chmod(0o755)
+
+    stub = runtime_dir / "pre-commit"
+    stub.write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n', encoding="utf-8")
+    stub.chmod(0o755)
+
+    tracked = husky_dir / "pre-commit"
+    tracked.write_text(tracked_body, encoding="utf-8")
+    tracked.chmod(0o755)
+    return runtime_dir, tracked
+
+
+@pytest.mark.asyncio
+async def test_guard_install_husky_v9_still_runs_tracked_hook(isolated_env, tmp_path: Path):
+    """After install_guard on a husky v9 repo, the tracked hook must still run.
+
+    install_guard renames the husky stub to pre-commit.orig. Exec'ing that
+    renamed stub gives husky's resolver basename($0) == 'pre-commit.orig',
+    so it looks up .husky/pre-commit.orig, misses, and exits 0 -- silently
+    skipping the user's tracked hook. The chain-runner must instead invoke
+    the resolver with argv0 presenting the real hook name.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    runtime_dir, _tracked = _write_husky_v9_layout(
+        repo, "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n"
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-test", repo)
+
+    # Stub was preserved as .orig in the husky runtime dir
+    assert (runtime_dir / "pre-commit.orig").exists()
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "HUSKY_TRACKED_RAN" in result.stdout, (
+        f"tracked husky hook did not run: exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_install_husky_v9_propagates_tracked_hook_failure(isolated_env, tmp_path: Path):
+    """A failing tracked husky hook must fail the whole chain-runner."""
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    _write_husky_v9_layout(repo, "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\nexit 23\n")
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-fail-test", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+    assert result.returncode != 0
+
+
+# =============================================================================
 # Hook Preservation Tests
 # =============================================================================
 
