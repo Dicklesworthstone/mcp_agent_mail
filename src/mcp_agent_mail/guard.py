@@ -28,6 +28,12 @@ def _render_chain_runner_script(hook_name: str) -> str:
     - Runs executables in hooks.d/<hook_name>/* in lexical order.
     - For pre-push, reads STDIN once and forwards it to each child hook.
     - If a <hook_name>.orig exists and is executable, it is invoked last.
+      When the preserved .orig is a husky v9 stub (it sources the sibling
+      resolver ``h``, which derives the tracked hook name from basename($0)),
+      the runner sources ``h`` through /bin/sh with argv0 set to the real
+      hook name. Exec'ing the renamed ``<hook_name>.orig`` directly would
+      make husky look up a non-existent ``.husky/<hook_name>.orig`` and
+      silently skip the user's tracked hook.
     - Exits non-zero on the first non-zero child exit code.
     """
     lines: list[str] = [
@@ -42,6 +48,8 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "HOOK_DIR = Path(__file__).parent",
         f"RUN_DIR = HOOK_DIR / 'hooks.d' / '{hook_name}'",
         f"ORIG = HOOK_DIR / '{hook_name}.orig'",
+        f"HOOK_NAME = '{hook_name}'",
+        "HUSKY_H = HOOK_DIR / 'h'",
         "",
         "def _is_exec(p: Path) -> bool:",
         "    try:",
@@ -71,6 +79,32 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "        return subprocess.run(['python', str(path), *ARGV], input=stdin_bytes, check=False).returncode",
         "    return subprocess.run([str(path), *ARGV], input=stdin_bytes, check=False).returncode",
         "",
+        "def _is_husky_stub(path: Path) -> bool:",
+        "    # husky v9 keeps its hooks in <repo>/.husky/_ next to a resolver",
+        "    # named 'h'; each stub just sources h, and h derives the tracked",
+        "    # hook name from basename($0).",
+        "    if os.name != 'posix' or not HUSKY_H.is_file():",
+        "        return False",
+        "    try:",
+        "        text = path.read_text(encoding='utf-8', errors='ignore')",
+        "    except Exception:",
+        "        return False",
+        "    return '/h\"' in text",
+        "",
+        "def _run_orig(*, stdin_bytes=None):",
+        "    if _is_husky_stub(ORIG):",
+        "        # Source husky's resolver with argv0 = <hooksDir>/<hook name> so",
+        "        # basename($0) is the hook name (not '<hook name>.orig') and it",
+        "        # still resolves and runs the user's tracked hook.",
+        "        argv0 = str(HOOK_DIR / HOOK_NAME)",
+        "        snippet = 'husky_h=\"$1\"; shift; . \"$husky_h\"'",
+        "        return subprocess.run(",
+        "            ['/bin/sh', '-c', snippet, argv0, str(HUSKY_H), *ARGV],",
+        "            input=stdin_bytes,",
+        "            check=False,",
+        "        ).returncode",
+        "    return _run_child(ORIG, stdin_bytes=stdin_bytes)",
+        "",
     ]
     if hook_name == "pre-push":
         lines += [
@@ -83,7 +117,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "",
             "# Run the preserved original hook last (POSIX: only if it is executable).",
             "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
-            "    rc = _run_child(ORIG, stdin_bytes=stdin_bytes)",
+            "    rc = _run_orig(stdin_bytes=stdin_bytes)",
             "    if rc != 0:",
             "        sys.exit(rc)",
             "sys.exit(0)",
@@ -97,7 +131,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "",
             "# Run the preserved original hook last (POSIX: only if it is executable).",
             "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
-            "    rc = _run_child(ORIG)",
+            "    rc = _run_orig()",
             "    if rc != 0:",
             "        sys.exit(rc)",
             "sys.exit(0)",
