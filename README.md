@@ -308,7 +308,7 @@ This creates a feedback loop where graph intelligence drives coordination.
 
 ## Core ideas (at a glance)
 
-- HTTP-only FastMCP server (Streamable HTTP). No SSE, no STDIO.
+- FastMCP server over Streamable HTTP (primary transport; no SSE). A STDIO transport (`serve-stdio`) is also available for direct CLI integration.
 - Dual persistence model:
   - Human-readable markdown in a per-project Git repo for every canonical message and per-recipient inbox/outbox copy
   - SQLite with FTS5 for fast search, directory queries, and file reservations/leases
@@ -2161,7 +2161,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 
 ## Design choices and rationale
 
-- **HTTP-only FastMCP**: Streamable HTTP is the modern remote transport; STDIO is not exposed here by design
+- **Streamable HTTP first**: the modern remote transport is the primary deployment mode; `serve-stdio` is also provided for clients that prefer a local STDIO server
 - **Git + Markdown**: Human-auditable, diffable artifacts that fit developer workflows (inbox/outbox mental model)
 - **SQLite + FTS5**: Efficient indexing/search with minimal ops footprint
 - **Advisory file reservations**: Make intent explicit and reviewable; optional guard enforces reservations at commit time

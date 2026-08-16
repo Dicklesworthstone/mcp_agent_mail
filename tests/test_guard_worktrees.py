@@ -680,3 +680,164 @@ async def test_chain_runner_executes_plugins(isolated_env, tmp_path: Path):
     # Plugin should have run
     assert marker_file.exists()
     assert marker_file.read_text() == "ran"
+
+
+# =============================================================================
+# Windows chain-runner dispatch (issue #262: preserved .orig must not be
+# exec'd bare -- CreateProcess cannot honor shebangs -> WinError 193)
+# =============================================================================
+
+
+class _RecordingRun:
+    """Stand-in for subprocess.run that records argv instead of spawning."""
+
+    def __init__(self, git_exec_path: str = ""):
+        self.calls: list[list[str]] = []
+        self._git_exec_path = git_exec_path
+
+    def __call__(self, argv, **kwargs):
+        argv = [str(a) for a in argv]
+        if argv[:2] == ["git", "--exec-path"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=self._git_exec_path, stderr="")
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+
+def _exec_chain_runner(hook_path: Path, script_text: str, *, os_name: str | None = None) -> None:
+    """Execute the rendered chain-runner in-process (it ends with sys.exit).
+
+    ``os_name`` simulates another platform for the script only: its
+    ``import os`` is served a shim whose ``name`` differs, while pathlib and
+    everything else keep using the real ``os`` (patching ``os.name`` globally
+    would make ``Path()`` instantiate WindowsPath and blow up on POSIX).
+    """
+    import builtins
+    import types
+
+    import pytest as _pytest
+
+    exec_globals: dict = {"__file__": str(hook_path), "__name__": "__main__"}
+    if os_name is not None:
+        os_shim = types.SimpleNamespace(name=os_name)
+        real_import = builtins.__import__
+
+        def _import(name, *args, **kwargs):
+            if name == "os":
+                return os_shim
+            return real_import(name, *args, **kwargs)
+
+        exec_globals["__builtins__"] = {**vars(builtins), "__import__": _import}
+
+    with _pytest.raises(SystemExit) as excinfo:
+        exec(  # deliberately running the rendered hook under test
+            compile(script_text, str(hook_path), "exec"),
+            exec_globals,
+        )
+    assert excinfo.value.code in (0, None)
+
+
+def _make_windows_hook_layout(tmp_path: Path) -> Path:
+    """hooks dir with a .py plugin, a shebang shell plugin, and a sh .orig."""
+    hooks = tmp_path / "hooks"
+    run_dir = hooks / "hooks.d" / "pre-commit"
+    run_dir.mkdir(parents=True)
+    (run_dir / "10-plugin.py").write_text("print('py plugin')\n", encoding="utf-8")
+    (run_dir / "20-plugin").write_text("#!/usr/bin/env python3\nprint('x')\n", encoding="utf-8")
+    orig = hooks / "pre-commit.orig"
+    orig.write_text("#!/usr/bin/env sh\necho original hook\n", encoding="utf-8")
+    return hooks
+
+
+def test_chain_runner_windows_dispatches_shebang_orig_via_sh(tmp_path: Path, monkeypatch):
+    """On Windows a preserved shell-script .orig must run through sh, not bare.
+
+    Regression test for issue #262: the runner special-cased only ``.py`` on
+    Windows, so ``pre-commit.orig`` (suffix ``.orig``, ``#!/usr/bin/env sh``)
+    was passed bare to CreateProcess and every commit failed with WinError 193.
+    """
+    import shutil
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+    recorder = _RecordingRun()
+
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(shutil, "which", lambda _cmd: "C:/Git/usr/bin/sh.exe")
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"), os_name="nt")
+
+    by_target = {call[-1].replace("\\", "/").rsplit("/", 1)[-1]: call for call in recorder.calls}
+    # .py plugin dispatched via python
+    assert by_target["10-plugin.py"][0] == "python"
+    # extensionless plugin with a python shebang dispatched via python
+    assert by_target["20-plugin"][0] == "python"
+    # the preserved sh-shebang .orig dispatched via sh -- never invoked bare
+    assert by_target["pre-commit.orig"][0] == "C:/Git/usr/bin/sh.exe"
+
+
+def test_chain_runner_windows_resolves_bundled_git_sh(tmp_path: Path, monkeypatch):
+    """With no sh on PATH, the runner finds git-for-windows' bundled sh.exe."""
+    import shutil
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+
+    # Fake git-for-windows install tree: <root>/mingw64/libexec/git-core
+    # as --exec-path, sh.exe at <root>/usr/bin/sh.exe.
+    git_root = tmp_path / "Git"
+    exec_path = git_root / "mingw64" / "libexec" / "git-core"
+    exec_path.mkdir(parents=True)
+    bundled_sh = git_root / "usr" / "bin" / "sh.exe"
+    bundled_sh.parent.mkdir(parents=True)
+    bundled_sh.write_text("", encoding="utf-8")
+
+    recorder = _RecordingRun(git_exec_path=str(exec_path))
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"), os_name="nt")
+
+    orig_calls = [c for c in recorder.calls if c[-1].endswith("pre-commit.orig")]
+    assert orig_calls, f"orig was never invoked: {recorder.calls}"
+    assert orig_calls[0][0] == str(bundled_sh)
+
+
+def test_chain_runner_posix_dispatch_unchanged(tmp_path: Path, monkeypatch):
+    """On POSIX the runner still execs children bare (kernel honors shebangs)."""
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+    orig = hooks / "pre-commit.orig"
+    orig.chmod(0o755)
+    for p in (hooks / "hooks.d" / "pre-commit").iterdir():
+        p.chmod(0o755)
+
+    recorder = _RecordingRun()
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"))
+
+    orig_calls = [c for c in recorder.calls if c[-1].endswith("pre-commit.orig")]
+    assert orig_calls == [[str(orig)]]
+
+
+def test_prepush_chain_runner_shares_windows_dispatch():
+    """pre-push renders the same runner, so it gets the same Windows fix."""
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    script = _render_chain_runner_script("pre-push")
+    assert "_read_shebang" in script
+    assert "_win_sh" in script
+    assert "'.exe', '.com', '.bat', '.cmd'" in script
