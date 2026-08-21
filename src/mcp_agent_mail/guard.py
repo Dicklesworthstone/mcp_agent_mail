@@ -20,6 +20,14 @@ __all__ = [
 ]
 
 
+# A husky v9 stub's single effective statement sources its sibling resolver
+# ``h``. Tolerate the spellings husky (and hand-rolled equivalents) emit:
+# ``.`` vs ``source``, double/single/absent quoting, and ``$(dirname "$0")``
+# vs ``${0%/*}``, plus surrounding whitespace and a trailing ``;``.
+_HUSKY_DIR_EXPR = r'''(?:\$\([ \t]*dirname[ \t]+(?:--[ \t]+)?["']?\$\{?0\}?["']?[ \t]*\)|\$\{0%/\*\})'''
+_HUSKY_SOURCE_PATTERN = r'''^(?:\.|source)[ \t]+(["']?)''' + _HUSKY_DIR_EXPR + r'''/h\1[ \t]*;?[ \t]*$'''
+
+
 def _render_chain_runner_script(hook_name: str) -> str:
     """
     Render a Python chain-runner for the given Git hook name.
@@ -33,7 +41,11 @@ def _render_chain_runner_script(hook_name: str) -> str:
       the runner sources ``h`` through /bin/sh with argv0 set to the real
       hook name. Exec'ing the renamed ``<hook_name>.orig`` directly would
       make husky look up a non-existent ``.husky/<hook_name>.orig`` and
-      silently skip the user's tracked hook.
+      silently skip the user's tracked hook. That diversion applies only to a
+      file that is *nothing but* a husky stub (optional shebang, blank lines,
+      ``#`` comments, and exactly one statement sourcing ``h``); a
+      hand-written hook that merely also sources ``h`` is exec'd directly so
+      that its own body still runs.
     - On Windows, where CreateProcess cannot honor shebangs, children are
       dispatched by suffix (``.py`` via ``python``; ``.exe/.com/.bat/.cmd``
       directly) and everything else — notably a preserved shell-script
@@ -45,6 +57,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "#!/usr/bin/env python3",
         f"# mcp-agent-mail chain-runner ({hook_name})",
         "import os",
+        "import re",
         "import sys",
         "import stat",
         "import subprocess",
@@ -127,17 +140,38 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "                argv = [_win_sh(), str(path), *ARGV]",
         "    return subprocess.run(argv, input=stdin_bytes, check=False).returncode",
         "",
+        f"HUSKY_SOURCE_RE = re.compile({_HUSKY_SOURCE_PATTERN!r})",
+        "",
         "def _is_husky_stub(path: Path) -> bool:",
         "    # husky v9 keeps its hooks in <repo>/.husky/_ next to a resolver",
         "    # named 'h'; each stub just sources h, and h derives the tracked",
         "    # hook name from basename($0).",
+        "    #",
+        "    # Only a file that is *nothing but* such a stub may be diverted to",
+        "    # the resolver: an optional shebang, blank lines, '#' comments, and",
+        "    # exactly one effective statement sourcing 'h'. A hand-written hook",
+        "    # that does its own work AND also sources 'h' is a CUSTOM hook and",
+        "    # must be exec'd directly, or its whole body is silently discarded.",
+        "    # Bias to CUSTOM whenever unsure: re-running a custom hook that also",
+        "    # sources 'h' is recoverable; dropping the user's hook is not.",
         "    if os.name != 'posix' or not HUSKY_H.is_file():",
         "        return False",
         "    try:",
         "        text = path.read_text(encoding='utf-8', errors='ignore')",
         "    except Exception:",
         "        return False",
-        "    return '/h\"' in text",
+        "    body = text.splitlines()",
+        "    if body and body[0].startswith('#!'):",
+        "        body = body[1:]",
+        "    sourced = 0",
+        "    for raw in body:",
+        "        line = raw.strip()",
+        "        if not line or line.startswith('#'):",
+        "            continue",
+        "        if sourced or not HUSKY_SOURCE_RE.match(line):",
+        "            return False",
+        "        sourced = 1",
+        "    return sourced == 1",
         "",
         "def _run_orig(*, stdin_bytes=None):",
         "    if _is_husky_stub(ORIG):",

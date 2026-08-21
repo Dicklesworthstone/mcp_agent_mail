@@ -202,11 +202,20 @@ async def test_guard_install_relative_hookspath(isolated_env, tmp_path: Path):
 # =============================================================================
 
 
-def _write_husky_v9_layout(repo: Path, tracked_body: str) -> tuple[Path, Path]:
+def _write_husky_v9_layout(
+    repo: Path,
+    tracked_body: str,
+    *,
+    stub_body: str | None = None,
+) -> tuple[Path, Path]:
     """Create a minimal husky v9 layout: .husky/_/{h,pre-commit} + tracked hook.
 
     Mirrors husky v9's real resolver: ``h`` derives the tracked hook name from
     basename($0) and runs ``.husky/<name>`` if present, else exits 0.
+
+    ``stub_body`` overrides the contents of ``.husky/_/pre-commit`` -- the file
+    install_guard preserves as ``pre-commit.orig`` -- so tests can install a
+    hand-written hook in the slot where a pure husky stub normally sits.
     """
     husky_dir = repo / ".husky"
     runtime_dir = husky_dir / "_"
@@ -225,7 +234,10 @@ def _write_husky_v9_layout(repo: Path, tracked_body: str) -> tuple[Path, Path]:
     resolver.chmod(0o755)
 
     stub = runtime_dir / "pre-commit"
-    stub.write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n', encoding="utf-8")
+    stub.write_text(
+        stub_body if stub_body is not None else '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+        encoding="utf-8",
+    )
     stub.chmod(0o755)
 
     tracked = husky_dir / "pre-commit"
@@ -285,6 +297,155 @@ async def test_guard_install_husky_v9_propagates_tracked_hook_failure(isolated_e
     result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
     assert "HUSKY_TRACKED_RAN" in result.stdout
     assert result.returncode != 0
+
+
+@pytest.mark.asyncio
+async def test_guard_husky_stub_detection_accepts_shell_param_expansion(isolated_env, tmp_path: Path):
+    """A pure stub written the way husky v9 actually emits it is still diverted.
+
+    Real ``.husky/_/<hook>`` stubs source the resolver as ``. "${0%/*}/h"``,
+    not via ``dirname``. The stub detector must accept both spellings, or the
+    diversion (argv0 = real hook name) never happens and the tracked hook is
+    silently skipped again.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    _write_husky_v9_layout(
+        repo,
+        "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n",
+        stub_body='#!/usr/bin/env sh\n\n# husky stub\n. "${0%/*}/h"\n',
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-param-expansion", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "HUSKY_TRACKED_RAN" in result.stdout, (
+        f"tracked husky hook did not run: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_hybrid_custom_hook_that_also_sources_husky_h_still_runs(
+    isolated_env, tmp_path: Path
+):
+    """A hand-written hook that ALSO sources husky's ``h`` must run its own body.
+
+    A bare ``'/h"' in text`` check misclassifies such a hook as a pure husky
+    stub, so the chain-runner sources ``h`` instead of exec'ing the preserved
+    ``.orig`` -- and the user's entire custom body is silently discarded. The
+    detector must only divert files that are *nothing but* a husky stub.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    # NOTE: statements AFTER the source line are deliberately not asserted --
+    # husky's resolver ends in `exit`, which terminates the sourcing script.
+    # The regression is about the body BEFORE it being dropped entirely.
+    _write_husky_v9_layout(
+        repo,
+        "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n",
+        stub_body=(
+            "#!/usr/bin/env sh\n"
+            "echo CUSTOM_ORIG_RAN\n"
+            'touch "$(git rev-parse --show-toplevel)/CUSTOM_RAN"\n'
+            '. "$(dirname "$0")/h"\n'
+            "echo CUSTOM_TAIL_RAN\n"
+        ),
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-hybrid", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "CUSTOM_ORIG_RAN" in result.stdout, (
+        f"custom hook body was silently skipped: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert (repo / "CUSTOM_RAN").exists(), (
+        "custom hook body did not execute its side effect"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_plain_custom_orig_runs_alongside_husky_layout(isolated_env, tmp_path: Path):
+    """A custom .orig with no husky reference still runs when ``h`` exists."""
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    _write_husky_v9_layout(
+        repo,
+        "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n",
+        stub_body=(
+            "#!/usr/bin/env sh\n"
+            "echo PLAIN_CUSTOM_RAN\n"
+            'touch "$(git rev-parse --show-toplevel)/PLAIN_CUSTOM_RAN"\n'
+        ),
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-plain-custom", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "PLAIN_CUSTOM_RAN" in result.stdout
+    assert (repo / "PLAIN_CUSTOM_RAN").exists()
+    assert "HUSKY_TRACKED_RAN" not in result.stdout, (
+        "a custom hook must not be diverted through husky's resolver"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_husky_stub_with_extra_statement_is_treated_as_custom(
+    isolated_env, tmp_path: Path
+):
+    """A failing custom body that also sources ``h`` must fail the commit.
+
+    Proves the misclassification is not merely cosmetic: when the custom body
+    is diverted away, a hook that should have BLOCKED the commit exits 0.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    _write_husky_v9_layout(
+        repo,
+        "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n",
+        stub_body=(
+            "#!/usr/bin/env sh\n"
+            "echo CUSTOM_GATE_RAN\n"
+            "exit 42\n"
+            '. "$(dirname "$0")/h"\n'
+        ),
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-custom-gate", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "CUSTOM_GATE_RAN" in result.stdout, (
+        f"custom gate was skipped: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.returncode == 42, (
+        f"custom hook failure did not propagate: exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
 
 
 # =============================================================================
