@@ -20,6 +20,27 @@ __all__ = [
 ]
 
 
+# A husky v9 stub's single effective statement sources the sibling resolver
+# ``h``. These patterns admit the spellings husky itself and hand-rolled
+# equivalents produce: ``.`` or ``source`` (optional ``--``); the resolver
+# directory as ``$(dirname "$0")`` (any quoting of $0, optional ``--``) or as
+# the ``${0%/*}`` parameter expansion husky actually ships; the whole operand
+# bare, double- or single-quoted; optional trailing ``;``. Anything else is a
+# hook body of its own and must NOT be treated as a stub (issue #264).
+_STUB_DOLLAR0 = r'(?:"\$\{?0\}?"|\'\$\{?0\}?\'|\$\{?0\}?)'
+_STUB_DIR = (
+    r'(?:\$\([ \t]*dirname[ \t]+(?:--[ \t]+)?' + _STUB_DOLLAR0 + r'[ \t]*\)'
+    r'|\$\{0%/\*\})'
+)
+_STUB_SOURCE_LINE = (
+    r'^(?:\.|source)[ \t]+(?:--[ \t]+)?'
+    r'(?:"' + _STUB_DIR + r'/h"'
+    r"|'" + _STUB_DIR + r"/h'"
+    r'|' + _STUB_DIR + r'/h)'
+    r'[ \t]*;?[ \t]*$'
+)
+
+
 def _render_chain_runner_script(hook_name: str) -> str:
     """
     Render a Python chain-runner for the given Git hook name.
@@ -33,7 +54,9 @@ def _render_chain_runner_script(hook_name: str) -> str:
       the runner sources ``h`` through /bin/sh with argv0 set to the real
       hook name. Exec'ing the renamed ``<hook_name>.orig`` directly would
       make husky look up a non-existent ``.husky/<hook_name>.orig`` and
-      silently skip the user's tracked hook.
+      silently skip the user's tracked hook. Only a file that is *nothing
+      but* such a stub is diverted this way; a hand-written hook that also
+      sources ``h`` is exec'd directly so its own body still runs.
     - On Windows, where CreateProcess cannot honor shebangs, children are
       dispatched by suffix (``.py`` via ``python``; ``.exe/.com/.bat/.cmd``
       directly) and everything else — notably a preserved shell-script
@@ -45,6 +68,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "#!/usr/bin/env python3",
         f"# mcp-agent-mail chain-runner ({hook_name})",
         "import os",
+        "import re",
         "import sys",
         "import stat",
         "import subprocess",
@@ -127,17 +151,39 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "                argv = [_win_sh(), str(path), *ARGV]",
         "    return subprocess.run(argv, input=stdin_bytes, check=False).returncode",
         "",
+        f"HUSKY_STUB_LINE_RE = re.compile({_STUB_SOURCE_LINE!r})",
+        "",
         "def _is_husky_stub(path: Path) -> bool:",
         "    # husky v9 keeps its hooks in <repo>/.husky/_ next to a resolver",
         "    # named 'h'; each stub just sources h, and h derives the tracked",
         "    # hook name from basename($0).",
+        "    #",
+        "    # Divert to the resolver ONLY when the preserved file is nothing",
+        "    # but such a stub: an optional shebang, blank lines, '#' comments,",
+        "    # and a single statement sourcing the sibling 'h'. A hand-written",
+        "    # hook that does real work and ALSO sources 'h' must be exec'd",
+        "    # directly -- diverting it silently discards the user's hook body",
+        "    # (issue #264). Bias to custom whenever unsure: a custom hook that",
+        "    # sources 'h' still reaches the resolver through its own source",
+        "    # line, whereas a dropped body can wave through a commit that the",
+        "    # user's hook would have blocked.",
         "    if os.name != 'posix' or not HUSKY_H.is_file():",
         "        return False",
         "    try:",
         "        text = path.read_text(encoding='utf-8', errors='ignore')",
         "    except Exception:",
         "        return False",
-        "    return '/h\"' in text",
+        "    effective = []",
+        "    for index, raw in enumerate(text.splitlines()):",
+        "        line = raw.strip()",
+        "        if index == 0 and line.startswith('#!'):",
+        "            continue",
+        "        if not line or line.startswith('#'):",
+        "            continue",
+        "        effective.append(line)",
+        "        if len(effective) > 1:",
+        "            return False  # a second statement means a real hook body",
+        "    return bool(effective) and HUSKY_STUB_LINE_RE.match(effective[0]) is not None",
         "",
         "def _run_orig(*, stdin_bytes=None):",
         "    if _is_husky_stub(ORIG):",

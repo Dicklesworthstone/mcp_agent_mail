@@ -202,11 +202,20 @@ async def test_guard_install_relative_hookspath(isolated_env, tmp_path: Path):
 # =============================================================================
 
 
-def _write_husky_v9_layout(repo: Path, tracked_body: str) -> tuple[Path, Path]:
+def _write_husky_v9_layout(
+    repo: Path,
+    tracked_body: str,
+    *,
+    stub_body: str | None = None,
+) -> tuple[Path, Path]:
     """Create a minimal husky v9 layout: .husky/_/{h,pre-commit} + tracked hook.
 
     Mirrors husky v9's real resolver: ``h`` derives the tracked hook name from
     basename($0) and runs ``.husky/<name>`` if present, else exits 0.
+
+    ``stub_body`` overrides ``.husky/_/pre-commit`` — the file install_guard
+    preserves as ``pre-commit.orig`` — so tests can plant a hand-written hook
+    in the slot where a pure husky stub normally sits.
     """
     husky_dir = repo / ".husky"
     runtime_dir = husky_dir / "_"
@@ -225,7 +234,10 @@ def _write_husky_v9_layout(repo: Path, tracked_body: str) -> tuple[Path, Path]:
     resolver.chmod(0o755)
 
     stub = runtime_dir / "pre-commit"
-    stub.write_text('#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n', encoding="utf-8")
+    stub.write_text(
+        stub_body if stub_body is not None else '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+        encoding="utf-8",
+    )
     stub.chmod(0o755)
 
     tracked = husky_dir / "pre-commit"
@@ -285,6 +297,143 @@ async def test_guard_install_husky_v9_propagates_tracked_hook_failure(isolated_e
     result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
     assert "HUSKY_TRACKED_RAN" in result.stdout
     assert result.returncode != 0
+
+
+def _husky_repo(tmp_path: Path, tracked_body: str, stub_body: str) -> Path:
+    """A git repo with a husky v9 layout, custom stub slot, and hooksPath set."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+    _write_husky_v9_layout(repo, tracked_body, stub_body=stub_body)
+    _git_config(repo, "core.hooksPath", ".husky/_")
+    return repo
+
+
+TRACKED_ECHO = "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n"
+
+
+@pytest.mark.asyncio
+async def test_guard_diverts_real_husky_param_expansion_stub(isolated_env, tmp_path: Path):
+    """husky v9's actual stub spelling (``. "${0%/*}/h"``) is still diverted.
+
+    Issue #264's fix must not over-tighten: the detector has to keep matching
+    the resolver-source spellings husky really emits (parameter expansion,
+    comments, blank lines), or the original silent-skip bug returns.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        '#!/usr/bin/env sh\n\n# husky init\n. "${0%/*}/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-param-expansion", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_guard_diverts_source_keyword_with_semicolon(isolated_env, tmp_path: Path):
+    """``source "$(dirname -- "$0")/h";`` is still a pure stub."""
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        '#!/usr/bin/env sh\nsource "$(dirname -- "$0")/h";\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-source-kw", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_guard_runs_hybrid_hook_body_that_also_sources_h(isolated_env, tmp_path: Path):
+    """Issue #264: a hand-written .orig that also sources ``h`` keeps its body.
+
+    Under the old ``'/h"' in text`` substring test this hook was misclassified
+    as a pure stub, diverted to the resolver, and its body silently discarded.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo CUSTOM_BODY_RAN\n"
+        'touch "$(git rev-parse --show-toplevel)/CUSTOM_BODY_MARKER"\n'
+        '. "$(dirname "$0")/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-hybrid", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "CUSTOM_BODY_RAN" in result.stdout, (
+        f"custom hook body was silently discarded: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert (repo / "CUSTOM_BODY_MARKER").exists(), "custom body side effect missing"
+
+
+@pytest.mark.asyncio
+async def test_guard_blocking_hybrid_hook_still_blocks_commit(isolated_env, tmp_path: Path):
+    """The sharp end of #264: a custom gate that should block must block.
+
+    Before the fix, the misclassified hook was diverted, its ``exit 42`` never
+    ran, and a commit its own gate rejected sailed through with exit 0.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo CUSTOM_GATE_RAN\n"
+        "exit 42\n"
+        '. "$(dirname "$0")/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-blocking-gate", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "CUSTOM_GATE_RAN" in result.stdout, (
+        f"custom gate skipped: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.returncode == 42, (
+        f"custom gate failure did not propagate: exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_mere_textual_mention_of_resolver_is_custom(isolated_env, tmp_path: Path):
+    """A hook that merely mentions ``.../h"`` in a string is not a stub.
+
+    The old substring test fired on any occurrence of ``/h"`` anywhere in the
+    file — even inside an echo or a comment-like string — discarding hooks
+    that never source the resolver at all.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo 'resolver lives at .husky/_/h\" if you need it'\n"
+        'touch "$(git rev-parse --show-toplevel)/MENTION_MARKER"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-mention", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert (repo / "MENTION_MARKER").exists(), "custom body was diverted away"
+    assert "HUSKY_TRACKED_RAN" not in result.stdout, (
+        "a non-stub hook must not be routed through husky's resolver"
+    )
 
 
 # =============================================================================
