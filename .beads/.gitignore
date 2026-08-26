@@ -43,3 +43,4 @@ beads.right.meta.json
 
 # bv (beads viewer) lock file
 .bv.lock
+.write.lock
