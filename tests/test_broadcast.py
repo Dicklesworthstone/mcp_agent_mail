@@ -535,8 +535,26 @@ async def test_broadcast_skips_contact_gated_recipients_without_creating_request
     project_key = "/test/bcast-contact-gate"
 
     async with Client(server) as client:
-        names = await _setup_project_with_agents(client, project_key, 3)
-        sender, open_recipient, gated_recipient = names
+        await client.call_tool("ensure_project", {"human_key": project_key})
+        registered: list[tuple[str, str]] = []
+        for i in range(3):
+            data = _get_data(
+                await client.call_tool(
+                    "register_agent",
+                    {
+                        "project_key": project_key,
+                        "program": "test-prog",
+                        "model": "test-model",
+                        "task_description": f"agent-{i}",
+                    },
+                )
+            )
+            registered.append((data["name"], data["registration_token"]))
+        (
+            (sender, sender_token),
+            (open_recipient, open_token),
+            (gated_recipient, gated_token),
+        ) = registered
         await client.call_tool(
             "set_contact_policy",
             {
@@ -566,6 +584,7 @@ async def test_broadcast_skips_contact_gated_recipients_without_creating_request
                 "subject": "Broadcast across a contact boundary",
                 "body_md": "Only the open recipient should get this.",
                 "broadcast": True,
+                "sender_token": sender_token,
             },
         )
         data = _get_data(result)
@@ -580,7 +599,11 @@ async def test_broadcast_skips_contact_gated_recipients_without_creating_request
         gated_inbox = _get_list(
             await client.call_tool(
                 "fetch_inbox",
-                {"project_key": project_key, "agent_name": gated_recipient},
+                {
+                    "project_key": project_key,
+                    "agent_name": gated_recipient,
+                    "registration_token": gated_token,
+                },
             )
         )
         assert gated_inbox == [], f"gated recipient should have an empty inbox: {gated_inbox}"
@@ -589,7 +612,11 @@ async def test_broadcast_skips_contact_gated_recipients_without_creating_request
         open_inbox = _get_list(
             await client.call_tool(
                 "fetch_inbox",
-                {"project_key": project_key, "agent_name": open_recipient},
+                {
+                    "project_key": project_key,
+                    "agent_name": open_recipient,
+                    "registration_token": open_token,
+                },
             )
         )
         assert [m["subject"] for m in open_inbox] == ["Broadcast across a contact boundary"]
