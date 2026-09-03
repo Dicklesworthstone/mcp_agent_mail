@@ -20,6 +20,27 @@ __all__ = [
 ]
 
 
+# A husky v9 stub's single effective statement sources the sibling resolver
+# ``h``. These patterns admit the spellings husky itself and hand-rolled
+# equivalents produce: ``.`` or ``source`` (optional ``--``); the resolver
+# directory as ``$(dirname "$0")`` (any quoting of $0, optional ``--``) or as
+# the ``${0%/*}`` parameter expansion husky actually ships; the whole operand
+# bare, double- or single-quoted; optional trailing ``;``. Anything else is a
+# hook body of its own and must NOT be treated as a stub (issue #264).
+_STUB_DOLLAR0 = r'(?:"\$\{?0\}?"|\'\$\{?0\}?\'|\$\{?0\}?)'
+_STUB_DIR = (
+    r'(?:\$\([ \t]*dirname[ \t]+(?:--[ \t]+)?' + _STUB_DOLLAR0 + r'[ \t]*\)'
+    r'|\$\{0%/\*\})'
+)
+_STUB_SOURCE_LINE = (
+    r'^(?:\.|source)[ \t]+(?:--[ \t]+)?'
+    r'(?:"' + _STUB_DIR + r'/h"'
+    r"|'" + _STUB_DIR + r"/h'"
+    r'|' + _STUB_DIR + r'/h)'
+    r'[ \t]*;?[ \t]*$'
+)
+
+
 def _render_chain_runner_script(hook_name: str) -> str:
     """
     Render a Python chain-runner for the given Git hook name.
@@ -28,12 +49,26 @@ def _render_chain_runner_script(hook_name: str) -> str:
     - Runs executables in hooks.d/<hook_name>/* in lexical order.
     - For pre-push, reads STDIN once and forwards it to each child hook.
     - If a <hook_name>.orig exists and is executable, it is invoked last.
+      When the preserved .orig is a husky v9 stub (it sources the sibling
+      resolver ``h``, which derives the tracked hook name from basename($0)),
+      the runner sources ``h`` through /bin/sh with argv0 set to the real
+      hook name. Exec'ing the renamed ``<hook_name>.orig`` directly would
+      make husky look up a non-existent ``.husky/<hook_name>.orig`` and
+      silently skip the user's tracked hook. Only a file that is *nothing
+      but* such a stub is diverted this way; a hand-written hook that also
+      sources ``h`` is exec'd directly so its own body still runs.
+    - On Windows, where CreateProcess cannot honor shebangs, children are
+      dispatched by suffix (``.py`` via ``python``; ``.exe/.com/.bat/.cmd``
+      directly) and everything else — notably a preserved shell-script
+      ``<hook_name>.orig`` — by shebang, through ``python`` or a resolved
+      ``sh`` (PATH first, then git-for-windows' bundled ``sh.exe``).
     - Exits non-zero on the first non-zero child exit code.
     """
     lines: list[str] = [
         "#!/usr/bin/env python3",
         f"# mcp-agent-mail chain-runner ({hook_name})",
         "import os",
+        "import re",
         "import sys",
         "import stat",
         "import subprocess",
@@ -42,6 +77,8 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "HOOK_DIR = Path(__file__).parent",
         f"RUN_DIR = HOOK_DIR / 'hooks.d' / '{hook_name}'",
         f"ORIG = HOOK_DIR / '{hook_name}.orig'",
+        f"HOOK_NAME = '{hook_name}'",
+        "HUSKY_H = HOOK_DIR / 'h'",
         "",
         "def _is_exec(p: Path) -> bool:",
         "    try:",
@@ -65,11 +102,102 @@ def _render_chain_runner_script(hook_name: str) -> str:
         "# Forward Git's hook arguments (e.g. pre-push <remote> <url>) to children.",
         "ARGV = sys.argv[1:]",
         "",
+        "def _win_sh():",
+        "    # Resolve a POSIX shell for shebang scripts on Windows. Git supplies",
+        "    # its own sh when *git* runs the hook, but the hook is also invoked",
+        "    # directly (tests, wrappers, GUI clients) where bare 'sh' may be",
+        "    # absent from PATH, so fall back to git-for-windows' bundled sh.exe.",
+        "    import shutil",
+        "    found = shutil.which('sh')",
+        "    if found:",
+        "        return found",
+        "    try:",
+        "        cp = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, check=False)",
+        "        exec_path = (cp.stdout or '').strip()",
+        "    except Exception:",
+        "        exec_path = ''",
+        "    if exec_path:",
+        "        base = Path(exec_path)",
+        "        for anchor in (base, *base.parents):",
+        "            for rel in (('usr', 'bin', 'sh.exe'), ('bin', 'sh.exe')):",
+        "                cand = anchor.joinpath(*rel)",
+        "                if cand.exists():",
+        "                    return str(cand)",
+        "    return 'sh'",
+        "",
+        "def _read_shebang(path: Path) -> str:",
+        "    try:",
+        "        with open(path, 'rb') as fh:",
+        "            first = fh.readline(256).decode('utf-8', 'ignore').strip()",
+        "    except Exception:",
+        "        return ''",
+        "    return first[2:].strip() if first.startswith('#!') else ''",
+        "",
         "def _run_child(path: Path, * , stdin_bytes=None):",
-        "    # On Windows, prefer 'python' for .py plugins to avoid PATHEXT reliance.",
-        "    if os.name != 'posix' and path.suffix.lower() == '.py':",
-        "        return subprocess.run(['python', str(path), *ARGV], input=stdin_bytes, check=False).returncode",
-        "    return subprocess.run([str(path), *ARGV], input=stdin_bytes, check=False).returncode",
+        "    argv = [str(path), *ARGV]",
+        "    if os.name != 'posix':",
+        "        # Windows CreateProcess runs PE binaries and PATHEXT suffixes only;",
+        "        # shebang scripts (a preserved <hook>.orig, hooks.d shell plugins)",
+        "        # need explicit interpreter dispatch or every commit dies with",
+        "        # WinError 193 (%1 is not a valid Win32 application). Issue #262.",
+        "        suffix = path.suffix.lower()",
+        "        if suffix == '.py':",
+        "            argv = ['python', str(path), *ARGV]",
+        "        elif suffix not in ('.exe', '.com', '.bat', '.cmd'):",
+        "            shebang = _read_shebang(path)",
+        "            if 'python' in shebang:",
+        "                argv = ['python', str(path), *ARGV]",
+        "            else:",
+        "                argv = [_win_sh(), str(path), *ARGV]",
+        "    return subprocess.run(argv, input=stdin_bytes, check=False).returncode",
+        "",
+        f"HUSKY_STUB_LINE_RE = re.compile({_STUB_SOURCE_LINE!r})",
+        "",
+        "def _is_husky_stub(path: Path) -> bool:",
+        "    # husky v9 keeps its hooks in <repo>/.husky/_ next to a resolver",
+        "    # named 'h'; each stub just sources h, and h derives the tracked",
+        "    # hook name from basename($0).",
+        "    #",
+        "    # Divert to the resolver ONLY when the preserved file is nothing",
+        "    # but such a stub: an optional shebang, blank lines, '#' comments,",
+        "    # and a single statement sourcing the sibling 'h'. A hand-written",
+        "    # hook that does real work and ALSO sources 'h' must be exec'd",
+        "    # directly -- diverting it silently discards the user's hook body",
+        "    # (issue #264). Bias to custom whenever unsure: a custom hook that",
+        "    # sources 'h' still reaches the resolver through its own source",
+        "    # line, whereas a dropped body can wave through a commit that the",
+        "    # user's hook would have blocked.",
+        "    if os.name != 'posix' or not HUSKY_H.is_file():",
+        "        return False",
+        "    try:",
+        "        text = path.read_text(encoding='utf-8', errors='ignore')",
+        "    except Exception:",
+        "        return False",
+        "    effective = []",
+        "    for index, raw in enumerate(text.splitlines()):",
+        "        line = raw.strip()",
+        "        if index == 0 and line.startswith('#!'):",
+        "            continue",
+        "        if not line or line.startswith('#'):",
+        "            continue",
+        "        effective.append(line)",
+        "        if len(effective) > 1:",
+        "            return False  # a second statement means a real hook body",
+        "    return bool(effective) and HUSKY_STUB_LINE_RE.match(effective[0]) is not None",
+        "",
+        "def _run_orig(*, stdin_bytes=None):",
+        "    if _is_husky_stub(ORIG):",
+        "        # Source husky's resolver with argv0 = <hooksDir>/<hook name> so",
+        "        # basename($0) is the hook name (not '<hook name>.orig') and it",
+        "        # still resolves and runs the user's tracked hook.",
+        "        argv0 = str(HOOK_DIR / HOOK_NAME)",
+        "        snippet = 'husky_h=\"$1\"; shift; . \"$husky_h\"'",
+        "        return subprocess.run(",
+        "            ['/bin/sh', '-c', snippet, argv0, str(HUSKY_H), *ARGV],",
+        "            input=stdin_bytes,",
+        "            check=False,",
+        "        ).returncode",
+        "    return _run_child(ORIG, stdin_bytes=stdin_bytes)",
         "",
     ]
     if hook_name == "pre-push":
@@ -83,7 +211,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "",
             "# Run the preserved original hook last (POSIX: only if it is executable).",
             "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
-            "    rc = _run_child(ORIG, stdin_bytes=stdin_bytes)",
+            "    rc = _run_orig(stdin_bytes=stdin_bytes)",
             "    if rc != 0:",
             "        sys.exit(rc)",
             "sys.exit(0)",
@@ -97,7 +225,7 @@ def _render_chain_runner_script(hook_name: str) -> str:
             "",
             "# Run the preserved original hook last (POSIX: only if it is executable).",
             "if ORIG.exists() and (os.name != 'posix' or _is_exec(ORIG)):",
-            "    rc = _run_child(ORIG)",
+            "    rc = _run_orig()",
             "    if rc != 0:",
             "        sys.exit(rc)",
             "sys.exit(0)",

@@ -13,6 +13,7 @@ Reference: mcp_agent_mail-c2x
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from mcp_agent_mail.storage import (
     collect_lock_status,
     ensure_archive,
     ensure_archive_root,
+    get_lock_telemetry,
     heal_archive_locks,
     write_agent_profile,
 )
@@ -455,6 +457,26 @@ class TestAsyncFileLock:
 
         assert lock._cleanup_if_stale() is False
         assert lock_path.exists()
+
+    def test_active_lock_registry_reclaims_released_locks(self, tmp_path):
+        """Regression for #244: the telemetry registry must not pin lock instances.
+
+        With a plain strong-ref dict, every AsyncFileLock's refcount stayed >= 1,
+        so __del__ never fired and `active_locks` grew without bound. With a
+        WeakValueDictionary the GC reclaims dropped locks and the count returns to
+        baseline.
+        """
+        gc.collect()
+        baseline = get_lock_telemetry()["active_locks"]
+
+        locks = [AsyncFileLock(tmp_path / f"reg{i}.lock") for i in range(50)]
+        assert get_lock_telemetry()["active_locks"] >= baseline + 50
+
+        del locks
+        gc.collect()
+        # All 50 had no other references, so they must be reclaimed; the registry
+        # drops back to (at most) the baseline rather than leaking the 50.
+        assert get_lock_telemetry()["active_locks"] <= baseline
 
     def test_file_lock_cleans_old_lock_without_metadata(self, tmp_path):
         """Age-based cleanup still removes old lock files without metadata."""

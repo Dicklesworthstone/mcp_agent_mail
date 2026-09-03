@@ -198,6 +198,245 @@ async def test_guard_install_relative_hookspath(isolated_env, tmp_path: Path):
 
 
 # =============================================================================
+# Husky v9 hooksPath Tests (tracked hook must survive the .orig rename)
+# =============================================================================
+
+
+def _write_husky_v9_layout(
+    repo: Path,
+    tracked_body: str,
+    *,
+    stub_body: str | None = None,
+) -> tuple[Path, Path]:
+    """Create a minimal husky v9 layout: .husky/_/{h,pre-commit} + tracked hook.
+
+    Mirrors husky v9's real resolver: ``h`` derives the tracked hook name from
+    basename($0) and runs ``.husky/<name>`` if present, else exits 0.
+
+    ``stub_body`` overrides ``.husky/_/pre-commit`` — the file install_guard
+    preserves as ``pre-commit.orig`` — so tests can plant a hand-written hook
+    in the slot where a pure husky stub normally sits.
+    """
+    husky_dir = repo / ".husky"
+    runtime_dir = husky_dir / "_"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+    resolver = runtime_dir / "h"
+    resolver.write_text(
+        "#!/usr/bin/env sh\n"
+        'hook_name="${0##*/}"\n'
+        'tracked="${0%/*/*}/$hook_name"\n'
+        '[ ! -f "$tracked" ] && exit 0\n'
+        'sh -e "$tracked" "$@"\n'
+        "exit $?\n",
+        encoding="utf-8",
+    )
+    resolver.chmod(0o755)
+
+    stub = runtime_dir / "pre-commit"
+    stub.write_text(
+        stub_body if stub_body is not None else '#!/usr/bin/env sh\n. "$(dirname "$0")/h"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+    tracked = husky_dir / "pre-commit"
+    tracked.write_text(tracked_body, encoding="utf-8")
+    tracked.chmod(0o755)
+    return runtime_dir, tracked
+
+
+@pytest.mark.asyncio
+async def test_guard_install_husky_v9_still_runs_tracked_hook(isolated_env, tmp_path: Path):
+    """After install_guard on a husky v9 repo, the tracked hook must still run.
+
+    install_guard renames the husky stub to pre-commit.orig. Exec'ing that
+    renamed stub gives husky's resolver basename($0) == 'pre-commit.orig',
+    so it looks up .husky/pre-commit.orig, misses, and exits 0 -- silently
+    skipping the user's tracked hook. The chain-runner must instead invoke
+    the resolver with argv0 presenting the real hook name.
+    """
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    runtime_dir, _tracked = _write_husky_v9_layout(
+        repo, "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n"
+    )
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-test", repo)
+
+    # Stub was preserved as .orig in the husky runtime dir
+    assert (runtime_dir / "pre-commit.orig").exists()
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "HUSKY_TRACKED_RAN" in result.stdout, (
+        f"tracked husky hook did not run: exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_install_husky_v9_propagates_tracked_hook_failure(isolated_env, tmp_path: Path):
+    """A failing tracked husky hook must fail the whole chain-runner."""
+    settings = get_settings()
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+
+    _write_husky_v9_layout(repo, "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\nexit 23\n")
+    _git_config(repo, "core.hooksPath", ".husky/_")
+
+    hook_path = await install_guard(settings, "husky-v9-fail-test", repo)
+
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+    assert result.returncode != 0
+
+
+def _husky_repo(tmp_path: Path, tracked_body: str, stub_body: str) -> Path:
+    """A git repo with a husky v9 layout, custom stub slot, and hooksPath set."""
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _init_git_repo(repo)
+    _write_husky_v9_layout(repo, tracked_body, stub_body=stub_body)
+    _git_config(repo, "core.hooksPath", ".husky/_")
+    return repo
+
+
+TRACKED_ECHO = "#!/usr/bin/env sh\necho HUSKY_TRACKED_RAN\n"
+
+
+@pytest.mark.asyncio
+async def test_guard_diverts_real_husky_param_expansion_stub(isolated_env, tmp_path: Path):
+    """husky v9's actual stub spelling (``. "${0%/*}/h"``) is still diverted.
+
+    Issue #264's fix must not over-tighten: the detector has to keep matching
+    the resolver-source spellings husky really emits (parameter expansion,
+    comments, blank lines), or the original silent-skip bug returns.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        '#!/usr/bin/env sh\n\n# husky init\n. "${0%/*}/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-param-expansion", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_guard_diverts_source_keyword_with_semicolon(isolated_env, tmp_path: Path):
+    """``source "$(dirname -- "$0")/h";`` is still a pure stub."""
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        '#!/usr/bin/env sh\nsource "$(dirname -- "$0")/h";\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-source-kw", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0
+    assert "HUSKY_TRACKED_RAN" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_guard_runs_hybrid_hook_body_that_also_sources_h(isolated_env, tmp_path: Path):
+    """Issue #264: a hand-written .orig that also sources ``h`` keeps its body.
+
+    Under the old ``'/h"' in text`` substring test this hook was misclassified
+    as a pure stub, diverted to the resolver, and its body silently discarded.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo CUSTOM_BODY_RAN\n"
+        'touch "$(git rev-parse --show-toplevel)/CUSTOM_BODY_MARKER"\n'
+        '. "$(dirname "$0")/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-hybrid", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "CUSTOM_BODY_RAN" in result.stdout, (
+        f"custom hook body was silently discarded: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    assert (repo / "CUSTOM_BODY_MARKER").exists(), "custom body side effect missing"
+
+
+@pytest.mark.asyncio
+async def test_guard_blocking_hybrid_hook_still_blocks_commit(isolated_env, tmp_path: Path):
+    """The sharp end of #264: a custom gate that should block must block.
+
+    Before the fix, the misclassified hook was diverted, its ``exit 42`` never
+    ran, and a commit its own gate rejected sailed through with exit 0.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo CUSTOM_GATE_RAN\n"
+        "exit 42\n"
+        '. "$(dirname "$0")/h"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-blocking-gate", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert "CUSTOM_GATE_RAN" in result.stdout, (
+        f"custom gate skipped: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert result.returncode == 42, (
+        f"custom gate failure did not propagate: exit={result.returncode} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_guard_mere_textual_mention_of_resolver_is_custom(isolated_env, tmp_path: Path):
+    """A hook that merely mentions ``.../h"`` in a string is not a stub.
+
+    The old substring test fired on any occurrence of ``/h"`` anywhere in the
+    file — even inside an echo or a comment-like string — discarding hooks
+    that never source the resolver at all.
+    """
+    settings = get_settings()
+    repo = _husky_repo(
+        tmp_path,
+        TRACKED_ECHO,
+        "#!/usr/bin/env sh\n"
+        "echo 'resolver lives at .husky/_/h\" if you need it'\n"
+        'touch "$(git rev-parse --show-toplevel)/MENTION_MARKER"\n',
+    )
+
+    hook_path = await install_guard(settings, "husky-264-mention", repo)
+    result = _run_hook(hook_path, repo, {"AGENT_NAME": "TestAgent", "WORKTREES_ENABLED": "1"})
+    assert result.returncode == 0, (
+        f"chain-runner failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert (repo / "MENTION_MARKER").exists(), "custom body was diverted away"
+    assert "HUSKY_TRACKED_RAN" not in result.stdout, (
+        "a non-stub hook must not be routed through husky's resolver"
+    )
+
+
+# =============================================================================
 # Hook Preservation Tests
 # =============================================================================
 
@@ -590,3 +829,164 @@ async def test_chain_runner_executes_plugins(isolated_env, tmp_path: Path):
     # Plugin should have run
     assert marker_file.exists()
     assert marker_file.read_text() == "ran"
+
+
+# =============================================================================
+# Windows chain-runner dispatch (issue #262: preserved .orig must not be
+# exec'd bare -- CreateProcess cannot honor shebangs -> WinError 193)
+# =============================================================================
+
+
+class _RecordingRun:
+    """Stand-in for subprocess.run that records argv instead of spawning."""
+
+    def __init__(self, git_exec_path: str = ""):
+        self.calls: list[list[str]] = []
+        self._git_exec_path = git_exec_path
+
+    def __call__(self, argv, **kwargs):
+        argv = [str(a) for a in argv]
+        if argv[:2] == ["git", "--exec-path"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=self._git_exec_path, stderr="")
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+
+def _exec_chain_runner(hook_path: Path, script_text: str, *, os_name: str | None = None) -> None:
+    """Execute the rendered chain-runner in-process (it ends with sys.exit).
+
+    ``os_name`` simulates another platform for the script only: its
+    ``import os`` is served a shim whose ``name`` differs, while pathlib and
+    everything else keep using the real ``os`` (patching ``os.name`` globally
+    would make ``Path()`` instantiate WindowsPath and blow up on POSIX).
+    """
+    import builtins
+    import types
+
+    import pytest as _pytest
+
+    exec_globals: dict = {"__file__": str(hook_path), "__name__": "__main__"}
+    if os_name is not None:
+        os_shim = types.SimpleNamespace(name=os_name)
+        real_import = builtins.__import__
+
+        def _import(name, *args, **kwargs):
+            if name == "os":
+                return os_shim
+            return real_import(name, *args, **kwargs)
+
+        exec_globals["__builtins__"] = {**vars(builtins), "__import__": _import}
+
+    with _pytest.raises(SystemExit) as excinfo:
+        exec(  # deliberately running the rendered hook under test
+            compile(script_text, str(hook_path), "exec"),
+            exec_globals,
+        )
+    assert excinfo.value.code in (0, None)
+
+
+def _make_windows_hook_layout(tmp_path: Path) -> Path:
+    """hooks dir with a .py plugin, a shebang shell plugin, and a sh .orig."""
+    hooks = tmp_path / "hooks"
+    run_dir = hooks / "hooks.d" / "pre-commit"
+    run_dir.mkdir(parents=True)
+    (run_dir / "10-plugin.py").write_text("print('py plugin')\n", encoding="utf-8")
+    (run_dir / "20-plugin").write_text("#!/usr/bin/env python3\nprint('x')\n", encoding="utf-8")
+    orig = hooks / "pre-commit.orig"
+    orig.write_text("#!/usr/bin/env sh\necho original hook\n", encoding="utf-8")
+    return hooks
+
+
+def test_chain_runner_windows_dispatches_shebang_orig_via_sh(tmp_path: Path, monkeypatch):
+    """On Windows a preserved shell-script .orig must run through sh, not bare.
+
+    Regression test for issue #262: the runner special-cased only ``.py`` on
+    Windows, so ``pre-commit.orig`` (suffix ``.orig``, ``#!/usr/bin/env sh``)
+    was passed bare to CreateProcess and every commit failed with WinError 193.
+    """
+    import shutil
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+    recorder = _RecordingRun()
+
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(shutil, "which", lambda _cmd: "C:/Git/usr/bin/sh.exe")
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"), os_name="nt")
+
+    by_target = {call[-1].replace("\\", "/").rsplit("/", 1)[-1]: call for call in recorder.calls}
+    # .py plugin dispatched via python
+    assert by_target["10-plugin.py"][0] == "python"
+    # extensionless plugin with a python shebang dispatched via python
+    assert by_target["20-plugin"][0] == "python"
+    # the preserved sh-shebang .orig dispatched via sh -- never invoked bare
+    assert by_target["pre-commit.orig"][0] == "C:/Git/usr/bin/sh.exe"
+
+
+def test_chain_runner_windows_resolves_bundled_git_sh(tmp_path: Path, monkeypatch):
+    """With no sh on PATH, the runner finds git-for-windows' bundled sh.exe."""
+    import shutil
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+
+    # Fake git-for-windows install tree: <root>/mingw64/libexec/git-core
+    # as --exec-path, sh.exe at <root>/usr/bin/sh.exe.
+    git_root = tmp_path / "Git"
+    exec_path = git_root / "mingw64" / "libexec" / "git-core"
+    exec_path.mkdir(parents=True)
+    bundled_sh = git_root / "usr" / "bin" / "sh.exe"
+    bundled_sh.parent.mkdir(parents=True)
+    bundled_sh.write_text("", encoding="utf-8")
+
+    recorder = _RecordingRun(git_exec_path=str(exec_path))
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"), os_name="nt")
+
+    orig_calls = [c for c in recorder.calls if c[-1].endswith("pre-commit.orig")]
+    assert orig_calls, f"orig was never invoked: {recorder.calls}"
+    assert orig_calls[0][0] == str(bundled_sh)
+
+
+def test_chain_runner_posix_dispatch_unchanged(tmp_path: Path, monkeypatch):
+    """On POSIX the runner still execs children bare (kernel honors shebangs)."""
+    import sys as _sys
+
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    hooks = _make_windows_hook_layout(tmp_path)
+    hook_path = hooks / "pre-commit"
+    orig = hooks / "pre-commit.orig"
+    orig.chmod(0o755)
+    for p in (hooks / "hooks.d" / "pre-commit").iterdir():
+        p.chmod(0o755)
+
+    recorder = _RecordingRun()
+    monkeypatch.setattr(subprocess, "run", recorder)
+    monkeypatch.setattr(_sys, "argv", [str(hook_path)])
+
+    _exec_chain_runner(hook_path, _render_chain_runner_script("pre-commit"))
+
+    orig_calls = [c for c in recorder.calls if c[-1].endswith("pre-commit.orig")]
+    assert orig_calls == [[str(orig)]]
+
+
+def test_prepush_chain_runner_shares_windows_dispatch():
+    """pre-push renders the same runner, so it gets the same Windows fix."""
+    from mcp_agent_mail.guard import _render_chain_runner_script
+
+    script = _render_chain_runner_script("pre-push")
+    assert "_read_shebang" in script
+    assert "_win_sh" in script
+    assert "'.exe', '.com', '.bat', '.cmd'" in script

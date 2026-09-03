@@ -15,16 +15,35 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import litellm
 import structlog
 from decouple import Config as DecoupleConfig, RepositoryEnv
-from litellm.types.caching import LiteLLMCacheType
 
 from .config import get_settings
 
 _init_lock = asyncio.Lock()
 _initialized: bool = False
 _logger = structlog.get_logger(__name__)
+_litellm_module: Any = None
+
+
+def _litellm() -> Any:
+    """Import litellm on first use.
+
+    litellm's import graph (openai types, proxy pydantic models, ...) costs
+    10-15 seconds of wall time, which used to be paid at ``import
+    mcp_agent_mail.app`` time — i.e. by every CLI invocation and by
+    ``serve-stdio``/``serve-http`` startup — even though most deployments never
+    make an LLM call. Deferring the import keeps server startup fast (GH#267 /
+    GH#268: stdio conformance harnesses timed out waiting >10s for the first
+    response) while leaving LLM behavior unchanged: the first completion call
+    pays the one-time import instead.
+    """
+    global _litellm_module
+    if _litellm_module is None:
+        import litellm
+
+        _litellm_module = litellm
+    return _litellm_module
 
 
 @dataclass(slots=True, frozen=True)
@@ -36,7 +55,7 @@ class LlmOutput:
 
 
 def _existing_callbacks() -> list[Any]:
-    callbacks = getattr(litellm, "success_callback", []) or []
+    callbacks = getattr(_litellm(), "success_callback", []) or []
     return list(callbacks)
 
 
@@ -78,7 +97,7 @@ def _setup_callbacks() -> None:
         callbacks: list[Any] = [*_existing_callbacks(), _on_success]
         # Attribute exists on modern LiteLLM; fall back safely if absent
         with contextlib.suppress(Exception):
-            litellm.success_callback = callbacks
+            _litellm().success_callback = callbacks
 
 
 async def _ensure_initialized() -> None:
@@ -99,6 +118,8 @@ async def _ensure_initialized() -> None:
         # Enable cache globally (in-memory or Redis) using LiteLLM's API
         if settings.llm.cache_enabled:
             with contextlib.suppress(Exception):
+                from litellm.types.caching import LiteLLMCacheType
+
                 backend = (getattr(settings.llm, "cache_backend", "local") or "local").lower()
                 if backend == "redis" and getattr(settings.llm, "cache_redis_url", ""):
                     parsed = urlparse(settings.llm.cache_redis_url)
@@ -108,7 +129,7 @@ async def _ensure_initialized() -> None:
                     try:
                         # Fast DNS sanity check to avoid noisy connection errors on placeholders
                         socket.gethostbyname(host)
-                        litellm.enable_cache(
+                        _litellm().enable_cache(
                             type=LiteLLMCacheType.REDIS,
                             host=str(host),
                             port=str(port),
@@ -116,9 +137,9 @@ async def _ensure_initialized() -> None:
                         )
                     except Exception:
                         _logger.info("litellm.cache.redis_unavailable_fallback_local", host=host, port=port)
-                        litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
+                        _litellm().enable_cache(type=LiteLLMCacheType.LOCAL)
                 else:
-                    litellm.enable_cache(type=LiteLLMCacheType.LOCAL)
+                    _litellm().enable_cache(type=LiteLLMCacheType.LOCAL)
 
         _setup_callbacks()
         _initialized = True
@@ -182,7 +203,7 @@ async def complete_system_user(system: str, user: str, *, model: Optional[str] =
     ]
 
     def _call_completion(m: str) -> Any:
-        return litellm.completion(model=m, messages=messages, temperature=temp, max_tokens=mtoks)
+        return _litellm().completion(model=m, messages=messages, temperature=temp, max_tokens=mtoks)
 
     resp: Any
     try:

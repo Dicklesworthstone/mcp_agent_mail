@@ -308,7 +308,7 @@ This creates a feedback loop where graph intelligence drives coordination.
 
 ## Core ideas (at a glance)
 
-- HTTP-only FastMCP server (Streamable HTTP). No SSE, no STDIO.
+- FastMCP server over Streamable HTTP (primary transport; no SSE). A STDIO transport (`serve-stdio`) is also available for direct CLI integration.
 - Dual persistence model:
   - Human-readable markdown in a per-project Git repo for every canonical message and per-recipient inbox/outbox copy
   - SQLite with FTS5 for fast search, directory queries, and file reservations/leases
@@ -2100,7 +2100,7 @@ Common variables you may set:
 | `ACK_ESCALATION_CLAIM_TTL_SECONDS` | `3600` | TTL for escalation file reservations |
 | `ACK_ESCALATION_CLAIM_EXCLUSIVE` | `false` | Make escalation file reservation exclusive |
 | `ACK_ESCALATION_CLAIM_HOLDER_NAME` |  | Ops agent name to own escalation file reservations |
-| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging |
+| `CONTACT_ENFORCEMENT_ENABLED` | `true` | Enforce contact policy before messaging. When `false`, explicitly addressed cross-project recipients (`project:X#name` / `name@project`) also no longer require an approved contact link; `block_all` is still honored |
 | `CONTACT_AUTO_TTL_SECONDS` | `86400` | TTL for in-session auto-approved contact links and the "recent contact" recency window (1 day) |
 | `CONTACT_PENDING_TTL_SECONDS` | `604800` | TTL for the *pending* contact-request fallback created by `send_message(auto_contact_if_blocked=True)` when in-session auto-approval is not possible — i.e. how long an async human approver has to respond (7 days) |
 | `CONTACT_AUTO_RETRY_ENABLED` | `true` | Auto-retry contact requests on policy violations |
@@ -2161,7 +2161,7 @@ Connect with your MCP client using the HTTP (Streamable HTTP) transport on the c
 
 ## Design choices and rationale
 
-- **HTTP-only FastMCP**: Streamable HTTP is the modern remote transport; STDIO is not exposed here by design
+- **Streamable HTTP first**: the modern remote transport is the primary deployment mode; `serve-stdio` is also provided for clients that prefer a local STDIO server
 - **Git + Markdown**: Human-auditable, diffable artifacts that fit developer workflows (inbox/outbox mental model)
 - **SQLite + FTS5**: Efficient indexing/search with minimal ops footprint
 - **Advisory file reservations**: Make intent explicit and reviewable; optional guard enforces reservations at commit time
@@ -2283,6 +2283,7 @@ Output format (all tools/resources):
 | `register_agent` | `register_agent(project_key: str, program: str, model: str, name?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Creates/updates agent; writes profile to Git |
 | `whois` | `whois(project_key: str, agent_name: str, include_recent_commits?: bool, commit_limit?: int)` | Agent profile dict | Enriched profile for one agent (optionally includes recent commits) |
 | `create_agent_identity` | `create_agent_identity(project_key: str, program: str, model: str, name_hint?: str, task_description?: str, attachments_policy?: str)` | Agent profile dict | Always creates a new unique agent |
+| `sweep_stale_agents` | `sweep_stale_agents(project_key: str, agent_name: str, threshold_seconds?: int, require_no_active_reservations?: bool, registration_token?: str)` | `{project_key, requested_by, threshold_seconds, retired[], retired_agents[], count}` | Authenticated project-scoped retirement; caller is excluded and active reservations block retirement by default |
 | `send_message` | `send_message(project_key: str, sender_name: str, to: list[str], subject: str, body_md: str, cc?: list[str], bcc?: list[str], attachment_paths?: list[str], convert_images?: bool, importance?: str, ack_required?: bool, thread_id?: str, auto_contact_if_blocked?: bool, sender_token?: str)` | `{deliveries: list, count: int, attachments?}` | Writes canonical + inbox/outbox, converts images. Non-absolute `attachment_paths` resolve relative to the project archive root. |
 | `reply_message` | `reply_message(project_key: str, message_id: int, sender_name: str, body_md: str, to?: list[str], cc?: list[str], bcc?: list[str], subject_prefix?: str, sender_token?: str)` | `{thread_id, reply_to, deliveries: list, count: int, attachments?}` | Preserves/creates thread, inherits flags |
 | `request_contact` | `request_contact(project_key: str, from_agent: str, to_agent: str, to_project?: str, reason?: str, ttl_seconds?: int, registration_token?: str)` | Contact link dict | Request permission to message another agent |

@@ -6,9 +6,43 @@ import pytest
 from fastmcp import Client
 
 from mcp_agent_mail.app import build_mcp_server
-from mcp_agent_mail.config import get_settings
+from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import ensure_schema, get_db_health_status, get_session
 from mcp_agent_mail.models import Agent, AgentLink, Project
+
+
+async def _seed_two_projects_no_link() -> None:
+    """Create Backend/Frontend projects with one agent each and NO AgentLink."""
+    await ensure_schema()
+    async with get_session() as s:
+        backend = Project(slug="backend", human_key="Backend")
+        frontend = Project(slug="frontend", human_key="Frontend")
+        s.add_all([backend, frontend])
+        await s.commit()
+        await s.refresh(backend)
+        await s.refresh(frontend)
+        assert backend.id is not None and frontend.id is not None
+        s.add_all(
+            [
+                Agent(
+                    project_id=backend.id,
+                    name="RedFalcon",
+                    program="codex",
+                    model="gpt-5",
+                    task_description="",
+                    registration_token="redfalcon-token",
+                ),
+                Agent(
+                    project_id=frontend.id,
+                    name="GoldHarbor",
+                    program="codex",
+                    model="gpt-5",
+                    task_description="",
+                    registration_token="goldharbor-token",
+                ),
+            ]
+        )
+        await s.commit()
 
 
 @pytest.mark.asyncio
@@ -147,6 +181,117 @@ async def test_external_cross_project_routing(isolated_env):
         storage_root = Path(get_settings().storage.root).expanduser().resolve()
         ops_dir = storage_root / "projects" / "ops" / "messages"
         assert any(ops_dir.rglob("*.md"))
+
+
+@pytest.mark.asyncio
+async def test_cross_project_send_requires_link_by_default(isolated_env):
+    """With enforcement on (default), explicit cross-project sends still need a link."""
+    await _seed_two_projects_no_link()
+    server = build_mcp_server()
+    async with Client(server) as client:
+        res = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "Backend",
+                "sender_name": "RedFalcon",
+                "sender_token": "redfalcon-token",
+                "to": ["project:frontend#GoldHarbor"],
+                "subject": "Cross",
+                "body_md": "hello",
+            },
+            raise_on_error=False,
+        )
+        deliveries = [] if res.is_error else (res.data.get("deliveries") or [])
+        assert not any(d.get("project") == "Frontend" for d in deliveries), (
+            "cross-project delivery must not succeed without an approved link "
+            "while CONTACT_ENFORCEMENT_ENABLED=true"
+        )
+
+
+@pytest.mark.asyncio
+async def test_cross_project_send_and_reply_without_link_when_enforcement_disabled(
+    isolated_env, monkeypatch
+):
+    """CONTACT_ENFORCEMENT_ENABLED=false relaxes the cross-project link requirement.
+
+    Regression for issue #257: with enforcement disabled, explicitly addressed
+    cross-project recipients should be deliverable without an AgentLink
+    handshake, for both send_message and reply_message.
+    """
+    monkeypatch.setenv("CONTACT_ENFORCEMENT_ENABLED", "false")
+    clear_settings_cache()
+    try:
+        await _seed_two_projects_no_link()
+        server = build_mcp_server()
+        async with Client(server) as client:
+            sent = await client.call_tool(
+                "send_message",
+                {
+                    "project_key": "Backend",
+                    "sender_name": "RedFalcon",
+                    "sender_token": "redfalcon-token",
+                    "to": ["project:frontend#GoldHarbor"],
+                    "subject": "Cross",
+                    "body_md": "hello",
+                },
+            )
+            deliveries = sent.data.get("deliveries") or []
+            assert any(d.get("project") == "Frontend" for d in deliveries)
+            message_id = deliveries[0]["payload"]["id"]
+
+            reply = await client.call_tool(
+                "reply_message",
+                {
+                    "project_key": "Frontend",
+                    "message_id": message_id,
+                    "sender_name": "GoldHarbor",
+                    "sender_token": "goldharbor-token",
+                    "body_md": "ack",
+                },
+            )
+            reply_deliveries = reply.data.get("deliveries") or []
+            assert any(d.get("project") == "Backend" for d in reply_deliveries)
+    finally:
+        clear_settings_cache()
+
+
+@pytest.mark.asyncio
+async def test_cross_project_send_enforcement_disabled_still_honors_block_all(
+    isolated_env, monkeypatch
+):
+    """Even with enforcement disabled, block_all recipients stay unreachable."""
+    monkeypatch.setenv("CONTACT_ENFORCEMENT_ENABLED", "false")
+    clear_settings_cache()
+    try:
+        await _seed_two_projects_no_link()
+        async with get_session() as s:
+            from sqlalchemy import select as _select
+
+            agent = (
+                await s.execute(_select(Agent).where(Agent.name == "GoldHarbor"))
+            ).scalars().first()
+            assert agent is not None
+            agent.contact_policy = "block_all"
+            s.add(agent)
+            await s.commit()
+
+        server = build_mcp_server()
+        async with Client(server) as client:
+            res = await client.call_tool(
+                "send_message",
+                {
+                    "project_key": "Backend",
+                    "sender_name": "RedFalcon",
+                    "sender_token": "redfalcon-token",
+                    "to": ["project:frontend#GoldHarbor"],
+                    "subject": "Cross",
+                    "body_md": "hello",
+                },
+                raise_on_error=False,
+            )
+            assert res.is_error, "block_all recipient must remain blocked"
+    finally:
+        clear_settings_cache()
 
 
 @pytest.mark.asyncio

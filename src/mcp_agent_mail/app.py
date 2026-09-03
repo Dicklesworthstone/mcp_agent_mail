@@ -3637,6 +3637,24 @@ async def _find_agent_optional(project: Project, name: str | None) -> Agent | No
         return result.scalars().first()
 
 
+async def _resolve_cross_project_recipient_unenforced(
+    target_project: Project,
+    display_value: str,
+    canonical: str,
+) -> Agent | None:
+    """Resolve an explicitly addressed cross-project recipient by name alone.
+
+    Only used when CONTACT_ENFORCEMENT_ENABLED=false: with contact enforcement
+    globally disabled, an explicit ``project:X#name`` (or ``name@project``)
+    recipient should not additionally require an approved AgentLink. Callers
+    must still honor the recipient's ``block_all`` contact policy.
+    """
+    agent = await _find_agent_optional(target_project, display_value)
+    if agent is None and canonical and canonical != display_value:
+        agent = await _find_agent_optional(target_project, canonical)
+    return agent
+
+
 async def _ensure_agent_registration_token(
     agent: Agent,
     *,
@@ -4121,6 +4139,8 @@ async def sweep_stale_agents(
     *,
     threshold_seconds: int,
     project_id: Optional[int] = None,
+    exclude_agent_id: Optional[int] = None,
+    require_no_active_reservations: bool = False,
     now: Optional[datetime] = None,
 ) -> list[dict[str, Any]]:
     """Mark agents inactive for `threshold_seconds` as retired.
@@ -4137,6 +4157,9 @@ async def sweep_stale_agents(
     - Skips agents that are already retired.
     - Skips agents whose `last_active_ts` is within the threshold.
     - Optionally scopes to a single project_id.
+    - Optionally excludes one agent (used by the on-demand tool so callers
+      cannot retire their own authenticated identity).
+    - Optionally skips agents with unexpired file reservations.
 
     Returns one dict per retired agent, with project/agent identifiers
     plus the `last_active_ts` that triggered retirement, so the caller
@@ -4149,13 +4172,30 @@ async def sweep_stale_agents(
     naive_now = _naive_utc(current)
 
     retired: list[dict[str, Any]] = []
-    async with get_session() as session:
+    # BEGIN IMMEDIATE serializes the optional active-reservation check with
+    # retirement. Without it, a reservation could be created after the check
+    # but before the agent is retired, violating the caller's safety gate.
+    async with get_immediate_session() as session:
         stmt = select(Agent, Project).join(Project, cast(Any, Agent.project_id) == Project.id).where(
             cast(Any, Agent.retired_at).is_(None),
             cast(Any, Agent.last_active_ts) < cutoff_naive,
         )
         if project_id is not None:
             stmt = stmt.where(cast(Any, Agent.project_id) == project_id)
+        if exclude_agent_id is not None:
+            stmt = stmt.where(cast(Any, Agent.id) != exclude_agent_id)
+        if require_no_active_reservations:
+            active_reservation = (
+                select(FileReservation.id)
+                .where(
+                    cast(Any, FileReservation.agent_id) == Agent.id,
+                    cast(Any, FileReservation.released_ts).is_(None),
+                    cast(Any, FileReservation.expires_ts) > naive_now,
+                )
+                .correlate(Agent)
+            )
+            stmt = stmt.where(~exists(active_reservation))
+        stmt = stmt.order_by(cast(Any, Project.id), cast(Any, Agent.id))
         result = await session.execute(stmt)
         candidates: list[tuple[Agent, Project]] = [
             cast(tuple[Agent, Project], row) for row in result.all()
@@ -4194,7 +4234,7 @@ async def _expire_stale_file_reservations(
     if project is None:
         return []
 
-    expired_pairs: list[tuple[FileReservation, Agent]] = []
+    expired_pairs: list[tuple[FileReservation, Optional[Agent]]] = []
     # Release any entries whose TTL has already elapsed.
     # Use BEGIN IMMEDIATE so the release is immediately visible to
     # subsequent reserve calls on other connections (#130).
@@ -4446,6 +4486,7 @@ async def _list_inbox(
             select(
                 Message,
                 MessageRecipient.kind,
+                MessageRecipient.read_ts,
                 sender_alias.name,
                 sender_project_alias.id,
                 sender_project_alias.human_key,
@@ -4480,7 +4521,7 @@ async def _list_inbox(
         result = await session.execute(stmt)
         rows = result.all()
     messages: list[dict[str, Any]] = []
-    for message, recipient_kind, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
+    for message, recipient_kind, recipient_read_ts, sender_name, sender_project_id, sender_project_human_key, sender_project_slug in rows:
         payload = _message_to_dict(message, include_body=include_bodies)
         _apply_sender_identity(
             payload,
@@ -4491,6 +4532,10 @@ async def _list_inbox(
             sender_project_slug=sender_project_slug,
         )
         payload["kind"] = recipient_kind
+        # Issue #254: the default inbox view deliberately includes read mail
+        # (fetching never consumes the inbox), so expose the per-recipient
+        # read state on each row to keep read vs unread distinguishable.
+        payload["read_at"] = _iso(recipient_read_ts) if recipient_read_ts else None
         messages.append(payload)
     return messages
 
@@ -5000,6 +5045,48 @@ async def _update_recipient_timestamp(
         return existing[0]
 
 
+# Minimum age (seconds) of an agent's stored `last_active_ts` before an
+# authenticated call refreshes it again. Keeps hot polling loops (e.g. a
+# fetch_inbox poll every few seconds) from turning every tool call into an
+# extra write, while still keeping the timestamp fresh enough for activity
+# filters that operate at day granularity.
+_ACTIVITY_TOUCH_THROTTLE_SECONDS = 60
+
+
+async def _touch_agent_activity(agent: Agent) -> None:
+    """Refresh ``last_active_ts`` for an agent-initiated, authenticated call.
+
+    Issue #255: mail-only agents (long-lived orchestrator identities that
+    mostly send, fetch, and acknowledge mail) must not go stale in discovery
+    while they are actively communicating. Sending already bumps the sender in
+    `_create_message`; this helper covers every other authenticated operation
+    (fetch_inbox, mark_message_read, acknowledge_message, ...) from the shared
+    authentication path, so "activity" means any authenticated tool call, not
+    just tool calls that happen to write a message row.
+
+    Throttled: skips the write when the stored timestamp is already fresher
+    than `_ACTIVITY_TOUCH_THROTTLE_SECONDS`. Best-effort: failures never break
+    the calling tool.
+    """
+    if agent.id is None:
+        return
+    now = _naive_utc()
+    last = agent.last_active_ts
+    if last is not None:
+        with suppress(TypeError):
+            if (now - last).total_seconds() < _ACTIVITY_TOUCH_THROTTLE_SECONDS:
+                return
+    with suppress(Exception):
+        async with get_session() as session:
+            await session.execute(
+                update(Agent)
+                .where(cast(Any, Agent.id) == agent.id)
+                .values(last_active_ts=now)
+            )
+            await session.commit()
+        agent.last_active_ts = now
+
+
 def build_mcp_server() -> FastMCP:
     """Create and configure the FastMCP server instance."""
     settings: Settings = get_settings()
@@ -5153,6 +5240,9 @@ def build_mcp_server() -> FastMCP:
         agent = await _get_agent(project, agent_name)
         if _session_is_bound_to_agent(ctx, project, agent):
             _bind_session_agent(ctx, project, agent)
+            # Issue #255: any authenticated, self-initiated call counts as
+            # activity so mail-only agents stay visible to activity filters.
+            await _touch_agent_activity(agent)
             return agent
 
         stored_token = (agent.registration_token or "").strip()
@@ -5192,6 +5282,7 @@ def build_mcp_server() -> FastMCP:
                 _wi = await _get_window_identity(project, _wi_uuid)
                 if _wi and _wi.display_name == agent.name:
                     _bind_session_agent(ctx, project, agent)
+                    await _touch_agent_activity(agent)
                     return agent
             raise ToolExecutionError(
                 "AUTHENTICATION_REQUIRED",
@@ -5211,6 +5302,7 @@ def build_mcp_server() -> FastMCP:
             )
 
         _bind_session_agent(ctx, project, agent)
+        await _touch_agent_activity(agent)
         return agent
 
     async def _resolve_authenticated_agent(
@@ -5234,6 +5326,7 @@ def build_mcp_server() -> FastMCP:
 
         agent = await _resolve_session_agent_for_project(ctx, project)
         if agent is not None:
+            await _touch_agent_activity(agent)
             return agent
 
         raise ToolExecutionError(
@@ -6112,6 +6205,61 @@ def build_mcp_server() -> FastMCP:
             "status": "retired",
             "agent_name": agent_name,
             "project_key": project_key,
+        }
+
+    @mcp.tool(
+        name="sweep_stale_agents",
+        description=(
+            "Retire abandoned agents in the caller's project using the server's conservative inactivity heuristic. "
+            "The caller is never retired, the threshold has a 60-second floor, and active file reservations block "
+            "retirement by default."
+        ),
+    )
+    @_instrument_tool(
+        "sweep_stale_agents",
+        cluster=CLUSTER_IDENTITY,
+        capabilities={"identity", "file_reservations"},
+        agent_arg="agent_name",
+        project_arg="project_key",
+    )
+    async def sweep_stale_agents_tool(
+        ctx: Context,
+        project_key: str,
+        agent_name: str,
+        threshold_seconds: int = 86400,
+        require_no_active_reservations: bool = True,
+        registration_token: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Retire stale project agents on demand without target-token custody."""
+        project = await _get_project_by_identifier(project_key)
+        actor = await _authenticate_agent(
+            ctx,
+            project,
+            agent_name,
+            registration_token,
+            token_param="registration_token",
+            action="sweep_stale_agents",
+        )
+        if project.id is None or actor.id is None:
+            raise ValueError("Project and caller must have ids before sweeping stale agents.")
+
+        effective_threshold = max(60, int(threshold_seconds))
+        retired = await sweep_stale_agents(
+            threshold_seconds=effective_threshold,
+            project_id=project.id,
+            exclude_agent_id=actor.id,
+            require_no_active_reservations=require_no_active_reservations,
+        )
+        retired_names = [entry["agent_name"] for entry in retired]
+        await ctx.info(f"Retired {len(retired_names)} stale agent(s) in project '{project.human_key}'.")
+        return {
+            "project_key": project.human_key,
+            "requested_by": actor.name,
+            "threshold_seconds": effective_threshold,
+            "require_no_active_reservations": require_no_active_reservations,
+            "retired": retired_names,
+            "retired_agents": retired,
+            "count": len(retired_names),
         }
 
     @mcp.tool(
@@ -7912,6 +8060,28 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.contact_enforcement_enabled
+                    ):
+                        # Contact enforcement is globally disabled: an explicit
+                        # cross-project recipient does not additionally need an
+                        # approved AgentLink. block_all is still honored.
+                        direct_target = await _resolve_cross_project_recipient_unenforced(
+                            target_project_override, display_value, canonical
+                        )
+                        if direct_target is not None:
+                            pol = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
+                            if pol == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(direct_target.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
@@ -8586,6 +8756,28 @@ def build_mcp_server() -> FastMCP:
                             continue
 
                     lookup_value = canonical.lower()
+                    if (
+                        explicit_override
+                        and target_project_override is not None
+                        and not settings_local.contact_enforcement_enabled
+                    ):
+                        # Contact enforcement is globally disabled: an explicit
+                        # cross-project recipient does not additionally need an
+                        # approved AgentLink. block_all is still honored.
+                        direct_target = await _resolve_cross_project_recipient_unenforced(
+                            target_project_override, display_value, canonical
+                        )
+                        if direct_target is not None:
+                            recipient_policy = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
+                            if recipient_policy == "block_all":
+                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
+                                raise _ContactBlocked()
+                            bucket = external.setdefault(
+                                target_project_override.id or 0,
+                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(direct_target.name)
+                            continue
                     rows = None
                     if explicit_override and target_project_override is not None:
                         rows = await sx.execute(
@@ -9423,7 +9615,9 @@ def build_mcp_server() -> FastMCP:
         Returns
         -------
         list[dict]
-            Each message includes: { id, subject, from, created_ts, importance, ack_required, kind, [body_md] }
+            Each message includes: { id, subject, from, created_ts, importance, ack_required, kind, read_at, [body_md] }
+            `read_at` is this recipient's read timestamp (null while unread), so the
+            default view — which includes already-read mail — stays distinguishable.
 
         Example
         -------
@@ -13498,6 +13692,10 @@ def build_mcp_server() -> FastMCP:
         - Agent names are NOT the same as your program name or user name.
         - Use the returned names when calling tools like whois(), request_contact(), send_message().
         - Agents in different projects cannot see each other - project isolation is enforced.
+        - `last_active_ts` refreshes on ANY authenticated tool call the agent makes
+          (send/reply, fetch_inbox, mark_message_read, acknowledge_message, ...), so
+          mail-only agents (e.g. orchestrator identities) remain visible to
+          activity-based filtering while they are actively communicating (#255).
         """
         key_value, query_params = _split_slug_and_query(project_key)
         format_value = format or query_params.get("format")

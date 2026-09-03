@@ -1080,6 +1080,21 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         json_response=True,
     )
 
+    # Second, STATEFUL MCP sub-app (issue #250): stateless mode creates a new
+    # transport per request and never issues an ``Mcp-Session-Id`` header, so
+    # session-bound agent authentication (#148) could never persist across
+    # HTTP tool calls — ``create_agent_identity(return_registration_token=false)``
+    # followed by any protected call failed with AUTHENTICATION_REQUIRED.
+    # A bare flip to ``stateless_http=False`` would break handshake-skipping
+    # clients (e.g. ntm's HTTP client), so we mount BOTH: the stateful app at
+    # '/mcp' for spec-compliant MCP clients that keep a session, and the
+    # stateless app at '/api' (and the configured base) for one-shot clients.
+    mcp_stateful_http_app = cast(_FastMCPHttpApp, server).http_app(
+        path="/",
+        stateless_http=False,
+        json_response=True,
+    )
+
     # no-op wrapper removed; using explicit stateless adapter below
 
     # Background workers lifecycle
@@ -1430,17 +1445,35 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan_context(app: FastAPI):
-        # Ensure the mounted MCP app initializes its internal task group
+        # Ensure both mounted MCP apps initialize their internal task groups
+        # (each http_app() call owns an independent StreamableHTTPSessionManager).
         mcp_lifespan_app = cast(_FastAPILifespan, mcp_http_app)
+        mcp_stateful_lifespan_app = cast(_FastAPILifespan, mcp_stateful_http_app)
         async with mcp_lifespan_app.lifespan(mcp_http_app):
-            await _startup()
-            try:
-                yield
-            finally:
-                await _shutdown()
+            async with mcp_stateful_lifespan_app.lifespan(mcp_stateful_http_app):
+                await _startup()
+                try:
+                    yield
+                finally:
+                    await _shutdown()
 
-    # Now construct FastAPI with the composed lifespan so ASGI transports run it
-    fastapi_app = FastAPI(lifespan=lifespan_context)
+    # Now construct FastAPI with the composed lifespan so ASGI transports run it.
+    # Give the app a real title/version so the auto-generated /openapi.json has a
+    # proper `info` block (derive the version from installed package metadata,
+    # mirroring cli._package_version; never hardcode a value that could drift).
+    def _package_version() -> str:
+        import importlib.metadata as _importlib_metadata
+
+        try:
+            return _importlib_metadata.version("mcp-agent-mail")
+        except _importlib_metadata.PackageNotFoundError:  # pragma: no cover - dev installs
+            return "0.0.0+local"
+
+    fastapi_app = FastAPI(
+        title="MCP Agent Mail",
+        version=_package_version(),
+        lifespan=lifespan_context,
+    )
 
     # Simple request logging (configurable)
     if settings.http.request_log_enabled:
@@ -1682,6 +1715,19 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
     base_no_slash = mount_base.rstrip("/") or "/"
     base_with_slash = base_no_slash if base_no_slash == "/" else base_no_slash + "/"
     stateless_app = _HeaderFixupMCPApp(mcp_http_app)
+    stateful_app = _HeaderFixupMCPApp(mcp_stateful_http_app)
+
+    # Path -> app mapping (issue #250): the '/mcp' compat alias is the
+    # stateful, Mcp-Session-Id-issuing endpoint; '/api' and the configured
+    # base stay stateless for handshake-skipping one-shot clients (e.g. ntm).
+    # The CONFIGURED base always keeps the legacy stateless behavior, even if
+    # an operator points it at '/mcp' — an explicit HTTP_PATH is a promise to
+    # existing clients of that deployment, so we never change its semantics.
+    def _app_for_mount(path: str) -> _HeaderFixupMCPApp:
+        normalized = path.rstrip("/") or "/"
+        if normalized == "/mcp" and base_no_slash != "/mcp":
+            return stateful_app
+        return stateless_app
 
     mount_paths = [base_no_slash, base_with_slash]
     for compat_base in ("/api", "/mcp"):
@@ -1714,16 +1760,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
     for mount_path in mount_paths:
         with contextlib.suppress(Exception):
-            fastapi_app.mount(mount_path, stateless_app)
+            fastapi_app.mount(mount_path, _app_for_mount(mount_path))
 
     # Expose composed lifespan via router
     fastapi_app.router.lifespan_context = lifespan_context
 
     # Add direct routes at no-slash base paths to tolerate clients omitting trailing slashes.
     def _register_base_passthrough(base_path_no_slash: str, base_path_with_slash: str) -> None:
+        # Dispatch to the same app that is mounted at this base (issue #250:
+        # '/mcp' is stateful, everything else stateless).
+        target_app = _app_for_mount(base_path_no_slash)
+
         @fastapi_app.post(base_path_no_slash)
         async def _base_passthrough(request: Request) -> JSONResponse:
-            # Re-dispatch to mounted stateless app by calling it directly
+            # Re-dispatch to the mounted MCP app by calling it directly
             response_body: dict[str, Any] = {}
             status_code = 200
             headers: dict[str, str] = {}
@@ -1753,7 +1803,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if not has_auth and settings.http.bearer_token:
                     scope_headers.append((b"authorization", f"Bearer {settings.http.bearer_token}".encode("latin1")))
                 scope["headers"] = scope_headers
-            await stateless_app(
+            await target_app(
                 {**scope, "path": "/"},  # MCP app expects requests at its root
                 request.receive,
                 _send,
@@ -4188,6 +4238,41 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         with contextlib.suppress(Exception):
             structlog.get_logger("ui").error("ui_init_failed", error=str(exc))
         pass
+
+    # Keep the auto-generated /openapi.json focused on the real API contract.
+    # The browser-facing SSR mail UI (and its UI-backing JSON helpers) all live
+    # under the `/mail` prefix; they are registered for humans, not as part of
+    # the documented API surface, so we filter them out of the schema. The
+    # routes stay fully registered and functional — they are only omitted from
+    # the OpenAPI document. Using a custom app.openapi() (rather than
+    # include_in_schema=False on ~33 decorators) keeps this in one place and
+    # automatically covers any future /mail/* routes.
+    from fastapi.openapi.utils import get_openapi as _get_openapi
+
+    def _custom_openapi() -> dict[str, Any]:
+        if fastapi_app.openapi_schema:
+            return fastapi_app.openapi_schema
+        schema = _get_openapi(
+            title=fastapi_app.title,
+            version=fastapi_app.version,
+            openapi_version=fastapi_app.openapi_version,
+            description=fastapi_app.description,
+            routes=fastapi_app.routes,
+        )
+        paths = schema.get("paths")
+        if isinstance(paths, dict):
+            schema["paths"] = {
+                path: item
+                for path, item in paths.items()
+                if not (path == "/mail" or path.startswith("/mail/"))
+            }
+        fastapi_app.openapi_schema = schema
+        return schema
+
+    # Install the custom generator (FastAPI's documented extension point for
+    # overriding the OpenAPI document); cast keeps the bound-method override
+    # explicit for the type checker.
+    cast(Any, fastapi_app).openapi = _custom_openapi
 
     # Static web UI (SPA) routing support
     def _resolve_web_root() -> Path | None:
