@@ -192,6 +192,91 @@ async def test_broadcast_respects_block_all_policy(isolated_env):
 
 
 @pytest.mark.asyncio
+async def test_broadcast_skips_contact_ineligible_agents_without_request_spam(isolated_env):
+    """Broadcasts should remain best-effort without creating contact requests."""
+    project_key = "/test/bcast-contact-policy"
+    server = build_mcp_server()
+    async with Client(server) as bootstrap_client:
+        await bootstrap_client.call_tool("ensure_project", {"human_key": project_key})
+        registrations = {}
+        for name in ("GreenCastle", "BlueLake", "RedStone", "GrayWolf"):
+            registrations[name] = await bootstrap_client.call_tool(
+                "register_agent",
+                {
+                    "project_key": project_key,
+                    "program": "test-prog",
+                    "model": "test-model",
+                    "name": name,
+                },
+            )
+
+        await bootstrap_client.call_tool(
+            "set_contact_policy",
+            {
+                "project_key": project_key,
+                "agent_name": "BlueLake",
+                "registration_token": registrations["BlueLake"].data["registration_token"],
+                "policy": "open",
+            },
+        )
+        await bootstrap_client.call_tool(
+            "retire_agent",
+            {
+                "project_key": project_key,
+                "agent_name": "GrayWolf",
+                "registration_token": registrations["GrayWolf"].data["registration_token"],
+            },
+        )
+
+    async with Client(server) as sender_client:
+        result = await sender_client.call_tool(
+            "send_message",
+            {
+                "project_key": project_key,
+                "sender_name": "GreenCastle",
+                "sender_token": registrations["GreenCastle"].data["registration_token"],
+                "to": [],
+                "subject": "Best-effort broadcast",
+                "body_md": "Deliver without contact-request side effects",
+                "broadcast": True,
+                "auto_contact_if_blocked": True,
+            },
+        )
+        data = _get_data(result)
+        payload = data["deliveries"][0]["payload"]
+        assert payload["to"] == ["BlueLake"]
+        assert data["broadcast_skipped"] == {
+            "contact_policy": ["RedStone"],
+            "retired": ["GrayWolf"],
+        }
+
+        contacts = await sender_client.call_tool(
+            "list_contacts",
+            {
+                "project_key": project_key,
+                "agent_name": "GreenCastle",
+                "registration_token": registrations["GreenCastle"].data["registration_token"],
+            },
+        )
+        contact_items = contacts.structured_content["result"]
+        assert not any(item["to"] in {"RedStone", "GrayWolf"} for item in contact_items)
+
+    async with Client(server) as restricted_client:
+        inbox = await restricted_client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": project_key,
+                "agent_name": "RedStone",
+                "registration_token": registrations["RedStone"].data["registration_token"],
+                "include_bodies": True,
+            },
+        )
+        messages = inbox.structured_content["result"]
+        assert not any(item["subject"] == "Contact request from GreenCastle" for item in messages)
+        assert not any(item["subject"] == "Best-effort broadcast" for item in messages)
+
+
+@pytest.mark.asyncio
 async def test_broadcast_empty_project(isolated_env):
     """Broadcast with only sender registered should produce empty recipients."""
     server = build_mcp_server()

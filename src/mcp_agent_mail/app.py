@@ -7045,7 +7045,8 @@ def build_mcp_server() -> FastMCP:
         broadcast : bool
             If true and `to` is empty, expand recipients to all registered agents in the
             project (excluding the sender). Mutually exclusive with explicit `to` recipients.
-            Respects contact_policy settings — agents with block_all are skipped.
+            Respects contact_policy settings. Contact-ineligible and retired agents are
+            skipped without creating contact requests and reported in `broadcast_skipped`.
         topic : Optional[str]
             Optional topic tag (max 64 chars). Must start with a letter or digit and may
             otherwise contain alphanumerics, '.', '_', or '-' — so beads_rust hierarchical
@@ -7074,7 +7075,11 @@ def build_mcp_server() -> FastMCP:
         dict
             {
               "deliveries": [ { "project": str, "payload": { ... message payload ... } } ],
-              "count": int
+              "count": int,
+              "broadcast_skipped": {
+                "contact_policy": [str],
+                "retired": [str]
+              }
             }
 
         Edge cases
@@ -7148,6 +7153,9 @@ def build_mcp_server() -> FastMCP:
                     data={"argument": "topic", "provided": topic},
                 )
 
+        broadcast_expanded_names: set[str] = set()
+        broadcast_skipped: dict[str, list[str]] = {}
+
         # Broadcast expansion: expand to = all agents in project (excluding sender)
         if broadcast:
             if to and any(t.strip() for t in to):
@@ -7169,12 +7177,29 @@ def build_mcp_server() -> FastMCP:
                 )
                 _bcast_rows = _bcast_result.all()
             sender_lower = sender_name.lower().strip()
+            retired_names = sorted(
+                row[0]
+                for row in _bcast_rows
+                if row[0].lower() != sender_lower and row[2] is not None
+            )
+            policy_blocked_names = sorted(
+                row[0]
+                for row in _bcast_rows
+                if row[0].lower() != sender_lower
+                and (row[1] or "auto").lower() == "block_all"
+                and row[2] is None
+            )
+            if retired_names:
+                broadcast_skipped["retired"] = retired_names
+            if policy_blocked_names:
+                broadcast_skipped["contact_policy"] = policy_blocked_names
             to = [
                 row[0] for row in _bcast_rows
                 if row[0].lower() != sender_lower
                 and (row[1] or "auto").lower() != "block_all"
                 and row[2] is None  # skip retired agents
             ]
+            broadcast_expanded_names = {name.lower() for name in to}
             if not to:
                 await ctx.info("[warn] Broadcast: no eligible recipients found (sender is the only active agent).")
 
@@ -7561,6 +7586,12 @@ def build_mcp_server() -> FastMCP:
                                         }
                                     )
                                     auto_approved.append(nm)
+                                elif broadcast and nm.lower() in broadcast_expanded_names:
+                                    # Broadcasts are best-effort fan-out. A recipient that
+                                    # requires contact approval is skipped below; creating a
+                                    # pending request here would turn one broadcast into N
+                                    # unsolicited contact messages and abort eligible delivery.
+                                    continue
                                 else:
                                     # Pending fallback path — async human may take days to approve,
                                     # so use the longer pending TTL (default 7 days) rather than
@@ -7610,6 +7641,27 @@ def build_mcp_server() -> FastMCP:
                                         blocked_recipients.append(rec.name)
                     except Exception:
                         logger.exception("Failed to auto-resolve contacts or re-evaluate recipients after in-session approvals")
+                if broadcast and blocked_recipients:
+                    broadcast_blocked = sorted(
+                        {
+                            nm
+                            for nm in blocked_recipients
+                            if nm.lower() in broadcast_expanded_names
+                        }
+                    )
+                    if broadcast_blocked:
+                        blocked_keys = {nm.lower() for nm in broadcast_blocked}
+                        to = [nm for nm in to if nm.lower() not in blocked_keys]
+                        blocked_recipients = [
+                            nm for nm in blocked_recipients if nm.lower() not in blocked_keys
+                        ]
+                        policy_skipped = broadcast_skipped.setdefault("contact_policy", [])
+                        policy_skipped.extend(broadcast_blocked)
+                        broadcast_skipped["contact_policy"] = sorted(set(policy_skipped))
+                        await ctx.info(
+                            "[note] Broadcast skipped recipients requiring contact approval: "
+                            + ", ".join(broadcast_blocked)
+                        )
                 if blocked_recipients:
                     err_type: str = "CONTACT_REQUIRED"
                     blocked_sorted = sorted(set(blocked_recipients))
@@ -8216,6 +8268,8 @@ def build_mcp_server() -> FastMCP:
         result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries), "verified_sender": verified_sender}
         if delivery_errors:
             result["delivery_errors"] = delivery_errors
+        if broadcast_skipped:
+            result["broadcast_skipped"] = broadcast_skipped
         # Back-compat: expose top-level attachments when a single local delivery exists
         if len(deliveries) == 1:
             payload = deliveries[0].get("payload") or {}
