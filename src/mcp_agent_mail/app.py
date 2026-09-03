@@ -7193,7 +7193,13 @@ def build_mcp_server() -> FastMCP:
         broadcast : bool
             If true and `to` is empty, expand recipients to all registered agents in the
             project (excluding the sender). Mutually exclusive with explicit `to` recipients.
-            Respects contact_policy settings — agents with block_all are skipped.
+            Respects contact_policy settings and is best-effort across contact boundaries:
+            expanded recipients that are retired, set ``block_all``, or would need contact
+            approval are skipped rather than blocking the send, and are reported in
+            ``broadcast_skipped`` (``[{"agent": name, "reason": ...}]``). No contact request
+            is created for them — request contact explicitly if you want them included.
+            ``auto_contact_if_blocked`` therefore never fires for broadcast-expanded
+            recipients; it still applies to explicitly named ``to``/``cc``/``bcc`` names.
         topic : Optional[str]
             Optional topic tag (max 64 chars). Must start with a letter or digit and may
             otherwise contain alphanumerics, '.', '_', or '-' — so beads_rust hierarchical
@@ -7297,6 +7303,8 @@ def build_mcp_server() -> FastMCP:
                 )
 
         # Broadcast expansion: expand to = all agents in project (excluding sender)
+        broadcast_expanded_names: set[str] = set()
+        broadcast_skipped: list[dict[str, str]] = []
         if broadcast:
             if to and any(t.strip() for t in to):
                 raise ToolExecutionError(
@@ -7323,6 +7331,12 @@ def build_mcp_server() -> FastMCP:
                 and (row[1] or "auto").lower() != "block_all"
                 and row[2] is None  # skip retired agents
             ]
+            # GH PR #271: the broadcast recipient list is machine-expanded, not
+            # chosen by the sender. Remember which names came from the
+            # expansion so the contact gate below can drop the ones that need
+            # approval instead of firing a pending contact request at every
+            # active agent in the project and then failing the whole send.
+            broadcast_expanded_names = set(to)
             if not to:
                 await ctx.info("[warn] Broadcast: no eligible recipients found (sender is the only active agent).")
 
@@ -7638,8 +7652,15 @@ def build_mcp_server() -> FastMCP:
                     rec = recipient_agents.get(nm)
                     if rec is None:
                         continue
+                    # A broadcast-expanded recipient was never named by the
+                    # sender, so a policy refusal for it is not a caller error:
+                    # it is simply not part of this broadcast (PR #271).
+                    was_broadcast_expanded = nm in broadcast_expanded_names
                     # Reject messages to retired agents
                     if getattr(rec, "retired_at", None) is not None:
+                        if was_broadcast_expanded:
+                            broadcast_skipped.append({"agent": rec.name, "reason": "retired"})
+                            continue
                         raise ToolExecutionError(
                             "AGENT_RETIRED",
                             f"Agent '{nm}' is retired and no longer accepts new messages. "
@@ -7654,6 +7675,9 @@ def build_mcp_server() -> FastMCP:
                     if rec_policy == "open":
                         continue
                     if rec_policy == "block_all":
+                        if was_broadcast_expanded:
+                            broadcast_skipped.append({"agent": rec.name, "reason": "block_all"})
+                            continue
                         await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
                         raise ToolExecutionError(
                             "CONTACT_BLOCKED",
@@ -7668,6 +7692,10 @@ def build_mcp_server() -> FastMCP:
                     if rec.id is not None and rec.id in approved_link_ids:
                         continue
                     # Contact policy must be enforced regardless of ack_required flag.
+                    # Broadcast-expanded names stay in this list so the in-session
+                    # auto-approval below can still resolve them cheaply; the ones
+                    # that survive it become `broadcast_skipped` instead of pending
+                    # contact requests (PR #271).
                     blocked_recipients.append(rec.name)
 
             if blocked_recipients:
@@ -7709,6 +7737,14 @@ def build_mcp_server() -> FastMCP:
                                         }
                                     )
                                     auto_approved.append(nm)
+                                elif nm in broadcast_expanded_names:
+                                    # PR #271: never create a pending contact
+                                    # request for a machine-expanded broadcast
+                                    # recipient. One broadcast would otherwise
+                                    # fire a request (and an ack_required intro
+                                    # message) at every unlinked agent in the
+                                    # project and then fail the whole send.
+                                    continue
                                 else:
                                     # Pending fallback path — async human may take days to approve,
                                     # so use the longer pending TTL (default 7 days) rather than
@@ -7758,6 +7794,21 @@ def build_mcp_server() -> FastMCP:
                                         blocked_recipients.append(rec.name)
                     except Exception:
                         logger.exception("Failed to auto-resolve contacts or re-evaluate recipients after in-session approvals")
+                # PR #271: a broadcast-expanded recipient that still needs
+                # approval is not a caller error — the sender never named it.
+                # Drop it from this broadcast and report it instead of failing
+                # the send for the recipients that ARE eligible.
+                if broadcast_expanded_names and blocked_recipients:
+                    already_skipped = {entry["agent"] for entry in broadcast_skipped}
+                    still_blocked: list[str] = []
+                    for nm in blocked_recipients:
+                        if nm in broadcast_expanded_names:
+                            if nm not in already_skipped:
+                                already_skipped.add(nm)
+                                broadcast_skipped.append({"agent": nm, "reason": "contact_required"})
+                        else:
+                            still_blocked.append(nm)
+                    blocked_recipients = still_blocked
                 if blocked_recipients:
                     err_type: str = "CONTACT_REQUIRED"
                     blocked_sorted = sorted(set(blocked_recipients))
@@ -7822,6 +7873,21 @@ def build_mcp_server() -> FastMCP:
                         recoverable=True,
                         data=err_data,
                     )
+        # PR #271: drop the broadcast-expanded recipients the contact gate
+        # refused. The broadcast is best-effort across contact-policy
+        # boundaries: eligible recipients still get the message, and the
+        # refusals are reported back as `broadcast_skipped` instead of
+        # spamming pending contact requests and failing the whole send.
+        if broadcast_skipped:
+            skipped_names = {entry["agent"] for entry in broadcast_skipped}
+            to = [nm for nm in to if nm not in skipped_names]
+            await ctx.info(
+                "[warn] Broadcast: skipped "
+                + ", ".join(
+                    f"{entry['agent']} ({entry['reason']})" for entry in sorted(broadcast_skipped, key=lambda e: e["agent"])
+                )
+            )
+
         # Split recipients into local vs external (approved links)
         local_to: list[str] = []
         local_cc: list[str] = []
@@ -8386,6 +8452,10 @@ def build_mcp_server() -> FastMCP:
         result: dict[str, Any] = {"deliveries": deliveries, "count": len(deliveries), "verified_sender": verified_sender}
         if delivery_errors:
             result["delivery_errors"] = delivery_errors
+        # PR #271: name the broadcast-expanded recipients that were left out so
+        # the sender can request contact explicitly if it actually wants them.
+        if broadcast_skipped:
+            result["broadcast_skipped"] = sorted(broadcast_skipped, key=lambda entry: entry["agent"])
         # Back-compat: expose top-level attachments when a single local delivery exists
         if len(deliveries) == 1:
             payload = deliveries[0].get("payload") or {}

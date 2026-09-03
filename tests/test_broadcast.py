@@ -517,3 +517,79 @@ async def test_broadcast_with_topic(isolated_env):
         items = _get_list(topic_result)
         assert len(items) == 1
         assert items[0]["subject"] == "Daily standup"
+
+
+@pytest.mark.asyncio
+async def test_broadcast_skips_contact_gated_recipients_without_creating_requests(isolated_env):
+    """A broadcast must not fire contact requests at every unlinked agent.
+
+    PR #271: broadcast recipients are machine-expanded, not chosen by the
+    sender. Before this fix, an expanded recipient whose contact policy needed
+    approval was pushed through the auto-handshake path — creating a pending
+    contact request and an ack_required intro message for it — and the whole
+    send then failed with CONTACT_REQUIRED, so the eligible recipients got
+    nothing. The broadcast is now best-effort: eligible recipients receive the
+    message and the refusals come back in ``broadcast_skipped``.
+    """
+    server = build_mcp_server()
+    project_key = "/test/bcast-contact-gate"
+
+    async with Client(server) as client:
+        names = await _setup_project_with_agents(client, project_key, 3)
+        sender, open_recipient, gated_recipient = names
+        await client.call_tool(
+            "set_contact_policy",
+            {
+                "project_key": project_key,
+                "agent_name": open_recipient,
+                "policy": "open",
+            },
+        )
+        await client.call_tool(
+            "set_contact_policy",
+            {
+                "project_key": project_key,
+                "agent_name": gated_recipient,
+                "policy": "contacts_only",
+            },
+        )
+
+    # A fresh session: no recipient is bound to it, so the in-session
+    # auto-approval shortcut cannot apply and the contact gate is real.
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "send_message",
+            {
+                "project_key": project_key,
+                "sender_name": sender,
+                "to": [],
+                "subject": "Broadcast across a contact boundary",
+                "body_md": "Only the open recipient should get this.",
+                "broadcast": True,
+            },
+        )
+        data = _get_data(result)
+        payload = data["deliveries"][0]["payload"]
+        assert payload["to"] == [open_recipient], f"unexpected recipients: {payload['to']}"
+        assert data.get("broadcast_skipped") == [
+            {"agent": gated_recipient, "reason": "contact_required"}
+        ], f"unexpected broadcast_skipped: {data.get('broadcast_skipped')}"
+
+        # The gated recipient was left entirely alone: no broadcast message and
+        # no auto-created contact-request intro in its inbox.
+        gated_inbox = _get_list(
+            await client.call_tool(
+                "fetch_inbox",
+                {"project_key": project_key, "agent_name": gated_recipient},
+            )
+        )
+        assert gated_inbox == [], f"gated recipient should have an empty inbox: {gated_inbox}"
+
+        # The eligible recipient really received it.
+        open_inbox = _get_list(
+            await client.call_tool(
+                "fetch_inbox",
+                {"project_key": project_key, "agent_name": open_recipient},
+            )
+        )
+        assert [m["subject"] for m in open_inbox] == ["Broadcast across a contact boundary"]
