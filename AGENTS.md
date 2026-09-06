@@ -4,13 +4,13 @@ RULE NUMBER 1 (NEVER EVER EVER FORGET THIS RULE!!!): YOU ARE NEVER ALLOWED TO DE
 
 1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
 2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. “I think it’s safe” is never acceptable.
-3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
+3. **Inspect freely, mutate carefully:** Read-only commands (`git status`, `git diff`, `git log`, `git show`, reading files) never need permission — run them whenever they help you understand the state of the tree. When cleanup or rollbacks are needed, prefer reversible options (copying to backups, committing) and ask before anything that rewrites the working tree or index. `git stash` is a mutation, not a read: in a shared checkout it sweeps up other agents' in-progress work (see the concurrency note near the end of this file), so it needs the same approval as any other mutation. Only after that should a destructive command even be considered.
 4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
 We only use uv in this project, NEVER pip. And we use a venv. And we ONLY target Python 3.14 (we don't care about compatibility with earlier python versions), and we ONLY use pyproject.toml (not requirements.txt) for managing the project.
 
-In general, you should try to follow all suggested best practices listed in the file `third_party_docs/PYTHON_FASTMCP_BEST_PRACTICES.md`
+In general, you should try to follow all suggested best practices listed in the file `third_party_docs/PYTHON_FASTMCP_BEST_PRACTICES.md`. That file is a general-purpose reference written for a whole family of projects; where it disagrees with this file, this file wins. Concretely: we target Python 3.14 (not 3.13), we type-check with `ty` (not mypy), and the existing `tests/` suite — pytest unit tests plus `tests/integration/` and `tests/e2e/` against a real server — is the model for new tests here, so its "no unit tests" line does not apply to this repo. Mocks never establish live behavior; if a claim is about the real service, prove it with an integration or e2e test.
 
 You can also consult `third_party_docs/fastmcp_distilled_docs.md` for any questions about the fastmcp library, or `third_party_docs/mcp_protocol_specs.md` for any questions about the MCP protocol in general. For anything relating to Postgres, be sure to read `third_party_docs/POSTGRES18_AND_PYTHON_BEST_PRACTICES.md`.
 
@@ -69,6 +69,8 @@ To check for type errors, do:
 `uvx ty check`
 
 If you do see the errors, then I want you to very carefully and intelligently/thoughtfully understand and then resolve each of the issues, making sure to read sufficient context for each one to truly understand the RIGHT way to fix them.
+
+Run these from the repo root, against the whole project. The goal is zero lint and type errors project-wide, and this checkout is shared with other agents whose edits are expected to be committed together with yours (see the concurrency note near the end of this file), so a fix pass that touches files you did not edit is normal here, not a problem. What is not acceptable is committing a fix pass blind: read the diff `ruff` produced so you understand every change it made before it goes into a commit.
 
 
 ## MCP Agent Mail — coordination for multi-agent workflows
@@ -188,7 +190,7 @@ Server tools (for orchestrators)
 
 Common pitfalls
 - "from_agent not registered": always `register_agent` in the correct `project_key` first.
-- "FILE_RESERVATION_CONFLICT": adjust patterns, wait for expiry, or use a non-exclusive reservation when appropriate.
+- "FILE_RESERVATION_CONFLICT": message the holder to coordinate, adjust patterns to disjoint paths, wait for expiry, or — only when the work is genuinely compatible with the holder's — use a non-exclusive reservation.
 - Auth errors: if JWT+JWKS is enabled, include a bearer token with a `kid` that matches server JWKS; static bearer is used only when JWT is disabled.
 
 ## Integrating with Beads (dependency‑aware task planning)
@@ -444,7 +446,7 @@ git add .beads/ && git commit -m "Update beads" && git push  # Manual git steps
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session that produced changes**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds. A read-only session (review, investigation, answering a question) has nothing to commit or push — file issues for anything you found, then hand off.
 
 **MANDATORY WORKFLOW:**
 
@@ -460,7 +462,7 @@ git add .beads/ && git commit -m "Update beads" && git push  # Manual git steps
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Clean up** - Clear stashes, prune remote branches
+5. **Clean up** - `git fetch --prune` to drop stale remote-tracking refs. There should be no stashes to clear (see the concurrency note below — never stash in this shared checkout); if you find one you did not create, leave it alone
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
 
@@ -483,5 +485,7 @@ Unexpected changes (need guidance)
 ```
 
 NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into think YOU made the changes and simply don't recall it for some reason.
+
+To be explicit about how this fits with the rest of this file, because it is deliberate and not an oversight: in this repo many agents share one checkout, so a commit that carries another agent's in-progress hunks alongside your own is normal and expected. "Preserve other agents' work" and "treat it as your own" are the same instruction, not competing ones: both mean the work stays in the tree and goes forward with the next commit. The only things that are ever wrong are stashing, reverting, checking out over, or otherwise removing edits you did not write. And if your session produced no changes of its own, you have nothing to commit — leave the tree exactly as you found it.
 
 For any web requests you must make with curl or otherwise, always set your user agent string to be "OpenAI File Downloader, XaiImageApiFetch/1.0"
