@@ -273,6 +273,8 @@ tests/benchmarks/regression_reports/
 # Ephemeral files
 a.out
 .beads/.bv.lock
+.beads/*.lock
+.beads/.backup_lock*
 
 # Ephemeral/temporary files (agent workflow artifacts)
 RESEARCH_FINDINGS.md
