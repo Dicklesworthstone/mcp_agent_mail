@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Fast inbox check hook for Claude Code / Codex-cli
+# Fast inbox check hook for Claude Code / Codex CLI / Gemini CLI / Factory Droid
 #
 # Features:
 # - Rate limited (checks at most once per INTERVAL seconds)
 # - Silent when no mail (saves tokens)
+# - Only counts UNREAD mail (fetch_inbox unread_only=true), so a message the
+#   agent has already read or acknowledged never triggers another reminder
 # - Uses curl directly (avoids Python import overhead)
 # - Supports both plain-text (default) and Claude-Code JSON envelope output
 #
-# Usage in .claude/settings.json:
+# Usage in .claude/settings.json (Claude Code) or .codex/hooks.json (Codex CLI,
+# same envelope; set AGENT_MAIL_HOOK_FORMAT=json for both):
 #   "PostToolUse": [
 #     { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/path/to/check_inbox.sh" }] }
 #   ]
@@ -86,11 +89,14 @@ AGENT_JSON=$(json_escape "${AGENT}")
 
 # Build fetch_inbox args. Include registration_token only if present so the
 # args shape stays backward-compatible with servers that don't enforce it.
+# unread_only=true: fetch_inbox otherwise returns the most recent messages
+# whether or not the agent already read/acknowledged them, which turned the
+# reminder into a standing nag every INTERVAL seconds (GH #274).
 if [[ -n "${REG_TOKEN}" ]]; then
   REG_TOKEN_JSON=$(json_escape "${REG_TOKEN}")
-  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"registration_token\":${REG_TOKEN_JSON},\"limit\":10,\"include_bodies\":false}"
+  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"registration_token\":${REG_TOKEN_JSON},\"limit\":10,\"include_bodies\":false,\"unread_only\":true}"
 else
-  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"limit\":10,\"include_bodies\":false}"
+  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"limit\":10,\"include_bodies\":false,\"unread_only\":true}"
 fi
 
 # Build curl command with proper auth
@@ -153,9 +159,9 @@ URGENT_COUNT="${URGENT_COUNT:-0}"
 
 if [[ "${MSG_COUNT}" -gt 0 ]]; then
   if [[ ${URGENT_COUNT} -gt 0 ]]; then
-    MSG_TEXT="You have ${MSG_COUNT} message(s) in your inbox (${URGENT_COUNT} urgent/high priority). Use fetch_inbox to check your messages."
+    MSG_TEXT="You have ${MSG_COUNT} unread message(s) in your inbox (${URGENT_COUNT} urgent/high priority). Use fetch_inbox to read them; reading or acknowledging a message stops this reminder."
   else
-    MSG_TEXT="You have ${MSG_COUNT} recent message(s) in your inbox. Consider checking with fetch_inbox if you haven't lately."
+    MSG_TEXT="You have ${MSG_COUNT} unread message(s) in your inbox. Use fetch_inbox to read them; reading or acknowledging a message stops this reminder."
   fi
 
   if [[ "${HOOK_FORMAT}" == "json" ]]; then

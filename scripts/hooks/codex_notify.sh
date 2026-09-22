@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
-# Codex CLI notify handler for MCP Agent Mail
+# Codex CLI notify handler for MCP Agent Mail (DEPRECATED)
+#
+# DEPRECATED: current Codex CLI spawns the `notify` program with stdin, stdout
+# and stderr redirected to /dev/null and never shows or feeds its output to
+# the model, so a reminder printed here cannot reach the agent (GH #273).
+# scripts/integrate_codex_cli.sh now installs scripts/hooks/check_inbox.sh as a
+# Codex `PostToolUse` hook (.codex/hooks.json, AGENT_MAIL_HOOK_FORMAT=json),
+# which injects the reminder into the model's context. This script is kept
+# only for installs that still reference it; it is no longer installed.
 #
 # This script is invoked by Codex CLI's notify mechanism when agent-turn-complete fires.
 # It checks the inbox periodically (rate-limited) and outputs reminders if there are messages.
@@ -76,11 +84,12 @@ AGENT_JSON=$(json_escape "${AGENT}")
 
 # Build fetch_inbox args. Include registration_token only if present so the
 # args shape stays backward-compatible with servers that don't enforce it.
+# unread_only=true so already-read/acknowledged mail is not re-announced (GH #274).
 if [[ -n "${REG_TOKEN}" ]]; then
   REG_TOKEN_JSON=$(json_escape "${REG_TOKEN}")
-  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"registration_token\":${REG_TOKEN_JSON},\"limit\":10,\"include_bodies\":false}"
+  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"registration_token\":${REG_TOKEN_JSON},\"limit\":10,\"include_bodies\":false,\"unread_only\":true}"
 else
-  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"limit\":10,\"include_bodies\":false}"
+  ARGS_JSON="{\"project_key\":${PROJECT_JSON},\"agent_name\":${AGENT_JSON},\"limit\":10,\"include_bodies\":false,\"unread_only\":true}"
 fi
 
 # Build curl command with proper auth
@@ -141,11 +150,11 @@ if [[ "${MSG_COUNT}" -gt 0 ]]; then
   echo ""
   echo "=== INBOX REMINDER ==="
   if [[ ${URGENT_COUNT} -gt 0 ]]; then
-    echo "You have ${MSG_COUNT} message(s) in your inbox (${URGENT_COUNT} urgent/high priority)"
-    echo "Use fetch_inbox to check your messages!"
+    echo "You have ${MSG_COUNT} unread message(s) in your inbox (${URGENT_COUNT} urgent/high priority)"
+    echo "Use fetch_inbox to read them; reading or acknowledging a message stops this reminder."
   else
-    echo "You have ${MSG_COUNT} recent message(s) in your inbox."
-    echo "Consider checking with fetch_inbox if you haven't lately."
+    echo "You have ${MSG_COUNT} unread message(s) in your inbox."
+    echo "Use fetch_inbox to read them; reading or acknowledging a message stops this reminder."
   fi
   echo "======================"
   echo ""

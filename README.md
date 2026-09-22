@@ -2536,7 +2536,7 @@ For manual integration or customization, dedicated scripts are available:
 | Tool | Script | What it configures |
 |------|--------|-------------------|
 | Claude Code | `scripts/integrate_claude_code.sh` | `.claude/settings.json`, hooks, MCP server |
-| Codex CLI | `scripts/integrate_codex_cli.sh` | `~/.codex/config.toml`, MCP server, notify handler |
+| Codex CLI | `scripts/integrate_codex_cli.sh` | `~/.codex/config.toml`, MCP server, `.codex/hooks.json` PostToolUse inbox hook |
 | Gemini CLI | `scripts/integrate_gemini_cli.sh` | `~/.gemini/settings.json`, MCP server, hooks |
 | Factory Droid | `scripts/integrate_factory_droid.sh` | `~/.factory/settings.json`, MCP server, hooks |
 
@@ -2554,7 +2554,7 @@ Agents often get absorbed in their work and forget to check their mail. The inte
 **How it works:**
 
 - A rate-limited hook script (`scripts/hooks/check_inbox.sh`) runs after certain tool invocations
-- It checks the inbox via a fast curl call (avoids Python import overhead)
+- It checks the inbox via a fast curl call (avoids Python import overhead) with `unread_only=true`, so mail the agent has already read or acknowledged is never re-announced
 - If there are unread messages, it outputs a brief reminder
 - Rate limited to at most once per 2 minutes to avoid noise
 
@@ -2577,11 +2577,24 @@ The hook is configured as a `PostToolUse` hook that fires after `Bash` or `shell
 
 **Codex CLI:**
 
-Uses the top-level `notify` configuration in `config.toml` (must appear before any `[section]` headers) to fire on `agent-turn-complete` events:
+Uses a project-local Codex hook (`<project>/.codex/hooks.json`) with the same `PostToolUse` envelope as Claude Code. The installer copies `check_inbox.sh` to `.codex/hooks/`, wraps it in a mode-0700 `inbox_wrapper.sh` that holds the tokens (so no secret lands in `hooks.json`), and merges this entry into any existing hooks:
 
-```toml
-notify = ["/path/to/.codex/hooks/notify_wrapper.sh"]
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "'/path/to/.codex/hooks/inbox_wrapper.sh'", "timeout": 10 }]
+      }
+    ]
+  }
+}
 ```
+
+Codex asks you to review and trust the hook (pinned by hash) before it runs, and loads project-local hooks only once the project's `.codex/` layer is trusted. Because the hook is project-local, each project keeps its own agent identity and rate-limit window.
+
+The older top-level `notify = [...]` mechanism is no longer installed: current Codex spawns the notify program with its output discarded and never shows it to the model, so a reminder printed there cannot reach the agent. If an earlier install left a `notify = [".../notify_wrapper.sh"]` line in `~/.codex/config.toml`, it is harmless and can be deleted.
 
 **Additional hooks (Claude Code only):**
 
