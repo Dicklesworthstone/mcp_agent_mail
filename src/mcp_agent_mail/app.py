@@ -11351,6 +11351,29 @@ def build_mcp_server() -> FastMCP:
         code_repo_path: str,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
+        """Install the Agent Mail pre-commit guard into a git repository.
+
+        The guard blocks a commit that stages files another agent holds an
+        exclusive file reservation on (set ``AGENT_MAIL_GUARD_MODE=warn`` to only
+        warn). Commits must run with ``AGENT_NAME`` set to the committing agent.
+        Any existing pre-commit hook is kept and still runs. Does nothing when
+        worktree features are disabled (``WORKTREES_ENABLED=0``).
+
+        Parameters
+        ----------
+        project_key : str
+            Project whose file reservations the guard enforces.
+        code_repo_path : str
+            Path to the git repository to install the hook into.
+        format : str, optional
+            Output format.
+
+        Returns
+        -------
+        dict
+            ``{"hook": "<path to the installed pre-commit hook>"}``; empty string
+            when skipped.
+        """
         if not settings.worktrees_enabled:
             await ctx.info("Worktree-friendly features are disabled (WORKTREES_ENABLED=0). Skipping guard install.")
             return {"hook": ""}
@@ -11377,6 +11400,25 @@ def build_mcp_server() -> FastMCP:
         code_repo_path: str,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
+        """Remove the Agent Mail commit guards from a git repository.
+
+        Removes Agent Mail's own pre-commit and pre-push guard plugins (and a
+        legacy single-file Agent Mail hook); other hooks in the repository are
+        left in place.
+
+        Parameters
+        ----------
+        code_repo_path : str
+            Path to the git repository to remove the guard from.
+        format : str, optional
+            Output format.
+
+        Returns
+        -------
+        dict
+            ``{"removed": true}`` when a guard was removed, ``false`` when none
+            was installed.
+        """
         if get_settings().tools_log_enabled:
             try:
                 import importlib as _imp
