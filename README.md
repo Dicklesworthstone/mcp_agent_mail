@@ -1,5 +1,7 @@
 # MCP Agent Mail
 
+> **Superseded by [mcp_agent_mail_rust](https://github.com/Dicklesworthstone/mcp_agent_mail_rust).** This Python version is no longer maintained; use the Rust version for new installs.
+
 ![Agent Mail Showcase](screenshots/output/agent_mail_showcase.gif)
 
 > "It's like gmail for your coding agents!"
