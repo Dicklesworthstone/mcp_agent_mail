@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Threads — {{ project.human_key }} — Agent Mail{% endblock %}
+
+{% block breadcrumbs %}
+<nav class="flex items-center gap-2 text-sm" aria-label="Breadcrumb">
+  <a href="/mail" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors flex items-center gap-1">
+    <i data-lucide="home" class="w-3.5 h-3.5"></i>
+    Projects
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">{{ project.human_key }}</a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <span class="text-slate-900 dark:text-white font-medium" aria-current="page">Threads</span>
+</nav>
+{% endblock %}
+
+{% block header_actions %}
+<a href="/mail/{{ project.slug }}"
+   class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm transition-colors">
+  <i data-lucide="arrow-left" class="w-4 h-4"></i>
+  <span class="text-sm">Back to project</span>
+</a>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6 page-transition">
+  <div class="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border border-slate-200 dark:border-slate-700">
+    <div class="flex items-center gap-4">
+      <div class="w-12 h-12 bg-primary-600 rounded-xl flex items-center justify-center shadow-md">
+        <i data-lucide="messages-square" class="w-6 h-6 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-3xl font-bold text-slate-900 dark:text-white">Threads</h1>
+        <p class="text-sm text-slate-600 dark:text-slate-400 mt-1">Conversations in {{ project.human_key }}, most recently active first.</p>
+      </div>
+    </div>
+  </div>
+
+  <section aria-label="Project threads" class="space-y-3">
+    {% for thread in threads %}
+    <a href="/mail/{{ project.slug }}/thread/{{ thread.thread_id|urlencode }}"
+       class="block bg-white dark:bg-slate-800 rounded-xl p-5 border border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-500 shadow-sm hover:shadow-md transition-all focus-visible:ring-2 focus-visible:ring-primary-500">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <h2 class="font-semibold text-slate-900 dark:text-white break-words">{{ thread.subject or '(No subject)' }}</h2>
+          <p class="mt-1 text-sm text-primary-600 dark:text-primary-400 break-all">
+            <span class="text-slate-500 dark:text-slate-400">Thread</span>
+            <span class="font-mono">{{ thread.thread_id }}</span>
+          </p>
+        </div>
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 dark:bg-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300">
+          <i data-lucide="message-square" class="w-3.5 h-3.5"></i>
+          {{ thread.message_count }} {{ 'message' if thread.message_count == 1 else 'messages' }}
+        </span>
+      </div>
+      <p class="mt-3 text-xs text-slate-500 dark:text-slate-400">
+        Latest activity: <time datetime="{{ thread.created }}">{{ thread.created }}</time>
+      </p>
+    </a>
+    {% else %}
+    <div class="bg-white dark:bg-slate-800 rounded-2xl p-10 text-center border border-slate-200 dark:border-slate-700">
+      <i data-lucide="messages-square" class="w-12 h-12 mx-auto mb-4 text-slate-400"></i>
+      <h2 class="text-xl font-semibold text-slate-900 dark:text-white">{{ 'No more threads' if prev_page else 'No threads yet' }}</h2>
+      <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">{{ 'Return to the previous page to browse conversations.' if prev_page else 'Conversations will appear here when messages are sent in this project.' }}</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  {% if prev_page or next_page %}
+  <nav aria-label="Thread pagination" class="flex items-center justify-between gap-4 text-sm">
+    {% if prev_page %}
+    <a href="/mail/{{ project.slug }}/threads?page={{ prev_page }}&amp;limit={{ limit }}" rel="prev"
+       class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-primary-400">
+      <i data-lucide="chevron-left" class="w-4 h-4"></i>
+      Previous
+    </a>
+    {% else %}
+    <span></span>
+    {% endif %}
+    <span class="text-slate-600 dark:text-slate-400">Page {{ page }}</span>
+    {% if next_page %}
+    <a href="/mail/{{ project.slug }}/threads?page={{ next_page }}&amp;limit={{ limit }}" rel="next"
+       class="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-primary-400">
+      Next
+      <i data-lucide="chevron-right" class="w-4 h-4"></i>
+    </a>
+    {% else %}
+    <span></span>
+    {% endif %}
+  </nav>
+  {% endif %}
+</div>
+{% endblock %}

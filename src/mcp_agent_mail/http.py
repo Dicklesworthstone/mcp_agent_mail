@@ -2521,6 +2521,77 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 results=matched_messages,
             )
 
+        @fastapi_app.get("/mail/{project}/threads", response_class=HTMLResponse)
+        async def mail_threads(project: str, limit: int = 50, page: int = 1) -> HTMLResponse:
+            """Browse project conversations, including standalone thread starters."""
+            limit = min(max(1, limit), 200)
+            page = min(max(1, page), 10000)
+            await ensure_schema()
+            async with get_session() as session:
+                prow = (
+                    await session.execute(
+                        text("SELECT id, slug, human_key FROM projects WHERE slug = :k OR human_key = :k"),
+                        {"k": project},
+                    )
+                ).fetchone()
+                if not prow:
+                    raise HTTPException(status_code=404, detail="Project not found")
+
+                # Group before paginating, rather than grouping a recent-message
+                # slice that can hide older conversations or undercount replies.
+                # Unthreaded starters use their message ID, matching mail_thread
+                # and the numeric thread ID assigned by reply_message.
+                rows = await session.execute(
+                    text(
+                        """
+                        WITH project_messages AS (
+                            SELECT id, subject, created_ts,
+                                   CASE
+                                       WHEN thread_id IS NOT NULL AND TRIM(thread_id) != ''
+                                       THEN thread_id
+                                       ELSE CAST(id AS TEXT)
+                                   END AS thread_key
+                            FROM messages
+                            WHERE project_id = :pid
+                        ), ranked_messages AS (
+                            SELECT id, subject, created_ts, thread_key,
+                                   COUNT(*) OVER (PARTITION BY thread_key) AS message_count,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY thread_key
+                                       ORDER BY created_ts DESC, id DESC
+                                   ) AS thread_position
+                            FROM project_messages
+                        )
+                        SELECT thread_key, subject, created_ts, message_count
+                        FROM ranked_messages
+                        WHERE thread_position = 1
+                        ORDER BY created_ts DESC, id DESC
+                        LIMIT :lim OFFSET :off
+                        """
+                    ),
+                    {"pid": int(prow[0]), "lim": limit + 1, "off": (page - 1) * limit},
+                )
+                thread_rows = rows.mappings().all()
+                threads = [
+                    {
+                        "thread_id": row["thread_key"],
+                        "subject": row["subject"],
+                        "created": str(row["created_ts"]),
+                        "message_count": int(row["message_count"]),
+                    }
+                    for row in thread_rows[:limit]
+                ]
+
+            return await _render(
+                "mail_threads.html",
+                project={"slug": prow[1], "human_key": prow[2]},
+                threads=threads,
+                page=page,
+                limit=limit,
+                prev_page=page - 1 if page > 1 else None,
+                next_page=page + 1 if len(thread_rows) > limit and page < 10000 else None,
+            )
+
         @fastapi_app.post("/mail/api/projects/{project_id}/siblings/{other_id}", response_class=JSONResponse)
         async def update_project_sibling(project_id: int, other_id: int, request: Request) -> JSONResponse:
             try:

@@ -14,7 +14,7 @@
 {% endblock %}
 
 {% block header_actions %}
-<div class="flex items-center gap-3">
+<div class="flex flex-wrap items-center gap-3">
   <!-- Human Overseer - Primary Action -->
   <a href="/mail/{{ project.slug }}/overseer/compose"
      class="inline-flex items-center gap-2 px-4 py-2.5 bg-amber-500 hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-700 text-white font-semibold rounded-lg shadow-sm hover:shadow-md transition-all duration-200"
@@ -27,7 +27,16 @@
   <div class="w-px h-8 bg-slate-200 dark:bg-slate-700"></div>
 
   <!-- Secondary Actions -->
-  <div class="flex items-center gap-2">
+  <div class="flex flex-wrap items-center gap-2">
+    <!-- Project Threads -->
+    <a href="/mail/{{ project.slug }}/threads"
+       class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md transition-all duration-200"
+       data-tippy-content="Browse conversations in this project"
+       aria-label="Browse project threads">
+      <i data-lucide="messages-square" class="w-4 h-4"></i>
+      <span class="text-sm">Threads</span>
+    </a>
+
     <!-- File Reservations -->
     <a href="/mail/{{ project.slug }}/file_reservations"
        class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm hover:shadow-md transition-all duration-200"
@@ -309,12 +318,14 @@
 
         <div class="space-y-3">
           {% for r in results %}
-            <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
-               class="block group bg-slate-50 dark:bg-slate-900 hover:bg-white dark:hover:bg-slate-800 rounded-xl p-5 border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 shadow-sm hover:shadow-md stagger-item"
-               style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
+            <article class="relative block group bg-slate-50 dark:bg-slate-900 hover:bg-white dark:hover:bg-slate-800 rounded-xl p-5 border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 shadow-sm hover:shadow-md stagger-item"
+                     style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
               <div class="flex items-start justify-between mb-3">
                 <h4 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1">
-                  {{ r.subject }}
+                  <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
+                     class="after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-primary-500 focus-visible:after:rounded-xl">
+                    {{ r.subject }}
+                  </a>
                 </h4>
                 {% if r.hits %}
                   <span class="px-3 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-bold rounded-full whitespace-nowrap ml-4">
@@ -338,7 +349,8 @@
                   <div class="flex items-center gap-1.5" data-tippy-content="Canonical thread identifier shared across agents" title="Canonical thread identifier shared across agents">
                     <i data-lucide="message-circle" class="w-4 h-4"></i>
                     <span class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-500">Thread</span>
-                    <span class="font-mono text-xs">{{ r.thread_id }}</span>
+                    <a href="/mail/{{ project.slug }}/thread/{{ r.thread_id|urlencode }}"
+                       class="relative z-10 font-mono text-xs text-primary-600 dark:text-primary-400 hover:underline focus-visible:ring-2 focus-visible:ring-primary-500">{{ r.thread_id }}</a>
                   </div>
                 {% endif %}
               </div>
@@ -348,7 +360,7 @@
                   {{ r.snippet | safe }}
                 </div>
               {% endif %}
-            </a>
+            </article>
           {% endfor %}
         </div>
       </div>
