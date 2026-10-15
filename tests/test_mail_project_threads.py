@@ -373,3 +373,59 @@ async def test_thread_message_browsing_round_trip_stays_in_the_message_project(
         assert [link["href"] for link in _thread_links(reopened)] == [thread_url]
         assert all(not link["href"].startswith("/mail/beta/thread/") for link in links)
         assert all(link["href"] != "/mail/beta/threads" for link in links)
+
+
+@pytest.mark.asyncio
+async def test_workspace_surfaces_recent_active_conversations(
+    mail_client: AsyncClient,
+) -> None:
+    await _seed_messages(
+        _message(1, "oldest", "Oldest Alpha", 1),
+        _message(2, "busy", "Busy opening", 2),
+        _message(3, "busy", "Busy latest", 30),
+        _message(4, "middle-a", "Middle A", 10),
+        _message(5, "middle-b", "Middle B", 11),
+        _message(6, "middle-c", "Middle C", 12),
+        _message(7, "middle-d", "Middle D", 13),
+        _message(8, "newest", "Newest Alpha", 40),
+        _message(9, "beta-only", "Beta only", 100, project_id=2, sender_id=2),
+    )
+
+    workspace = await mail_client.get("/mail/alpha")
+    assert workspace.status_code == 200
+    assert "Active Conversations" in workspace.text
+    assert "Browse all threads" in workspace.text
+
+    links = _thread_links(workspace)
+    assert [link["href"] for link in links] == [
+        "/mail/alpha/thread/newest",
+        "/mail/alpha/thread/busy",
+        "/mail/alpha/thread/middle-d",
+        "/mail/alpha/thread/middle-c",
+        "/mail/alpha/thread/middle-b",
+        "/mail/alpha/thread/middle-a",
+    ]
+    assert "Busy latest" in links[1]["text"]
+    assert "2 messages" in " ".join(links[1]["text"].split())
+    assert "Oldest Alpha" not in workspace.text
+    assert "Beta only" not in workspace.text
+    assert "/mail/beta/thread/" not in workspace.text
+    assert any(link["href"] == "/mail/alpha/threads" for link in _Links(workspace.text).links)
+
+
+@pytest.mark.asyncio
+async def test_workspace_active_conversations_empty_and_encoded(
+    mail_client: AsyncClient,
+) -> None:
+    empty = await mail_client.get("/mail/empty")
+    assert empty.status_code == 200
+    assert "No conversations yet" in empty.text
+    assert _thread_links(empty, "empty") == []
+
+    thread_id = "workspace ?#&"
+    await _seed_messages(_message(1, thread_id, "Encoded workspace thread", 1))
+    project_path = f"/mail/{quote('Workspace Alpha', safe='')}"
+    workspace = await mail_client.get(project_path)
+    assert workspace.status_code == 200
+    assert _thread_links(workspace)[0]["href"] == f"/mail/alpha/thread/{quote(thread_id, safe='')}"
+    assert any(link["href"] == "/mail/alpha/threads" for link in _Links(workspace.text).links)
