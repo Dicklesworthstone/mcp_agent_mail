@@ -64,6 +64,61 @@ from .storage import (
 )
 
 
+async def _project_thread_rows(
+    session: Any,
+    *,
+    project_id: int,
+    limit: int,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Return project conversations ordered by latest activity.
+
+    Grouping happens before pagination so busy threads cannot crowd older
+    conversations out of the result set. Messages without a nonblank thread ID
+    use their own message ID, matching the thread-detail route's starter
+    fallback.
+    """
+    rows = await session.execute(
+        text(
+            """
+            WITH project_messages AS (
+                SELECT id, subject, created_ts,
+                       CASE
+                           WHEN thread_id IS NOT NULL AND TRIM(thread_id) != ''
+                           THEN thread_id
+                           ELSE CAST(id AS TEXT)
+                       END AS thread_key
+                FROM messages
+                WHERE project_id = :pid
+            ), ranked_messages AS (
+                SELECT id, subject, created_ts, thread_key,
+                       COUNT(*) OVER (PARTITION BY thread_key) AS message_count,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY thread_key
+                           ORDER BY created_ts DESC, id DESC
+                       ) AS thread_position
+                FROM project_messages
+            )
+            SELECT thread_key, subject, created_ts, message_count
+            FROM ranked_messages
+            WHERE thread_position = 1
+            ORDER BY created_ts DESC, id DESC
+            LIMIT :lim OFFSET :off
+            """
+        ),
+        {"pid": project_id, "lim": limit, "off": offset},
+    )
+    return [
+        {
+            "thread_id": row["thread_key"],
+            "subject": row["subject"],
+            "created": str(row["created_ts"]),
+            "message_count": int(row["message_count"]),
+        }
+        for row in rows.mappings().all()
+    ]
+
+
 async def _project_slug_from_id(pid: int | None) -> str | None:
     if pid is None:
         return None
@@ -2409,6 +2464,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     {"pid": pid},
                 )
                 agents = [{"id": r[0], "name": r[1], "program": r[2], "model": r[3], "retired_at": str(r[4]) if r[4] else None} for r in agents_q.fetchall()]
+                active_threads = await _project_thread_rows(session, project_id=pid, limit=6)
                 matched_messages: list[dict] = []
                 if q and q.strip():
                     # Prefer FTS5 when available (fts_messages maintained by triggers)
@@ -2513,6 +2569,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 "mail_project.html",
                 project={"id": pid, "slug": prow[1], "human_key": prow[2], "archived_at": project_archived_at},
                 agents=agents,
+                active_threads=active_threads,
                 q=q or "",
                 scope=scope or "",
                 order=order or "relevance",
@@ -2537,50 +2594,13 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if not prow:
                     raise HTTPException(status_code=404, detail="Project not found")
 
-                # Group before paginating, rather than grouping a recent-message
-                # slice that can hide older conversations or undercount replies.
-                # Unthreaded starters use their message ID, matching mail_thread
-                # and the numeric thread ID assigned by reply_message.
-                rows = await session.execute(
-                    text(
-                        """
-                        WITH project_messages AS (
-                            SELECT id, subject, created_ts,
-                                   CASE
-                                       WHEN thread_id IS NOT NULL AND TRIM(thread_id) != ''
-                                       THEN thread_id
-                                       ELSE CAST(id AS TEXT)
-                                   END AS thread_key
-                            FROM messages
-                            WHERE project_id = :pid
-                        ), ranked_messages AS (
-                            SELECT id, subject, created_ts, thread_key,
-                                   COUNT(*) OVER (PARTITION BY thread_key) AS message_count,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY thread_key
-                                       ORDER BY created_ts DESC, id DESC
-                                   ) AS thread_position
-                            FROM project_messages
-                        )
-                        SELECT thread_key, subject, created_ts, message_count
-                        FROM ranked_messages
-                        WHERE thread_position = 1
-                        ORDER BY created_ts DESC, id DESC
-                        LIMIT :lim OFFSET :off
-                        """
-                    ),
-                    {"pid": int(prow[0]), "lim": limit + 1, "off": (page - 1) * limit},
+                thread_rows = await _project_thread_rows(
+                    session,
+                    project_id=int(prow[0]),
+                    limit=limit + 1,
+                    offset=(page - 1) * limit,
                 )
-                thread_rows = rows.mappings().all()
-                threads = [
-                    {
-                        "thread_id": row["thread_key"],
-                        "subject": row["subject"],
-                        "created": str(row["created_ts"]),
-                        "message_count": int(row["message_count"]),
-                    }
-                    for row in thread_rows[:limit]
-                ]
+                threads = thread_rows[:limit]
 
             return await _render(
                 "mail_threads.html",
