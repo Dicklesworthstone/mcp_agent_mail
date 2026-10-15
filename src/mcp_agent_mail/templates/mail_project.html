@@ -155,6 +155,55 @@
     <div class="absolute top-0 right-0 w-64 h-64 bg-gradient-to-br from-primary-500/5 to-purple-500/5 rounded-full blur-3xl pointer-events-none"></div>
   </div>
 
+  <!-- Active Threads -->
+  <section class="bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border border-slate-200 dark:border-slate-700"
+           aria-labelledby="active-threads-heading">
+    <div class="flex flex-wrap items-center justify-between gap-4 mb-5">
+      <div class="flex items-center gap-3">
+        <div class="w-11 h-11 bg-primary-600 rounded-xl flex items-center justify-center shadow-md">
+          <i data-lucide="messages-square" class="w-5 h-5 text-white"></i>
+        </div>
+        <div>
+          <h2 id="active-threads-heading" class="text-xl font-bold text-slate-900 dark:text-white">Active Conversations</h2>
+          <p class="text-sm text-slate-600 dark:text-slate-400">Jump straight into the most recently active threads in this workspace.</p>
+        </div>
+      </div>
+      <a href="/mail/{{ project.slug }}/threads"
+         class="inline-flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg text-sm font-semibold transition-colors">
+        Browse all threads
+        <i data-lucide="arrow-right" class="w-4 h-4"></i>
+      </a>
+    </div>
+
+    {% if active_threads %}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        {% for thread in active_threads %}
+          <a href="/mail/{{ project.slug }}/thread/{{ thread.thread_id|urlencode }}"
+             class="group flex items-start justify-between gap-4 p-4 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 hover:bg-white dark:hover:bg-slate-800 hover:border-primary-400 dark:hover:border-primary-500 transition-all"
+             aria-label="Open thread {{ thread.thread_id }}">
+            <div class="min-w-0 flex-1">
+              <h3 class="font-semibold text-slate-900 dark:text-white truncate group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
+                {{ thread.subject or '(No subject)' }}
+              </h3>
+              <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                <span class="font-mono truncate max-w-full">#{{ thread.thread_id }}</span>
+                <span>{{ thread.message_count }} {{ 'message' if thread.message_count == 1 else 'messages' }}</span>
+                <time datetime="{{ thread.created }}">{{ thread.created }}</time>
+              </div>
+            </div>
+            <i data-lucide="chevron-right" class="w-4 h-4 mt-1 text-slate-400 group-hover:text-primary-500 flex-shrink-0"></i>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="rounded-xl border border-dashed border-slate-300 dark:border-slate-600 p-8 text-center">
+        <i data-lucide="message-square-dashed" class="w-8 h-8 mx-auto mb-3 text-slate-400"></i>
+        <h3 class="font-semibold text-slate-900 dark:text-white">No conversations yet</h3>
+        <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">Threads will appear here as soon as messages are exchanged in this workspace.</p>
+      </div>
+    {% endif %}
+  </section>
+
   <!-- Enhanced Search Section -->
   <div class="bg-white dark:bg-slate-800 rounded-2xl p-8 shadow-soft border border-slate-200 dark:border-slate-700"
        x-data='{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, query: {{ (q or '')|tojson }}, isExpanded: {{ 'true' if (q is not none and q != '') else 'false' }} }'>
