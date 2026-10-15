@@ -1,5 +1,8 @@
 {% extends "base.html" %}
 
+{# Match the project thread list's starter fallback; preserve nonblank IDs verbatim. #}
+{% set conversation_id = message.thread_id if message.thread_id and message.thread_id|trim(' ') else message.id|string %}
+
 {% block title %}{{ message.subject }} — Agent Mail{% endblock %}
 
 {% block breadcrumbs %}
@@ -12,12 +15,22 @@
     {{ project.human_key }}
   </a>
   <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}/threads" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Threads
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
   <span class="text-slate-900 dark:text-white font-medium truncate max-w-xs">{{ message.subject }}</span>
 </nav>
 {% endblock %}
 
 {% block header_actions %}
-<div class="flex items-center gap-2">
+<div class="flex flex-wrap items-center gap-2">
+  <a href="/mail/{{ project.slug }}/threads"
+     class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm transition-colors"
+     aria-label="Browse project threads">
+    <i data-lucide="messages-square" class="w-4 h-4"></i>
+    <span class="text-sm">Browse Threads</span>
+  </a>
   <button disabled
           class="px-4 py-2 text-sm font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
           data-tippy-content="Coming soon - Reply to this message"
@@ -76,15 +89,13 @@
           <i data-lucide="calendar" class="w-4 h-4"></i>
           <span>{{ message.created }}</span>
         </div>
-        {% if message.thread_id %}
-          <a href="/mail/{{ project.slug }}/thread/{{ message.thread_id }}"
-             class="inline-flex items-center gap-2 px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-lg transition-all duration-200 font-medium">
-            <i data-lucide="messages-square" class="w-4 h-4"></i>
-            <span class="text-sm">View Thread</span>
-            <span class="font-mono text-xs opacity-75">#{{ message.thread_id }}</span>
-            <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
-          </a>
-        {% endif %}
+        <a href="/mail/{{ project.slug }}/thread/{{ conversation_id|urlencode }}"
+           class="inline-flex items-center gap-2 px-3 py-1.5 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-lg transition-all duration-200 font-medium">
+          <i data-lucide="messages-square" class="w-4 h-4"></i>
+          <span class="text-sm">View Thread</span>
+          <span class="font-mono text-xs opacity-75">#{{ conversation_id }}</span>
+          <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i>
+        </a>
         {% if commit_sha %}
           <div class="flex items-center gap-2">
             <i data-lucide="git-commit" class="w-4 h-4"></i>
@@ -337,7 +348,7 @@
             </div>
           </div>
 
-          <a href="/mail/{{ project.slug }}/thread/{{ message.thread_id }}"
+          <a href="/mail/{{ project.slug }}/thread/{{ conversation_id|urlencode }}"
              class="inline-flex items-center gap-2 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg shadow-md hover:shadow-xl transform hover:scale-105 transition-all duration-200">
             <i data-lucide="eye" class="w-4 h-4"></i>
             View Full Thread

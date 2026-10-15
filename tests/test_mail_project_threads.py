@@ -316,3 +316,60 @@ async def test_thread_page_size_is_capped_and_invalid_parameters_are_rejected(ma
     assert any(link["href"] == "/mail/alpha/threads?page=9999&limit=200" for link in _Links(beyond.text).links)
     for params in ({"limit": "invalid"}, {"page": "invalid"}):
         assert (await mail_client.get("/mail/alpha/threads", params=params)).status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_key", ["alpha", "Workspace Alpha"])
+@pytest.mark.parametrize("thread_id", [None, "", "   ", "release", "release ?#&", 'literal%2F"'])
+async def test_thread_message_browsing_round_trip_stays_in_the_message_project(
+    mail_client: AsyncClient,
+    project_key: str,
+    thread_id: str | None,
+) -> None:
+    conversation_id = thread_id if thread_id and thread_id.strip(" ") else "100"
+    await _seed_messages(
+        # The sender belongs to Beta, but the conversation belongs to Alpha.
+        _message(100, thread_id, "Alpha opening", 1, sender_id=2),
+        _message(101, conversation_id, "Alpha reply", 2),
+        _message(200, conversation_id, "Beta private", 3, project_id=2, sender_id=2),
+    )
+    listing = await mail_client.get(f"/mail/{quote(project_key, safe='')}/threads")
+    threads = _thread_links(listing)
+    assert len(threads) == 1
+    thread_url = f"/mail/alpha/thread/{quote(conversation_id, safe='')}"
+    assert threads[0]["href"] == thread_url
+
+    detail = await mail_client.get(threads[0]["href"])
+    assert detail.status_code == 200
+    detail_links = _Links(detail.text).links
+    # Breadcrumb, header, and footer all return to the current workspace's list.
+    assert sum(link["href"] == "/mail/alpha/threads" for link in detail_links) >= 3
+    assert any(link["href"] == "/mail/alpha" for link in detail_links)
+    assert "Body for message 200." not in detail.text
+
+    for mid in (100, 101):
+        message_link = next(link for link in detail_links if link["href"] == f"/mail/alpha/message/{mid}")
+        message = await mail_client.get(message_link["href"])
+        assert message.status_code == 200
+        assert f"Body for message {mid}." in message.text
+        assert "Body for message 200." not in message.text
+        links = _Links(message.text).links
+        conversation_links = [
+            link for link in links if "View Thread" in link["text"] or "View Full Thread" in link["text"]
+        ]
+        assert conversation_links, "Even a standalone starter must link back to its conversation"
+        assert all(link["href"] == thread_url for link in conversation_links)
+        # Named threads also expose the conversation preview's separate link.
+        if thread_id and thread_id.strip(" "):
+            assert any("View Full Thread" in link["text"] for link in conversation_links)
+        returned = await mail_client.get(conversation_links[0]["href"])
+        assert returned.status_code == 200
+        assert "Body for message 100." in returned.text
+        assert "Body for message 101." in returned.text
+        assert "Body for message 200." not in returned.text
+
+        browse = next(link for link in links if link["href"] == "/mail/alpha/threads")
+        reopened = await mail_client.get(browse["href"])
+        assert [link["href"] for link in _thread_links(reopened)] == [thread_url]
+        assert all(not link["href"].startswith("/mail/beta/thread/") for link in links)
+        assert all(link["href"] != "/mail/beta/threads" for link in links)

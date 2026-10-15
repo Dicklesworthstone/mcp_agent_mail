@@ -13,6 +13,10 @@
     {{ project.human_key }}
   </a>
   <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
+  <a href="/mail/{{ project.slug }}/threads" class="text-slate-600 dark:text-slate-400 hover:text-primary-600 dark:hover:text-primary-400 transition-colors">
+    Threads
+  </a>
+  <i data-lucide="chevron-right" class="w-4 h-4 text-slate-400"></i>
   <span class="text-slate-900 dark:text-white font-medium">Thread Conversation</span>
 </nav>
 {% endblock %}
@@ -22,7 +26,7 @@
 
   <!-- Thread Header - Gmail Style -->
   <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 p-6">
-    <div class="flex items-start justify-between mb-4">
+    <div class="flex flex-wrap items-start justify-between gap-4 mb-4">
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-3 mb-2">
           <i data-lucide="messages-square" class="w-6 h-6 text-primary-600 dark:text-primary-400 flex-shrink-0"></i>
@@ -43,7 +47,13 @@
       </div>
 
       <!-- Actions -->
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <a href="/mail/{{ project.slug }}/threads"
+           class="px-3 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-all duration-200 flex items-center gap-2 text-sm font-medium"
+           aria-label="Browse project threads">
+          <i data-lucide="messages-square" class="w-4 h-4"></i>
+          Browse Threads
+        </a>
         <a href="/mail/{{ project.slug }}"
            class="px-3 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-all duration-200 flex items-center gap-2 text-sm font-medium">
           <i data-lucide="arrow-left" class="w-4 h-4"></i>
@@ -172,10 +182,10 @@
         <p class="text-xs">{{ message_count }} message{{ 's' if message_count != 1 else '' }} in this thread</p>
       </div>
 
-      <a href="/mail/{{ project.slug }}"
+      <a href="/mail/{{ project.slug }}/threads"
          class="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg shadow-sm hover:shadow-md transition-all duration-200 font-medium">
         <i data-lucide="arrow-left" class="w-4 h-4"></i>
-        Back to Project
+        Back to Threads
       </a>
     </div>
   </div>
