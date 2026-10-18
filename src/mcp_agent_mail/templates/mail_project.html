@@ -59,6 +59,7 @@
 {% endblock %}
 
 {% block content %}
+{% from "mail_search_snippet.html" import highlighted_snippet %}
 <div class="space-y-8 page-transition">
   <!-- Project Hero Header -->
   <div class="relative overflow-hidden bg-white dark:bg-slate-800 rounded-2xl p-6 shadow-soft border border-slate-200 dark:border-slate-700">
@@ -367,13 +368,14 @@
 
         <div class="space-y-3">
           {% for r in results %}
+            {% set conversation_id = r.thread_id if r.thread_id and r.thread_id|trim(' ') else r.id|string %}
             <article class="relative block group bg-slate-50 dark:bg-slate-900 hover:bg-white dark:hover:bg-slate-800 rounded-xl p-5 border-2 border-slate-200 dark:border-slate-700 hover:border-primary-400 dark:hover:border-primary-600 transition-all duration-300 shadow-sm hover:shadow-md stagger-item"
                      style="animation-delay: {{ [loop.index0 * 0.05, 1.0]|min }}s;">
               <div class="flex items-start justify-between mb-3">
                 <h4 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1">
                   <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
                      class="after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-primary-500 focus-visible:after:rounded-xl">
-                    {{ r.subject }}
+                    {{ r.subject or '(No subject)' }}
                   </a>
                 </h4>
                 {% if r.hits %}
@@ -383,7 +385,7 @@
                 {% endif %}
               </div>
 
-              <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-3">
+              <div class="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-3">
                 <div class="flex items-center gap-1.5">
                   <i data-lucide="user" class="w-4 h-4"></i>
                   <span class="font-medium">{{ r.sender }}</span>
@@ -393,27 +395,26 @@
                   <i data-lucide="calendar" class="w-4 h-4"></i>
                   <span>{{ r.created }}</span>
                 </div>
-                {% if r.thread_id %}
-                  <span class="text-slate-300 dark:text-slate-600">•</span>
-                  <div class="flex items-center gap-1.5" data-tippy-content="Canonical thread identifier shared across agents" title="Canonical thread identifier shared across agents">
-                    <i data-lucide="message-circle" class="w-4 h-4"></i>
-                    <span class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-500">Thread</span>
-                    <a href="/mail/{{ project.slug }}/thread/{{ r.thread_id|urlencode }}"
-                       class="relative z-10 font-mono text-xs text-primary-600 dark:text-primary-400 hover:underline focus-visible:ring-2 focus-visible:ring-primary-500">{{ r.thread_id }}</a>
-                  </div>
-                {% endif %}
+                <span class="text-slate-300 dark:text-slate-600">•</span>
+                <div class="flex items-center gap-1.5 min-w-0" data-tippy-content="Canonical thread identifier shared across agents" title="Canonical thread identifier shared across agents">
+                  <i data-lucide="message-circle" class="w-4 h-4 flex-shrink-0"></i>
+                  <span class="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-500">Thread</span>
+                  <a href="/mail/{{ project.slug }}/thread/{{ conversation_id|urlencode }}"
+                     class="relative z-10 font-mono text-xs break-all text-primary-600 dark:text-primary-400 hover:underline focus-visible:ring-2 focus-visible:ring-primary-500"
+                     aria-label="Open thread {{ conversation_id }}">{{ conversation_id }}</a>
+                </div>
               </div>
 
               {% if r.snippet %}
                 <div class="text-sm text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-800 rounded-lg p-3 line-clamp-2 border border-slate-200 dark:border-slate-700">
-                  {{ r.snippet | safe }}
+                  {{ highlighted_snippet(r.snippet) }}
                 </div>
               {% endif %}
             </article>
           {% endfor %}
         </div>
       </div>
-    {% elif results is defined %}
+    {% elif results is defined and q and q|trim %}
       <div class="mt-8 text-center py-12 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700">
         <div class="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
           <i data-lucide="search-x" class="w-8 h-8 text-slate-400"></i>

@@ -1,0 +1,17 @@
+{# SQLite FTS snippets contain untrusted message text, not sanitized HTML.
+   Only exact, balanced highlight markers become markup. Force-escape every
+   text segment, even if a caller accidentally supplies a Markup value. #}
+{% macro highlighted_snippet(snippet) -%}
+  {%- for part in snippet.split('<mark>') -%}
+    {%- if loop.first -%}
+      {{- part|forceescape -}}
+    {%- else -%}
+      {%- set highlight = part.split('</mark>', 1) -%}
+      {%- if highlight|length == 2 -%}
+        <mark>{{ highlight[0]|forceescape }}</mark>{{ highlight[1]|forceescape }}
+      {%- else -%}
+        {{- '<mark>'|forceescape -}}{{- part|forceescape -}}
+      {%- endif -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro %}

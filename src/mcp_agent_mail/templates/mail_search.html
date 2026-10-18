@@ -16,7 +16,17 @@
 </nav>
 {% endblock %}
 
+{% block header_actions %}
+<a href="/mail/{{ project.slug }}/threads"
+   class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm transition-colors"
+   aria-label="Browse project threads">
+  <i data-lucide="messages-square" class="w-4 h-4"></i>
+  <span class="text-sm">Browse Threads</span>
+</a>
+{% endblock %}
+
 {% block content %}
+{% from "mail_search_snippet.html" import highlighted_snippet %}
 <div class="space-y-6 animate-fade-in" x-data='{ scope: {{ (scope or '')|tojson }}, order: {{ (order or 'relevance')|tojson }}, showHelp: false }'>
   <!-- Search Header -->
   <div class="bg-white dark:bg-slate-800 rounded-xl p-8 shadow-soft border border-slate-200 dark:border-slate-700">
@@ -210,11 +220,14 @@
 
       <div class="divide-y divide-slate-200 dark:divide-slate-700">
         {% for r in results %}
-          <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
-             class="block p-6 hover:bg-slate-50 dark:hover:bg-slate-900 transition-all duration-200 group">
+          {% set conversation_id = r.thread_id if r.thread_id and r.thread_id|trim(' ') else r.id|string %}
+          <article class="relative block p-6 hover:bg-slate-50 dark:hover:bg-slate-900 transition-all duration-200 group">
             <div class="flex items-start justify-between mb-3">
               <h4 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
-                {{ r.subject }}
+                <a href="/mail/{{ project.slug }}/message/{{ r.id }}"
+                   class="after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-primary-500">
+                  {{ r.subject or '(No subject)' }}
+                </a>
               </h4>
               {% if r.hits %}
                 <span class="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 text-xs font-medium rounded-full">
@@ -223,7 +236,7 @@
               {% endif %}
             </div>
 
-            <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-3">
+            <div class="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-400 mb-3">
               <div class="flex items-center gap-1.5">
                 <i data-lucide="user" class="w-4 h-4"></i>
                 <span>{{ r.from }}</span>
@@ -232,17 +245,18 @@
                 <i data-lucide="calendar" class="w-4 h-4"></i>
                 <span>{{ r.created }}</span>
               </div>
-              {% if r.thread_id %}
-                <div class="flex items-center gap-1.5">
-                  <i data-lucide="message-circle" class="w-4 h-4"></i>
-                  <span class="font-mono text-xs">{{ r.thread_id }}</span>
-                </div>
-              {% endif %}
+              <div class="flex items-center gap-1.5 min-w-0">
+                <i data-lucide="message-circle" class="w-4 h-4 flex-shrink-0"></i>
+                <span class="text-xs uppercase tracking-wide">Thread</span>
+                <a href="/mail/{{ project.slug }}/thread/{{ conversation_id|urlencode }}"
+                   class="relative z-10 font-mono text-xs break-all text-primary-600 dark:text-primary-400 hover:underline focus-visible:ring-2 focus-visible:ring-primary-500"
+                   aria-label="Open thread {{ conversation_id }}">{{ conversation_id }}</a>
+              </div>
             </div>
 
             {% if r.snippet %}
               <div class="text-sm text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 rounded-lg p-3 line-clamp-2">
-                {{ r.snippet | safe }}
+                {{ highlighted_snippet(r.snippet) }}
               </div>
             {% endif %}
 
@@ -250,7 +264,7 @@
               <span class="text-sm font-medium">View message</span>
               <i data-lucide="arrow-right" class="w-4 h-4 group-hover:translate-x-1 transition-transform"></i>
             </div>
-          </a>
+          </article>
         {% endfor %}
       </div>
     </div>
