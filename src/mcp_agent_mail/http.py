@@ -3369,60 +3369,40 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                 pid = int(prow[0])
 
-                # Get all messages in this thread, ordered chronologically
-                # Include messages where thread_id matches OR message id matches (for thread starter)
-                try:
-                    thread_id_int = int(thread_id)
-                    rows = await session.execute(
-                        text(
-                            """
-                            SELECT
-                                m.id,
-                                m.subject,
-                                m.body_md,
-                                s.name AS sender_name,
-                                s.project_id AS sender_project_id,
-                                sp.human_key AS sender_project_name,
-                                sp.slug AS sender_project_slug,
-                                m.created_ts,
-                                m.importance,
-                                m.thread_id
-                            FROM messages m
-                            JOIN agents s ON s.id = m.sender_id
-                            LEFT JOIN projects sp ON sp.id = s.project_id
-                            WHERE m.project_id = :pid
-                            AND (m.thread_id = :tid OR m.id = :tid_int)
-                            ORDER BY m.created_ts ASC
-                            """
-                        ),
-                        {"pid": pid, "tid": thread_id, "tid_int": thread_id_int},
-                    )
-                except ValueError:
-                    # Not an integer, just use string thread_id
-                    rows = await session.execute(
-                        text(
-                            """
-                            SELECT
-                                m.id,
-                                m.subject,
-                                m.body_md,
-                                s.name AS sender_name,
-                                s.project_id AS sender_project_id,
-                                sp.human_key AS sender_project_name,
-                                sp.slug AS sender_project_slug,
-                                m.created_ts,
-                                m.importance,
-                                m.thread_id
-                            FROM messages m
-                            JOIN agents s ON s.id = m.sender_id
-                            LEFT JOIN projects sp ON sp.id = s.project_id
-                            WHERE m.project_id = :pid
-                            AND m.thread_id = :tid
-                            ORDER BY m.created_ts ASC
-                            """
-                        ),
-                        {"pid": pid, "tid": thread_id},
-                    )
+                # Resolve exactly the same canonical conversation key used by the
+                # workspace preview and thread list. This avoids numeric-ID
+                # collisions where thread "42" could otherwise pull in message
+                # #42 even when that message belongs to a different thread.
+                rows = await session.execute(
+                    text(
+                        """
+                        SELECT
+                            m.id,
+                            m.subject,
+                            m.body_md,
+                            s.name AS sender_name,
+                            s.project_id AS sender_project_id,
+                            sp.human_key AS sender_project_name,
+                            sp.slug AS sender_project_slug,
+                            m.created_ts,
+                            m.importance,
+                            m.thread_id
+                        FROM messages m
+                        JOIN agents s ON s.id = m.sender_id
+                        LEFT JOIN projects sp ON sp.id = s.project_id
+                        WHERE m.project_id = :pid
+                          AND (
+                              CASE
+                                  WHEN m.thread_id IS NOT NULL AND TRIM(m.thread_id) != ''
+                                  THEN m.thread_id
+                                  ELSE CAST(m.id AS TEXT)
+                              END
+                          ) = :tid
+                        ORDER BY m.created_ts ASC, m.id ASC
+                        """
+                    ),
+                    {"pid": pid, "tid": thread_id},
+                )
 
                 messages = []
                 for r in rows.mappings().all():
