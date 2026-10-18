@@ -2869,6 +2869,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         "created": str(r["created_ts"]),
                         "importance": r["importance"],
                         "thread_id": r["thread_id"],
+                        "conversation_id": (
+                            r["thread_id"]
+                            if r["thread_id"] is not None and str(r["thread_id"]).strip()
+                            else str(r["id"])
+                        ),
                         "ack_required": ack_required,
                         "read_ts": str(read_ts) if read_ts else None,
                         "ack_ts": str(ack_ts) if ack_ts else None,

@@ -462,3 +462,25 @@ async def test_numeric_thread_id_does_not_capture_unrelated_message_with_same_da
     assert "Body for message 42." in other.text
     assert "Body for message 41." not in other.text
     assert "Body for message 43." not in other.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", [None, "", "   ", "release"])
+async def test_agent_inbox_exposes_independent_canonical_thread_navigation(
+    mail_client: AsyncClient,
+    thread_id: str | None,
+) -> None:
+    conversation_id = thread_id if thread_id and thread_id.strip() else "100"
+    await _seed_messages(_message(100, thread_id, "Inbox navigation", 1))
+    async with get_session() as session:
+        await session.execute(
+            text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (100, 1, 'to')")
+        )
+        await session.commit()
+
+    response = await mail_client.get("/mail/alpha/inbox/BlueLake")
+    assert response.status_code == 200
+    links = _Links(response.text).links
+    assert any(link["href"] == "/mail/alpha/threads" for link in links)
+    assert f'"conversation_id": "{conversation_id}"' in response.text
+    assert "encodeURIComponent(item.conversation_id)" in response.text

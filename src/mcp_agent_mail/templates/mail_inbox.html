@@ -16,6 +16,15 @@
 </nav>
 {% endblock %}
 
+{% block header_actions %}
+<a href="/mail/{{ project.slug }}/threads"
+   class="inline-flex items-center gap-2 px-3 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-medium rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm transition-colors"
+   aria-label="Browse project threads">
+  <i data-lucide="messages-square" class="w-4 h-4"></i>
+  <span class="text-sm">Browse Threads</span>
+</a>
+{% endblock %}
+
 {% block content %}
 <div class="space-y-6 animate-fade-in" x-data="inboxManager()">
   <!-- Inbox Header with Filters -->
@@ -200,15 +209,19 @@
                      :aria-label="'Select message: ' + item.subject" />
             </div>
 
-            <!-- Message Content (clickable) -->
-            <a :href="`/mail/{{ project.slug }}/message/${item.id}`"
-               class="flex-1 min-w-0 group">
+            <!-- Message Content: stretched message link + independent thread link -->
+            <div class="relative flex-1 min-w-0 group">
 
               <!-- Message Header -->
               <div class="flex items-start justify-between mb-3">
                 <div class="flex-1 min-w-0">
-                  <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1 mb-2"
-                      x-text="item.subject"></h3>
+                  <h3 class="text-lg font-semibold text-slate-900 dark:text-white group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors line-clamp-1 mb-2">
+                    <a :href="`/mail/{{ project.slug }}/message/${item.id}`"
+                       class="after:absolute after:inset-0 focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-primary-500 focus-visible:after:rounded-lg"
+                       :aria-label="'Open message: ' + (item.subject || 'No subject')">
+                      <span x-text="item.subject || '(No subject)'"></span>
+                    </a>
+                  </h3>
 
                   <!-- Message Meta -->
                   <div class="flex items-center gap-4 text-sm text-slate-600 dark:text-slate-400 flex-wrap">
@@ -220,15 +233,14 @@
                       <i data-lucide="calendar" class="w-4 h-4"></i>
                       <span x-text="item.created"></span>
                     </div>
-                    <template x-if="item.thread_id">
-                      <a :href="`/mail/{{ project.slug }}/thread/${item.thread_id}`"
-                         @click.stop
-                         class="flex items-center gap-1.5 px-2 py-1 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-md transition-colors">
-                        <i data-lucide="messages-square" class="w-3.5 h-3.5"></i>
-                        <span class="font-mono text-xs font-medium">Thread</span>
-                        <span class="font-mono text-xs opacity-75" x-text="'#' + item.thread_id"></span>
-                      </a>
-                    </template>
+                    <a :href="`/mail/{{ project.slug }}/thread/${encodeURIComponent(item.conversation_id)}`"
+                       @click.stop
+                       class="relative z-10 flex items-center gap-1.5 px-2 py-1 bg-primary-100 dark:bg-primary-900/30 hover:bg-primary-200 dark:hover:bg-primary-800/40 text-primary-700 dark:text-primary-300 rounded-md transition-colors"
+                       :aria-label="'Open thread ' + item.conversation_id">
+                      <i data-lucide="messages-square" class="w-3.5 h-3.5"></i>
+                      <span class="font-mono text-xs font-medium">Thread</span>
+                      <span class="font-mono text-xs opacity-75" x-text="'#' + item.conversation_id"></span>
+                    </a>
                   </div>
                 </div>
 
@@ -286,7 +298,7 @@
                   </div>
                 </div>
               </div>
-            </a>
+            </div>
           </div>
         </div>
       </template>
