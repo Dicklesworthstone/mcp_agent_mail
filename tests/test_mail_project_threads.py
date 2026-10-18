@@ -429,3 +429,36 @@ async def test_workspace_active_conversations_empty_and_encoded(
     assert workspace.status_code == 200
     assert _thread_links(workspace)[0]["href"] == f"/mail/alpha/thread/{quote(thread_id, safe='')}"
     assert any(link["href"] == "/mail/alpha/threads" for link in _Links(workspace.text).links)
+
+
+@pytest.mark.asyncio
+async def test_numeric_thread_id_does_not_capture_unrelated_message_with_same_database_id(
+    mail_client: AsyncClient,
+) -> None:
+    await _seed_messages(
+        _message(41, "42", "Numeric thread opening", 1),
+        _message(43, "42", "Numeric thread reply", 3),
+        # Same numeric database ID as the thread key, but explicitly belongs
+        # to another conversation and must not leak into thread "42".
+        _message(42, "other-thread", "Unrelated message 42", 2),
+    )
+
+    listing = await mail_client.get("/mail/alpha/threads")
+    assert listing.status_code == 200
+    links = _thread_links(listing)
+    hrefs = [link["href"] for link in links]
+    assert "/mail/alpha/thread/42" in hrefs
+    assert "/mail/alpha/thread/other-thread" in hrefs
+
+    numeric = await mail_client.get("/mail/alpha/thread/42")
+    assert numeric.status_code == 200
+    assert "Body for message 41." in numeric.text
+    assert "Body for message 43." in numeric.text
+    assert "Body for message 42." not in numeric.text
+    assert "Unrelated message 42" not in numeric.text
+
+    other = await mail_client.get("/mail/alpha/thread/other-thread")
+    assert other.status_code == 200
+    assert "Body for message 42." in other.text
+    assert "Body for message 41." not in other.text
+    assert "Body for message 43." not in other.text
