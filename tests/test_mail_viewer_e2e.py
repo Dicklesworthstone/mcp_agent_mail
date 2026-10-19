@@ -5,6 +5,8 @@ Tests all /mail/* endpoints to ensure proper rendering and functionality.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -194,6 +196,24 @@ async def test_mail_unified_inbox_html(isolated_env):
         assert "text/html" in resp.headers.get("content-type", "")
         # Should contain some HTML structure
         assert "<html" in resp.text.lower() or "<!doctype" in resp.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_mail_footer_shows_current_year(isolated_env):
+    """The shared footer is stamped with the render-time year, not a hardcoded one (GH #276)."""
+    settings = _config.get_settings()
+    app = build_http_app(settings, build_mcp_server())
+    await _setup_test_data(settings)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        years = {datetime.now(timezone.utc).year}
+        resp = await client.get("/mail")
+        years.add(datetime.now(timezone.utc).year)  # tolerate a New Year rollover mid-request
+
+    assert resp.status_code == 200
+    footer = resp.text.split("<footer", 1)[1].split("</footer>", 1)[0]
+    assert any(f"MCP Agent Mail &copy; {year}" in footer for year in years), footer
 
 
 @pytest.mark.asyncio

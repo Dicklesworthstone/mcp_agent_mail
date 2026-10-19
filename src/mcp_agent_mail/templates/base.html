@@ -2212,7 +2212,7 @@
     <footer class="border-t border-slate-200 dark:border-slate-800 mt-16">
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div class="flex items-center justify-between text-sm text-slate-500 dark:text-slate-400">
-          <p>MCP Agent Mail &copy; 2025</p>
+          <p>MCP Agent Mail &copy; {{ current_year }}</p>
           <div class="flex items-center gap-4">
             <!-- Footer links commented out until destinations are available -->
             <!-- <a href="#" class="hover:text-primary-600 dark:hover:text-primary-400 transition-colors">Documentation</a> -->
@@ -2859,15 +2859,28 @@
         if (typeof lucide !== 'undefined') {
           lucide.createIcons();
 
-          // Re-initialize on Alpine mutations with throttling for performance
+          // Render icon placeholders that Alpine inserts later (x-for, x-if, x-html).
+          // lucide.createIcons() replaces every [data-lucide] node, including <svg> icons it
+          // already rendered, so reacting to those swaps re-triggered this observer forever:
+          // every icon was rebuilt ~10x per second and animated icons (the refresh spinner)
+          // kept restarting. Only insertions that carry unrendered placeholders need a pass.
+          const hasPendingIcon = (node) =>
+            node.nodeType === Node.ELEMENT_NODE &&
+            ((node.hasAttribute('data-lucide') && !(node instanceof SVGElement)) ||
+              node.querySelector('[data-lucide]:not(svg)') !== null);
+
           let iconUpdateTimeout;
-          const observer = new MutationObserver(() => {
+          const observer = new MutationObserver((mutations) => {
+            const needsIcons = mutations.some((mutation) =>
+              Array.from(mutation.addedNodes).some(hasPendingIcon)
+            );
+            if (!needsIcons) return;
             clearTimeout(iconUpdateTimeout);
             iconUpdateTimeout = setTimeout(() => {
               if (typeof lucide !== 'undefined') {
                 lucide.createIcons();
               }
-            }, 100); // Throttle to max once per 100ms
+            }, 100); // Batch bursts of insertions into one pass
           });
 
           observer.observe(document.body, {

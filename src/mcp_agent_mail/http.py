@@ -1957,6 +1957,8 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
         async def _render(name: str, **ctx: Any) -> HTMLResponse:
             tpl = env.get_template(name)
+            # Stamped per render so a long-running server never shows a stale footer year.
+            ctx.setdefault("current_year", datetime.now(timezone.utc).year)
             html = await tpl.render_async(**ctx)
             return HTMLResponse(html)
 
