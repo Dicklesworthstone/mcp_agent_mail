@@ -309,18 +309,16 @@
             <template x-for="(msg, index) in filteredMessages" :key="msg.id">
               <!-- Gmail-style Message Item -->
               <div @click="handleMessageClick(msg)"
-                   @keydown.enter="handleMessageClick(msg)"
                    :data-message-id="msg.id"
                    :class="{
                      'bg-primary-50 dark:bg-primary-900/20 border-l-4 border-l-primary-500': selectedMessage && selectedMessage.id === msg.id,
                      'border-l-4 border-l-transparent hover:bg-slate-50 dark:hover:bg-slate-900': !selectedMessage || selectedMessage.id !== msg.id,
                      'font-semibold': !msg.read
                    }"
-                   class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-inset"
+                   class="px-4 py-3 border-b border-slate-100 dark:border-slate-700 cursor-pointer transition-all duration-200 group focus-within:ring-2 focus-within:ring-primary-500 focus-within:ring-inset"
                    :style="`animation-delay: ${Math.min(index * 0.02, 0.5)}s;`"
-                   tabindex="0"
-                   role="button"
-                   :aria-label="'Message from ' + msg.sender + ': ' + msg.subject">
+                   role="group"
+                   :aria-label="'Message from ' + msg.sender + ': ' + (msg.subject || 'No subject')">
 
                 <div class="flex items-start gap-3">
                   <!-- Checkbox -->
@@ -343,12 +341,15 @@
                     <!-- Badges Row -->
                     <div class="flex items-center gap-2 mb-1.5 flex-wrap">
                       <!-- Project Badge -->
-                      <span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full"
-                            :class="getProjectBadgeClass(msg.project_name)"
-                            :title="msg.project_name">
+                      <a :href="projectUrl(msg)"
+                         @click.stop
+                         class="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full hover:underline focus-visible:ring-2 focus-visible:ring-primary-500"
+                         :class="getProjectBadgeClass(msg.project_name)"
+                         :title="msg.project_name"
+                         :aria-label="'Open project ' + msg.project_name">
                         <i data-lucide="folder" class="w-3 h-3"></i>
                         <span class="truncate max-w-[100px]" x-text="msg.project_name"></span>
-                      </span>
+                      </a>
 
                       <!-- Importance Badge -->
                       <template x-if="msg.importance === 'urgent'">
@@ -364,17 +365,21 @@
                         </span>
                       </template>
 
-                      <!-- Thread Indicator -->
-                      <template x-if="msg.thread_id">
-                        <span class="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 text-xs font-medium rounded-full">
-                          <i data-lucide="message-circle" class="w-3 h-3"></i>
-                          Thread
-                        </span>
-                      </template>
+                      <!-- Independent conversation link, including standalone starters -->
+                      <a :href="threadUrl(msg)"
+                         @click.stop
+                         :aria-label="'Open thread ' + conversationId(msg) + ' in ' + msg.project_name"
+                         class="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 text-xs font-medium rounded-full hover:underline focus-visible:ring-2 focus-visible:ring-primary-500">
+                        <i data-lucide="message-circle" class="w-3 h-3"></i>
+                        View Thread
+                      </a>
                     </div>
 
                     <!-- Subject -->
-                    <div class="text-sm mb-1 text-slate-900 dark:text-white truncate" x-text="msg.subject"></div>
+                    <button type="button" @click.stop="handleMessageClick(msg)"
+                            class="block w-full text-left text-sm mb-1 text-slate-900 dark:text-white truncate focus-visible:ring-2 focus-visible:ring-primary-500"
+                            :aria-label="'Open message: ' + (msg.subject || 'No subject')"
+                            x-text="msg.subject || '(No subject)'"></button>
 
                     <!-- Excerpt -->
                     <div class="text-xs text-slate-600 dark:text-slate-400 line-clamp-2" x-text="msg.excerpt"></div>
@@ -469,7 +474,7 @@
                   </div>
                   <div>
                     <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Project</div>
-                    <a :href="`/mail/${selectedMessage.project_slug}`"
+                    <a :href="projectUrl(selectedMessage)"
                        class="text-sm font-semibold text-primary-600 dark:text-primary-400 hover:underline"
                        x-text="selectedMessage.project_name"></a>
                   </div>
@@ -486,39 +491,42 @@
                   </div>
                 </div>
 
-                <!-- Thread (if applicable) -->
-                <template x-if="selectedMessage.thread_id">
-                  <div class="flex items-center gap-3 col-span-full">
-                    <div class="w-10 h-10 bg-gradient-to-br from-pink-500 to-pink-700 rounded-xl flex items-center justify-center shadow-medium">
-                      <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
-                    </div>
-                    <div>
-                      <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Thread</div>
-                      <div class="text-sm font-mono text-slate-900 dark:text-white" x-text="selectedMessage.thread_id"></div>
-                    </div>
+                <!-- Canonical conversation, including messages without an explicit thread ID -->
+                <div class="flex items-center gap-3 col-span-full">
+                  <div class="w-10 h-10 bg-gradient-to-br from-pink-500 to-pink-700 rounded-xl flex items-center justify-center shadow-medium">
+                    <i data-lucide="message-circle" class="w-5 h-5 text-white"></i>
                   </div>
-                </template>
+                  <div class="min-w-0">
+                    <div class="text-xs text-slate-600 dark:text-slate-400 font-medium uppercase tracking-wide">Thread</div>
+                    <a :href="threadUrl(selectedMessage)"
+                       class="text-sm font-mono text-primary-600 dark:text-primary-400 break-all hover:underline focus-visible:ring-2 focus-visible:ring-primary-500"
+                       x-text="conversationId(selectedMessage)"></a>
+                  </div>
+                </div>
               </div>
 
               <!-- Quick Actions -->
-              <div class="flex items-center gap-2 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
+              <div class="flex flex-wrap items-center gap-2 mt-6 pt-6 border-t border-slate-200 dark:border-slate-700">
                 <button @click="copyMessageLink(selectedMessage)"
                         class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
                   <i data-lucide="link" class="w-4 h-4"></i>
                   Copy Link
                 </button>
-                <a :href="`/mail/${selectedMessage.project_slug}/message/${selectedMessage.id}`"
+                <a :href="messageUrl(selectedMessage)"
                    class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
                   <i data-lucide="external-link" class="w-4 h-4"></i>
                   Open in Project
                 </a>
-                <template x-if="selectedMessage.thread_id">
-                  <a :href="`/mail/${selectedMessage.project_slug}/thread/${selectedMessage.thread_id}`"
-                     class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
-                    <i data-lucide="git-branch" class="w-4 h-4"></i>
-                    View Thread
-                  </a>
-                </template>
+                <a :href="threadUrl(selectedMessage)"
+                   class="px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-300 rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                  <i data-lucide="git-branch" class="w-4 h-4"></i>
+                  View Thread
+                </a>
+                <a :href="threadsUrl(selectedMessage)"
+                   class="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-colors flex items-center gap-2 text-sm font-medium">
+                  <i data-lucide="messages-square" class="w-4 h-4"></i>
+                  Browse Project Threads
+                </a>
               </div>
             </div>
 
@@ -905,7 +913,8 @@ function unifiedInboxManager() {
             sender.includes(query) ||
             recipients.includes(query) ||
             excerpt.includes(query) ||
-            projectName.includes(query)
+            projectName.includes(query) ||
+            this.conversationId(msg).toLowerCase().includes(query)
           );
         });
       }
@@ -942,9 +951,9 @@ function unifiedInboxManager() {
 
       // Thread filter
       if (this.filters.hasThread === 'true') {
-        filtered = filtered.filter(msg => msg.thread_id);
+        filtered = filtered.filter(msg => this.hasThreadId(msg));
       } else if (this.filters.hasThread === 'false') {
-        filtered = filtered.filter(msg => !msg.thread_id);
+        filtered = filtered.filter(msg => !this.hasThreadId(msg));
       }
 
       // Sort
@@ -1120,7 +1129,8 @@ function unifiedInboxManager() {
     handleMessageClick(msg) {
       if (this.viewMode === 'list') {
         // Navigate to dedicated message page in list view
-        window.location.href = `/mail/${msg.project_slug}/message/${msg.id}`;
+        const url = this.messageUrl(msg);
+        if (url) window.location.href = url;
       } else {
         // Select and display in split view
         this.selectMessage(msg);
@@ -1336,11 +1346,44 @@ function unifiedInboxManager() {
     },
 
     // Helpers
+    hasThreadId(msg) {
+      // Match SQLite TRIM(thread_id): only ASCII spaces denote a blank ID.
+      // Do not trim or numerically coerce a nonblank conversation identifier.
+      return typeof msg?.thread_id === 'string' && /[^ ]/.test(msg.thread_id);
+    },
+
+    conversationId(msg) {
+      if (!msg) return '';
+      return this.hasThreadId(msg) ? msg.thread_id : String(msg.id ?? '');
+    },
+
+    projectUrl(msg) {
+      // Routing follows the message's project, never its sender's project.
+      return typeof msg?.project_slug === 'string' && msg.project_slug
+        ? `/mail/${encodeURIComponent(msg.project_slug)}`
+        : null;
+    },
+
+    threadUrl(msg) {
+      const project = this.projectUrl(msg);
+      const conversation = this.conversationId(msg);
+      return project && conversation ? `${project}/thread/${encodeURIComponent(conversation)}` : null;
+    },
+
+    threadsUrl(msg) {
+      const project = this.projectUrl(msg);
+      return project ? `${project}/threads` : null;
+    },
+
+    messageUrl(msg) {
+      const project = this.projectUrl(msg);
+      return project && msg.id != null ? `${project}/message/${encodeURIComponent(String(msg.id))}` : null;
+    },
+
     copyMessageLink(msg) {
-      if (!msg) return;
-      const projectSlug = encodeURIComponent(msg.project_slug || '');
-      const messageId = encodeURIComponent(String(msg.id));
-      const url = `${window.location.origin}/mail/${projectSlug}/message/${messageId}`;
+      const path = this.messageUrl(msg);
+      if (!path) return;
+      const url = `${window.location.origin}${path}`;
       if (typeof window.copyToClipboard === 'function') {
         window.copyToClipboard(url, 'Message link copied!');
       } else if (navigator.clipboard && navigator.clipboard.writeText) {
