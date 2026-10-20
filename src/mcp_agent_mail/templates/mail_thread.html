@@ -22,6 +22,33 @@
 {% endblock %}
 
 {% block content %}
+{% macro thread_pagination(location) %}
+  {% if page_count > 1 %}
+  {% set thread_path = '/mail/' ~ project.slug ~ '/thread/' ~ (thread_id|urlencode) %}
+  <nav aria-label="Thread message pagination ({{ location }})"
+       class="flex flex-wrap items-center justify-between gap-3 text-sm">
+    <div class="flex flex-wrap items-center gap-2">
+      {% if prev_page %}
+      <a href="{{ thread_path }}?page=1&amp;limit={{ limit }}"
+         class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-primary-600 dark:text-primary-400 hover:underline">First messages</a>
+      <a href="{{ thread_path }}?page={{ prev_page }}&amp;limit={{ limit }}" rel="prev"
+         class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-primary-600 dark:text-primary-400 hover:underline">Older messages</a>
+      {% endif %}
+    </div>
+    <span class="text-slate-600 dark:text-slate-400">
+      Messages {{ first_message }}–{{ last_message }} of {{ message_count }} · Page {{ page }} of {{ page_count }}
+    </span>
+    <div class="flex flex-wrap items-center gap-2">
+      {% if next_page %}
+      <a href="{{ thread_path }}?page={{ next_page }}&amp;limit={{ limit }}" rel="next"
+         class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-primary-600 dark:text-primary-400 hover:underline">Newer messages</a>
+      {% endif %}
+      <a href="{{ thread_path }}?limit={{ limit }}"
+         class="px-3 py-2 rounded-lg bg-primary-600 hover:bg-primary-700 text-white">Latest messages</a>
+    </div>
+  </nav>
+  {% endif %}
+{% endmacro %}
 <div class="max-w-5xl mx-auto space-y-6 page-transition pb-12">
 
   <!-- Thread Header - Gmail Style -->
@@ -62,6 +89,8 @@
       </div>
     </div>
   </div>
+
+  {{ thread_pagination('top') }}
 
   <!-- Conversation Thread - Gmail Style -->
   <div class="space-y-4">
@@ -174,11 +203,13 @@
     {% endfor %}
   </div>
 
+  {{ thread_pagination('bottom') }}
+
   <!-- Thread Actions Footer -->
   <div class="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
     <div class="flex items-center justify-between">
       <div class="text-sm text-slate-600 dark:text-slate-400">
-        <p class="mb-1">End of conversation</p>
+        <p class="mb-1">{{ 'More recent messages available' if next_page else 'End of conversation' }}</p>
         <p class="text-xs">{{ message_count }} message{{ 's' if message_count != 1 else '' }} in this thread</p>
       </div>
 

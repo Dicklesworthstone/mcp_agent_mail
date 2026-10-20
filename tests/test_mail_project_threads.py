@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -465,12 +466,12 @@ async def test_numeric_thread_id_does_not_capture_unrelated_message_with_same_da
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("thread_id", [None, "", "   ", "release"])
+@pytest.mark.parametrize("thread_id", [None, "", "   ", "release", "\t", " \t ", "\u00a0"])
 async def test_agent_inbox_exposes_independent_canonical_thread_navigation(
     mail_client: AsyncClient,
     thread_id: str | None,
 ) -> None:
-    conversation_id = thread_id if thread_id and thread_id.strip() else "100"
+    conversation_id = thread_id if thread_id and thread_id.strip(" ") else "100"
     await _seed_messages(_message(100, thread_id, "Inbox navigation", 1))
     async with get_session() as session:
         await session.execute(
@@ -482,5 +483,257 @@ async def test_agent_inbox_exposes_independent_canonical_thread_navigation(
     assert response.status_code == 200
     links = _Links(response.text).links
     assert any(link["href"] == "/mail/alpha/threads" for link in links)
-    assert f'"conversation_id": "{conversation_id}"' in response.text
+    assert f'"conversation_id": {json.dumps(conversation_id)}' in response.text
     assert "encodeURIComponent(item.conversation_id)" in response.text
+
+
+def _conversation_preview_links(response: Response) -> list[dict[str, str]]:
+    assert response.status_code == 200, response.text
+    section = response.text.split("<!-- Thread Quick Info - Link to Full Thread View -->", 1)[1]
+    return _Links(section).links
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("project_key", ["alpha", "Workspace Alpha"])
+@pytest.mark.parametrize("starter_thread", [None, "", "   ", "release", "00100", "\t", " \t ", "release ?#&"])
+async def test_message_preview_includes_starters_and_replies_in_the_message_project(
+    mail_client: AsyncClient,
+    project_key: str,
+    starter_thread: str | None,
+) -> None:
+    conversation_id = starter_thread if starter_thread and starter_thread.strip(" ") else "100"
+    await _seed_messages(
+        # A remote sender does not change the message's project.
+        _message(100, starter_thread, "Opening", 1, sender_id=2),
+        _message(101, conversation_id, "First reply", 2),
+        _message(102, conversation_id, "Second reply", 3),
+        _message(200, conversation_id, "Other project", 4, project_id=2, sender_id=2),
+        _message(201, "unrelated", "Other conversation", 5),
+    )
+    thread_url = f"/mail/alpha/thread/{quote(conversation_id, safe='')}"
+    listing = await mail_client.get(f"/mail/{quote(project_key, safe='')}/threads")
+    entry = next(link for link in _thread_links(listing) if link["href"] == thread_url)
+    assert "3 messages" in " ".join(entry["text"].split())
+
+    for mid in (100, 101, 102):
+        response = await mail_client.get(f"/mail/{quote(project_key, safe='')}/message/{mid}")
+        links = _conversation_preview_links(response)
+        assert ">3 messages</span>" in response.text
+        assert [link["href"] for link in links if "/message/" in link["href"]] == [
+            f"/mail/alpha/message/{other}" for other in (100, 101, 102) if other != mid
+        ]
+        full_thread = next(link for link in links if "View Full Thread" in link["text"])
+        assert full_thread["href"] == thread_url
+        detail = await mail_client.get(full_thread["href"])
+        assert detail.status_code == 200
+        for other in (100, 101, 102):
+            assert f"Body for message {other}." in detail.text
+        assert "Body for message 200." not in detail.text
+        assert "Body for message 201." not in detail.text
+        assert not any("/mail/beta/" in link["href"] for link in links)
+        assert not any("more" in link["text"] for link in links)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [1, 2, 5, 6, 7, 12, 202])
+@pytest.mark.parametrize("position", ["first", "last"])
+async def test_message_preview_is_bounded_without_losing_the_total_or_hiding_an_extra_reply(
+    mail_client: AsyncClient,
+    count: int,
+    position: str,
+) -> None:
+    # Equal timestamps must have deterministic ID ordering, including the opener.
+    await _seed_messages(*(
+        _message(mid, None if mid == 100 else "100", f"Conversation message {mid}", 1)
+        for mid in range(100, 100 + count)
+    ))
+    mid = 100 if position == "first" else 99 + count
+    response = await mail_client.get(f"/mail/alpha/message/{mid}")
+    links = _conversation_preview_links(response)
+    expected_ids = [other for other in range(100, 100 + count) if other != mid][:5]
+    assert [link["href"] for link in links if "/message/" in link["href"]] == [
+        f"/mail/alpha/message/{other}" for other in expected_ids
+    ]
+    if count == 1:
+        assert "Part of a Conversation Thread" not in response.text
+        assert not links
+        return
+    assert f">{count} messages</span>" in response.text
+    remaining = count - 1 - len(expected_ids)
+    more = [link for link in links if "more" in link["text"]]
+    if remaining:
+        assert len(more) == 1
+        assert " ".join(more[0]["text"].split()) == f"+{remaining} more"
+        assert more[0]["href"] == "/mail/alpha/thread/100"
+    else:
+        assert not more
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", ["42", "0042", "99999999999999999999999999"])
+async def test_message_preview_keeps_numeric_conversations_distinct(
+    mail_client: AsyncClient,
+    thread_id: str,
+) -> None:
+    await _seed_messages(
+        _message(41, thread_id, "Numeric opening", 1),
+        _message(43, thread_id, "Numeric reply", 2),
+        _message(42, "other-thread", "Unrelated message 42", 3),
+        _message(50, "00042", "A distinct numeric identifier", 4),
+    )
+    response = await mail_client.get("/mail/alpha/message/43")
+    links = _conversation_preview_links(response)
+    assert ">2 messages</span>" in response.text
+    assert [link["href"] for link in links if "/message/" in link["href"]] == ["/mail/alpha/message/41"]
+    assert next(link for link in links if "View Full Thread" in link["text"])["href"] == (
+        f"/mail/alpha/thread/{thread_id}"
+    )
+    assert "Unrelated message 42" not in response.text
+    assert "A distinct numeric identifier" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_message_preview_does_not_change_recipient_state_or_duplicate_recipients(
+    mail_client: AsyncClient,
+) -> None:
+    await _seed_messages(_message(100, None, "Opening", 1), _message(101, "100", "Reply", 2))
+    async with get_session() as session:
+        await session.execute(
+            text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (:mid, :aid, 'to')"),
+            [{"mid": mid, "aid": aid} for mid in (100, 101) for aid in (1, 3)],
+        )
+        await session.commit()
+    response = await mail_client.get("/mail/alpha/message/100")
+    assert response.status_code == 200
+    assert ">2 messages</span>" in response.text
+    assert [link["href"] for link in _conversation_preview_links(response) if "/message/" in link["href"]] == [
+        "/mail/alpha/message/101"
+    ]
+    async with get_session() as session:
+        rows = await session.execute(text("SELECT read_ts, ack_ts FROM message_recipients"))
+        assert [tuple(row) for row in rows.fetchall()] == [(None, None)] * 4
+
+
+def _thread_page_message_ids(response: Response) -> list[int]:
+    assert response.status_code == 200, response.text
+    prefix = "/mail/alpha/message/"
+    return [
+        int(link["href"][len(prefix):])
+        for link in _Links(response.text).links
+        if link["href"].startswith(prefix)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_thread_detail_opens_latest_page_and_all_history_is_reachable(mail_client: AsyncClient) -> None:
+    await _seed_messages(*(
+        _message(mid, "busy", "Opening subject" if mid == 1 else f"Reply {mid}", 1)
+        for mid in range(1, 122)
+    ))
+    response = await mail_client.get("/mail/alpha/thread/busy")
+    assert _thread_page_message_ids(response) == list(range(101, 122))
+    assert "121 messages" in response.text
+    assert "Opening subject" in response.text
+    assert "Messages 101–121 of 121" in response.text
+    assert "End of conversation" in response.text
+
+    all_ids = []
+    while True:
+        all_ids[:0] = _thread_page_message_ids(response)
+        previous = [link for link in _Links(response.text).links if "Older messages" in link["text"]]
+        if not previous:
+            break
+        response = await mail_client.get(previous[0]["href"])
+        assert "Opening subject" in response.text
+    assert all_ids == list(range(1, 122))
+    assert "More recent messages available" in response.text
+    latest = next(link for link in _Links(response.text).links if "Latest messages" in link["text"])
+    assert latest["href"] == "/mail/alpha/thread/busy?limit=50"
+    assert _thread_page_message_ids(await mail_client.get(latest["href"])) == list(range(101, 122))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,page,expected", [
+    (0, 0, [1]),
+    (-4, -7, [1]),
+    (2, 1, [1, 2]),
+    (2, 2, [3, 4]),
+    (2, 10**60, [5]),
+    (2, -(10**60), [1, 2]),
+    (10**60, 1, [1, 2, 3, 4, 5]),
+])
+async def test_thread_detail_clamps_parameters_before_sqlite_binding(
+    mail_client: AsyncClient, limit: int, page: int, expected: list[int],
+) -> None:
+    await _seed_messages(*(_message(mid, "busy", f"Reply {mid}", 1) for mid in range(1, 6)))
+    response = await mail_client.get("/mail/alpha/thread/busy", params={"limit": limit, "page": page})
+    assert _thread_page_message_ids(response) == expected
+    assert "5 messages" in response.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameters", [{"page": "bad"}, {"limit": "bad"}, {"page": "1.5"}])
+async def test_thread_detail_rejects_invalid_pagination(
+    mail_client: AsyncClient, parameters: dict[str, str],
+) -> None:
+    response = await mail_client.get("/mail/alpha/thread/busy", params=parameters)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("starter_thread", [None, "", "   "])
+async def test_paginated_thread_keeps_unthreaded_opener_with_replies(
+    mail_client: AsyncClient, starter_thread: str | None,
+) -> None:
+    await _seed_messages(
+        _message(42, starter_thread, "Opening subject", 1),
+        *(_message(mid, "42", f"Reply {mid}", 1) for mid in range(43, 47)),
+    )
+    first = await mail_client.get("/mail/alpha/thread/42?limit=2&page=1")
+    second = await mail_client.get("/mail/alpha/thread/42?limit=2&page=2")
+    last = await mail_client.get("/mail/alpha/thread/42?limit=2")
+    assert _thread_page_message_ids(first) == [42, 43]
+    assert _thread_page_message_ids(second) == [44, 45]
+    assert _thread_page_message_ids(last) == [46]
+    assert "5 messages" in last.text
+    assert "Opening subject" in last.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thread_id", ["007", "release ?#&", "\t", "\u00a0", "会話"])
+async def test_thread_pagination_links_remain_project_scoped_and_encoded(
+    mail_client: AsyncClient, thread_id: str,
+) -> None:
+    await _seed_messages(
+        *(_message(mid, thread_id, f"Alpha {mid}", 1, sender_id=2) for mid in range(100, 105)),
+        _message(7, "other", "Unrelated numeric collision", 1),
+        _message(200, thread_id, "Beta private", 2, project_id=2, sender_id=2),
+    )
+    path = f"/mail/{quote('Workspace Alpha', safe='')}/thread/{quote(thread_id, safe='')}"
+    response = await mail_client.get(path, params={"limit": 2, "page": 2})
+    assert _thread_page_message_ids(response) == [102, 103]
+    assert "5 messages" in response.text
+    assert "Body for message 200." not in response.text
+    assert "Unrelated numeric collision" not in response.text
+    links = _Links(response.text).links
+    older = next(link for link in links if "Older messages" in link["text"])
+    newer = next(link for link in links if "Newer messages" in link["text"])
+    assert older["href"] == f"/mail/alpha/thread/{quote(thread_id, safe='')}?page=1&limit=2"
+    assert newer["href"] == f"/mail/alpha/thread/{quote(thread_id, safe='')}?page=3&limit=2"
+    assert _thread_page_message_ids(await mail_client.get(older["href"])) == [100, 101]
+    assert _thread_page_message_ids(await mail_client.get(newer["href"])) == [104]
+
+
+@pytest.mark.asyncio
+async def test_thread_page_size_is_capped_without_changing_recipient_state(mail_client: AsyncClient) -> None:
+    await _seed_messages(*(_message(mid, "busy", f"Reply {mid}", 1) for mid in range(1, 402)))
+    async with get_session() as session:
+        await session.execute(text("INSERT INTO message_recipients (message_id, agent_id, kind) VALUES (201, 1, 'to')"))
+        await session.commit()
+    response = await mail_client.get("/mail/alpha/thread/busy?limit=999999&page=2")
+    assert _thread_page_message_ids(response) == list(range(201, 401))
+    assert "401 messages" in response.text
+    assert "Body for message 401." not in response.text
+    async with get_session() as session:
+        row = (await session.execute(text("SELECT read_ts, ack_ts FROM message_recipients WHERE message_id = 201"))).one()
+        assert tuple(row) == (None, None)

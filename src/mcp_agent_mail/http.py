@@ -2871,7 +2871,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                         "thread_id": r["thread_id"],
                         "conversation_id": (
                             r["thread_id"]
-                            if r["thread_id"] is not None and str(r["thread_id"]).strip()
+                            if r["thread_id"] is not None and str(r["thread_id"]).strip(" ")
                             else str(r["id"])
                         ),
                         "ack_required": ack_required,
@@ -2961,47 +2961,64 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     "read": read_count,
                     "acked": ack_count,
                 }
-                # Find thread messages if thread_id is set
-                thread_items: list[dict] = []
+                # Match the workspace/thread-detail conversation identity, including
+                # unthreaded starters. Count before limiting so a small preview still
+                # reports the full conversation size. Six rows suffice to show five
+                # other messages even when the current message is among them.
+                thread_preview_limit = 5
                 th = mrow["thread_id"]
-                if isinstance(th, str) and th.strip():
-                    th_rows = await session.execute(
-                        text(
-                            """
-                            SELECT
-                                m.id,
-                                m.subject,
-                                s.name AS sender_name,
-                                s.project_id AS sender_project_id,
-                                sp.human_key AS sender_project_name,
-                                sp.slug AS sender_project_slug,
-                                m.created_ts
-                            FROM messages m
-                            JOIN agents s ON s.id = m.sender_id
-                            LEFT JOIN projects sp ON sp.id = s.project_id
-                            WHERE m.project_id = :pid AND (m.thread_id = :th OR m.id = :id)
-                            ORDER BY m.created_ts ASC
-                            """
-                        ),
-                        {"pid": pid, "th": th, "id": mid},
+                if not isinstance(th, str) or not th.strip(" "):
+                    th = str(mid)
+                th_rows = await session.execute(
+                    text(
+                        """
+                        SELECT
+                            m.id,
+                            m.subject,
+                            s.name AS sender_name,
+                            s.project_id AS sender_project_id,
+                            sp.human_key AS sender_project_name,
+                            sp.slug AS sender_project_slug,
+                            m.created_ts,
+                            COUNT(*) OVER () AS message_count
+                        FROM messages m
+                        JOIN agents s ON s.id = m.sender_id
+                        LEFT JOIN projects sp ON sp.id = s.project_id
+                        WHERE m.project_id = :pid
+                          AND (
+                              CASE
+                                  WHEN m.thread_id IS NOT NULL AND TRIM(m.thread_id) != ''
+                                  THEN m.thread_id
+                                  ELSE CAST(m.id AS TEXT)
+                              END
+                          ) = :th
+                        ORDER BY m.created_ts ASC, m.id ASC
+                        LIMIT :preview_limit
+                        """
+                    ),
+                    {"pid": pid, "th": th, "preview_limit": thread_preview_limit + 1},
+                )
+                preview_rows = th_rows.mappings().all()
+                thread_message_count = int(preview_rows[0]["message_count"]) if preview_rows else 0
+                thread_items: list[dict] = []
+                for rr in preview_rows:
+                    if rr["id"] == mid or len(thread_items) >= thread_preview_limit:
+                        continue
+                    sender_display, sender_meta = _http_sender_identity(
+                        message_project_id=pid,
+                        sender_name=rr["sender_name"],
+                        sender_project_id=rr["sender_project_id"],
+                        sender_project_human_key=rr["sender_project_name"],
+                        sender_project_slug=rr["sender_project_slug"],
                     )
-                    thread_items = []
-                    for rr in th_rows.mappings().all():
-                        sender_display, sender_meta = _http_sender_identity(
-                            message_project_id=pid,
-                            sender_name=rr["sender_name"],
-                            sender_project_id=rr["sender_project_id"],
-                            sender_project_human_key=rr["sender_project_name"],
-                            sender_project_slug=rr["sender_project_slug"],
-                        )
-                        item = {
-                            "id": rr["id"],
-                            "subject": rr["subject"],
-                            "from": sender_display,
-                            "created": str(rr["created_ts"]),
-                        }
-                        item.update(sender_meta)
-                        thread_items.append(item)
+                    item = {
+                        "id": rr["id"],
+                        "subject": rr["subject"],
+                        "from": sender_display,
+                        "created": str(rr["created_ts"]),
+                    }
+                    item.update(sender_meta)
+                    thread_items.append(item)
             # Convert markdown body to HTML for display (server-side render)
             body_html = (
                 markdown2.markdown(mrow["body_md"] or "", extras=["fenced-code-blocks", "tables", "strike", "cuddled-lists"])
@@ -3064,6 +3081,7 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 recipients=recipients,
                 ack_summary=ack_summary,
                 thread_items=thread_items,
+                thread_message_count=thread_message_count,
                 commit_sha=commit_sha,
             )
 
@@ -3354,12 +3372,23 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 ) from exc
 
         @fastapi_app.get("/mail/{project}/thread/{thread_id}", response_class=HTMLResponse)
-        async def mail_thread(project: str, thread_id: str) -> HTMLResponse:
-            """Display all messages in a thread chronologically (Gmail-style conversation view).
+        async def mail_thread(
+            project: str,
+            thread_id: str,
+            limit: int = 50,
+            page: int | None = None,
+        ) -> HTMLResponse:
+            """Show a bounded conversation page, opening at the latest activity.
 
-            NOTE: Currently loads ALL messages in thread without pagination.
-            For threads with 1000+ messages, consider adding LIMIT/OFFSET pagination.
+            Explicit pages run chronologically from 1. Counts and page bounds
+            come from the same query snapshot; only the selected page's bodies
+            are returned to Python and rendered as Markdown.
             """
+            limit = min(max(1, limit), 200)
+            if page is not None:
+                # SQLite binds signed 64-bit integers. Clamp even enormous
+                # user inputs before binding; SQL then clamps to the last page.
+                page = min(max(1, page), (1 << 63) - 1)
             await ensure_schema()
             async with get_session() as session:
                 # Get project
@@ -3374,13 +3403,41 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
 
                 pid = int(prow[0])
 
-                # Resolve exactly the same canonical conversation key used by the
-                # workspace preview and thread list. This avoids numeric-ID
-                # collisions where thread "42" could otherwise pull in message
-                # #42 even when that message belongs to a different thread.
+                # Rank lightweight metadata before fetching bodies. The canonical
+                # key matches workspace discovery, including unthreaded starters,
+                # without capturing a different conversation's numeric message ID.
+                # This still scans matching metadata to compute an exact count.
                 rows = await session.execute(
                     text(
                         """
+                        WITH thread_metadata AS (
+                            SELECT m.id, m.subject, m.created_ts,
+                                   COUNT(*) OVER () AS message_count,
+                                   FIRST_VALUE(m.subject) OVER (
+                                       ORDER BY m.created_ts ASC, m.id ASC
+                                   ) AS thread_subject,
+                                   ROW_NUMBER() OVER (
+                                       ORDER BY m.created_ts ASC, m.id ASC
+                                   ) AS thread_position
+                            FROM messages m
+                            JOIN agents s ON s.id = m.sender_id
+                            WHERE m.project_id = :pid
+                              AND (
+                                  CASE
+                                      WHEN m.thread_id IS NOT NULL AND TRIM(m.thread_id) != ''
+                                      THEN m.thread_id
+                                      ELSE CAST(m.id AS TEXT)
+                                  END
+                              ) = :tid
+                        ), paged_metadata AS (
+                            SELECT id, message_count, thread_subject, thread_position,
+                                   CASE
+                                       WHEN :page IS NULL OR :page > (message_count - 1) / :lim + 1
+                                       THEN (message_count - 1) / :lim + 1
+                                       ELSE :page
+                                   END AS page_number
+                            FROM thread_metadata
+                        )
                         SELECT
                             m.id,
                             m.subject,
@@ -3391,27 +3448,35 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                             sp.slug AS sender_project_slug,
                             m.created_ts,
                             m.importance,
-                            m.thread_id
-                        FROM messages m
+                            m.thread_id,
+                            p.message_count,
+                            p.thread_subject,
+                            p.page_number
+                        FROM paged_metadata p
+                        JOIN messages m ON m.id = p.id
                         JOIN agents s ON s.id = m.sender_id
                         LEFT JOIN projects sp ON sp.id = s.project_id
-                        WHERE m.project_id = :pid
-                          AND (
-                              CASE
-                                  WHEN m.thread_id IS NOT NULL AND TRIM(m.thread_id) != ''
-                                  THEN m.thread_id
-                                  ELSE CAST(m.id AS TEXT)
-                              END
-                          ) = :tid
-                        ORDER BY m.created_ts ASC, m.id ASC
+                        WHERE p.thread_position > (p.page_number - 1) * :lim
+                          AND p.thread_position <= p.page_number * :lim
+                        ORDER BY p.thread_position ASC
                         """
                     ),
-                    {"pid": pid, "tid": thread_id},
+                    {"pid": pid, "tid": thread_id, "lim": limit, "page": page},
                 )
+                thread_rows = rows.mappings().all()
+                if not thread_rows:
+                    return await _render(
+                        "error.html",
+                        message=f"No messages found in thread '{thread_id}'. The thread may not exist or all messages may have been deleted."
+                    )
 
+                message_count = int(thread_rows[0]["message_count"])
+                page_number = int(thread_rows[0]["page_number"])
+                page_count = (message_count - 1) // limit + 1
+                thread_subject = thread_rows[0]["thread_subject"] or f"Thread {thread_id}"
                 messages = []
-                for r in rows.mappings().all():
-                    # Convert markdown to HTML for each message
+                for r in thread_rows:
+                    # Convert Markdown only for messages on this page.
                     body_html = ""
                     if r["body_md"]:
                         body_html = markdown2.markdown(
@@ -3440,22 +3505,20 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                     message.update(sender_meta)
                     messages.append(message)
 
-                if not messages:
-                    return await _render(
-                        "error.html",
-                        message=f"No messages found in thread '{thread_id}'. The thread may not exist or all messages may have been deleted."
-                    )
-
-                # Get unique subject (use first message's subject, with fallback)
-                thread_subject = messages[0]["subject"] if messages and messages[0]["subject"] else f"Thread {thread_id}"
-
                 return await _render(
                     "mail_thread.html",
                     project={"slug": prow[1], "human_key": prow[2]},
                     thread_id=thread_id,
                     thread_subject=thread_subject,
                     messages=messages,
-                    message_count=len(messages),
+                    message_count=message_count,
+                    page=page_number,
+                    page_count=page_count,
+                    limit=limit,
+                    first_message=(page_number - 1) * limit + 1,
+                    last_message=(page_number - 1) * limit + len(messages),
+                    prev_page=page_number - 1 if page_number > 1 else None,
+                    next_page=page_number + 1 if page_number < page_count else None,
                 )
 
         # Full-text search UI across subject/body using LIKE fallback (SQLite FTS handled elsewhere)
