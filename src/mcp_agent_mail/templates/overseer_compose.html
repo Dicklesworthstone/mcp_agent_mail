@@ -24,7 +24,7 @@
   <div class="mb-6">
     <h1 class="text-3xl font-semibold text-slate-900 dark:text-white mb-2">Send Message as Human Overseer</h1>
     <p class="text-slate-600 dark:text-slate-400">
-      Send high-priority instructions directly to your agents. Messages are automatically marked as urgent.
+      Send high-priority instructions directly to your agents as Human Overseer.
     </p>
   </div>
 
@@ -37,6 +37,18 @@
         <p class="text-blue-700 dark:text-blue-300">Agents receive your message with a preamble indicating human guidance. They'll pause current work to prioritize your request, then resume their original tasks.</p>
       </div>
     </div>
+  </div>
+
+  <!-- Reply context is data, never HTML or a caller-controlled return URL. -->
+  <div x-show="replyThreadId !== null" x-cloak
+       class="bg-primary-50 dark:bg-primary-900/20 border border-primary-200 dark:border-primary-800 rounded-lg p-4">
+    <p class="font-medium text-slate-900 dark:text-white">Replying to this conversation</p>
+    <a :href="conversationUrl(replyThreadId)"
+       class="font-mono text-sm break-all text-primary-700 dark:text-primary-300 hover:underline"
+       x-text="replyThreadId"></a>
+    <p class="mt-2 text-sm text-slate-600 dark:text-slate-400">
+      Choose recipients in this project and write your reply below. You will review it before sending.
+    </p>
   </div>
 
   <!-- Main Composer Form -->
@@ -258,15 +270,17 @@ Please investigate the following:
         <!-- Thread ID (Optional) -->
         <div>
           <label for="threadId" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-            Thread ID <span class="text-xs font-normal text-slate-500">(Optional)</span>
+            Thread ID <span x-show="replyThreadId === null" class="text-xs font-normal text-slate-500">(Optional)</span>
           </label>
           <input type="text"
                  id="threadId"
                  x-model="threadId"
+                 :readonly="replyThreadId !== null"
                  placeholder="e.g., 42 or custom-thread-id"
                  class="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 font-mono text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all" />
           <p class="mt-1.5 text-xs text-slate-500 dark:text-slate-500">
-            Leave blank to start a new conversation
+            <span x-show="replyThreadId === null">Leave blank to start a new conversation</span>
+            <span x-show="replyThreadId !== null">This reply stays in the conversation you opened.</span>
           </p>
         </div>
       </div>
@@ -292,6 +306,7 @@ Please investigate the following:
     <!-- Actions (NOT sticky, properly in flow) -->
     <div class="flex items-center justify-between gap-4 pt-2">
       <a href="/mail/{{ project.slug }}"
+         :href="replyThreadId !== null ? conversationUrl(replyThreadId) : projectUrl()"
          class="inline-flex items-center gap-2 px-4 py-2.5 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg text-sm font-medium transition-colors">
         <i data-lucide="arrow-left" class="w-4 h-4"></i>
         Cancel
@@ -364,6 +379,10 @@ Please investigate the following:
             <span class="text-slate-600 dark:text-slate-400 flex-shrink-0">Subject:</span>
             <span class="font-medium text-slate-900 dark:text-white text-right" x-text="subject"></span>
           </div>
+          <div class="flex items-start justify-between text-sm gap-3" x-show="conversationId() !== null">
+            <span class="text-slate-600 dark:text-slate-400 flex-shrink-0">Thread:</span>
+            <span class="font-mono break-all text-slate-900 dark:text-white text-right" x-text="conversationId()"></span>
+          </div>
           <div class="flex items-center justify-between text-sm">
             <span class="text-slate-600 dark:text-slate-400">Priority:</span>
             <span class="px-2 py-0.5 bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 text-xs font-medium rounded">High</span>
@@ -400,6 +419,8 @@ function overseerComposer() {
     subject: '',
     body: '',
     threadId: '',
+    replyThreadId: null,
+    initialized: false,
     recipientSearch: '',
     viewMode: 'write',
     renderedPreview: '',
@@ -411,12 +432,47 @@ function overseerComposer() {
     toastMessage: '',
 
     init() {
+      // Alpine may invoke init automatically as well as through x-init.
+      // Never overwrite a draft when the component is initialized twice.
+      if (this.initialized) return;
+      this.initialized = true;
+      const params = new URLSearchParams(window.location.search);
+      const replyThread = params.get('reply_thread');
+      if (replyThread !== null && /[^ ]/.test(replyThread)) {
+        this.replyThreadId = replyThread;
+        this.threadId = replyThread;
+        const original = params.get('reply_subject') || '(No subject)';
+        const subject = /^re:/i.test(original) ? original : `Re: ${original}`;
+        // Bound the prefill without splitting a Unicode code point.
+        this.subject = '';
+        for (const character of subject) {
+          if (this.subject.length + character.length > 200) break;
+          this.subject += character;
+        }
+      }
       this.updatePreview();
       this.$nextTick(() => {
         if (typeof lucide !== 'undefined') {
           lucide.createIcons();
         }
       });
+    },
+
+    projectUrl() {
+      // Always use the server-resolved project, not a query-string project.
+      return `/mail/${encodeURIComponent({{ project.slug | tojson }})}`;
+    },
+
+    conversationId() {
+      // Match SQLite TRIM: blank ASCII spaces mean a new conversation.
+      // Preserve all nonblank IDs exactly, including leading zeroes/spaces.
+      if (this.replyThreadId !== null) return this.replyThreadId;
+      return /[^ ]/.test(this.threadId) ? this.threadId : null;
+    },
+
+    conversationUrl(threadId) {
+      return threadId === null ? this.projectUrl()
+        : `${this.projectUrl()}/thread/${encodeURIComponent(threadId)}`;
     },
 
     selectAll() {
@@ -476,27 +532,22 @@ function overseerComposer() {
     },
 
     updatePreview() {
-      if (typeof marked !== 'undefined') {
+      // Fail closed when either CDN dependency is absent or fails.
+      const escaped = (this.body || 'No content yet...').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[character]);
+      this.renderedPreview = `<pre class="whitespace-pre-wrap">${escaped}</pre>`;
+      if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
         try {
-          // Parse markdown to HTML
           const rawHtml = marked.parse(this.body || '_No content yet..._');
-
-          // Sanitize HTML to prevent XSS (self-XSS protection)
-          if (typeof DOMPurify !== 'undefined') {
-            this.renderedPreview = DOMPurify.sanitize(rawHtml);
-          } else {
-            // Fallback if DOMPurify fails to load
-            this.renderedPreview = rawHtml;
-            console.warn('DOMPurify not loaded - preview may contain unsanitized HTML');
-          }
-
+          this.renderedPreview = DOMPurify.sanitize(rawHtml);
           this.$nextTick(() => {
             if (typeof Prism !== 'undefined') {
               Prism.highlightAll();
             }
           });
         } catch (e) {
-          this.renderedPreview = '<p class="text-red-500">Error rendering markdown preview</p>';
+          // Keep the escaped-text preview prepared above.
         }
       }
     },
@@ -509,25 +560,28 @@ function overseerComposer() {
     async confirmSend() {
       // CRITICAL: Guard against double-clicks during modal transition or network request
       // Without this, rapid clicks during the 300ms x-transition can send duplicate messages
-      if (this.sending) return;
+      if (!this.showConfirmModal || !this.canSend()) return;
+
+      // Snapshot the confirmed draft. Edits during the request must not change
+      // the submitted recipients or the eventual conversation destination.
+      const payload = {
+        recipients: [...this.selectedRecipients],
+        subject: this.subject.trim(),
+        body_md: this.body.trim(),
+        thread_id: this.conversationId(),
+      };
+      const destination = this.conversationUrl(payload.thread_id);
 
       this.showConfirmModal = false;
       this.sending = true;
 
       try {
-        // Use properly escaped project slug for URL safety
-        const projectSlug = {{ project.slug | tojson }};
-        const response = await fetch(`/mail/${projectSlug}/overseer/send`, {
+        const response = await fetch(`${this.projectUrl()}/overseer/send`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            recipients: this.selectedRecipients,
-            subject: this.subject.trim(),
-            body_md: this.body.trim(),
-            thread_id: this.threadId.trim() || null,
-          })
+          body: JSON.stringify(payload)
         });
 
         if (!response.ok) {
@@ -535,13 +589,18 @@ function overseerComposer() {
           throw new Error(error.detail || error.error || `Server error: ${response.status}`);
         }
 
+        const result = await response.json();
+        if (result.success !== true) {
+          throw new Error('The server did not confirm delivery. Review the conversation before retrying.');
+        }
+        const deliveredCount = Array.isArray(result.recipients) ? result.recipients.length : payload.recipients.length;
         this.toastType = 'success';
         this.toastTitle = 'Message Sent Successfully';
-        this.toastMessage = `Delivered to ${this.selectedRecipients.length} agent${this.selectedRecipients.length !== 1 ? 's' : ''}`;
+        this.toastMessage = `Delivered to ${deliveredCount} agent${deliveredCount !== 1 ? 's' : ''}`;
         this.showToast = true;
 
         setTimeout(() => {
-          window.location.href = `/mail/${projectSlug}`;
+          window.location.href = destination;
         }, 2000);
 
       } catch (error) {

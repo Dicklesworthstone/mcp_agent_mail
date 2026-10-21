@@ -31,14 +31,12 @@
     <i data-lucide="messages-square" class="w-4 h-4"></i>
     <span class="text-sm">Browse Threads</span>
   </a>
-  <button disabled
-          class="px-4 py-2 text-sm font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
-          data-tippy-content="Coming soon - Reply to this message"
-          aria-label="Reply (Coming Soon)">
+  <a href="/mail/{{ project.slug }}/overseer/compose?{{ {'reply_thread': conversation_id, 'reply_subject': message.subject or ''}|urlencode }}"
+     class="px-4 py-2 text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 rounded-lg flex items-center gap-2 transition-colors"
+     aria-label="Reply to this message as Human Overseer">
     <i data-lucide="reply" class="w-4 h-4"></i>
-    Reply
-    <span class="absolute -top-1 -right-1 px-1 py-0.5 bg-amber-500 text-white text-[9px] font-bold rounded-full shadow-sm">Soon</span>
-  </button>
+    Reply as Human Overseer
+  </a>
   <button disabled
           class="px-4 py-2 text-sm font-medium text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 rounded-lg flex items-center gap-2 opacity-60 cursor-not-allowed relative"
           data-tippy-content="Coming soon - Forward this message"

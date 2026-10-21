@@ -75,6 +75,12 @@
 
       <!-- Actions -->
       <div class="flex flex-wrap items-center gap-2">
+        <a href="/mail/{{ project.slug }}/overseer/compose?{{ {'reply_thread': thread_id, 'reply_subject': thread_subject}|urlencode }}"
+           class="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg transition-all duration-200 flex items-center gap-2 text-sm font-medium"
+           aria-label="Reply to this thread as Human Overseer">
+          <i data-lucide="reply" class="w-4 h-4"></i>
+          Reply as Human Overseer
+        </a>
         <a href="/mail/{{ project.slug }}/threads"
            class="px-3 py-2 bg-primary-600 hover:bg-primary-700 text-white rounded-lg transition-all duration-200 flex items-center gap-2 text-sm font-medium"
            aria-label="Browse project threads">
@@ -209,7 +215,7 @@
   <div class="bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-700 p-6">
     <div class="flex items-center justify-between">
       <div class="text-sm text-slate-600 dark:text-slate-400">
-        <p class="mb-1">{{ 'More recent messages available' if next_page else 'End of conversation' }}</p>
+        <p class="mb-1">{{ 'More messages follow' if next_page else 'End of conversation' }}</p>
         <p class="text-xs">{{ message_count }} message{{ 's' if message_count != 1 else '' }} in this thread</p>
       </div>
 
