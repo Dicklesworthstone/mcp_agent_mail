@@ -19,7 +19,6 @@ import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markupsafe import Markup
 
-
 TEMPLATES = Path(__file__).resolve().parents[1] / "src" / "mcp_agent_mail" / "templates"
 SEARCH_TEMPLATES = ("mail_project.html", "mail_search.html")
 

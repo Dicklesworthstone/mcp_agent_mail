@@ -27,6 +27,7 @@ from urllib.parse import quote
 import pytest
 from fastmcp import Client
 from sqlalchemy import delete
+from sqlmodel import col
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import get_session
@@ -935,7 +936,7 @@ async def test_file_reservations_resource_surfaces_orphaned(isolated_env):
         # Delete the owning agent row out-of-band — mimics the operational
         # condition the issue describes.
         async with get_session() as session:
-            await session.execute(delete(Agent).where(Agent.name == agent_name))
+            await session.execute(delete(Agent).where(col(Agent.name) == agent_name))
             await session.commit()
 
         # Orphaned reservations are stale=True by definition, so the resource

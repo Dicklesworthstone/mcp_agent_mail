@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, AsyncIterator, Iterable, Sequence, TypeVar, cast
+from typing import Any, AsyncGenerator, Iterable, Sequence, TypeVar, cast
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
@@ -1236,7 +1236,7 @@ class AsyncFileLock:
 
 
 @asynccontextmanager
-async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
+async def archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncGenerator[None, None]:
     """Context manager for safely mutating archive surfaces.
 
     The lock is released in a ``finally`` no matter how the body terminates —
@@ -2797,11 +2797,16 @@ async def get_file_content(
             if obj.size > max_size_bytes:
                 raise ValueError(f"File too large: {obj.size} bytes (max {max_size_bytes})")
 
-            stream = obj.data_stream
+            stream = obj.data_stream.stream
             try:
                 return str(stream.read().decode("utf-8", errors="replace"))
             finally:
-                stream.close()
+                # GitCmdObjectDB's sized cat-file stream has no close(): a
+                # complete read drains it without closing the shared pipe.
+                # Other GitDB backends expose a separately closable stream.
+                close_stream = getattr(stream, "close", None)
+                if callable(close_stream):
+                    close_stream()
         except KeyError:
             return None
 

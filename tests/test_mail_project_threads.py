@@ -634,7 +634,7 @@ async def test_thread_detail_opens_latest_page_and_all_history_is_reachable(mail
     assert _thread_page_message_ids(response) == list(range(101, 122))
     assert "121 messages" in response.text
     assert "Opening subject" in response.text
-    assert "Messages 101–121 of 121" in response.text
+    assert "Messages 101\u2013121 of 121" in response.text
     assert "End of conversation" in response.text
 
     all_ids = []

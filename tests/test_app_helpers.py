@@ -92,6 +92,7 @@ def test_latest_filesystem_activity_early_exits_on_recent(tmp_path) -> None:
     )
 
     # Returned the first (recent) mtime, NOT the larger second one -> stopped early.
+    assert latest is not None
     assert latest == datetime.fromtimestamp(first_ts, tz=timezone.utc)
     assert latest < datetime.fromtimestamp(second_ts, tz=timezone.utc)
 

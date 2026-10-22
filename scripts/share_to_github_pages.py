@@ -573,10 +573,7 @@ def _is_inside_git_repo(path: Path) -> bool:
     (which is exactly how signing-77c6e768.key leaked in commit d1342ce).
     """
     candidate = path.resolve()
-    for ancestor in (candidate, *candidate.parents):
-        if (ancestor / ".git").exists():
-            return True
-    return False
+    return any((ancestor / ".git").exists() for ancestor in (candidate, *candidate.parents))
 
 
 def _safe_signing_key_dir() -> Path:

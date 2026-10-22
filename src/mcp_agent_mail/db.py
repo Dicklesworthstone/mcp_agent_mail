@@ -24,7 +24,7 @@ import random
 import re
 import threading
 import time
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import Enum
@@ -186,7 +186,7 @@ def stop_query_tracking(token: contextvars.Token) -> None:
 
 
 @contextmanager
-def track_queries(*, slow_ms: float | None = None) -> Iterator[QueryTracker]:
+def track_queries(*, slow_ms: float | None = None) -> Generator[QueryTracker, None, None]:
     tracker, token = start_query_tracking(slow_ms=slow_ms)
     try:
         yield tracker
@@ -599,7 +599,7 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 
 @asynccontextmanager
-async def get_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[AsyncSession]:
+async def get_session(*, check_circuit_breaker: bool = False) -> AsyncGenerator[AsyncSession, None]:
     """Provide an async database session with guaranteed cleanup.
 
     This context manager ensures the session is always closed, even under task
@@ -640,7 +640,7 @@ async def get_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[A
 
 
 @asynccontextmanager
-async def get_immediate_session(*, check_circuit_breaker: bool = False) -> AsyncIterator[AsyncSession]:
+async def get_immediate_session(*, check_circuit_breaker: bool = False) -> AsyncGenerator[AsyncSession, None]:
     """Provide an async database session that begins with ``BEGIN IMMEDIATE``.
 
     This forces SQLite to acquire a *reserved lock* at the start of the

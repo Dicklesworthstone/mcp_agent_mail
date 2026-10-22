@@ -19,6 +19,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastmcp import Client
+from sqlalchemy import select, update
+from sqlmodel import col
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.db import get_session
@@ -71,8 +73,8 @@ async def _backdate(agent_name: str, hours: int) -> datetime:
     stamp = _naive_utc(datetime.now(timezone.utc) - timedelta(hours=hours))
     async with get_session() as session:
         await session.execute(
-            Agent.__table__.update()
-            .where(Agent.name == agent_name)
+            update(Agent)
+            .where(col(Agent.name) == agent_name)
             .values(last_active_ts=stamp)
         )
         await session.commit()
@@ -83,9 +85,9 @@ async def _last_active(agent_name: str) -> datetime:
     async with get_session() as session:
         row = (
             await session.execute(
-                Agent.__table__.select().where(Agent.name == agent_name)
+                select(Agent).where(col(Agent.name) == agent_name)
             )
-        ).first()
+        ).scalars().first()
         assert row is not None
         return row.last_active_ts
 

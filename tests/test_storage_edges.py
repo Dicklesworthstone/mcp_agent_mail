@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from fastmcp import Client
+from git import Repo
 from PIL import Image
 
 from mcp_agent_mail import config as _config
@@ -28,6 +29,7 @@ from mcp_agent_mail.storage import (
     collect_lock_status,
     create_diagnostic_backup,
     ensure_archive,
+    get_file_content,
     heal_archive_locks,
     list_backups,
     restore_from_backup,
@@ -992,34 +994,52 @@ def test_async_file_lock_releases_across_executor_threads(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_get_file_content_reuses_git_object_stream(isolated_env) -> None:
+    """Reading one blob must leave GitPython's shared cat-file stream usable."""
+    archive = await ensure_archive(get_settings(), "repeated-blob-reads")
+    contents = {"first.txt": "first blob\n", "second.txt": "second blob\n", "empty.txt": ""}
+    paths = []
+    for name, content in contents.items():
+        path = archive.root / name
+        path.write_text(content, encoding="utf-8")
+        paths.append(str(path.relative_to(archive.repo_root)))
+    archive.repo.index.add(paths)
+    commit = archive.repo.index.commit("Add blobs for repeated content reads")
+
+    for commit_sha in (None, commit.hexsha):
+        for name, content in contents.items():
+            assert await get_file_content(archive, name, commit_sha=commit_sha) == content
+    assert await get_file_content(archive, "first.txt") == contents["first.txt"]
+
+
+@pytest.mark.asyncio
 async def test_archive_write_lock_releases_on_body_exception(tmp_path: Path, monkeypatch) -> None:
     """The archive write lock is released even when the guarded body raises (#166)."""
     monkeypatch.setenv("APP_ENVIRONMENT", "development")
     from mcp_agent_mail.storage import ProjectArchive, archive_write_lock
 
     lock_path = tmp_path / ".archive.lock"
-    # Only lock_path is exercised by archive_write_lock; the other fields satisfy
-    # the dataclass constructor (repo is never dereferenced on this path).
-    archive = ProjectArchive(
-        settings=get_settings(),
-        slug="t",
-        root=tmp_path,
-        repo=None,  # type: ignore[arg-type]
-        lock_path=lock_path,
-        repo_root=tmp_path,
-    )
+    with Repo.init(tmp_path) as repo:
+        archive = ProjectArchive(
+            settings=get_settings(),
+            slug="t",
+            root=tmp_path,
+            repo=repo,
+            lock_path=lock_path,
+            repo_root=tmp_path,
+        )
 
-    with contextlib.suppress(RuntimeError):
+        with contextlib.suppress(RuntimeError):
+            async with archive_write_lock(archive, timeout_seconds=5.0):
+                assert lock_path.exists()
+                raise RuntimeError("simulated interrupted write")
+
+        # finally must have released the lock regardless of the exception.
+        assert not lock_path.exists(), "archive lock must be released after a failed write (#166)"
+        # And the lock must be immediately re-acquirable (not wedged).
         async with archive_write_lock(archive, timeout_seconds=5.0):
             assert lock_path.exists()
-            raise RuntimeError("simulated interrupted write")
-
-    # finally must have released the lock regardless of the exception.
-    assert not lock_path.exists(), "archive lock must be released after a failed write (#166)"
-    # And the lock must be immediately re-acquirable (not wedged).
-    async with archive_write_lock(archive, timeout_seconds=5.0):
-        assert lock_path.exists()
-    assert not lock_path.exists()
+        assert not lock_path.exists()
 
 
 @pytest.mark.asyncio
@@ -1110,6 +1130,7 @@ async def test_store_image_writes_sha256_path(isolated_env):
         )
 
         # rel_path must reference the SHA256 filename
+        assert rel_path is not None
         assert digest in rel_path, (
             f"rel_path {rel_path!r} must contain the SHA256 digest"
         )
@@ -1172,6 +1193,7 @@ async def test_legacy_sha1_blob_readable_alongside_sha256(isolated_env):
         meta, _rel_path = await _store_image(archive, blue_file, embed_policy="file")
         new_digest = meta["sha1"]
 
+        assert isinstance(new_digest, str), "digest must be a string"
         assert len(new_digest) == 64, "fresh write must use 64-char SHA256 digest"
 
         # Both paths must coexist and be readable
