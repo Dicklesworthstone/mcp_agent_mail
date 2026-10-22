@@ -21,7 +21,7 @@ import stat
 import subprocess
 import time
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +37,7 @@ from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 from sqlalchemy import and_ as _sa_and, asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, exists as _sa_exists, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from . import rich_logger
@@ -777,7 +778,7 @@ def _capabilities_for(agent: Optional[str], project: Optional[str]) -> list[str]
 
 def _lifespan_factory(settings: Settings) -> Callable[[FastMCP], AsyncContextManager[None]]:
     @asynccontextmanager
-    async def lifespan(app: FastMCP) -> AsyncIterator[None]:
+    async def lifespan(app: FastMCP) -> AsyncGenerator[None]:
         init_engine(settings)
         heal_summary = await heal_archive_locks(settings)
         if heal_summary.get("locks_removed") or heal_summary.get("metadata_removed"):
@@ -2794,7 +2795,7 @@ def _canonical_project_pair(a_id: int, b_id: int) -> tuple[int, int]:
 
 
 @asynccontextmanager
-async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncIterator[None]:
+async def _archive_write_lock(archive: ProjectArchive, *, timeout_seconds: float = 60.0) -> AsyncGenerator[None]:
     try:
         async with archive_write_lock(archive, timeout_seconds=timeout_seconds):
             yield
@@ -3637,75 +3638,147 @@ async def _find_agent_optional(project: Project, name: str | None) -> Agent | No
         return result.scalars().first()
 
 
-async def _resolve_routing_identity(
-    project: Project, sender: Agent, name: str, target_project: Project | None,
-) -> tuple[Project, Agent] | None:
-    """Resolve identity before authorization; never select an alias by row order.
+class _MessageRecipientResolver:
+    """Resolve stored identities before deciding whether delivery is authorized.
 
-    Exact case-insensitive names take precedence over sanitized aliases. Bare
-    names search the local project and projects with active outgoing contacts;
-    explicit addresses search only their named project. Inspect all identities
-    in that scope, not just approved recipients, so approval cannot redirect an
-    address to a different agent with a colliding normalized name.
+    Punctuation is significant in explicit agent identities. Exact names win
+    over sanitized aliases, and an alias must identify exactly one agent.
+    Index all agents in the relevant projects, including unapproved contacts:
+    an approved ``BlueLake`` must never stand in for an existing ``Blue.Lake``.
     """
-    async with get_session() as session:
-        links = (await session.execute(
-            select(AgentLink).where(
-                cast(Any, AgentLink.a_project_id) == project.id,
-                cast(Any, AgentLink.a_agent_id) == sender.id,
+
+    def __init__(self, project: Project, sender: Agent) -> None:
+        self.project = project
+        self.sender = sender
+        self._projects: dict[int, Project] = {}
+        self._exact: dict[int, dict[str, list[Agent]]] = {}
+        self._aliases: dict[int, dict[str, list[Agent]]] = {}
+        self._approved: set[tuple[int, int]] = set()
+        self._bare_project_ids: set[int] = set()
+
+    def _index(self, project: Project, agent: Agent | None = None) -> None:
+        project_id = project.id or 0
+        self._projects[project_id] = project
+        exact = self._exact.setdefault(project_id, {})
+        aliases = self._aliases.setdefault(project_id, {})
+        if agent is not None:
+            exact.setdefault(agent.name.strip().lower(), []).append(agent)
+            alias = sanitize_agent_name(agent.name)
+            if alias:
+                aliases.setdefault(alias.lower(), []).append(agent)
+
+    async def refresh(self) -> None:
+        """Refresh after registration or an in-session contact approval."""
+        async with get_session() as session:
+            links = await session.execute(
+                select(AgentLink.b_project_id, AgentLink.b_agent_id)
+                .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
+                .where(
+                    cast(Any, AgentLink.a_project_id) == self.project.id,
+                    cast(Any, AgentLink.a_agent_id) == self.sender.id,
+                    cast(Any, Agent.project_id == AgentLink.b_project_id),
+                    _active_approved_agent_link_clause(),
+                )
+            )
+            self._approved = {(row[0], row[1]) for row in links.all()}
+            self._bare_project_ids = {self.project.id or 0} | {pid for pid, _aid in self._approved}
+            rows = await session.execute(
+                select(Project, Agent)
+                .join(Agent, cast(Any, Agent.project_id == Project.id))
+                .where(cast(Any, Project.id).in_(self._bare_project_ids))
+            )
+            self._projects.clear()
+            self._exact.clear()
+            self._aliases.clear()
+            self._index(self.project)
+            for target_project, agent in rows.all():
+                self._index(target_project, agent)
+
+    def is_approved(self, project: Project, agent: Agent) -> bool:
+        return (project.id or 0, agent.id or 0) in self._approved
+
+    async def has_approved_link(self, session: AsyncSession, project: Project, agent: Agent) -> bool:
+        """Authorize the resolved identity, including both sides' project IDs."""
+        rows = await session.execute(
+            select(AgentLink.id).where(
+                cast(Any, AgentLink.a_project_id) == self.project.id,
+                cast(Any, AgentLink.a_agent_id) == self.sender.id,
+                cast(Any, AgentLink.b_project_id) == project.id,
+                cast(Any, AgentLink.b_agent_id) == agent.id,
                 _active_approved_agent_link_clause(),
             )
-        )).scalars().all()
-        approved = {(link.b_project_id, link.b_agent_id) for link in links}
-        scope = {target_project.id} if target_project else {project.id, *(p for p, _ in approved)}
-        key = name.strip().lower()
-        scoped_agents = select(Project, Agent).join(Agent, cast(Any, Agent.project_id == Project.id)).where(
-            cast(Any, Project.id).in_(scope),
         )
-        rows = (await session.execute(scoped_agents.where(cast(Any, func.lower(Agent.name) == key)))).all()
-        if not rows:
-            # Only alias resolution needs to inspect normalized stored names.
-            rows = (await session.execute(scoped_agents)).all()
-        normalized = (sanitize_agent_name(name) or name.strip()).lower()
-        exact = [(p, a) for p, a in rows if a.name.lower() == key]
-        matches = exact or [
-            (p, a) for p, a in rows
-            if (sanitize_agent_name(a.name) or a.name).lower() == normalized
-        ]
-        if not target_project and exact:
-            # Preserve the approved remote-over-local-shadow routing contract.
-            remote = [(p, a) for p, a in exact if p.id != project.id and (p.id, a.id) in approved]
-            self_match = [(p, a) for p, a in exact if a.id == sender.id]
-            matches = self_match or remote or exact
+        return rows.first() is not None
+
+    @staticmethod
+    def _unique(name: str, matches: list[tuple[Project, Agent]]) -> tuple[Project, Agent] | None:
         if len(matches) > 1:
             raise ToolExecutionError(
-                "AMBIGUOUS_RECIPIENT", "Recipient name is ambiguous; use an exact name and explicit project.",
+                "AMBIGUOUS_RECIPIENT",
+                f"Recipient '{name}' matches multiple agents. Use an exact stored agent name "
+                "and an explicit project address (project:<slug>#<name>).",
                 recoverable=True,
+                data={
+                    "recipient": name,
+                    "candidates": sorted(
+                        _format_cross_project_agent_address(project.slug, agent.name)
+                        for project, agent in matches
+                    ),
+                },
             )
-        if not matches:
+        return matches[0] if matches else None
+
+    async def resolve(
+        self,
+        name: str,
+        *,
+        target_project: Project | None = None,
+    ) -> tuple[Project, Agent] | None:
+        exact_key = name.strip().lower()
+        if not exact_key:
             return None
-        resolved_project, agent = matches[0]
-        if resolved_project.id != project.id and (agent.contact_policy or "auto").lower() == "block_all":
-            raise ToolExecutionError("CONTACT_BLOCKED", "Recipient is not accepting messages.", recoverable=True)
-        return resolved_project, agent
+        if target_project is not None:
+            project_id = target_project.id or 0
+            if project_id not in self._projects:
+                async with get_session() as session:
+                    rows = await session.execute(select(Agent).where(Agent.project_id == project_id))
+                    self._index(target_project)
+                    for agent in rows.scalars().all():
+                        self._index(target_project, agent)
+            project_ids = {project_id}
+        else:
+            project_ids = self._bare_project_ids
 
+        exact = [
+            (self._projects[pid], agent)
+            for pid in project_ids
+            for agent in self._exact.get(pid, {}).get(exact_key, [])
+        ]
+        if exact:
+            if target_project is not None:
+                return self._unique(name, exact)
+            local = [(proj, agent) for proj, agent in exact if proj.id == self.project.id]
+            # An exact self-address remains local. A normalized collision with
+            # the sender is not a self-address and gets no authorization bypass.
+            if local and any(agent.id == self.sender.id for _proj, agent in local):
+                return self._unique(name, local)
+            approved_external = [
+                (proj, agent)
+                for proj, agent in exact
+                if proj.id != self.project.id and self.is_approved(proj, agent)
+            ]
+            # Both sends and replies preserve an approved external contact
+            # over a same-name local shadow (#138). All remaining exact
+            # identities must be unambiguous before checking authorization.
+            return self._unique(name, approved_external or exact)
 
-async def _resolve_cross_project_recipient_unenforced(
-    target_project: Project,
-    display_value: str,
-    canonical: str,
-) -> Agent | None:
-    """Resolve an explicitly addressed cross-project recipient by name alone.
-
-    Only used when CONTACT_ENFORCEMENT_ENABLED=false: with contact enforcement
-    globally disabled, an explicit ``project:X#name`` (or ``name@project``)
-    recipient should not additionally require an approved AgentLink. Callers
-    must still honor the recipient's ``block_all`` contact policy.
-    """
-    agent = await _find_agent_optional(target_project, display_value)
-    if agent is None and canonical and canonical != display_value:
-        agent = await _find_agent_optional(target_project, canonical)
-    return agent
+        alias = sanitize_agent_name(name)
+        matches = [
+            (self._projects[pid], agent)
+            for pid in project_ids
+            for agent in self._aliases.get(pid, {}).get((alias or "").lower(), [])
+        ]
+        return self._unique(name, matches)
 
 
 async def _ensure_agent_registration_token(
@@ -5072,10 +5145,10 @@ async def _update_recipient_timestamp(
             .where(
                 MessageRecipient.message_id == message_id,
                 MessageRecipient.agent_id == agent.id,
-                cast(Any, field_col).is_(None),
+                field_col.is_(None),
             )
             .values({field: naive_now})
-            .returning(cast(Any, field_col))
+            .returning(field_col)
         )
         result = await session.execute(stmt)
         applied = result.first()
@@ -5210,7 +5283,7 @@ def build_mcp_server() -> FastMCP:
         # ctx refuses attribute assignment; multi-lookup consistency
         # degrades to "best effort" but a single lookup still works.
         with suppress(Exception):
-            ctx._mcp_agent_mail_orphan_key = orphan_key  # type: ignore[attr-defined]
+            cast(Any, ctx)._mcp_agent_mail_orphan_key = orphan_key
         return orphan_key
 
     def _prune_expired_session_bindings(now: float) -> None:
@@ -7533,6 +7606,34 @@ def build_mcp_server() -> FastMCP:
         verified_sender = True
         # Enforce contact policies (per-recipient) with auto-allow heuristics
         settings_local = get_settings()
+        recipient_resolver = _MessageRecipientResolver(project, sender)
+        await recipient_resolver.refresh()
+        cross_project_recipient_names: set[str] = set()
+
+        async def _canonicalize_local_recipients(names: list[str]) -> list[str]:
+            resolved_names: list[str] = []
+            for name in names:
+                if (name.startswith("project:") and "#" in name) or (
+                    "@" in name and all(part.strip() for part in name.split("@", 1))
+                ):
+                    resolved_names.append(name)
+                    continue
+                match = await recipient_resolver.resolve(name)
+                if match is not None:
+                    target_project, target_agent = match
+                    if target_project.id == project.id:
+                        # The local policy gate must see the actual identity,
+                        # including when the caller used a normalized alias.
+                        resolved_names.append(target_agent.name)
+                        continue
+                    if recipient_resolver.is_approved(target_project, target_agent):
+                        cross_project_recipient_names.add(name)
+                resolved_names.append(name)
+            return resolved_names
+
+        to = await _canonicalize_local_recipients(to)
+        cc = await _canonicalize_local_recipients(cc or [])
+        bcc = await _canonicalize_local_recipients(bcc or [])
         if settings_local.contact_enforcement_enabled:
             # allow replies always; if thread present and recipient already on thread, allow
             auto_ok_names: set[str] = set()
@@ -7661,45 +7762,13 @@ def build_mcp_server() -> FastMCP:
                     logger.exception("Failed to batch fetch approved agent links")
                     approved_link_ids = set()
 
-                # PR #138 Bug 1: also gather names for which this sender has any
-                # approved cross-project AgentLink. When a bare name routes to
-                # another project (handled later in _route), the local-side
-                # contact-policy enforcement must not loud-fail on a same-named
-                # local shadow — the cross-project link is the explicit approval.
-                cross_project_approved_names: set[str] = set()
-                try:
-                    xp_link_rows = await s3.execute(
-                        select(Agent.name)
-                        .join(AgentLink, cast(Any, AgentLink.b_agent_id) == Agent.id)
-                        .where(
-                            cast(Any, AgentLink.a_project_id) == project.id,
-                            cast(Any, AgentLink.a_agent_id) == sender.id,
-                            cast(Any, AgentLink.b_project_id) != project.id,
-                            _active_approved_agent_link_clause(now_utc),
-                        )
-                    )
-                    for (xp_name,) in xp_link_rows.all():
-                        nm_str = (xp_name or "").strip()
-                        if not nm_str:
-                            continue
-                        cross_project_approved_names.add(nm_str.lower())
-                        sanitized_xp = sanitize_agent_name(nm_str) or nm_str
-                        cross_project_approved_names.add(sanitized_xp.lower())
-                except Exception:
-                    logger.exception("Failed to batch fetch cross-project agent links for policy bypass")
-                    cross_project_approved_names = set()
-
                 for nm in to + (cc or []) + (bcc or []):
                     if nm in auto_ok_names:
                         continue
                     # PR #138 Bug 1: name resolves cross-project via approved link;
                     # the local contact policy is irrelevant since delivery routes
                     # to the other project's recipient (handled in _route below).
-                    nm_keys = {(nm or "").strip().lower()}
-                    sanitized_nm = sanitize_agent_name(nm or "") or ""
-                    if sanitized_nm:
-                        nm_keys.add(sanitized_nm.lower())
-                    if nm_keys & cross_project_approved_names:
+                    if nm in cross_project_recipient_names:
                         continue
                     # recipient lookup (from batch-fetched dict)
                     rec = recipient_agents.get(nm)
@@ -7823,6 +7892,8 @@ def build_mcp_server() -> FastMCP:
                             recipient_agents_retry = await _get_agents_batch_lenient(project, all_recipient_names)
                             async with get_session() as s3b:
                                 for nm in to + (cc or []) + (bcc or []):
+                                    if nm in cross_project_recipient_names:
+                                        continue
                                     rec = recipient_agents_retry.get(nm)
                                     if rec is None:
                                         continue
@@ -7948,27 +8019,6 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
 
         async with get_session() as sx:
-            # Preload local agent names (normalized -> canonical stored name)
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
-            local_lookup: dict[str, str] = {}
-            for row in existing.fetchall():
-                canonical_name = (row[0] or "").strip()
-                if not canonical_name:
-                    continue
-                local_lookup[canonical_name.lower()] = canonical_name
-
-            def _normalize(value: str) -> tuple[str, set[str], Optional[str]]:
-                """Trim input, derive comparable lowercase keys, and canonical lookup token."""
-                trimmed = (value or "").strip()
-                sanitized = sanitize_agent_name(trimmed)
-                keys: set[str] = set()
-                if trimmed:
-                    keys.add(trimmed.lower())
-                if sanitized:
-                    keys.add(sanitized.lower())
-                canonical = sanitized or (trimmed if trimmed else None)
-                return trimmed or value, keys, canonical
-
             unknown_local: dict[str, set[str]] = defaultdict(set)
             unknown_external: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
 
@@ -8015,8 +8065,8 @@ def build_mcp_server() -> FastMCP:
                                 unknown_external[label][candidate.strip() or candidate].add(kind)
                                 continue
 
-                    display_value, key_candidates, canonical = _normalize(agent_fragment)
-                    if not key_candidates or not canonical:
+                    display_value = agent_fragment.strip()
+                    if not display_value:
                         if explicit_override:
                             label = target_project_label or "(unknown project)"
                             unknown_external[label][candidate.strip() or candidate].add(kind)
@@ -8024,107 +8074,39 @@ def build_mcp_server() -> FastMCP:
                             unknown_local[candidate.strip() or candidate].add(kind)
                         continue
 
-                    identity = await _resolve_routing_identity(project, sender, display_value, target_project_override)
-                    if identity is not None:
-                        identity_project, identity_agent = identity
-                        canonical = identity_agent.name
-                        display_value = identity_agent.name
-                        key_candidates = {canonical.lower()}
-                        if identity_project.id != project.id:
-                            explicit_override = True
-                            target_project_override = identity_project
-                            target_project_label = identity_project.human_key or identity_project.slug
-
-                    # Always allow exact self-send (local context only)
-                    if not explicit_override and sender.name.lower() in key_candidates:
-                        if kind == "to":
-                            local_to.append(sender.name)
-                        elif kind == "cc":
-                            local_cc.append(sender.name)
-                        else:
-                            local_bcc.append(sender.name)
-                        continue
-
-                    if not explicit_override:
-                        resolved_local = None
-                        for key in key_candidates:
-                            resolved_local = local_lookup.get(key)
-                            if resolved_local:
-                                break
-                        if resolved_local:
-                            # Local-only (no cross-project link): route locally as before.
-                            if kind == "to":
-                                local_to.append(resolved_local)
-                            elif kind == "cc":
-                                local_cc.append(resolved_local)
-                            else:
-                                local_bcc.append(resolved_local)
-                            continue
-
-                    lookup_value = canonical.lower()
-                    if (
-                        explicit_override
-                        and target_project_override is not None
-                        and not settings_local.contact_enforcement_enabled
-                    ):
-                        # Contact enforcement is globally disabled: an explicit
-                        # cross-project recipient does not additionally need an
-                        # approved AgentLink. block_all is still honored.
-                        direct_target = await _resolve_cross_project_recipient_unenforced(
-                            target_project_override, display_value, canonical
-                        )
-                        if direct_target is not None:
-                            pol = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
-                            if pol == "block_all":
-                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
-                                raise _ContactBlocked()
-                            bucket = external.setdefault(
-                                target_project_override.id or 0,
-                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
-                            )
-                            bucket[kind].append(direct_target.name)
-                            continue
-                    rows = None
-                    if explicit_override and target_project_override is not None:
-                        rows = await sx.execute(
-                            select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(
-                                cast(Any, AgentLink.a_project_id) == project.id,
-                                cast(Any, AgentLink.a_agent_id) == sender.id,
-                                _active_approved_agent_link_clause(),
-                                cast(Any, Project.id == target_project_override.id),
-                                cast(Any, func.lower(Agent.name) == lookup_value),
-                            )
-                            .limit(1)
-                        )
-                    else:
-                        rows = await sx.execute(
-                            select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(
-                                cast(Any, AgentLink.a_project_id) == project.id,
-                                cast(Any, AgentLink.a_agent_id) == sender.id,
-                                _active_approved_agent_link_clause(),
-                                cast(Any, func.lower(Agent.name) == lookup_value),
-                            )
-                            .limit(1)
-                        )
-
-                    rec = rows.first() if rows else None
-                    if rec:
-                        _link, target_project, target_agent = rec
+                    match = await recipient_resolver.resolve(
+                        display_value,
+                        target_project=target_project_override,
+                    )
+                    if match is not None:
+                        target_project, target_agent = match
                         pol = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
-                        if pol == "block_all":
+                        if pol == "block_all" and (explicit_override or target_agent.id != sender.id):
                             await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
                             raise _ContactBlocked()
-                        bucket = external.setdefault(
-                            target_project.id or 0,
-                            {"project": target_project, "to": [], "cc": [], "bcc": []},
+                        if not explicit_override and target_project.id == project.id:
+                            if kind == "to":
+                                local_to.append(target_agent.name)
+                            elif kind == "cc":
+                                local_cc.append(target_agent.name)
+                            else:
+                                local_bcc.append(target_agent.name)
+                            continue
+                        authorized = not settings_local.contact_enforcement_enabled or (
+                            await recipient_resolver.has_approved_link(sx, target_project, target_agent)
                         )
-                        bucket[kind].append(target_agent.name)
+                        if authorized:
+                            bucket = external.setdefault(
+                                target_project.id or 0,
+                                {"project": target_project, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(target_agent.name)
+                            continue
+                        # Preserve the identity when requesting missing approval;
+                        # never auto-register a local shadow of this recipient.
+                        unknown_external[target_project.human_key or target_project.slug][target_agent.name].add(
+                            kind
+                        )
                         continue
 
                     if explicit_override:
@@ -8164,6 +8146,7 @@ def build_mcp_server() -> FastMCP:
                             logger.exception("Failed to auto-register recipient %r in project %r", missing, project.human_key)
                     # Re-run routing for any that were registered
                     if newly_registered:
+                        await recipient_resolver.refresh()
                         from contextlib import suppress
                         with suppress(_ContactBlocked):
                             for name in sorted(newly_registered):
@@ -8239,6 +8222,7 @@ def build_mcp_server() -> FastMCP:
                                     logger.exception("Failed to auto-resolve contact for external recipient %r@%r", nm, label)
                         # Re-route any that were approved in-session
                         if approved_external_routes:
+                            await recipient_resolver.refresh()
                             from contextlib import suppress
                             with suppress(_ContactBlocked):
                                 for item, route_kind in approved_external_routes:
@@ -8641,29 +8625,12 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
         unknown_local: set[str] = set()
         unknown_external: dict[str, set[str]] = defaultdict(set)
+        recipient_resolver = _MessageRecipientResolver(project, sender)
+        await recipient_resolver.refresh()
 
         async with get_session() as sx:
-            existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
-            local_lookup: dict[str, str] = {}
-            for row in existing.fetchall():
-                canonical_name = (row[0] or "").strip()
-                if not canonical_name:
-                    continue
-                local_lookup[canonical_name.lower()] = canonical_name
-
             class _ContactBlocked(Exception):
                 pass
-
-            def _normalize(value: str) -> tuple[str, set[str], Optional[str]]:
-                trimmed = (value or "").strip()
-                sanitized = sanitize_agent_name(trimmed)
-                keys: set[str] = set()
-                if trimmed:
-                    keys.add(trimmed.lower())
-                if sanitized:
-                    keys.add(sanitized.lower())
-                canonical = sanitized or (trimmed if trimmed else None)
-                return trimmed or value, keys, canonical
 
             async def _route(name_list: list[str], kind: str) -> None:
                 for raw in name_list:
@@ -8701,8 +8668,8 @@ def build_mcp_server() -> FastMCP:
                                 unknown_external[label].add(candidate.strip() or candidate)
                                 continue
 
-                    display_value, key_candidates, canonical = _normalize(agent_fragment)
-                    if not key_candidates or not canonical:
+                    display_value = agent_fragment.strip()
+                    if not display_value:
                         if explicit_override:
                             label = target_project_label or "(unknown project)"
                             unknown_external[label].add(candidate.strip() or candidate)
@@ -8710,107 +8677,40 @@ def build_mcp_server() -> FastMCP:
                             unknown_local.add(candidate.strip() or candidate)
                         continue
 
-                    identity = await _resolve_routing_identity(project, sender, display_value, target_project_override)
-                    if identity is not None:
-                        identity_project, identity_agent = identity
-                        canonical = identity_agent.name
-                        display_value = identity_agent.name
-                        key_candidates = {canonical.lower()}
-                        if identity_project.id != project.id:
-                            explicit_override = True
-                            target_project_override = identity_project
-                            target_project_label = identity_project.human_key or identity_project.slug
-
-                    if not explicit_override and sender.name.lower() in key_candidates:
-                        if kind == "to":
-                            local_to.append(sender.name)
-                        elif kind == "cc":
-                            local_cc.append(sender.name)
-                        else:
-                            local_bcc.append(sender.name)
-                        continue
-
-                    if not explicit_override:
-                        resolved_local = None
-                        for key in key_candidates:
-                            resolved_local = local_lookup.get(key)
-                            if resolved_local:
-                                break
-                        if resolved_local:
-                            if kind == "to":
-                                local_to.append(resolved_local)
-                            elif kind == "cc":
-                                local_cc.append(resolved_local)
-                            else:
-                                local_bcc.append(resolved_local)
-                            continue
-
-                    lookup_value = canonical.lower()
-                    if (
-                        explicit_override
-                        and target_project_override is not None
-                        and not settings_local.contact_enforcement_enabled
-                    ):
-                        # Contact enforcement is globally disabled: an explicit
-                        # cross-project recipient does not additionally need an
-                        # approved AgentLink. block_all is still honored.
-                        direct_target = await _resolve_cross_project_recipient_unenforced(
-                            target_project_override, display_value, canonical
-                        )
-                        if direct_target is not None:
-                            recipient_policy = (getattr(direct_target, "contact_policy", "auto") or "auto").lower()
-                            if recipient_policy == "block_all":
-                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
-                                raise _ContactBlocked()
-                            bucket = external.setdefault(
-                                target_project_override.id or 0,
-                                {"project": target_project_override, "to": [], "cc": [], "bcc": []},
-                            )
-                            bucket[kind].append(direct_target.name)
-                            continue
-                    rows = None
-                    if explicit_override and target_project_override is not None:
-                        rows = await sx.execute(
-                            select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(
-                                cast(Any, AgentLink.a_project_id) == project.id,
-                                cast(Any, AgentLink.a_agent_id) == sender.id,
-                                _active_approved_agent_link_clause(),
-                                cast(Any, Project.id == target_project_override.id),
-                                cast(Any, func.lower(Agent.name) == lookup_value),
-                            )
-                            .limit(1)
-                        )
-                    else:
-                        rows = await sx.execute(
-                            select(AgentLink, Project, Agent)
-                            .join(Project, Project.id == AgentLink.b_project_id)
-                            .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                            .where(
-                                cast(Any, AgentLink.a_project_id) == project.id,
-                                cast(Any, AgentLink.a_agent_id) == sender.id,
-                                _active_approved_agent_link_clause(),
-                                cast(Any, func.lower(Agent.name) == lookup_value),
-                            )
-                            .limit(1)
-                        )
-                    rec = rows.first()
-                    if rec:
-                        _link, target_project, target_agent = rec
+                    match = await recipient_resolver.resolve(
+                        display_value, target_project=target_project_override
+                    )
+                    if match is not None:
+                        target_project, target_agent = match
                         recipient_policy = (getattr(target_agent, "contact_policy", "auto") or "auto").lower()
-                        if recipient_policy == "block_all":
+                        if recipient_policy == "block_all" and (explicit_override or target_agent.id != sender.id):
                             await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
                             raise _ContactBlocked()
-                        bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
-                        bucket[kind].append(target_agent.name)
+                        if not explicit_override and target_project.id == project.id:
+                            if kind == "to":
+                                local_to.append(target_agent.name)
+                            elif kind == "cc":
+                                local_cc.append(target_agent.name)
+                            else:
+                                local_bcc.append(target_agent.name)
+                            continue
+                        authorized = not settings_local.contact_enforcement_enabled or (
+                            await recipient_resolver.has_approved_link(sx, target_project, target_agent)
+                        )
+                        if authorized:
+                            bucket = external.setdefault(
+                                target_project.id or 0,
+                                {"project": target_project, "to": [], "cc": [], "bcc": []},
+                            )
+                            bucket[kind].append(target_agent.name)
+                            continue
+                        unknown_external[target_project.human_key or target_project.slug].add(target_agent.name)
+                        continue
+                    if explicit_override:
+                        label = target_project_label or "(unknown project)"
+                        unknown_external[label].add(display_value or candidate.strip() or candidate)
                     else:
-                        if explicit_override:
-                            label = target_project_label or "(unknown project)"
-                            unknown_external[label].add(display_value or candidate.strip() or candidate)
-                        else:
-                            unknown_local.add(display_value or candidate.strip() or candidate)
+                        unknown_local.add(display_value or candidate.strip() or candidate)
 
             try:
                 await _route(to_names, "to")
@@ -9759,6 +9659,7 @@ def build_mcp_server() -> FastMCP:
                 if since_dt:
                     stmt = stmt.where(Message.created_ts > _naive_utc(since_dt))
             if unread_only:
+                assert viewer is not None
                 # Narrow to recipient rows the viewer has not marked read.
                 # The JOIN on MessageRecipient already restricts to messages
                 # where the viewer has a recipient row, so no additional
@@ -9770,7 +9671,7 @@ def build_mcp_server() -> FastMCP:
                         cast(Any, viewer_recipient.message_id) == Message.id,
                     )
                     .where(
-                        cast(Any, viewer_recipient.agent_id) == (viewer.id or 0),  # type: ignore[union-attr]
+                        cast(Any, viewer_recipient.agent_id) == (viewer.id or 0),
                         cast(Any, viewer_recipient.read_ts).is_(None),
                     )
                 )
@@ -10024,7 +9925,7 @@ def build_mcp_server() -> FastMCP:
                     "format": "json",
                 }
             )
-            file_reservations_result = cast(dict[str, Any], _file_reservation_run.structured_content or {})
+            file_reservations_result = _file_reservation_run.structured_content or {}
 
         inbox_items = await _list_inbox(
             project,
