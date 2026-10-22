@@ -1,14 +1,139 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from fastmcp import Client
+from sqlalchemy import select
 
 from mcp_agent_mail.app import build_mcp_server
 from mcp_agent_mail.config import clear_settings_cache, get_settings
 from mcp_agent_mail.db import ensure_schema, get_db_health_status, get_session
 from mcp_agent_mail.models import Agent, AgentLink, Project
+
+
+async def _seed_punctuated_contacts(sender_name, recipient_name, status="approved", collision=None):
+    await _seed_two_projects_no_link()
+    async with get_session() as session:
+        sender = (await session.execute(select(Agent).where(cast(Any, Agent.name == "RedFalcon")))).scalar_one()
+        recipient = (await session.execute(select(Agent).where(cast(Any, Agent.name == "GoldHarbor")))).scalar_one()
+        sender.name = sender_name
+        recipient.name = recipient_name
+        session.add_all([sender, recipient])
+        session.add_all([
+            AgentLink(a_project_id=sender.project_id, a_agent_id=sender.id,
+                      b_project_id=recipient.project_id, b_agent_id=recipient.id, status=status),
+            AgentLink(a_project_id=recipient.project_id, a_agent_id=recipient.id,
+                      b_project_id=sender.project_id, b_agent_id=sender.id, status=status),
+        ])
+        if collision:
+            session.add(Agent(project_id=recipient.project_id, name=collision, program="codex", model="gpt-5",
+                              task_description="", registration_token="collision-token"))
+        await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("names", [("Alice.von.A", "Bob.von.B"), ("Alice-A", "Bob_B"), ("Alice", "Bob")])
+@pytest.mark.parametrize("address", ["{}", "project:frontend#{}", "{}@frontend"])
+async def test_punctuated_cross_project_send_and_reply(isolated_env, names, address):
+    sender, recipient = names
+    await _seed_punctuated_contacts(sender, recipient)
+    async with Client(build_mcp_server()) as client:
+        sent = await client.call_tool("send_message", {
+            "project_key": "Backend", "sender_name": sender, "sender_token": "redfalcon-token",
+            "to": [address.format(recipient)], "subject": "punctuation", "body_md": "hello",
+        })
+        delivery = sent.data["deliveries"][0]
+        assert delivery["project"] == "Frontend"
+        assert delivery["payload"]["to"] == [recipient]
+        for reply_to in (None, [sender], [f"{sender}@backend"]):
+            args = {"project_key": "Frontend", "sender_name": recipient, "sender_token": "goldharbor-token",
+                    "message_id": delivery["payload"]["id"], "body_md": "reply"}
+            if reply_to is not None:
+                args["to"] = reply_to
+            reply = await client.call_tool("reply_message", args)
+            assert reply.data["deliveries"][0]["project"] == "Backend"
+            assert reply.data["deliveries"][0]["payload"]["to"] == [sender]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["pending", "blocked"])
+async def test_punctuated_unapproved_contact_is_rejected(isolated_env, status):
+    await _seed_punctuated_contacts("Alice.von.A", "Bob.von.B", status=status)
+    async with Client(build_mcp_server()) as client:
+        result = await client.call_tool("send_message", {
+            "project_key": "Backend", "sender_name": "Alice.von.A", "sender_token": "redfalcon-token",
+            "to": ["Bob.von.B@frontend"], "subject": "blocked", "body_md": "hello",
+        }, raise_on_error=False)
+        assert result.is_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("address", ["Bob-vonB", "project:frontend#Bob-vonB"])
+async def test_ambiguous_normalization_cannot_select_approved_identity(isolated_env, address):
+    await _seed_punctuated_contacts("Alice", "Bob.von.B", collision="BobvonB")
+    async with Client(build_mcp_server()) as client:
+        for target in (address, "BobvonB@frontend"):
+            result = await client.call_tool("send_message", {
+                "project_key": "Backend", "sender_name": "Alice", "sender_token": "redfalcon-token",
+                "to": [target], "subject": "collision", "body_md": "must fail",
+            }, raise_on_error=False)
+            assert result.is_error
+        # An exact dotted name still identifies its own approved agent.
+        result = await client.call_tool("send_message", {
+            "project_key": "Backend", "sender_name": "Alice", "sender_token": "redfalcon-token",
+            "to": ["Bob.von.B@frontend"], "subject": "exact", "body_md": "hello",
+        })
+        assert result.data["deliveries"][0]["payload"]["to"] == ["Bob.von.B"]
+        seed = await client.call_tool("send_message", {
+            "project_key": "Frontend", "sender_name": "Bob.von.B", "sender_token": "goldharbor-token",
+            "to": ["Alice@backend"], "subject": "seed reply", "body_md": "hello",
+        })
+        reply = await client.call_tool("reply_message", {
+            "project_key": "Backend", "sender_name": "Alice", "sender_token": "redfalcon-token",
+            "message_id": seed.data["deliveries"][0]["payload"]["id"], "to": [address], "body_md": "ambiguous",
+        }, raise_on_error=False)
+        assert reply.is_error or reply.data.get("error")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restriction", ["pending", "expired", "block_all", "wrong_project"])
+async def test_punctuated_reply_cannot_bypass_contact_restrictions(isolated_env, restriction):
+    from datetime import datetime, timedelta, timezone
+
+    await _seed_punctuated_contacts("Alice.von.A", "Bob.von.B")
+    async with Client(build_mcp_server()) as client:
+        sent = await client.call_tool("send_message", {
+            "project_key": "Backend", "sender_name": "Alice.von.A", "sender_token": "redfalcon-token",
+            "to": ["Bob.von.B"], "subject": "seed", "body_md": "hello",
+        })
+        async with get_session() as session:
+            alice = (await session.execute(select(Agent).where(
+                cast(Any, Agent.name == "Alice.von.A"),
+            ))).scalar_one()
+            link = (await session.execute(select(AgentLink).where(
+                cast(Any, AgentLink.b_agent_id == alice.id),
+            ))).scalar_one()
+            if restriction == "pending":
+                link.status = "pending"
+            elif restriction == "expired":
+                link.expires_ts = datetime.now(timezone.utc) - timedelta(seconds=1)
+            elif restriction == "wrong_project":
+                link.b_project_id = link.a_project_id
+            else:
+                alice.contact_policy = "block_all"
+            session.add_all([alice, link])
+            await session.commit()
+        for tool in ("send_message", "reply_message"):
+            args = {"project_key": "Frontend", "sender_name": "Bob.von.B",
+                    "sender_token": "goldharbor-token", "body_md": "must fail"}
+            if tool == "reply_message":
+                args["message_id"] = sent.data["deliveries"][0]["payload"]["id"]
+            else:
+                args.update(to=["Alice.von.A@backend"], subject="blocked", auto_contact_if_blocked=False)
+            result = await client.call_tool(tool, args, raise_on_error=False)
+            assert result.is_error or result.data.get("error")
 
 
 async def _seed_two_projects_no_link() -> None:

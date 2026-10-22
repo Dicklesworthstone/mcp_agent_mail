@@ -936,6 +936,19 @@ async def test_cross_project_sender_identity_does_not_collide_with_same_name_loc
             )
         assert "Contact approval required for recipients: GreenCastle" in str(exc_info.value)
 
+        # Reply authorization is directional; thread history is not approval.
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": ops_key,
+                "requester": "BlueLake",
+                "target": "GreenCastle",
+                "to_project": backend_key,
+                "auto_accept": True,
+                "requester_registration_token": receiver_token,
+                "target_registration_token": source_token,
+            },
+        )
         reply = await client.call_tool(
             "reply_message",
             {
@@ -1087,6 +1100,19 @@ async def test_reply_message_surfaces_external_delivery_failures(isolated_env):
         )
         assert reservation.data["granted"]
 
+        # Reach the archive failure with a legitimately authorized reply.
+        await client.call_tool(
+            "macro_contact_handshake",
+            {
+                "project_key": ops_key,
+                "requester": receiver_name,
+                "target": "GreenCastle",
+                "to_project": backend_key,
+                "auto_accept": True,
+                "requester_registration_token": receiver.data["registration_token"],
+                "target_registration_token": sender.data["registration_token"],
+            },
+        )
         reply = await client.call_tool(
             "reply_message",
             {
@@ -1209,10 +1235,9 @@ async def test_search_and_summarize_thread_respect_recipient_visibility(isolated
 async def test_send_message_rolls_back_db_row_when_archive_write_fails(isolated_env, monkeypatch):
     """#180: a failed archive write after the message row is committed must roll
     the row (and its recipients) back, not orphan a committed DB row."""
-    import mcp_agent_mail.app as app_module
-    from sqlalchemy import func
-    from sqlalchemy import select as sa_select
+    from sqlalchemy import func, select as sa_select
 
+    import mcp_agent_mail.app as app_module
     from mcp_agent_mail.models import Message, MessageRecipient
 
     server = build_mcp_server()

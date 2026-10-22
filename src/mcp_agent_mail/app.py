@@ -3637,6 +3637,59 @@ async def _find_agent_optional(project: Project, name: str | None) -> Agent | No
         return result.scalars().first()
 
 
+async def _resolve_routing_identity(
+    project: Project, sender: Agent, name: str, target_project: Project | None,
+) -> tuple[Project, Agent] | None:
+    """Resolve identity before authorization; never select an alias by row order.
+
+    Exact case-insensitive names take precedence over sanitized aliases. Bare
+    names search the local project and projects with active outgoing contacts;
+    explicit addresses search only their named project. Inspect all identities
+    in that scope, not just approved recipients, so approval cannot redirect an
+    address to a different agent with a colliding normalized name.
+    """
+    async with get_session() as session:
+        links = (await session.execute(
+            select(AgentLink).where(
+                cast(Any, AgentLink.a_project_id) == project.id,
+                cast(Any, AgentLink.a_agent_id) == sender.id,
+                _active_approved_agent_link_clause(),
+            )
+        )).scalars().all()
+        approved = {(link.b_project_id, link.b_agent_id) for link in links}
+        scope = {target_project.id} if target_project else {project.id, *(p for p, _ in approved)}
+        key = name.strip().lower()
+        scoped_agents = select(Project, Agent).join(Agent, cast(Any, Agent.project_id == Project.id)).where(
+            cast(Any, Project.id).in_(scope),
+        )
+        rows = (await session.execute(scoped_agents.where(cast(Any, func.lower(Agent.name) == key)))).all()
+        if not rows:
+            # Only alias resolution needs to inspect normalized stored names.
+            rows = (await session.execute(scoped_agents)).all()
+        normalized = (sanitize_agent_name(name) or name.strip()).lower()
+        exact = [(p, a) for p, a in rows if a.name.lower() == key]
+        matches = exact or [
+            (p, a) for p, a in rows
+            if (sanitize_agent_name(a.name) or a.name).lower() == normalized
+        ]
+        if not target_project and exact:
+            # Preserve the approved remote-over-local-shadow routing contract.
+            remote = [(p, a) for p, a in exact if p.id != project.id and (p.id, a.id) in approved]
+            self_match = [(p, a) for p, a in exact if a.id == sender.id]
+            matches = self_match or remote or exact
+        if len(matches) > 1:
+            raise ToolExecutionError(
+                "AMBIGUOUS_RECIPIENT", "Recipient name is ambiguous; use an exact name and explicit project.",
+                recoverable=True,
+            )
+        if not matches:
+            return None
+        resolved_project, agent = matches[0]
+        if resolved_project.id != project.id and (agent.contact_policy or "auto").lower() == "block_all":
+            raise ToolExecutionError("CONTACT_BLOCKED", "Recipient is not accepting messages.", recoverable=True)
+        return resolved_project, agent
+
+
 async def _resolve_cross_project_recipient_unenforced(
     target_project: Project,
     display_value: str,
@@ -7893,11 +7946,6 @@ def build_mcp_server() -> FastMCP:
         local_cc: list[str] = []
         local_bcc: list[str] = []
         external: dict[int, dict[str, Any]] = {}
-        thread_external_participants = (
-            await _get_thread_external_participants(project, sender, thread_id)
-            if thread_id
-            else {}
-        )
 
         async with get_session() as sx:
             # Preload local agent names (normalized -> canonical stored name)
@@ -7907,53 +7955,7 @@ def build_mcp_server() -> FastMCP:
                 canonical_name = (row[0] or "").strip()
                 if not canonical_name:
                     continue
-                sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
-                for key in {canonical_name.lower(), sanitized_canonical.lower()}:
-                    local_lookup.setdefault(key, canonical_name)
-
-            # PR #138 Bug 1 fix: pre-fetch approved CROSS-project AgentLinks for
-            # this sender. When a bare recipient name has BOTH a local agent and
-            # an approved cross-project link (e.g. a stale shadow agent left
-            # over from a prior auto_contact_if_blocked + handshake cycle), we
-            # prefer the cross-project route — the explicit prior approval is
-            # the load-bearing signal of intent, and silently delivering to a
-            # local shadow has caused message loss in production.
-            #
-            # Only cross-project links go in this lookup. Same-project links
-            # are handled by the existing local-resolution path (and the
-            # existing AgentLink-based fallback further down) — including them
-            # here would cause messages to land in the `external` bucket keyed
-            # by the sender's own project, which downstream code does not
-            # expect.
-            agent_link_lookup: dict[str, tuple[Project, Agent]] = {}
-            if sender.id is not None and project.id is not None:
-                link_rows = await sx.execute(
-                    select(AgentLink, Project, Agent)
-                    .join(Project, Project.id == AgentLink.b_project_id)
-                    .join(Agent, cast(Any, Agent.id == AgentLink.b_agent_id))
-                    .where(
-                        cast(Any, AgentLink.a_project_id) == project.id,
-                        cast(Any, AgentLink.a_agent_id) == sender.id,
-                        cast(Any, AgentLink.b_project_id) != project.id,
-                        _active_approved_agent_link_clause(),
-                    )
-                )
-                for _link, b_project, b_agent in link_rows.all():
-                    canonical = (b_agent.name or "").strip()
-                    if not canonical:
-                        continue
-                    sanitized_b = sanitize_agent_name(canonical) or canonical
-                    for key in {canonical.lower(), sanitized_b.lower()}:
-                        agent_link_lookup.setdefault(key, (b_project, b_agent))
-
-            sender_candidate_keys = {
-                key.lower()
-                for key in (
-                    (sender.name or "").strip(),
-                    sanitize_agent_name(sender.name or "") or "",
-                )
-                if key
-            }
+                local_lookup[canonical_name.lower()] = canonical_name
 
             def _normalize(value: str) -> tuple[str, set[str], Optional[str]]:
                 """Trim input, derive comparable lowercase keys, and canonical lookup token."""
@@ -8022,8 +8024,19 @@ def build_mcp_server() -> FastMCP:
                             unknown_local[candidate.strip() or candidate].add(kind)
                         continue
 
-                    # Always allow self-send (local context only)
-                    if not explicit_override and sender_candidate_keys.intersection(key_candidates):
+                    identity = await _resolve_routing_identity(project, sender, display_value, target_project_override)
+                    if identity is not None:
+                        identity_project, identity_agent = identity
+                        canonical = identity_agent.name
+                        display_value = identity_agent.name
+                        key_candidates = {canonical.lower()}
+                        if identity_project.id != project.id:
+                            explicit_override = True
+                            target_project_override = identity_project
+                            target_project_label = identity_project.human_key or identity_project.slug
+
+                    # Always allow exact self-send (local context only)
+                    if not explicit_override and sender.name.lower() in key_candidates:
                         if kind == "to":
                             local_to.append(sender.name)
                         elif kind == "cc":
@@ -8038,31 +8051,6 @@ def build_mcp_server() -> FastMCP:
                             resolved_local = local_lookup.get(key)
                             if resolved_local:
                                 break
-                        cross_link_match: tuple[Project, Agent] | None = None
-                        for key in key_candidates:
-                            cross_link_match = agent_link_lookup.get(key)
-                            if cross_link_match:
-                                break
-                        if cross_link_match is not None:
-                            # PR #138 Bug 1: an approved cross-project AgentLink
-                            # is the load-bearing signal of intent. Prefer it
-                            # over both a (possibly stale-shadow) local agent
-                            # and the DB-side AgentLink fallback below — that
-                            # fallback only matches `func.lower(Agent.name) ==
-                            # canonical.lower()` and would miss legacy / non-
-                            # sanitized agent names that the pre-fetch finds
-                            # via the alternate sanitized-form key.
-                            target_project_xp, target_agent_xp = cross_link_match
-                            pol = (getattr(target_agent_xp, "contact_policy", "auto") or "auto").lower()
-                            if pol == "block_all":
-                                await ctx.error("CONTACT_BLOCKED: Recipient is not accepting messages.")
-                                raise _ContactBlocked()
-                            bucket = external.setdefault(
-                                target_project_xp.id or 0,
-                                {"project": target_project_xp, "to": [], "cc": [], "bcc": []},
-                            )
-                            bucket[kind].append(target_agent_xp.name)
-                            continue
                         if resolved_local:
                             # Local-only (no cross-project link): route locally as before.
                             if kind == "to":
@@ -8138,19 +8126,6 @@ def build_mcp_server() -> FastMCP:
                         )
                         bucket[kind].append(target_agent.name)
                         continue
-
-                    if explicit_override and target_project_override is not None:
-                        thread_participant = thread_external_participants.get(
-                            (target_project_override.id or 0, lookup_value)
-                        )
-                        if thread_participant is not None:
-                            target_project, participant_name = thread_participant
-                            bucket = external.setdefault(
-                                target_project.id or 0,
-                                {"project": target_project, "to": [], "cc": [], "bcc": []},
-                            )
-                            bucket[kind].append(participant_name)
-                            continue
 
                     if explicit_override:
                         label = target_project_label or "(unknown project)"
@@ -8666,7 +8641,6 @@ def build_mcp_server() -> FastMCP:
         external: dict[int, dict[str, Any]] = {}
         unknown_local: set[str] = set()
         unknown_external: dict[str, set[str]] = defaultdict(set)
-        thread_external_participants = await _get_thread_external_participants(project, sender, thread_key)
 
         async with get_session() as sx:
             existing = await sx.execute(select(Agent.name).where(Agent.project_id == project.id))
@@ -8675,18 +8649,7 @@ def build_mcp_server() -> FastMCP:
                 canonical_name = (row[0] or "").strip()
                 if not canonical_name:
                     continue
-                sanitized_canonical = sanitize_agent_name(canonical_name) or canonical_name
-                for key in {canonical_name.lower(), sanitized_canonical.lower()}:
-                    local_lookup.setdefault(key, canonical_name)
-
-            sender_candidate_keys = {
-                key.lower()
-                for key in (
-                    (sender.name or "").strip(),
-                    sanitize_agent_name(sender.name or "") or "",
-                )
-                if key
-            }
+                local_lookup[canonical_name.lower()] = canonical_name
 
             class _ContactBlocked(Exception):
                 pass
@@ -8747,7 +8710,18 @@ def build_mcp_server() -> FastMCP:
                             unknown_local.add(candidate.strip() or candidate)
                         continue
 
-                    if not explicit_override and sender_candidate_keys.intersection(key_candidates):
+                    identity = await _resolve_routing_identity(project, sender, display_value, target_project_override)
+                    if identity is not None:
+                        identity_project, identity_agent = identity
+                        canonical = identity_agent.name
+                        display_value = identity_agent.name
+                        key_candidates = {canonical.lower()}
+                        if identity_project.id != project.id:
+                            explicit_override = True
+                            target_project_override = identity_project
+                            target_project_label = identity_project.human_key or identity_project.slug
+
+                    if not explicit_override and sender.name.lower() in key_candidates:
                         if kind == "to":
                             local_to.append(sender.name)
                         elif kind == "cc":
@@ -8832,18 +8806,6 @@ def build_mcp_server() -> FastMCP:
                         bucket = external.setdefault(target_project.id or 0, {"project": target_project, "to": [], "cc": [], "bcc": []})
                         bucket[kind].append(target_agent.name)
                     else:
-                        if explicit_override and target_project_override is not None:
-                            thread_participant = thread_external_participants.get(
-                                (target_project_override.id or 0, lookup_value)
-                            )
-                            if thread_participant is not None:
-                                target_project, participant_name = thread_participant
-                                bucket = external.setdefault(
-                                    target_project.id or 0,
-                                    {"project": target_project, "to": [], "cc": [], "bcc": []},
-                                )
-                                bucket[kind].append(participant_name)
-                                continue
                         if explicit_override:
                             label = target_project_label or "(unknown project)"
                             unknown_external[label].add(display_value or candidate.strip() or candidate)
