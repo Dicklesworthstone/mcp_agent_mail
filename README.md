@@ -10,7 +10,7 @@ A mail-like coordination layer for coding agents, exposed as an HTTP-only FastMC
 
 Think of it as asynchronous email + directory + change-intent signaling for your agents, backed by Git (for human-auditable artifacts) and SQLite (for indexing and queries).
 
-Status: Under active development. The design is captured in detail in `docs/planning/project_idea_and_guide.md` (start with the original prompt at the top of that file).
+Status: Maintenance mode. This Python implementation is superseded by the Rust rewrite and is no longer actively developed; new installs should use [mcp_agent_mail_rust](https://github.com/Dicklesworthstone/mcp_agent_mail_rust). The original design is captured in detail in `docs/planning/project_idea_and_guide.md` (start with the original prompt at the top of that file).
 
 ## Why this exists
 
