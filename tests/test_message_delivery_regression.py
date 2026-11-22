@@ -228,7 +228,7 @@ async def test_send_message_multiple_to_recipients(isolated_env):
 
 @pytest.mark.asyncio
 async def test_send_message_recipient_lookup_query_count(isolated_env):
-    """Sending to many recipients should not scale agent lookup queries linearly."""
+    """Sending to many recipients should keep agent lookup queries constant O(1)."""
     server = build_mcp_server()
     project_key = "/test/query-count"
     async with Client(server) as client:
@@ -241,7 +241,7 @@ async def test_send_message_recipient_lookup_query_count(isolated_env):
         sender = sender_payload.data["name"]
 
         recipients: list[str] = []
-        for _ in range(3):
+        for _ in range(10):
             payload = await client.call_tool(
                 "register_agent",
                 {"project_key": project_key, "program": "test", "model": "test"},
@@ -254,21 +254,38 @@ async def test_send_message_recipient_lookup_query_count(isolated_env):
                 {"project_key": project_key, "agent_name": name, "policy": "open"},
             )
 
-        with track_queries() as tracker:
+        with track_queries() as tracker_small:
+            await client.call_tool(
+                "send_message",
+                {
+                    "project_key": project_key,
+                    "sender_name": sender,
+                    "to": recipients[:3],
+                    "subject": "Query Count Small",
+                    "body_md": "Benchmarking query count (3 recipients).",
+                    "ack_required": True,
+                },
+            )
+
+        with track_queries() as tracker_large:
             await client.call_tool(
                 "send_message",
                 {
                     "project_key": project_key,
                     "sender_name": sender,
                     "to": recipients,
-                    "subject": "Query Count",
-                    "body_md": "Benchmarking query count.",
+                    "subject": "Query Count Large",
+                    "body_md": "Benchmarking query count (10 recipients).",
                     "ack_required": True,
                 },
             )
 
-    agents_queries = tracker.per_table.get("agents", 0)
-    assert agents_queries <= 2, f"Expected <= 2 agent queries, got {agents_queries}"
+    agents_small = tracker_small.per_table.get("agents", 0)
+    agents_large = tracker_large.per_table.get("agents", 0)
+    assert agents_small > 0, "Expected query tracker to observe SQL queries against agents table"
+    assert agents_large == agents_small, (
+        f"Expected O(1) agent queries regardless of recipient count, got {agents_small} (3 recs) vs {agents_large} (10 recs)"
+    )
 
 
 @pytest.mark.asyncio

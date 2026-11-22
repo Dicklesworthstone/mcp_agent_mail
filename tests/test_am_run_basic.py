@@ -12,6 +12,7 @@ from typing import Any, cast
 import click
 import httpx
 import pytest
+import typer
 from sqlalchemy import select
 from typer.testing import CliRunner
 
@@ -181,7 +182,7 @@ def test_am_run_blocks_on_structured_content_conflicts(tmp_path: Path, monkeypat
     monkeypatch.setattr("httpx.Client.post", fake_post)
     monkeypatch.setattr("subprocess.run", unexpected_run)
 
-    with pytest.raises(click.exceptions.Exit) as excinfo:
+    with pytest.raises((typer.Exit, click.exceptions.Exit)) as excinfo:
         am_run(
             slot="unittest-slot",
             cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],
@@ -239,7 +240,7 @@ def test_am_run_blocks_on_existing_exclusive_conflicts_even_for_shared_request(t
     monkeypatch.setattr("httpx.Client.post", fake_post)
     monkeypatch.setattr("subprocess.run", unexpected_run)
 
-    with pytest.raises(click.exceptions.Exit) as excinfo:
+    with pytest.raises((typer.Exit, click.exceptions.Exit)) as excinfo:
         am_run(
             slot="unittest-slot",
             cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],
@@ -726,7 +727,7 @@ def test_am_run_local_fallback_blocks_on_existing_exclusive_conflicts_even_for_s
 
     monkeypatch.setattr("subprocess.run", unexpected_run)
 
-    with pytest.raises(click.exceptions.Exit) as excinfo:
+    with pytest.raises((typer.Exit, click.exceptions.Exit)) as excinfo:
         am_run(
             slot="unittest-slot",
             cmd=[sys.executable, "-c", "import sys; sys.exit(0)"],

@@ -108,3 +108,56 @@ async def test_http_jwt_malformed_token(isolated_env, monkeypatch):
         r = await client.post(settings.http.path, headers=headers, json=_rpc("tools/call", {"name": "health_check", "arguments": {}}))
         assert r.status_code == 401
 
+
+@pytest.mark.asyncio
+async def test_http_jwt_valid_aud_iss_accepted_and_wrong_aud_rejected(isolated_env, monkeypatch):
+    """Configured aud+iss must accept matching tokens and reject mismatched aud under authlib >=1.9."""
+    monkeypatch.setenv("HTTP_JWT_ENABLED", "true")
+    monkeypatch.setenv("HTTP_JWT_ALGORITHMS", "HS256")
+    monkeypatch.setenv("HTTP_JWT_SECRET", "super-secret-signing-key-32-bytes!")
+    monkeypatch.setenv("HTTP_JWT_AUDIENCE", "api://me")
+    monkeypatch.setenv("HTTP_JWT_ISSUER", "https://issuer.example")
+    monkeypatch.setenv("HTTP_ALLOW_LOCALHOST_UNAUTHENTICATED", "false")
+    with contextlib.suppress(Exception):
+        _config.clear_settings_cache()
+    settings = _config.get_settings()
+
+    valid_token = jwt.encode(
+        {"alg": "HS256"},
+        {
+            "sub": "u1",
+            "aud": "api://me",
+            "iss": "https://issuer.example",
+            settings.http.jwt_role_claim: "reader",
+        },
+        settings.http.jwt_secret,
+    ).decode("utf-8")
+    wrong_aud_token = jwt.encode(
+        {"alg": "HS256"},
+        {
+            "sub": "u1",
+            "aud": "api://someone-else",
+            "iss": "https://issuer.example",
+            settings.http.jwt_role_claim: "reader",
+        },
+        settings.http.jwt_secret,
+    ).decode("utf-8")
+
+    server = build_mcp_server()
+    app = build_http_app(settings, server)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_ok = await client.post(
+            settings.http.path,
+            headers={"Authorization": f"Bearer {valid_token}"},
+            json=_rpc("tools/call", {"name": "health_check", "arguments": {}}),
+        )
+        assert r_ok.status_code == 200
+
+        r_bad = await client.post(
+            settings.http.path,
+            headers={"Authorization": f"Bearer {wrong_aud_token}"},
+            json=_rpc("tools/call", {"name": "health_check", "arguments": {}}),
+        )
+        assert r_bad.status_code == 401
+

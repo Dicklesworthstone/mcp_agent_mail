@@ -258,6 +258,7 @@ async def test_hard_delete_project_rejects_legacy_tokenless_project(isolated_env
         project = (
             await session.execute(select(Project).where(Project.human_key == "/legacy/no-token"))
         ).scalars().one()
+        assert project.id is not None
         session.add(
             Agent(
                 project_id=project.id,

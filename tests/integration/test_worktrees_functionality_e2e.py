@@ -32,28 +32,31 @@ async def _read_json_resource(server: Any, uri: str) -> dict[str, Any]:
 
 
 def _print_tools_and_resources(console: Console, mcp: Any) -> tuple[list[str], list[str]]:
-    # Use FastMCP async getters
+    # Use FastMCP async getters (FastMCP 3/4 uses list_tools/list_resources; 2 used get_tools/get_resources)
     import asyncio as _asyncio
+
+    list_tools_fn = getattr(mcp, "list_tools", None) or mcp.get_tools
+    list_resources_fn = getattr(mcp, "list_resources", None) or mcp.get_resources
     try:
-        tools = _asyncio.run(mcp.get_tools())
+        tools = _asyncio.run(list_tools_fn())
     except RuntimeError:
         # in-case nested loop; run a temporary loop
         import queue
         import threading
         q: "queue.Queue[Iterable[Any]]" = queue.Queue()
         def _runner():
-            q.put(_asyncio.run(mcp.get_tools()))
+            q.put(_asyncio.run(list_tools_fn()))
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
         tools = q.get()
     try:
-        resources = _asyncio.run(mcp.get_resources())
+        resources = _asyncio.run(list_resources_fn())
     except RuntimeError:
         import queue
         import threading
         q2: "queue.Queue[Iterable[Any]]" = queue.Queue()
         def _runner2():
-            q2.put(_asyncio.run(mcp.get_resources()))
+            q2.put(_asyncio.run(list_resources_fn()))
         t2 = threading.Thread(target=_runner2, daemon=True)
         t2.start()
         resources = q2.get()

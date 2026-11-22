@@ -528,9 +528,8 @@ class TestAsyncFileLock:
         lock = AsyncFileLock(lock_path)
 
         with pytest.raises(RuntimeError, match="Re-entrant"):
-            async with lock:
-                async with lock:  # Should raise
-                    pass
+            async with lock, lock:  # Should raise
+                pass
 
 
 # ============================================================================

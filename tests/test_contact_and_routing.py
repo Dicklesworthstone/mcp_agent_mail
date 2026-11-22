@@ -586,6 +586,7 @@ async def _seed_punctuated_contacts(sender_name, recipient_name, status="approve
         recipient = (await session.execute(select(Agent).where(cast(Any, Agent.name == "GoldHarbor")))).scalar_one()
         sender.name = sender_name
         recipient.name = recipient_name
+        assert sender.id is not None and recipient.id is not None
         session.add_all([sender, recipient])
         session.add_all([
             AgentLink(a_project_id=sender.project_id, a_agent_id=sender.id,

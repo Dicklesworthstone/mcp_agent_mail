@@ -161,10 +161,21 @@ def _new_compact_message_table(title: str) -> Table:
     return Table(title=title, show_lines=False, pad_edge=False, collapse_padding=True)
 
 
+_TYPER_CLICK_EXC: Any = getattr(getattr(typer, "_click", None), "ClickException", None)
+if isinstance(_TYPER_CLICK_EXC, type) and _TYPER_CLICK_EXC is not click.ClickException:
+    _CLIServerError: type[Exception] = type(
+        "_CLIServerError",
+        (_TYPER_CLICK_EXC, click.ClickException),
+        {"__doc__": "CLI error handled by both Typer 0.29+ and click.ClickException callers."},
+    )
+else:
+    _CLIServerError = click.ClickException
+
+
 def _extract_jsonrpc_result(payload: Any, *, request_name: str) -> Any:
     """Unwrap FastMCP HTTP JSON-RPC responses or raise a CLI-facing server error."""
     if not isinstance(payload, dict):
-        raise click.ClickException(f"{request_name}: invalid server response")
+        raise _CLIServerError(f"{request_name}: invalid server response")
     error = payload.get("error")
     if isinstance(error, dict):
         message = str(error.get("message") or "server request failed")
@@ -173,7 +184,7 @@ def _extract_jsonrpc_result(payload: Any, *, request_name: str) -> Any:
             detail = detail.get("message") or detail.get("detail") or detail
         if detail not in (None, "", message):
             message = f"{message}: {detail}"
-        raise click.ClickException(f"{request_name}: {message}")
+        raise _CLIServerError(f"{request_name}: {message}")
     result = payload.get("result")
     if not isinstance(result, dict):
         return result
@@ -195,11 +206,11 @@ def _parse_jsonrpc_response(response: Any, *, request_name: str) -> Any:
     except httpx.HTTPStatusError as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         status_suffix = f" HTTP {status_code}" if status_code is not None else " HTTP error"
-        raise click.ClickException(f"{request_name}:{status_suffix} from server") from exc
+        raise _CLIServerError(f"{request_name}:{status_suffix} from server") from exc
     try:
         payload = response.json()
     except ValueError as exc:
-        raise click.ClickException(f"{request_name}: invalid JSON response from server") from exc
+        raise _CLIServerError(f"{request_name}: invalid JSON response from server") from exc
     return _extract_jsonrpc_result(payload, request_name=request_name)
 
 
@@ -315,7 +326,7 @@ def _require_cli_product_auth(command_name: str, product_key: str, agent_name: s
     """Require a concrete product auth token for server-first or local fallback reads."""
     if effective_token:
         return effective_token
-    raise click.ClickException(
+    raise _CLIServerError(
         f"{command_name} requires --registration-token / $AGENT_MAIL_REGISTRATION_TOKEN for agent '{agent_name}' "
         f"or a single unambiguous locally stored token linked to product '{product_key}'."
     )
@@ -697,7 +708,7 @@ def products_search(
         return
     agent_name = (agent or "").strip()
     if not agent_name:
-        raise click.ClickException("products search requires --agent or $AGENT_NAME.")
+        raise _CLIServerError("products search requires --agent or $AGENT_NAME.")
     effective_token = _require_cli_product_auth(
         "products search",
         product_key,
@@ -747,7 +758,7 @@ def products_search(
             if project.id is not None and agent.id is not None
         }
         if not authorized_map:
-            raise click.ClickException(
+            raise _CLIServerError(
                 f"products search: invalid registration token for agent '{agent_name}' on product '{product_key}'."
             )
         async with get_session() as session:
@@ -928,7 +939,7 @@ def products_inbox(
                 if agent_record.id is not None
             }
             if not authorized_agent_ids:
-                raise click.ClickException(
+                raise _CLIServerError(
                     f"products inbox: invalid registration token for agent '{agent}' on product '{product_key}'."
                 )
             async with get_session() as session:
@@ -1058,7 +1069,7 @@ def products_summarize_thread(
     """
     agent_name = (agent or "").strip()
     if not agent_name:
-        raise click.ClickException("products summarize-thread requires --agent or $AGENT_NAME.")
+        raise _CLIServerError("products summarize-thread requires --agent or $AGENT_NAME.")
     settings = get_settings()
     server_url = f"http://{settings.http.host}:{settings.http.port}{settings.http.path}"
     bearer = settings.http.bearer_token or ""
@@ -3691,7 +3702,7 @@ def list_projects(
             if include_agents:
                 for project in projects:
                     count_result = await session.execute(
-                        select(func.count(Agent.id)).where(Agent.project_id == project.id)
+                        select(func.count(cast(Any, Agent.id))).where(Agent.project_id == project.id)
                     )
                     count = int(count_result.scalar_one())
                     rows.append((project, count))
@@ -4109,7 +4120,7 @@ def am_run(
                 if not resolved_registration_token:
                     resolved_registration_token = _run_async(_lookup_agent_registration_token(str(p), agent_name))
                 if not resolved_registration_token:
-                    raise click.ClickException(
+                    raise _CLIServerError(
                         "am-run requires a registered agent with a registration token when the server is reachable. "
                         "Register the agent first, or pass --registration-token / $AGENT_MAIL_REGISTRATION_TOKEN."
                     )

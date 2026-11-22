@@ -107,9 +107,17 @@ def isolated_env(tmp_path, monkeypatch):
     reset_database_state()
     # Clear repo cache before test to ensure isolation
     clear_repo_cache()
+    with contextlib.suppress(Exception):
+        from mcp_agent_mail import http as _http_mod
+
+        _http_mod._jwks_cache.clear()
     try:
         yield
     finally:
+        with contextlib.suppress(Exception):
+            from mcp_agent_mail import http as _http_mod
+
+            _http_mod._jwks_cache.clear()
         # Close all cached Repo objects first (prevents file handle leaks)
         clear_repo_cache()
         # Dispose database engine/pool state before forcing GC so SQLAlchemy

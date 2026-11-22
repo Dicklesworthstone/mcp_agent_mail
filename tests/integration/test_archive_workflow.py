@@ -16,7 +16,7 @@ from mcp_agent_mail.share import resolve_sqlite_database_path
 
 
 @pytest.mark.filterwarnings("ignore:.*ResourceWarning")
-def test_archive_save_list_restore_cycle(isolated_env):
+def test_archive_save_list_restore_cycle(isolated_env, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     runner = CliRunner()
     storage_root = Path(os.environ["STORAGE_ROOT"])
     storage_root.mkdir(parents=True, exist_ok=True)
@@ -62,36 +62,39 @@ def test_archive_save_list_restore_cycle(isolated_env):
 
     asyncio.run(_seed())
 
-    with runner.isolated_filesystem():
-        archive_dir = Path.cwd() / cli_module.ARCHIVE_DIR_NAME
-        before = set(archive_dir.glob("*.zip")) if archive_dir.exists() else set()
+    work_dir = tmp_path / "archive_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(work_dir)
 
-        save_result = runner.invoke(app, ["archive", "save", "--label", "integration-test"])
-        assert save_result.exit_code == 0
+    archive_dir = Path.cwd() / cli_module.ARCHIVE_DIR_NAME
+    before = set(archive_dir.glob("*.zip")) if archive_dir.exists() else set()
 
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        created = set(archive_dir.glob("*.zip")) - before
-        assert len(created) == 1
-        archive_path = created.pop()
+    save_result = runner.invoke(app, ["archive", "save", "--label", "integration-test"])
+    assert save_result.exit_code == 0
 
-        list_result = runner.invoke(app, ["archive", "list", "--json"])
-        assert list_result.exit_code == 0
-        assert archive_path.name in list_result.stdout
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    created = set(archive_dir.glob("*.zip")) - before
+    assert len(created) == 1
+    archive_path = created.pop()
 
-        database_path = resolve_sqlite_database_path()
-        if database_path.exists():
-            database_path.unlink()
-        wal_path = Path(f"{database_path}-wal")
-        if wal_path.exists():
-            wal_path.unlink()
-        shm_path = Path(f"{database_path}-shm")
-        if shm_path.exists():
-            shm_path.unlink()
-        if storage_root.exists():
-            shutil.rmtree(storage_root)
+    list_result = runner.invoke(app, ["archive", "list", "--json"])
+    assert list_result.exit_code == 0
+    assert archive_path.name in list_result.stdout
 
-        restore_result = runner.invoke(app, ["archive", "restore", str(archive_path), "--force"])
-        assert restore_result.exit_code == 0
+    database_path = resolve_sqlite_database_path()
+    if database_path.exists():
+        database_path.unlink()
+    wal_path = Path(f"{database_path}-wal")
+    if wal_path.exists():
+        wal_path.unlink()
+    shm_path = Path(f"{database_path}-shm")
+    if shm_path.exists():
+        shm_path.unlink()
+    if storage_root.exists():
+        shutil.rmtree(storage_root)
+
+    restore_result = runner.invoke(app, ["archive", "restore", str(archive_path), "--force"])
+    assert restore_result.exit_code == 0
 
     restored_db = resolve_sqlite_database_path()
     conn = sqlite3.connect(restored_db)

@@ -1275,3 +1275,39 @@ async def test_store_image_sha256_via_mcp_send_message(isolated_env, monkeypatch
             assert full_path.exists(), f"webp at {att_path} not found on disk"
 
     img_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_fast_archive_object_db_writes_git_fsck_clean_commits_and_respects_sha256(
+    isolated_env, tmp_path: Path
+) -> None:
+    """_FastArchiveObjectDB writes valid SHA-1 commits without hash-object spawns and falls back on SHA-256."""
+    import subprocess
+
+    from git.db import GitCmdObjectDB
+
+    from mcp_agent_mail.storage import _archive_odbt, _FastArchiveObjectDB, write_agent_profile
+
+    archive = await ensure_archive(get_settings(), "fast-odbt-check")
+    assert isinstance(archive.repo.odb, _FastArchiveObjectDB)
+    await write_agent_profile(
+        archive,
+        {"name": "AmberRidge", "program": "test", "model": "test", "task_description": "verify odbt"},
+    )
+    cp = await asyncio.to_thread(
+        subprocess.run,
+        ["git", "-C", str(archive.repo_root), "fsck", "--strict"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert cp.returncode == 0
+
+    sha256_repo = tmp_path / "sha256-repo"
+    (sha256_repo / ".git").mkdir(parents=True)
+    (sha256_repo / ".git" / "config").write_text(
+        "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n",
+        encoding="utf-8",
+    )
+    assert _archive_odbt(sha256_repo) is GitCmdObjectDB
+    assert _archive_odbt(archive.repo_root) is _FastArchiveObjectDB

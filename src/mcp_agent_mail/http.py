@@ -874,13 +874,14 @@ class SecurityAndRateLimitMiddleware(BaseHTTPMiddleware):
             keys_to_try = candidate_keys if candidate_keys else ([key] if key is not None else [])
             if not keys_to_try:
                 return None
+            claims_options: dict[str, dict[str, Any]] = {}
+            if audience:
+                claims_options["aud"] = {"essential": True, "value": audience}
+            if issuer:
+                claims_options["iss"] = {"essential": True, "value": issuer}
             for candidate in keys_to_try:
                 with contextlib.suppress(Exception):
-                    claims = jwt.decode(token, candidate)
-                    if audience:
-                        claims.validate_aud(audience)
-                    if issuer and str(claims.get("iss") or "") != issuer:
-                        continue
+                    claims = jwt.decode(token, candidate, claims_options=claims_options or None)
                     claims.validate()
                     return dict(claims)
         return None
@@ -1696,11 +1697,12 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
         def __init__(self, native_app: FastAPI) -> None:
             self._app = native_app
             self._lifespan_entered = False
-            self._lifespan_cm: Any = None
+            self._lifespan_task: asyncio.Task[None] | None = None
+            self._lifespan_stop: asyncio.Event | None = None
             self._lifespan_lock: asyncio.Lock | None = None
 
         async def _ensure_lifespan(self) -> None:
-            """Lazily enter the MCP app's lifespan if not already running.
+            """Lazily start the MCP app's lifespan in a dedicated background task.
 
             This handles test environments where ASGI lifespan events are never
             sent (e.g. httpx ASGITransport).  In production the parent app's
@@ -1708,8 +1710,11 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
             session manager's task group will already be initialized and this
             method is a fast no-op.
 
-            Uses double-check locking to prevent concurrent requests from
-            entering the lifespan context manager twice.
+            Running the lifespan context manager inside its own asyncio.Task
+            keeps its AnyIO task group / cancel scope isolated from the caller
+            request task (BaseHTTPMiddleware enters and exits its own cancel
+            scope around each request in Starlette 1.x) and ensures entry and
+            exit always happen in the same task.
             """
             if self._lifespan_entered:
                 return
@@ -1733,10 +1738,28 @@ def build_http_app(settings: Settings, server=None) -> FastAPI:
                 if session_mgr is not None and getattr(session_mgr, "_task_group", None) is not None:
                     self._lifespan_entered = True
                     return
-                # Enter the MCP app's lifespan (test path)
+                # Start the MCP app's lifespan in an isolated task (test path)
                 mcp_lifespan_app = cast(_FastAPILifespan, self._app)
-                self._lifespan_cm = mcp_lifespan_app.lifespan(self._app)
-                await self._lifespan_cm.__aenter__()
+                ready = asyncio.Event()
+                stop = asyncio.Event()
+                startup_error: list[BaseException] = []
+
+                async def _run_lifespan() -> None:
+                    try:
+                        async with mcp_lifespan_app.lifespan(self._app):
+                            ready.set()
+                            await stop.wait()
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as exc:  # pragma: no cover - defensive
+                        startup_error.append(exc)
+                        ready.set()
+
+                self._lifespan_stop = stop
+                self._lifespan_task = asyncio.create_task(_run_lifespan())
+                await ready.wait()
+                if startup_error:
+                    raise startup_error[0]
                 self._lifespan_entered = True
 
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

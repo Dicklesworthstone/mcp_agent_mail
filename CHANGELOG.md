@@ -6,6 +6,27 @@ Format: entries are organized by version in reverse chronological order. Each ve
 
 ---
 
+## [v0.3.5] - 2026-11-22 (GitHub Release — Maintenance Security Release)
+
+> **Maintenance notice**: This Python implementation is in maintenance mode and has been superseded by [`mcp_agent_mail_rust`](https://github.com/Dicklesworthstone/mcp_agent_mail_rust). New deployments should use the Rust version. `v0.3.5` is a security and dependency compatibility release for existing Python installations.
+
+### Security & Dependencies
+
+- **Clear all 29 OSV exact-version advisory matches in `uv.lock` (29 -> 0 across 158 locked packages)** -- upgraded the full runtime and dev dependency stack, including `fastmcp` (2.13.0.2 -> 4.2.4), `mcp` (1.25.0 -> 2.3.0), `fastapi` (0.128.0 -> 0.165.0), `starlette` (0.50.0 -> 1.10.0), `authlib` (1.5.2 -> 1.9.10), `sqlmodel` (0.0.31 -> 0.0.50), `sqlalchemy` (2.0.45 -> 2.1.9), `cryptography` (46.x -> 50.0.2), `aiohttp` (3.13.3 -> 3.14.5), `pillow` (12.1.0 -> 13.0.0), `GitPython` (3.1.46 -> 3.2.1), `litellm` (1.x -> 1.110.2), `orjson` (3.11.5 -> 3.11.6), `bleach`, `filelock`, `pyjwt`, `python-multipart`, `urllib3`, `requests`, and `pytest`. Upgrading to FastMCP 4 also removed the unpatched `diskcache 5.6.3` transitive dependency completely (#279).
+- **Freeze Docker builds to `uv.lock`** -- `Dockerfile` now copies `uv.lock` and installs with `uv sync --frozen --no-dev` so container builds always match the audited lockfile (#278, #279).
+- **Fix Authlib JWT audience/issuer validation** -- pass `claims_options` for `aud` and `iss` directly to `jwt.decode(...)` instead of calling `claims.validate_aud(audience)` with a positional argument, ensuring strict audience/issuer enforcement on `authlib 1.9.x`.
+
+### Compatibility & Bug Fixes
+
+- **SQLModel 0.0.48+ / SQLAlchemy 2.1 naive UTC datetime compatibility** -- annotated all 25 datetime columns across all 11 SQLModel tables with `pydantic.NaiveDatetime`, preserving the existing SQLite naive UTC storage contract and seamless upgrades from existing databases while fixing `ensure_project` and write failures on `sqlmodel >= 0.0.48` / `SQLAlchemy 2.1` (#278).
+- **FastMCP 4 / MCP SDK v2 migration** -- adapted internal tool-to-tool invocation (`_invoke_mcp_tool`), `ToolResult` imports, `mcp.disable(...)` tool filtering, `ResourceSecurity(reject_path_traversal=True, reject_absolute_paths=False, reject_null_bytes=True)` for absolute project keys in `resource://identity/{project}`, and per-connection session isolation across non-HTTP transports.
+- **Starlette 1.10 ASGI lifespan isolation** -- run the lazy StreamableHTTP session manager lifespan in a dedicated background `asyncio.Task` so AnyIO cancel-scope cleanup stays decoupled from `BaseHTTPMiddleware` request tasks.
+- **Typer 0.29 CLI error formatting** -- align server error exceptions with Typer's vendored Click exception base so CLI error reporting preserves clean exit codes and messages.
+- **Preserve archive commit performance on GitPython 3.2+** -- use in-process SHA-1 loose-object writes (`LooseObjectDB.store`) for standard SHA-1 archive repositories while falling back to `GitCmdObjectDB` for SHA-256 repositories, eliminating per-object `git hash-object` subprocess overhead introduced in GitPython 3.1.62+/3.2+.
+- **Web UI, routing, and guard fixes since `v0.3.4`** -- unified-inbox conversation browsing and confirmed Human Overseer replies (#277), punctuated recipient routing (#281), Lucide icon re-render loop and footer fix (#276), MCP descriptions on pre-commit guard tools (#275), stateful `/mcp` HTTP session handling (#250), project-scoped stale-agent sweep (#249), weak active-lock telemetry (#244), `/openapi.json` UI exclusion (#241), non-blocking reservation sweeper (#240), and config/rollback hardening (#169, #180, #188, #189, #220).
+
+---
+
 ## [v0.3.2] - 2026-04-16
 
 ### Bug Fixes

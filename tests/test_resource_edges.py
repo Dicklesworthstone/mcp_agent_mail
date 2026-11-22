@@ -40,11 +40,15 @@ async def test_empty_inbox_and_pagination(isolated_env):
                 return obj.get(field)
             return getattr(obj, field, None)
         last_created = _get("created_ts", items[-1])
+        assert last_created is not None
         next_page = await client.call_tool(
             "fetch_inbox",
             {"project_key": "Backend", "agent_name": "BlueLake", "limit": 10, "since_ts": last_created},
         )
-        assert len(list(next_page.data)) >= 10
+        next_items = list(next_page.data)
+        # Strictly newer than the 10th-newest message (items[-1]) yields the 9 newer messages.
+        assert len(next_items) == 9
+        assert all(_get("created_ts", m) > last_created for m in next_items)
 
         # Thread resource with multiple messages
         # Use the last message id as thread seed and ensure at least 2

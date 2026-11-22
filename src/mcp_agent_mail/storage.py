@@ -37,7 +37,9 @@ from typing import Any, AsyncGenerator, Iterable, Sequence, TypeVar, cast
 
 from filelock import SoftFileLock, Timeout
 from git import Actor, Repo
+from git.db import GitCmdObjectDB
 from git.objects.tree import Tree
+from gitdb.db import LooseObjectDB
 from PIL import Image
 
 from .config import Settings
@@ -47,6 +49,33 @@ from .utils import validate_thread_id_format
 _logger = logging.getLogger(__name__)
 _IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<path>[^)]+)\)")
 _SUBJECT_SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+class _FastArchiveObjectDB(GitCmdObjectDB):
+    """GitCmdObjectDB that writes SHA-1 loose objects in-process via LooseObjectDB.
+
+    GitPython 3.1.62+/3.2+ overrode GitCmdObjectDB.store() to spawn a separate
+    ``git hash-object`` subprocess for every blob and commit object, nearly
+    doubling per-commit latency. Delegating loose writes to LooseObjectDB.store()
+    restores the in-process SHA-1 write path used in GitPython <=3.1.61 while
+    keeping GitCmdObjectDB for packfile and alternates reads.
+    """
+
+    def store(self, istream: Any) -> Any:
+        return LooseObjectDB.store(self, istream)
+
+
+def _archive_odbt(repo_root: Path) -> type[GitCmdObjectDB]:
+    """Use in-process SHA-1 object writes unless the repository uses SHA-256."""
+    try:
+        config_path = repo_root / ".git" / "config"
+        if config_path.is_file():
+            cfg = config_path.read_text(encoding="utf-8", errors="ignore").lower()
+            if "objectformat" in cfg and "sha256" in cfg:
+                return GitCmdObjectDB
+    except OSError:
+        pass
+    return _FastArchiveObjectDB
 
 
 def _sanitize_backup_reason(reason: str) -> str:
@@ -1467,13 +1496,13 @@ async def _ensure_repo(root: Path, settings: Settings) -> Repo:
 
             git_dir = root / ".git"
             if git_dir.exists():
-                repo = Repo(str(root))
+                repo = Repo(str(root), odbt=_archive_odbt(root))
                 _REPO_CACHE.put(cache_key, repo)
                 return repo
 
             # Initialize new repo and put in cache while holding the lock.
             # Keep the returned Repo instance to avoid leaking an extra Repo handle.
-            repo = await _to_thread(Repo.init, str(root))
+            repo = await _to_thread(Repo.init, str(root), odbt=_FastArchiveObjectDB)
             _REPO_CACHE.put(cache_key, repo)
             # Flag that this is a newly created repo needing initialization
             needs_init = True
@@ -2139,7 +2168,8 @@ async def _commit_direct(
         return
 
     actor = Actor(settings.storage.git_author_name, settings.storage.git_author_email)
-    repo = Repo(str(repo_root))
+    odbt = _archive_odbt(repo_root)
+    repo = Repo(str(repo_root), odbt=odbt)
     attempt_repo = repo  # May diverge from `repo` during EMFILE recovery
 
     def _perform_commit(target_repo: Repo) -> None:
@@ -2203,7 +2233,7 @@ async def _commit_direct(
                         await asyncio.sleep(0.05)
                         with contextlib.suppress(Exception):
                             attempt_repo.close()
-                        attempt_repo = Repo(str(repo_root))
+                        attempt_repo = Repo(str(repo_root), odbt=odbt)
                         continue
 
                     # Handle git index.lock contention (concurrent git operations)

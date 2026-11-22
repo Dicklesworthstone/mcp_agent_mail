@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-agent-mail"
-version = "0.3.4"
+version = "0.3.5"
 description = "Coordinated multi-agent messaging and coordination MCP server."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,35 +23,35 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "fastmcp>=2.10.5",
-  "uvicorn[standard]>=0.32.0",
-  "fastapi>=0.110.0",
+  "fastmcp>=4.2.4",
+  "uvicorn[standard]>=0.35.0",
+  "fastapi>=0.146.0",
   "PyYAML>=6.0.2",
   "pathspec>=0.12.1",
-  "jinja2>=3.1.4",
+  "jinja2>=3.1.6",
   "markdown2>=2.4.12",
-  "bleach>=6.1.0",
+  "bleach>=6.4.0",
   "tinycss2>=1.4.0",
   "python-decouple>=3.8",
-  "sqlmodel>=0.0.16",
-  "sqlalchemy[asyncio]>=2.0.35",
+  "sqlmodel>=0.0.50",
+  "sqlalchemy[asyncio]>=2.1.0",
   "aiosqlite>=0.20.0",
-  "httpx[http2]>=0.27.2",
+  "httpx[http2]>=0.28.1",
   "aiolimiter>=1.1.0",
   "tenacity>=8.3.0",
   "redis[hiredis]>=5.3.0",
-  "rich>=13.9.1",
+  "rich>=13.9.4",
   "typer>=0.15.0",
   "structlog>=24.1.0",
-  "orjson>=3.10.7,<4",
+  "orjson>=3.11.6,<4",
   "tiktoken>=0.7.0",
-  "pillow>=10.4.0",
-  "GitPython>=3.1.43",
-  "filelock>=3.16.0",
+  "pillow>=12.3.0",
+  "GitPython>=3.1.62",
+  "filelock>=4.2.1",
   "jsonschema>=4.23.0",
   "attrs>=24.2.0",
-  "authlib>=1.5.2,<1.6",
-  "litellm>=1.40.0,<2",
+  "authlib>=1.9.5,<2",
+  "litellm>=1.96.2,<2",
   "ruff>=0.14.1",
   "pynacl>=1.6.0",
   "psutil>=6.1.1",
@@ -64,7 +64,7 @@ postgres = [
 dev = [
   "ruff>=0.5.7",
   "mypy>=1.11.1",
-  "pytest>=8.3.3",
+  "pytest>=9.0.3",
   "pytest-asyncio>=0.23.8",
   "pytest-cov>=5.0.0",
   "ipython>=8.27.0",
@@ -102,6 +102,9 @@ select = [
 ignore = [
   "E501",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ASYNC240"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["mcp_agent_mail"]

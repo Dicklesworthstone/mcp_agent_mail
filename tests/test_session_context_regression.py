@@ -268,6 +268,7 @@ async def test_file_reservation_renew_persists_to_database(isolated_env):
             )
             new_expiry = result.scalar()
 
+        assert original_expiry is not None and new_expiry is not None
         assert new_expiry > original_expiry, "Expiry should be extended after renew"
 
 

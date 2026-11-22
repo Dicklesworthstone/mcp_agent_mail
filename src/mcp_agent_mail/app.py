@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, AsyncContextManager, Callable, Optional, Protocol, cast
 from urllib.parse import parse_qsl
 import uuid
+import weakref
 
 from fastmcp import Context, FastMCP
 from git import Repo
@@ -113,6 +114,27 @@ class _ToolRegistryLike(Protocol):
 
 class _FastMCPToolManagerLike(Protocol):
     _tool_manager: _ToolRegistryLike
+
+
+async def _invoke_mcp_tool(tool_obj: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Invoke a sibling MCP tool whether FastMCP returns a wrapper or raw coroutine."""
+    if hasattr(tool_obj, "run"):
+        tool_result = await tool_obj.run(payload)
+        return dict(getattr(tool_result, "structured_content", None) or {})
+    result = await tool_obj(**payload)
+    if hasattr(result, "structured_content"):
+        return dict(getattr(result, "structured_content", None) or {})
+    return dict(result) if isinstance(result, dict) else {}
+
+
+def _make_list_tool_result(items: list[dict[str, Any]]) -> Any:
+    """Wrap list tool outputs in FastMCP ToolResult structured_content."""
+    try:
+        from fastmcp.tools import ToolResult
+
+        return ToolResult(structured_content={"result": items})
+    except Exception:
+        return items
 
 # ty currently struggles to type SQLModel-mapped SQLAlchemy expressions.
 # Provide lightweight wrappers to keep type checking focused on our code.
@@ -5225,7 +5247,26 @@ def build_mcp_server() -> FastMCP:
         "{format:'toon', data:'<TOON>'}."
     )
 
-    mcp = FastMCP(name="mcp-agent-mail", instructions=instructions, lifespan=lifespan)
+    fastmcp_kwargs: dict[str, Any] = {
+        "name": "mcp-agent-mail",
+        "instructions": instructions,
+        "lifespan": lifespan,
+    }
+    try:
+        from fastmcp.resources import ResourceSecurity
+
+        # Project keys are absolute filesystem paths passed in resource URIs
+        # (e.g. resource://identity/{project}); allow absolute paths while still
+        # blocking path traversal and null bytes.
+        fastmcp_kwargs["resource_security"] = ResourceSecurity(
+            reject_path_traversal=True,
+            reject_absolute_paths=False,
+            reject_null_bytes=True,
+        )
+    except Exception:
+        pass
+
+    mcp = FastMCP(**fastmcp_kwargs)
 
     # Session bindings are keyed by `ctx.session_id` (the FastMCP-assigned
     # ID derived from the `mcp-session-id` header for HTTP transport, or a
@@ -5247,6 +5288,7 @@ def build_mcp_server() -> FastMCP:
     session_agent_bindings: dict[str, set[tuple[int, int]]] = {}
     session_current_agents: dict[str, dict[int, int]] = {}
     session_binding_last_access: dict[str, float] = {}
+    transport_outbound_session_ids: weakref.WeakKeyDictionary[Any, str] = weakref.WeakKeyDictionary()
 
     async def _ctx_info_safe(ctx: Context, message: str) -> None:
         try:
@@ -5261,15 +5303,39 @@ def build_mcp_server() -> FastMCP:
         return project.id, agent.id
 
     def _session_binding_key(ctx: Context) -> str:
-        # `ctx.session_id` is a stable identifier across requests for both
-        # HTTP (mcp-session-id header) and stdio (uuid stored on the
-        # in-memory session). Falls through to a generated UUID cached on
-        # the ctx itself if the transport doesn't surface one — caching
-        # is required because `_bind_session_agent` calls into both
-        # `_session_bindings_for` and `_session_current_agents_for`, and
-        # without a stable per-ctx key those two helpers would write to
-        # different orphan UUIDs and the binding would be invisible to
-        # the next `_session_is_bound_to_agent` lookup.
+        # Resolve a stable per-client session key across transports and MCP
+        # protocol versions:
+        # - HTTP (stateful): negotiated connection.session_id or mcp-session-id header.
+        # - HTTP (stateless): per-request ctx.session_id (no cross-request sharing).
+        # - Handshake-era stdio/in-memory: persistent ctx.session_id.
+        # - 2026-07-28 stdio/in-memory (FastMCP 4 / MCP SDK v2): each request
+        #   constructs a fresh Connection with a new ctx.session_id, while the
+        #   client's underlying `connection.outbound` transport channel is unique
+        #   and persistent per client connection. Keying on `connection.outbound`
+        #   via a WeakKeyDictionary preserves continuity within a client session
+        #   AND strict isolation between concurrent clients on the same server.
+        try:
+            request_ctx = getattr(ctx, "request_context", None)
+            session = getattr(request_ctx, "session", None) if request_ctx is not None else None
+            connection = getattr(session, "_connection", None) if session is not None else None
+            transport = getattr(ctx, "transport", None)
+            is_http = transport in ("sse", "streamable-http") or (
+                request_ctx is not None and getattr(request_ctx, "request", None) is not None
+            )
+            if not is_http and connection is not None and getattr(connection, "session_id", None) is None:
+                outbound = getattr(connection, "outbound", None)
+                if outbound is not None:
+                    existing = transport_outbound_session_ids.get(outbound)
+                    if existing is not None:
+                        return existing
+                    generated = f"transport:{uuid.uuid4()}"
+                    try:
+                        transport_outbound_session_ids[outbound] = generated
+                        return generated
+                    except TypeError:
+                        pass
+        except Exception:
+            pass
         try:
             session_id = ctx.session_id
         except Exception:
@@ -7836,17 +7902,14 @@ def build_mcp_server() -> FastMCP:
                 )
                 if effective_auto_contact:
                     try:
-                        from fastmcp.tools.tool import FunctionTool
-
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
-                        request_tool = cast(FunctionTool, cast(Any, request_contact))
                         for nm in list(dict.fromkeys(blocked_recipients)):
                             rec = recipient_agents.get(nm)
                             if rec is None:
                                 continue
                             try:
                                 if _session_is_bound_to_agent(ctx, project, rec):
-                                    await handshake.run(
+                                    await _invoke_mcp_tool(
+                                        macro_contact_handshake,
                                         {
                                             "ctx": ctx,
                                             "project_key": project.human_key,
@@ -7856,7 +7919,7 @@ def build_mcp_server() -> FastMCP:
                                             "auto_accept": True,
                                             "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                             "format": "json",
-                                        }
+                                        },
                                     )
                                     auto_approved.append(nm)
                                 elif nm in broadcast_expanded_names:
@@ -7871,7 +7934,8 @@ def build_mcp_server() -> FastMCP:
                                     # Pending fallback path — async human may take days to approve,
                                     # so use the longer pending TTL (default 7 days) rather than
                                     # the in-session auto-approval TTL (default 24h).
-                                    await request_tool.run(
+                                    await _invoke_mcp_tool(
+                                        request_contact,
                                         {
                                             "ctx": ctx,
                                             "project_key": project.human_key,
@@ -7880,7 +7944,7 @@ def build_mcp_server() -> FastMCP:
                                             "reason": "auto contact request created by send_message",
                                             "ttl_seconds": int(settings_local.contact_pending_ttl_seconds),
                                             "format": "json",
-                                        }
+                                        },
                                     )
                                     auto_requested.append(nm)
                             except Exception:
@@ -8164,9 +8228,6 @@ def build_mcp_server() -> FastMCP:
                         else auto_contact_if_blocked
                     )
                     if effective_auto_contact and unknown_external:
-                        from fastmcp.tools.tool import FunctionTool
-                        handshake = cast(FunctionTool, cast(Any, macro_contact_handshake))
-                        request_tool = cast(FunctionTool, cast(Any, request_contact))
                         # Iterate over a copy since we may mutate/resolve entries
                         for label, pending_names in list(unknown_external.items()):
                             try:
@@ -8180,7 +8241,8 @@ def build_mcp_server() -> FastMCP:
                                 try:
                                     target_agent = await _find_agent_optional(target_proj, nm)
                                     if target_agent is not None and _session_is_bound_to_agent(ctx, target_proj, target_agent):
-                                        await handshake.run(
+                                        await _invoke_mcp_tool(
+                                            macro_contact_handshake,
                                             {
                                                 "ctx": ctx,
                                                 "project_key": project.human_key,
@@ -8192,7 +8254,7 @@ def build_mcp_server() -> FastMCP:
                                                 "ttl_seconds": int(settings_local.contact_auto_ttl_seconds),
                                                 "register_if_missing": True,
                                                 "format": "json",
-                                            }
+                                            },
                                         )
                                         attempted_external.append(display_target)
                                         for route_kind in sorted(route_kinds):
@@ -8201,7 +8263,8 @@ def build_mcp_server() -> FastMCP:
                                         # Pending fallback path — async human may take days to approve,
                                         # so use the longer pending TTL (default 7 days) rather than
                                         # the in-session auto-approval TTL (default 24h).
-                                        await request_tool.run(
+                                        await _invoke_mcp_tool(
+                                            request_contact,
                                             {
                                                 "ctx": ctx,
                                                 "project_key": project.human_key,
@@ -8215,7 +8278,7 @@ def build_mcp_server() -> FastMCP:
                                                 "model": sender.model,
                                                 "task_description": sender.task_description,
                                                 "format": "json",
-                                            }
+                                            },
                                         )
                                         requested_external.append(display_target)
                                 except Exception:
@@ -9908,12 +9971,9 @@ def build_mcp_server() -> FastMCP:
 
         file_reservations_result: Optional[dict[str, Any]] = None
         if file_reservation_paths is not None:
-            # Use MCP tool registry to avoid param shadowing (file_reservation_paths param shadows file_reservation_paths function)
-            from fastmcp.tools.tool import FunctionTool
-
-            mcp_with_tools = cast(_FastMCPToolGetter, mcp)
-            _file_reservation_tool = cast(FunctionTool, await mcp_with_tools.get_tool("file_reservation_paths"))
-            _file_reservation_run = await _file_reservation_tool.run(
+            # Use non-shadowed closure alias (the parameter above shadows the tool function name).
+            file_reservations_result = await _invoke_mcp_tool(
+                _file_reservation_paths_fn,
                 {
                     "ctx": ctx,
                     "project_key": project.human_key,
@@ -9923,9 +9983,8 @@ def build_mcp_server() -> FastMCP:
                     "exclusive": True,
                     "reason": file_reservation_reason,
                     "format": "json",
-                }
+                },
             )
-            file_reservations_result = _file_reservation_run.structured_content or {}
 
         inbox_items = await _list_inbox(
             project,
@@ -10056,11 +10115,8 @@ def build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         """Reserve a set of file paths and optionally release them at the end of the workflow."""
 
-        # Call underlying FunctionTool directly so we don't treat the wrapper as a plain coroutine
-        from fastmcp.tools.tool import FunctionTool
-
-        file_reservations_tool = cast(FunctionTool, cast(Any, file_reservation_paths))
-        file_reservations_tool_result = await file_reservations_tool.run(
+        file_reservations_result = await _invoke_mcp_tool(
+            file_reservation_paths,
             {
                 "ctx": ctx,
                 "project_key": project_key,
@@ -10071,9 +10127,8 @@ def build_mcp_server() -> FastMCP:
                 "reason": reason,
                 "registration_token": registration_token,
                 "format": "json",
-            }
+            },
         )
-        file_reservations_result = cast(dict[str, Any], file_reservations_tool_result.structured_content or {})
 
         release_result = None
         if auto_release:
@@ -10087,8 +10142,8 @@ def build_mcp_server() -> FastMCP:
                 if entry.get("id") is not None and not entry.get("reused", False)
             ]
             if newly_granted_ids:
-                release_tool = cast(FunctionTool, cast(Any, release_file_reservations_tool))
-                release_tool_result = await release_tool.run(
+                release_result = await _invoke_mcp_tool(
+                    release_file_reservations_tool,
                     {
                         "ctx": ctx,
                         "project_key": project_key,
@@ -10096,9 +10151,8 @@ def build_mcp_server() -> FastMCP:
                         "file_reservation_ids": newly_granted_ids,
                         "registration_token": registration_token,
                         "format": "json",
-                    }
+                    },
                 )
-                release_result = cast(dict[str, Any], release_tool_result.structured_content or {})
             else:
                 # Nothing new to release (all reservations pre-existed); skip the call.
                 release_result = {"released": [], "skipped": "no_newly_granted_reservations"}
@@ -10366,9 +10420,6 @@ def build_mcp_server() -> FastMCP:
             }
             return {"request": approved_payload, "response": approved_payload, "welcome_message": None}
 
-        from fastmcp.tools.tool import FunctionTool
-
-        request_tool = cast(FunctionTool, cast(Any, request_contact))
         request_payload: dict[str, Any] = {
             "ctx": ctx,
             "project_key": project_key,
@@ -10389,8 +10440,7 @@ def build_mcp_server() -> FastMCP:
             request_payload["model"] = model
         if task_description:
             request_payload["task_description"] = task_description
-        request_tool_result = await request_tool.run(request_payload)
-        request_result = cast(dict[str, Any], request_tool_result.structured_content or {})
+        request_result = await _invoke_mcp_tool(request_contact, request_payload)
         request_status = str(request_result.get("status") or "").lower()
 
         response_result = None
@@ -10414,7 +10464,6 @@ def build_mcp_server() -> FastMCP:
                         "token_param": "target_registration_token",
                     }
                 else:
-                    respond_tool = cast(FunctionTool, cast(Any, respond_contact))
                     respond_payload: dict[str, Any] = {
                         "ctx": ctx,
                         "project_key": target_project_key or project_key,
@@ -10428,8 +10477,7 @@ def build_mcp_server() -> FastMCP:
                         respond_payload["registration_token"] = target_auth_token
                     if target_project_key:
                         respond_payload["from_project"] = project_key
-                    respond_tool_result = await respond_tool.run(respond_payload)
-                    response_result = cast(dict[str, Any], respond_tool_result.structured_content or {})
+                    response_result = await _invoke_mcp_tool(respond_contact, respond_payload)
 
         welcome_message = None
         welcome_error: dict[str, Any] | None = None
@@ -10445,8 +10493,8 @@ def build_mcp_server() -> FastMCP:
             else:
                 try:
                     welcome_recipients = [real_target] if not target_project_key else [f"{real_target}@{target_project_key}"]
-                    send_tool = cast(FunctionTool, cast(Any, send_message))
-                    send_tool_result = await send_tool.run(
+                    welcome_payload = await _invoke_mcp_tool(
+                        send_message,
                         {
                             "ctx": ctx,
                             "project_key": project_key,
@@ -10457,9 +10505,8 @@ def build_mcp_server() -> FastMCP:
                             "thread_id": thread_id,
                             "sender_token": requester_registration_token,
                             "format": "json",
-                        }
+                        },
                     )
-                    welcome_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
                     error_payload = _extract_delivery_error_payload(welcome_payload)
                     if error_payload is not None:
                         welcome_error = _with_delivery_project(error_payload, welcome_project)
@@ -10567,11 +10614,7 @@ def build_mcp_server() -> FastMCP:
         sanitized_query = _sanitize_fts_query(query)
         if sanitized_query is None:
             await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
-            try:
-                from fastmcp.tools.tool import ToolResult
-                return ToolResult(structured_content={"result": []})
-            except Exception:
-                return []
+            return _make_list_tool_result([])
 
         await ensure_schema()
         rows: list[Any] = []
@@ -10691,11 +10734,7 @@ def build_mcp_server() -> FastMCP:
                 sender_project_slug=row["sender_project_slug"],
             )
             items.append(item)
-        try:
-            from fastmcp.tools.tool import ToolResult
-            return ToolResult(structured_content={"result": items})
-        except Exception:
-            return items
+        return _make_list_tool_result(items)
 
     @mcp.tool(name="summarize_thread")
     @_instrument_tool("summarize_thread", cluster=CLUSTER_SEARCH, capabilities={"summarization", "search"}, project_arg="project_key")
@@ -11611,6 +11650,8 @@ def build_mcp_server() -> FastMCP:
             )
         return {"granted": granted, "conflicts": conflicts, "warnings": warnings_list}
 
+    _file_reservation_paths_fn = file_reservation_paths
+
     @mcp.tool(name="release_file_reservations")
     @_instrument_tool("release_file_reservations", cluster=CLUSTER_FILE_RESERVATIONS, capabilities={"file_reservations"}, project_arg="project_key", agent_arg="agent_name")
     async def release_file_reservations_tool(
@@ -11951,10 +11992,8 @@ def build_mcp_server() -> FastMCP:
                 ]
             )
             try:
-                from fastmcp.tools.tool import FunctionTool
-
-                send_tool = cast(FunctionTool, cast(Any, send_message))
-                send_tool_result = await send_tool.run(
+                notification_payload = await _invoke_mcp_tool(
+                    send_message,
                     {
                         "ctx": ctx,
                         "project_key": project_key,
@@ -11964,9 +12003,8 @@ def build_mcp_server() -> FastMCP:
                         "subject": f"[file-reservations] Released stale lock on {reservation.path_pattern}",
                         "body_md": "\n".join(body_lines),
                         "format": "json",
-                    }
+                    },
                 )
-                notification_payload = cast(dict[str, Any], send_tool_result.structured_content or {})
                 error_payload = _extract_delivery_error_payload(notification_payload)
                 if error_payload is not None:
                     notification_error = _with_delivery_project(error_payload, project)
@@ -12567,11 +12605,7 @@ def build_mcp_server() -> FastMCP:
             sanitized_query = _sanitize_fts_query(query)
             if sanitized_query is None:
                 await ctx.info(f"Search query '{query}' is not searchable, returning empty results.")
-                try:
-                    from fastmcp.tools.tool import ToolResult
-                    return ToolResult(structured_content={"result": []})
-                except Exception:
-                    return []
+                return _make_list_tool_result([])
 
             await ensure_schema()
             _product, _projects, authorized = await _authenticate_product_agents(
@@ -12685,11 +12719,7 @@ def build_mcp_server() -> FastMCP:
                     sender_project_slug=row["sender_project_slug"],
                 )
                 items.append(item)
-            try:
-                from fastmcp.tools.tool import ToolResult
-                return ToolResult(structured_content={"result": items})
-            except Exception:
-                return items
+            return _make_list_tool_result(items)
     else:
         async def search_messages_product(
             ctx: Context,
@@ -14635,7 +14665,29 @@ def _apply_tool_filter(mcp: FastMCP, settings: Settings) -> None:
     based on the tool filter settings. This approach is cleaner than conditional
     registration because it doesn't require modifying every @mcp.tool decorator.
     """
-    # FastMCP stores tools in _tool_manager._tools (dict keyed by tool name)
+    # FastMCP 3+/4+ exposes first-class visibility control via mcp.disable(...)
+    disable_fn = getattr(mcp, "disable", None)
+    if callable(disable_fn):
+        all_registered = list(TOOL_CLUSTER_MAP.keys())
+        to_remove = []
+        for tool_name in all_registered:
+            cluster = TOOL_CLUSTER_MAP.get(tool_name, "unclassified")
+            if not _should_expose_tool(tool_name, cluster, settings):
+                to_remove.append(tool_name)
+                _FILTERED_TOOLS.add(tool_name)
+        if to_remove:
+            disable_fn(names=set(to_remove), components={"tool"})
+            for tool_name in to_remove:
+                TOOL_CLUSTER_MAP.pop(tool_name, None)
+                TOOL_METADATA.pop(tool_name, None)
+            profile = settings.tool_filter.profile
+            logger.info(
+                f"Tool filtering active (profile={profile}): removed {len(to_remove)} tools, "
+                f"{len(TOOL_CLUSTER_MAP)} tools exposed"
+            )
+        return
+
+    # Legacy FastMCP 2 stores tools in _tool_manager._tools (dict keyed by tool name)
     tool_manager = getattr(cast(_FastMCPToolManagerLike, mcp), "_tool_manager", None)
     if tool_manager is None:
         logger.warning("Tool filtering enabled but FastMCP tool manager not found")
@@ -14648,7 +14700,7 @@ def _apply_tool_filter(mcp: FastMCP, settings: Settings) -> None:
     tools_registry = cast(dict[str, Any], tools_registry_raw)
 
     # Identify tools to remove
-    to_remove: list[str] = []
+    to_remove = []
     for tool_name in list(tools_registry.keys()):
         cluster = TOOL_CLUSTER_MAP.get(tool_name, "unclassified")
         if not _should_expose_tool(tool_name, cluster, settings):

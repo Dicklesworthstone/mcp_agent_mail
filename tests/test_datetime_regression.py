@@ -438,3 +438,136 @@ async def test_inbox_fetch_with_since_ts_datetime_handling(isolated_env):
         )
         # Should return empty list, not raise TypeError
         assert isinstance(result.data, list)
+
+
+# ============================================================================
+# Regression Tests (#278): sqlmodel >= 0.0.48 / SQLAlchemy 2.1 NaiveDatetime
+# ============================================================================
+
+
+def test_all_sqlmodel_tables_use_naive_datetime_columns():
+    """Every datetime column across all SQLModel tables must map to naive DateTime.
+
+    sqlmodel >= 0.0.48 maps plain ``datetime`` fields to ``UTCDateTime`` which
+    raises ValueError on naive UTC datetimes unless annotated with
+    ``pydantic.NaiveDatetime`` (issue #278).
+    """
+    from sqlalchemy import DateTime
+
+    from mcp_agent_mail.models import (
+        MessageRecipient,
+        MessageSummary,
+        WindowIdentity,
+    )
+
+    all_models = (
+        Project,
+        Product,
+        ProductProjectLink,
+        Agent,
+        MessageRecipient,
+        Message,
+        FileReservation,
+        AgentLink,
+        WindowIdentity,
+        MessageSummary,
+        ProjectSiblingSuggestion,
+    )
+    checked = 0
+    for model_cls in all_models:
+        table = getattr(model_cls, "__table__", None)
+        assert table is not None, f"{model_cls.__name__} missing __table__"
+        for col in table.columns:
+            col_type = col.type
+            if isinstance(col_type, DateTime) or "DateTime" in type(col_type).__name__:
+                checked += 1
+                assert type(col_type).__name__ != "UTCDateTime", (
+                    f"{model_cls.__name__}.{col.name} mapped to UTCDateTime; annotate with NaiveDatetime"
+                )
+                assert getattr(col_type, "timezone", False) is False, (
+                    f"{model_cls.__name__}.{col.name} must have timezone=False for naive SQLite UTC storage"
+                )
+    assert checked >= 20, f"Expected to audit >=20 datetime columns, audited {checked}"
+
+
+@pytest.mark.asyncio
+async def test_upgrade_path_reads_legacy_naive_sqlite_rows(isolated_env):
+    """Existing SQLite databases with legacy naive UTC rows work seamlessly after upgrade (#278)."""
+    import sqlite3
+
+    from mcp_agent_mail.db import ensure_schema
+    from mcp_agent_mail.share import resolve_sqlite_database_path
+
+    await ensure_schema()
+    db_path = resolve_sqlite_database_path()
+    legacy_ts = "2025-05-01 12:00:00.000000"
+    future_ts = "2099-05-01 12:00:00.000000"
+    test_reg_id = f"test-{db_path.name}"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO projects (slug, human_key, created_at) VALUES (?, ?, ?)",
+            ("legacy-proj", "/legacy/proj", legacy_ts),
+        )
+        proj_id = conn.execute("SELECT id FROM projects WHERE slug = 'legacy-proj'").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO agents (
+                project_id, name, program, model, task_description,
+                inception_ts, last_active_ts, attachments_policy, contact_policy, registration_token
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (proj_id, "BlueLake", "codex", "gpt-5", "legacy", legacy_ts, legacy_ts, "auto", "open", test_reg_id),
+        )
+        agent_id = conn.execute("SELECT id FROM agents WHERE name = 'BlueLake'").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO file_reservations (
+                project_id, agent_id, path_pattern, exclusive, reason, created_ts, expires_ts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (proj_id, agent_id, "legacy/**", 1, "pre-upgrade", legacy_ts, future_ts),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    server = build_mcp_server()
+    async with Client(server) as client:
+        ensured = await client.call_tool("ensure_project", {"human_key": "/legacy/proj"})
+        assert ensured.data["slug"] == "legacy-proj"
+
+        sent = await client.call_tool(
+            "send_message",
+            {
+                "project_key": "/legacy/proj",
+                "sender_name": "BlueLake",
+                "sender_token": test_reg_id,
+                "to": ["BlueLake"],
+                "subject": "Post-upgrade write",
+                "body_md": "Verifying naive UTC compatibility with pre-existing rows.",
+            },
+        )
+        assert sent.data["count"] == 1
+
+        inbox = await client.call_tool(
+            "fetch_inbox",
+            {
+                "project_key": "/legacy/proj",
+                "agent_name": "BlueLake",
+                "since_ts": "2025-05-01T00:00:00Z",
+                "limit": 10,
+            },
+        )
+        assert len(inbox.data) == 1
+
+        renewed = await client.call_tool(
+            "renew_file_reservations",
+            {
+                "project_key": "/legacy/proj",
+                "agent_name": "BlueLake",
+                "extend_seconds": 600,
+            },
+        )
+        assert renewed.data["renewed"] == 1
