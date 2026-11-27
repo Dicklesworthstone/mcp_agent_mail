@@ -1,6 +1,6 @@
 # MCP Agent Mail
 
-[![Protodex Verified](https://img.shields.io/badge/Protodex-Verified_MCP-2DD9E0?style=flat-square&logo=github)](https://protodex.io/servers/Dicklesworthstone-mcp_agent_mail.html)
+[![Protodex Verified](https://img.shields.io/badge/Protodex-Verified_MCP-2DD9E0?style=flat-square&logo=github)](https://protodex.io/servers/dicklesworthstone-mcp_agent_mail.html)
 
 > **Superseded by [mcp_agent_mail_rust](https://github.com/Dicklesworthstone/mcp_agent_mail_rust).** This Python version is no longer maintained; use the Rust version for new installs.
 
